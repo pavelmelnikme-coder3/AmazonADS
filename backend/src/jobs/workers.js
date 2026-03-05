@@ -4,11 +4,11 @@
  */
 
 const { Queue, Worker, QueueEvents } = require("bullmq");
-const { createRedisConnection } = require("../../config/redis");
-const logger = require("../../config/logger");
-const { fetchCampaigns, syncCampaigns, fetchAdGroups, syncAdGroups, fetchKeywords, syncKeywords } = require("../amazon/entities");
-const { runReportingPipeline } = require("../amazon/reporting");
-const { query } = require("../../db/pool");
+const { createRedisConnection } = require("../config/redis");
+const logger = require("../config/logger");
+const { fetchCampaigns, syncCampaigns, fetchAdGroups, syncAdGroups, fetchKeywords, syncKeywords } = require("../services/amazon/entities");
+const { runReportingPipeline } = require("../services/amazon/reporting");
+const { query } = require("../db/pool");
 
 // ─── Queue definitions ────────────────────────────────────────────────────────
 const QUEUES = {
