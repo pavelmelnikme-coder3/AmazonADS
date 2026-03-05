@@ -1,0 +1,87 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: adsflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: adsflow
+      POSTGRES_USER: adsflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-adsflow_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/db/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adsflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: adsflow_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: adsflow_backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://adsflow:${POSTGRES_PASSWORD:-adsflow_secret}@postgres:5432/adsflow
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change_me_in_production_32chars}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-change_me_32bytes_hex_key_here!!}
+      # Amazon LwA credentials (from developer.amazon.com)
+      AMAZON_CLIENT_ID: ${AMAZON_CLIENT_ID}
+      AMAZON_CLIENT_SECRET: ${AMAZON_CLIENT_SECRET}
+      AMAZON_REDIRECT_URI: ${AMAZON_REDIRECT_URI:-http://localhost:3000/connect/amazon/callback}
+      # Amazon Ads API
+      AMAZON_ADS_API_URL: https://advertising-api.amazon.com
+      AMAZON_ADS_API_EU_URL: https://advertising-api-eu.amazon.com
+      AMAZON_ADS_API_FE_URL: https://advertising-api-fe.amazon.com
+      FRONTEND_URL: http://localhost:3000
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: adsflow_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:4000/api/v1
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:

@@ -1,0 +1,42 @@
+{
+  "name": "adsflow-backend",
+  "version": "1.0.0",
+  "description": "AdsFlow — Amazon Ads Dashboard Backend",
+  "main": "src/app.js",
+  "scripts": {
+    "dev": "nodemon src/app.js",
+    "start": "node src/app.js",
+    "migrate": "node src/db/migrate.js",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "axios-retry": "^4.4.0",
+    "bcryptjs": "^2.4.3",
+    "bullmq": "^5.7.14",
+    "compression": "^1.7.4",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "cron": "^3.1.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.3.1",
+    "express-validator": "^7.1.0",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "pg": "^8.12.0",
+    "uuid": "^10.0.0",
+    "winston": "^3.13.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.4",
+    "supertest": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
