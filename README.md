@@ -2,68 +2,6 @@
 
 Полноценный дашборд для управления Amazon Ads кампаниями с AI-рекомендациями.
 
-## ⚡ Быстрый старт (сегодня подключиться к Amazon)
-
-### 1. Получить Amazon LwA credentials
-
-1. Перейти на https://developer.amazon.com/apps-and-games/console/app/list
-2. Нажать **Create a New Security Profile**
-3. Заполнить: Profile Name, Description, Privacy URL
-4. Перейти в **Web Settings** → **Allowed Return URLs**: добавить `http://localhost:3000/connect/amazon/callback`
-5. Скопировать **Client ID** и **Client Secret**
-
-> 📌 Если у вас уже есть Amazon Ads API доступ через Seller/Vendor Central — используйте тот же аккаунт для авторизации.
-
-### 2. Настроить окружение
-
-```bash
-cp .env.example .env
-```
-
-Заполнить в `.env`:
-```env
-AMAZON_CLIENT_ID=amzn1.application-oa2-client.XXXX
-AMAZON_CLIENT_SECRET=your_secret_here
-AMAZON_REDIRECT_URI=http://localhost:3000/connect/amazon/callback
-
-# Сгенерировать:
-JWT_SECRET=$(openssl rand -base64 32)
-ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
-POSTGRES_PASSWORD=your_db_password
-```
-
-### 3. Запустить
-
-```bash
-docker-compose up -d
-```
-
-Первый запуск: ~2-3 минуты (скачивание образов, инициализация БД).
-
-```bash
-# Проверить логи
-docker-compose logs -f backend
-
-# Убедиться что всё работает
-curl http://localhost:4000/health
-```
-
-### 4. Открыть приложение
-
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:4000/api/v1
-
-### 5. Подключить Amazon
-
-1. Зарегистрироваться в приложении
-2. Перейти в раздел **Connections** (⊕ в боковом меню)
-3. Нажать **Connect Amazon Ads Account**
-4. Авторизоваться на amazon.com и разрешить доступ
-5. Выбрать профили для синхронизации
-6. Ждать ~2-5 минут пока пройдёт первый синк
-
----
-
 ## 🏗 Архитектура
 
 ```
@@ -151,7 +89,7 @@ adsflow/
 ## 🔄 Roadmap
 
 - [x] **Этап 1**: OAuth + Profiles + Entities sync + Campaigns table + Reports v3 + Audit
-- [ ] **Этап 2**: Bulk ops + Rule engine + Alerts + Keywords management
+- [x] **Этап 2**: Bulk ops + Rule engine + Alerts + Keywords management
 - [ ] **Этап 3**: AI Orchestrator + Recommendations + Preview/Apply
 - [ ] **Этап 4**: Automated runs + DSP/AMC integration
 
