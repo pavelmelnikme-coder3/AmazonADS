@@ -31,8 +31,9 @@ router.use(requireAuth);
 // Returns the Amazon OAuth URL for the user to redirect to
 router.get("/amazon/init", async (req, res, next) => {
   try {
-    const { url, state } = buildAuthUrl(req.user.id, req.orgId);
-    res.json({ url, state });
+    const region = req.query.region || "EU";
+    const { url, state } = buildAuthUrl(req.user.id, req.orgId, region);
+    res.json({ url, state, region });
   } catch (err) {
     next(err);
   }
@@ -56,8 +57,9 @@ router.post("/amazon/callback", async (req, res, next) => {
     // Exchange code for tokens
     const tokenData = await exchangeCodeForTokens(code);
 
-    // Save connection
-    const connection = await saveConnection(tokenData, req.user.id, req.orgId, workspaceId || null);
+    // Save connection with region from state
+    const region = stateData.region || "EU";
+    const connection = await saveConnection(tokenData, req.user.id, req.orgId, workspaceId || null, region);
 
     // Immediately fetch profiles from Amazon
     const amazonProfiles = await fetchProfiles(connection.id);

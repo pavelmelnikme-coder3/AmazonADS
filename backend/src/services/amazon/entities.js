@@ -9,37 +9,65 @@ const { get, getAll } = require("./adsClient");
 const { query, withTransaction } = require("../../db/pool");
 const logger = require("../../config/logger");
 
+// ─── API Base URLs by region ──────────────────────────────────────────────────
+const REGION_URLS = {
+  NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+  EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+  FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+};
+
 // ─── PROFILES ─────────────────────────────────────────────────────────────────
 
 /**
  * List all Amazon Ads profiles for a connection.
- * https://advertising.amazon.com/API/docs/en-us/reference/2/profiles
+ * Tries the connection's stored region first, then falls back to all regions.
  */
 async function fetchProfiles(connectionId) {
   const { rows: [conn] } = await query(
-    "SELECT id, org_id FROM amazon_connections WHERE id = $1",
+    "SELECT id, org_id, region FROM amazon_connections WHERE id = $1",
     [connectionId]
   );
   if (!conn) throw new Error("Connection not found");
 
-  // Profiles endpoint doesn't need a profile scope header
-  const { get: rawGet } = require("./adsClient");
   const { getValidAccessToken } = require("./lwa");
   const axios = require("axios");
-
   const accessToken = await getValidAccessToken(connectionId);
-  const baseUrl = process.env.AMAZON_ADS_API_URL || "https://advertising-api.amazon.com";
 
-  const response = await axios.get(`${baseUrl}/v2/profiles`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
-      "Content-Type": "application/json",
-    },
-    timeout: 15000,
-  });
+  // Try stored region first, then all others as fallback
+  const storedRegion = conn.region || "EU";
+  const regionsToTry = [storedRegion, ...Object.keys(REGION_URLS).filter(r => r !== storedRegion)];
 
-  return response.data; // Array of profile objects
+  let allProfiles = [];
+  let successRegion = null;
+
+  for (const region of regionsToTry) {
+    try {
+      const baseUrl = REGION_URLS[region];
+      const response = await axios.get(`${baseUrl}/v2/profiles`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Content-Type": "application/json",
+        },
+        timeout: 15000,
+      });
+      if (response.data?.length > 0) {
+        allProfiles = response.data;
+        successRegion = region;
+        logger.info("Profiles fetched", { connectionId, region, count: allProfiles.length });
+        break;
+      }
+    } catch (err) {
+      logger.warn(`Failed to fetch profiles from ${region}`, { error: err.message });
+    }
+  }
+
+  // Update region in DB if we found profiles in a different region
+  if (successRegion && successRegion !== storedRegion) {
+    await query("UPDATE amazon_connections SET region = $1 WHERE id = $2", [successRegion, connectionId]);
+  }
+
+  return allProfiles;
 }
 
 /**

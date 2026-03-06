@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useI18n } from "./i18n/index.jsx";
+import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const Styles = () => (
@@ -142,71 +144,76 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 const NAV = [
-  { id: "overview", icon: "⬡", label: "Overview" },
-  { id: "campaigns", icon: "◈", label: "Campaigns" },
-  { id: "keywords", icon: "◇", label: "Keywords" },
-  { id: "reports", icon: "≋", label: "Reports" },
-  { id: "rules", icon: "⟁", label: "Rules" },
-  { id: "alerts", icon: "◎", label: "Alerts" },
-  { id: "ai", icon: "✦", label: "AI Assistant" },
-  { id: "audit", icon: "⊡", label: "Audit Log" },
-  { id: "connect", icon: "⊕", label: "Connections" },
-  { id: "settings", icon: "⊛", label: "Settings" },
+  { id: "overview", icon: "⬡" },
+  { id: "campaigns", icon: "◈" },
+  { id: "keywords", icon: "◇" },
+  { id: "reports", icon: "≋" },
+  { id: "rules", icon: "⟁" },
+  { id: "alerts", icon: "◎" },
+  { id: "ai", icon: "✦" },
+  { id: "audit", icon: "⊡" },
+  { id: "connect", icon: "⊕" },
+  { id: "settings", icon: "⊛" },
 ];
 
-const Sidebar = ({ active, setActive, user, workspace }) => (
-  <aside style={{
-    width: 220, minHeight: "100vh", background: "var(--s1)", borderRight: "1px solid var(--b1)",
-    display: "flex", flexDirection: "column", position: "fixed", left: 0, top: 0, bottom: 0, zIndex: 100
-  }}>
-    <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid var(--b1)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>⬡</div>
-        <div>
-          <div style={{ fontFamily: "var(--disp)", fontWeight: 700, fontSize: 15 }}>AdsFlow</div>
-          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>Amazon Ads</div>
+const Sidebar = ({ active, setActive, user, workspace }) => {
+  const { t } = useI18n();
+  return (
+    <aside style={{
+      width: 220, minHeight: "100vh", background: "var(--s1)", borderRight: "1px solid var(--b1)",
+      display: "flex", flexDirection: "column", position: "fixed", left: 0, top: 0, bottom: 0, zIndex: 100
+    }}>
+      <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid var(--b1)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>⬡</div>
+          <div>
+            <div style={{ fontFamily: "var(--disp)", fontWeight: 700, fontSize: 15 }}>AdsFlow</div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>Amazon Ads</div>
+          </div>
         </div>
       </div>
-    </div>
 
-    {workspace && (
-      <div style={{ padding: "10px 12px", margin: "8px 10px", background: "var(--s2)", borderRadius: 8, border: "1px solid var(--b1)" }}>
-        <div style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)", marginBottom: 3, letterSpacing: ".06em" }}>WORKSPACE</div>
-        <div style={{ fontSize: 12, fontWeight: 500 }}>{workspace.name}</div>
-      </div>
-    )}
+      {workspace && (
+        <div style={{ padding: "10px 12px", margin: "8px 10px", background: "var(--s2)", borderRadius: 8, border: "1px solid var(--b1)" }}>
+          <div style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)", marginBottom: 3, letterSpacing: ".06em" }}>{t("common.workspace")}</div>
+          <div style={{ fontSize: 12, fontWeight: 500 }}>{workspace.name}</div>
+        </div>
+      )}
 
-    <nav style={{ flex: 1, padding: "6px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
-      {NAV.map(({ id, icon, label }) => (
-        <button key={id} onClick={() => setActive(id)} style={{
-          display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 7,
-          background: active === id ? "var(--s3)" : "transparent",
-          border: active === id ? "1px solid var(--b2)" : "1px solid transparent",
-          color: active === id ? "var(--tx)" : "var(--tx2)",
-          cursor: "pointer", fontSize: 13, fontFamily: "var(--ui)", width: "100%", textAlign: "left",
-          transition: "all .15s", position: "relative"
-        }}>
-          <span style={{ fontSize: 14, width: 18, textAlign: "center", color: active === id ? "var(--ac2)" : "var(--tx3)" }}>{icon}</span>
-          {label}
-          {active === id && <span style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)", width: 3, height: 18, background: "var(--ac)", borderRadius: "2px 0 0 2px" }} />}
-        </button>
-      ))}
-    </nav>
+      <nav style={{ flex: 1, padding: "6px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
+        {NAV.map(({ id, icon }) => (
+          <button key={id} onClick={() => setActive(id)} style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 7,
+            background: active === id ? "var(--s3)" : "transparent",
+            border: active === id ? "1px solid var(--b2)" : "1px solid transparent",
+            color: active === id ? "var(--tx)" : "var(--tx2)",
+            cursor: "pointer", fontSize: 13, fontFamily: "var(--ui)", width: "100%", textAlign: "left",
+            transition: "all .15s", position: "relative"
+          }}>
+            <span style={{ fontSize: 14, width: 18, textAlign: "center", color: active === id ? "var(--ac2)" : "var(--tx3)" }}>{icon}</span>
+            {t("nav." + id)}
+            {active === id && <span style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)", width: 3, height: 18, background: "var(--ac)", borderRadius: "2px 0 0 2px" }} />}
+          </button>
+        ))}
+      </nav>
 
-    <div style={{ padding: "12px 14px", borderTop: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 10 }}>
-      <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "#fff" }}>
-        {user?.name?.slice(0, 2).toUpperCase() || "??"}
+      <div style={{ padding: "12px 14px", borderTop: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "#fff" }}>
+          {user?.name?.slice(0, 2).toUpperCase() || "??"}
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 500 }}>{user?.name || "—"}</div>
+          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{user?.role || ""}</div>
+        </div>
+        <LanguageSwitcher />
       </div>
-      <div>
-        <div style={{ fontSize: 12, fontWeight: 500 }}>{user?.name || "—"}</div>
-        <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{user?.role || ""}</div>
-      </div>
-    </div>
-  </aside>
-);
+    </aside>
+  );
+};
 
 // ─── Connect / OAuth Page ─────────────────────────────────────────────────────
 const ConnectPage = ({ workspaceId, onConnected }) => {
+  const { t } = useI18n();
   const [step, setStep] = useState("list"); // list, connecting, profiles, done
   const [connections, setConnections] = useState([]);
   const [profiles, setProfiles] = useState([]);
@@ -215,6 +222,13 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [msg, setMsg] = useState(null);
+  const [region, setRegion] = useState("EU"); // NA, EU, FE
+
+  const REGIONS = [
+    { value: "NA", label: "🇺🇸 North America", desc: "US, Canada, Mexico" },
+    { value: "EU", label: "🇪🇺 Europe", desc: "DE, UK, FR, IT, ES, NL..." },
+    { value: "FE", label: "🌏 Far East", desc: "Japan, Australia, India" },
+  ];
 
   // Load existing connections
   useEffect(() => {
@@ -235,8 +249,9 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
   async function startConnect() {
     setLoading(true); setError(null);
     try {
-      const { url, state } = await get("/connections/amazon/init");
+      const { url, state } = await get(`/connections/amazon/init?region=${region}`);
       localStorage.setItem("af_oauth_state", state);
+      localStorage.setItem("af_oauth_region", region);
       window.location.href = url;
     } catch (e) {
       setError(e.message);
@@ -250,7 +265,7 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
     localStorage.removeItem("af_oauth_state");
 
     if (state !== savedState) {
-      setError("Security validation failed. Please try again.");
+      setError("Security validation failed. Please try again."); // technical message, keep en
       setStep("list"); setLoading(false);
       return;
     }
@@ -285,7 +300,7 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
   }
 
   async function revokeConnection(id) {
-    if (!confirm("Disconnect this Amazon account? All tokens will be deleted.")) return;
+    if (!confirm(t("connect.disconnectConfirm"))) return;
     await del(`/connections/${id}`);
     setConnections(c => c.filter(x => x.id !== id));
   }
@@ -293,8 +308,8 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
   return (
     <div className="fade">
       <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Amazon Connections</h1>
-        <div style={{ fontSize: 13, color: "var(--tx2)" }}>Подключите рекламные аккаунты через Login with Amazon (LwA) OAuth 2.0</div>
+        <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("connect.title")}</h1>
+        <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("connect.subtitle")}</div>
       </div>
 
       {error && (
@@ -309,7 +324,7 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
           {connections.length > 0 && (
             <div className="card" style={{ marginBottom: 20, overflow: "hidden" }}>
               <table>
-                <thead><tr><th>Аккаунт</th><th>Профили</th><th>Статус</th><th>Обновлён</th><th></th></tr></thead>
+                <thead><tr><th>{t("connect.colAccount")}</th><th>{t("connect.colProfiles")}</th><th>{t("connect.colStatus")}</th><th>{t("connect.colUpdated")}</th><th></th></tr></thead>
                 <tbody>
                   {connections.map(c => (
                     <tr key={c.id}>
@@ -318,7 +333,7 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
                       <td><span className={`badge ${c.status === "active" ? "bg-grn" : "bg-red"}`}>● {c.status}</span></td>
                       <td style={{ color: "var(--tx3)", fontSize: 12 }}>{c.last_refresh_at ? new Date(c.last_refresh_at).toLocaleString("ru") : "—"}</td>
                       <td>
-                        <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => revokeConnection(c.id)}>Отключить</button>
+                        <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => revokeConnection(c.id)}>{t("connect.disconnect")}</button>
                       </td>
                     </tr>
                   ))}
@@ -329,33 +344,53 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
 
           <div className="card" style={{ padding: "40px 32px", textAlign: "center", border: "1px dashed var(--b2)" }}>
             <div style={{ fontSize: 40, marginBottom: 16 }}>⬡</div>
-            <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Подключить Amazon Ads</div>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{t("connect.connectTitle")}</div>
             <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 24, maxWidth: 400, margin: "0 auto 24px" }}>
-              Авторизуйтесь через Login with Amazon для доступа к Sponsored Products, Brands и Display кампаниям
+              {t("connect.connectDesc")}
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center", maxWidth: 320, margin: "0 auto" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center", maxWidth: 360, margin: "0 auto" }}>
+              {/* Region selector */}
+              <div style={{ width: "100%", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 8, fontWeight: 600 }}>{t("connect.selectRegion")}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                  {REGIONS.map(r => (
+                    <div key={r.value}
+                      onClick={() => setRegion(r.value)}
+                      style={{
+                        padding: "10px 8px", borderRadius: 8, cursor: "pointer", textAlign: "center",
+                        border: `2px solid ${region === r.value ? "var(--ac)" : "var(--b2)"}`,
+                        background: region === r.value ? "rgba(59,130,246,.08)" : "var(--s2)",
+                        transition: "all .15s"
+                      }}>
+                      <div style={{ fontSize: 16, marginBottom: 2 }}>{r.label.split(" ")[0]}</div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: region === r.value ? "var(--ac)" : "var(--tx1)" }}>{r.value}</div>
+                      <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 2 }}>{r.desc}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <button className="btn btn-amazon" style={{ width: "100%", justifyContent: "center", padding: "12px 20px", fontSize: 14 }}
                 onClick={startConnect} disabled={loading}>
-                {loading ? <span className="loader" style={{ borderTopColor: "#111" }} /> : "🛍"} Connect Amazon Ads Account
+                {loading ? <span className="loader" style={{ borderTopColor: "#111" }} /> : "🛍"} {t("connect.connectBtn")}
               </button>
 
               <div style={{ fontSize: 11, color: "var(--tx3)", textAlign: "center", lineHeight: 1.5 }}>
-                Вы будете перенаправлены на amazon.com для авторизации.<br/>
-                Токены хранятся в зашифрованном виде на сервере.
+                {t("connect.redirectNote").split("\n").map((line, i) => <span key={i}>{line}{i === 0 && <br/>}</span>)}
               </div>
             </div>
 
             <div style={{ marginTop: 28, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, maxWidth: 500, margin: "28px auto 0" }}>
               {[
-                { icon: "🔒", label: "Безопасно", desc: "OAuth 2.0 + AES-256 шифрование" },
-                { icon: "⚡", label: "Быстро", desc: "Первые данные через 2-5 минут" },
-                { icon: "♻", label: "Авто-sync", desc: "Обновление каждые 2 часа" },
-              ].map(({ icon, label, desc }) => (
-                <div key={label} style={{ padding: "14px", background: "var(--s2)", borderRadius: 8, border: "1px solid var(--b1)" }}>
+                { icon: "🔒", labelKey: "connect.secure", descKey: "connect.secureDesc" },
+                { icon: "⚡", labelKey: "connect.fast", descKey: "connect.fastDesc" },
+                { icon: "♻", labelKey: "connect.autoSync", descKey: "connect.autoSyncDesc" },
+              ].map(({ icon, labelKey, descKey }) => (
+                <div key={labelKey} style={{ padding: "14px", background: "var(--s2)", borderRadius: 8, border: "1px solid var(--b1)" }}>
                   <div style={{ fontSize: 20, marginBottom: 6 }}>{icon}</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 3 }}>{label}</div>
-                  <div style={{ fontSize: 11, color: "var(--tx3)" }}>{desc}</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 3 }}>{t(labelKey)}</div>
+                  <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t(descKey)}</div>
                 </div>
               ))}
             </div>
@@ -367,8 +402,8 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
       {step === "connecting" && (
         <div className="card fade" style={{ padding: "60px 32px", textAlign: "center" }}>
           <div className="loader" style={{ width: 32, height: 32, margin: "0 auto 16px" }} />
-          <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 600, marginBottom: 8 }}>Обмен токенами...</div>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>Устанавливаем защищённое соединение с Amazon Ads API</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 600, marginBottom: 8 }}>{t("connect.exchangingTokens")}</div>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("connect.securingConnection")}</div>
         </div>
       )}
 
@@ -379,8 +414,8 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <span style={{ fontSize: 20 }}>✓</span>
               <div>
-                <div style={{ fontWeight: 600, marginBottom: 2 }}>Amazon аккаунт подключён!</div>
-                <div style={{ fontSize: 12, color: "var(--tx2)" }}>Найдено {profiles.length} профилей. Выберите, какие подключить к этому workspace.</div>
+                <div style={{ fontWeight: 600, marginBottom: 2 }}>{t("connect.accountConnected")}</div>
+                <div style={{ fontSize: 12, color: "var(--tx2)" }}>{t("connect.profilesFound", { count: profiles.length })}</div>
               </div>
             </div>
           </div>
@@ -412,9 +447,9 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn btn-primary" onClick={attachProfiles} disabled={!selected.size || loading}>
               {loading ? <span className="loader" /> : null}
-              Подключить выбранные ({selected.size})
+              {t("connect.attachSelected", { count: selected.size })}
             </button>
-            <button className="btn btn-ghost" onClick={() => { setStep("list"); }}>Отмена</button>
+            <button className="btn btn-ghost" onClick={() => { setStep("list"); }}>{t("common.cancel")}</button>
           </div>
         </div>
       )}
@@ -423,9 +458,9 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
       {step === "done" && (
         <div className="card fade" style={{ padding: "40px 32px", textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🎉</div>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Готово!</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{t("connect.done")}</div>
           <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 20 }}>{msg}</div>
-          <button className="btn btn-primary" onClick={() => setStep("list")}>К подключениям</button>
+          <button className="btn btn-primary" onClick={() => setStep("list")}>{t("connect.toConnections")}</button>
         </div>
       )}
     </div>
@@ -434,6 +469,7 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
 
 // ─── Overview Page (real data) ────────────────────────────────────────────────
 const OverviewPage = ({ workspaceId }) => {
+  const { t } = useI18n();
   const [range, setRange] = useState("7");
   const endDate = new Date().toISOString().split("T")[0];
   const startDate = new Date(Date.now() - parseInt(range) * 86400000).toISOString().split("T")[0];
@@ -454,31 +490,32 @@ const OverviewPage = ({ workspaceId }) => {
   );
 
   const hasData = summary?.totals;
-  const t = summary?.totals || {};
+  const totals = summary?.totals || {};
   const d = summary?.deltas || {};
   const trend = summary?.trend || [];
 
   const kpis = [
-    { label: "Total Spend", value: hasData ? `$${parseFloat(t.spend).toLocaleString("en", { maximumFractionDigits: 0 })}` : "—", delta: d.spend, color: "#60A5FA" },
-    { label: "Total Sales", value: hasData ? `$${parseFloat(t.sales).toLocaleString("en", { maximumFractionDigits: 0 })}` : "—", delta: d.sales, color: "#22C55E" },
-    { label: "ACOS", value: hasData ? `${parseFloat(t.acos).toFixed(1)}%` : "—", delta: d.acos, color: "#F59E0B" },
-    { label: "ROAS", value: hasData ? `${parseFloat(t.roas).toFixed(2)}×` : "—", delta: d.roas, color: "#A78BFA" },
-    { label: "Clicks", value: hasData ? parseInt(t.clicks).toLocaleString() : "—", delta: null, color: "#14B8A6" },
-    { label: "Impressions", value: hasData ? (parseInt(t.impressions) / 1000).toFixed(0) + "K" : "—", delta: null, color: "#F472B6" },
+    { label: t("overview.kpiSpend"), value: hasData ? `$${parseFloat(totals.spend).toLocaleString("en", { maximumFractionDigits: 0 })}` : "—", delta: d.spend, color: "#60A5FA" },
+    { label: t("overview.kpiSales"), value: hasData ? `$${parseFloat(totals.sales).toLocaleString("en", { maximumFractionDigits: 0 })}` : "—", delta: d.sales, color: "#22C55E" },
+    { label: "ACOS", value: hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—", delta: d.acos, color: "#F59E0B" },
+    { label: "ROAS", value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: d.roas, color: "#A78BFA" },
+    { label: t("overview.kpiClicks"), value: hasData ? parseInt(totals.clicks).toLocaleString() : "—", delta: null, color: "#14B8A6" },
+    { label: t("overview.kpiImpressions"), value: hasData ? (parseInt(totals.impressions) / 1000).toFixed(0) + "K" : "—", delta: null, color: "#F472B6" },
   ];
 
   const spendTrend = trend.map(r => parseFloat(r.spend));
+
   const activeProfiles = profiles?.filter(p => p.sync_status === "synced") || [];
 
   return (
     <div className="fade">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
         <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Overview</h1>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("overview.title")}</h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>
             {activeProfiles.length > 0
-              ? `${activeProfiles.length} профилей синхронизировано`
-              : <span style={{ color: "var(--amb)" }}>⚠ Нет синхронизированных профилей — <span style={{ color: "var(--ac2)", cursor: "pointer" }} onClick={() => {}}>подключите Amazon</span></span>
+              ? t("overview.profilesSynced", { count: activeProfiles.length })
+              : <span style={{ color: "var(--amb)" }}>{t("overview.noProfilesWarning")}<span style={{ color: "var(--ac2)", cursor: "pointer" }} onClick={() => {}}>{t("overview.connectAmazon")}</span></span>
             }
           </div>
         </div>
@@ -493,8 +530,8 @@ const OverviewPage = ({ workspaceId }) => {
 
       {!hasData && !sl && (
         <div style={{ marginBottom: 16, padding: "14px 18px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.15)", borderRadius: 8, fontSize: 13 }}>
-          <strong style={{ color: "var(--ac2)" }}>Нет данных.</strong>{" "}
-          <span style={{ color: "var(--tx2)" }}>Подключите Amazon аккаунт, выберите профили и подождите первого синка (~2-5 мин).</span>
+          <strong style={{ color: "var(--ac2)" }}>{t("overview.noData")}</strong>{" "}
+          <span style={{ color: "var(--tx2)" }}>{t("overview.noDataDesc")}</span>
         </div>
       )}
 
@@ -507,7 +544,7 @@ const OverviewPage = ({ workspaceId }) => {
       {/* Spend trend chart */}
       {trend.length > 0 && (
         <div className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Spend по дням</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("overview.spendByDay")}</div>
           <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64 }}>
             {trend.map((r, i) => {
               const max = Math.max(...trend.map(x => parseFloat(x.spend)));
@@ -528,9 +565,9 @@ const OverviewPage = ({ workspaceId }) => {
       {/* Top Campaigns */}
       {(topCampaigns?.length > 0) && (
         <div className="card" style={{ overflow: "hidden" }}>
-          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>Топ кампании</div>
+          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("overview.topCampaigns")}</div>
           <table>
-            <thead><tr><th>Кампания</th><th>Тип</th><th style={{ textAlign: "right" }}>Spend</th><th style={{ textAlign: "right" }}>Sales</th><th style={{ textAlign: "right" }}>ACOS</th><th style={{ textAlign: "right" }}>ROAS</th></tr></thead>
+            <thead><tr><th>{t("overview.colCampaign")}</th><th>{t("overview.colType")}</th><th style={{ textAlign: "right" }}>Spend</th><th style={{ textAlign: "right" }}>Sales</th><th style={{ textAlign: "right" }}>ACOS</th><th style={{ textAlign: "right" }}>ROAS</th></tr></thead>
             <tbody>
               {topCampaigns.map(c => (
                 <tr key={c.id}>
@@ -554,6 +591,7 @@ const OverviewPage = ({ workspaceId }) => {
 
 // ─── Campaigns Page (real data) ───────────────────────────────────────────────
 const CampaignsPage = ({ workspaceId }) => {
+  const { t } = useI18n();
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [editId, setEditId] = useState(null);
@@ -576,45 +614,45 @@ const CampaignsPage = ({ workspaceId }) => {
       reload();
       setEditId(null);
     } catch (e) {
-      alert("Ошибка: " + e.message);
+      alert(t("campaigns.errorUpdate") + e.message);
     }
     setSaving(false);
   }
 
-  const typeLabel = t => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[t] || t;
+  const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || ct;
 
   return (
     <div className="fade">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
         <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Campaigns</h1>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{data?.pagination?.total ?? "—"} кампаний</div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("campaigns.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("campaigns.count", { count: data?.pagination?.total ?? "—" })}</div>
         </div>
-        <button className="btn btn-primary">+ Новая кампания</button>
+        <button className="btn btn-primary">{t("campaigns.newCampaign")}</button>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        <input placeholder="🔍 Поиск..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: 200 }} />
+        <input placeholder={t("campaigns.searchPlaceholder")} value={search} onChange={e => setSearch(e.target.value)} style={{ width: 200 }} />
         {["all", "enabled", "paused", "archived"].map(f => (
           <button key={f} onClick={() => setFilter(f)} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
-            {f === "all" ? "Все" : f.charAt(0).toUpperCase() + f.slice(1)}
+            {f === "all" ? t("common.all") : f.charAt(0).toUpperCase() + f.slice(1)}
           </button>
         ))}
-        <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ Обновить</button>
+        <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ {t("common.refresh")}</button>
       </div>
 
       <div className="card" style={{ overflow: "hidden" }}>
         {loading
           ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}><span className="loader" style={{ width: 20, height: 20 }} /></div>
           : campaigns.length === 0
-            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>Нет кампаний. Подключите Amazon аккаунт и дождитесь синка.</div>
+            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("campaigns.noCampaigns")}</div>
             : (
               <div style={{ overflowX: "auto" }}>
                 <table>
                   <thead>
                     <tr>
-                      <th>Название</th><th>Тип</th><th>Статус</th>
-                      <th style={{ textAlign: "right" }}>Бюджет/д</th>
+                      <th>{t("campaigns.colName")}</th><th>{t("campaigns.colType")}</th><th>{t("campaigns.colStatus")}</th>
+                      <th style={{ textAlign: "right" }}>{t("campaigns.colBudget")}</th>
                       <th style={{ textAlign: "right" }}>Spend</th>
                       <th style={{ textAlign: "right" }}>Sales</th>
                       <th style={{ textAlign: "right" }}>ACOS</th>
@@ -667,7 +705,7 @@ const CampaignsPage = ({ workspaceId }) => {
                             : (
                               <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 8px" }}
                                 onClick={() => { setEditId(c.id); setEditState(c.state); }}>
-                                Изм.
+                                {t("common.edit")}
                               </button>
                             )
                           }
@@ -686,6 +724,7 @@ const CampaignsPage = ({ workspaceId }) => {
 
 // ─── Reports Page ─────────────────────────────────────────────────────────────
 const ReportsPage = ({ workspaceId }) => {
+  const { t } = useI18n();
   const [form, setForm] = useState({ campaignType: "SP", reportLevel: "campaign", startDate: "", endDate: "" });
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(null);
@@ -701,9 +740,9 @@ const ReportsPage = ({ workspaceId }) => {
   );
 
   async function submitReport() {
-    if (!form.startDate || !form.endDate) return alert("Укажите период");
+    if (!form.startDate || !form.endDate) return alert(t("reports.alertPeriod"));
     const profileId = profilesList?.[0]?.id;
-    if (!profileId) return alert("Нет подключённых профилей");
+    if (!profileId) return alert(t("reports.alertNoProfiles"));
 
     setSubmitting(true);
     try {
@@ -711,7 +750,7 @@ const ReportsPage = ({ workspaceId }) => {
       setSubmitted(res);
       reload();
     } catch (e) {
-      alert("Ошибка: " + e.message);
+      alert(t("reports.alertError") + e.message);
     }
     setSubmitting(false);
   }
@@ -719,13 +758,13 @@ const ReportsPage = ({ workspaceId }) => {
   return (
     <div className="fade">
       <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Reports</h1>
-        <div style={{ fontSize: 13, color: "var(--tx2)" }}>Amazon Ads Reporting API v3 · Async pipeline</div>
+        <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("reports.title")}</h1>
+        <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("reports.subtitle")}</div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16 }}>
         <div className="card" style={{ padding: "18px 20px", height: "fit-content" }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Новый отчёт</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{t("reports.newReport")}</div>
           {[
             { label: "Ad Product", field: "campaignType", opts: ["SP", "SB", "SD"] },
             { label: "Report Level", field: "reportLevel", opts: ["campaign", "ad_group", "keyword"] },
@@ -740,30 +779,30 @@ const ReportsPage = ({ workspaceId }) => {
             </div>
           ))}
           <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", letterSpacing: ".06em", textTransform: "uppercase" }}>Период</div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", letterSpacing: ".06em", textTransform: "uppercase" }}>{t("reports.period")}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <input type="date" value={form.startDate} onChange={e => setForm(f => ({ ...f, startDate: e.target.value }))} style={{ flex: 1, fontSize: 12 }} />
               <input type="date" value={form.endDate} onChange={e => setForm(f => ({ ...f, endDate: e.target.value }))} style={{ flex: 1, fontSize: 12 }} />
             </div>
           </div>
           <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submitReport} disabled={submitting}>
-            {submitting ? <span className="loader" /> : "▶ Запустить отчёт"}
+            {submitting ? <span className="loader" /> : t("reports.run")}
           </button>
-          {submitted && <div style={{ marginTop: 10, fontSize: 12, color: "var(--teal)" }}>✓ Поставлен в очередь (jobId: {submitted.jobId?.slice(0, 8)})</div>}
+          {submitted && <div style={{ marginTop: 10, fontSize: 12, color: "var(--teal)" }}>{t("reports.queued", { jobId: submitted.jobId?.slice(0, 8) })}</div>}
         </div>
 
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ padding: "12px 16px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>История отчётов</div>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("reports.history")}</div>
             <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={reload}>↺</button>
           </div>
           {loading
             ? <div style={{ padding: 30, textAlign: "center" }}><span className="loader" /></div>
             : !reports?.length
-              ? <div style={{ padding: "30px 20px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>Нет отчётов</div>
+              ? <div style={{ padding: "30px 20px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("reports.noReports")}</div>
               : (
                 <table>
-                  <thead><tr><th>Тип</th><th>Период</th><th>Статус</th><th>Строк</th><th>Создан</th></tr></thead>
+                  <thead><tr><th>{t("reports.colType")}</th><th>{t("reports.colPeriod")}</th><th>{t("reports.colStatus")}</th><th>{t("reports.colRows")}</th><th>{t("reports.colCreated")}</th></tr></thead>
                   <tbody>
                     {reports.map(r => (
                       <tr key={r.id}>
@@ -790,6 +829,7 @@ const ReportsPage = ({ workspaceId }) => {
 
 // ─── Audit Page ───────────────────────────────────────────────────────────────
 const AuditPage = ({ workspaceId }) => {
+  const { t } = useI18n();
   const { data: events, loading, reload } = useAsync(
     () => workspaceId ? get("/audit", { limit: 50 }) : Promise.resolve([]),
     [workspaceId]
@@ -799,8 +839,8 @@ const AuditPage = ({ workspaceId }) => {
     <div className="fade">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Audit Log</h1>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>Все изменения · append-only</div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("audit.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("audit.subtitle")}</div>
         </div>
         <button className="btn btn-ghost" onClick={reload}>↺</button>
       </div>
@@ -808,10 +848,10 @@ const AuditPage = ({ workspaceId }) => {
         {loading
           ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
           : !events?.length
-            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>Нет событий</div>
+            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
             : (
               <table>
-                <thead><tr><th>Время</th><th>Пользователь</th><th>Действие</th><th>Сущность</th><th>Источник</th></tr></thead>
+                <thead><tr><th>{t("audit.colTime")}</th><th>{t("audit.colUser")}</th><th>{t("audit.colAction")}</th><th>{t("audit.colEntity")}</th><th>{t("audit.colSource")}</th></tr></thead>
                 <tbody>
                   {events.map(e => (
                     <tr key={e.id}>
@@ -833,6 +873,7 @@ const AuditPage = ({ workspaceId }) => {
 
 // ─── Login Page ───────────────────────────────────────────────────────────────
 const LoginPage = ({ onLogin }) => {
+  const { t } = useI18n();
   const [tab, setTab] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", name: "", orgName: "" });
   const [loading, setLoading] = useState(false);
@@ -865,18 +906,18 @@ const LoginPage = ({ onLogin }) => {
         <div style={{ textAlign: "center", marginBottom: 28 }}>
           <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, margin: "0 auto 12px" }}>⬡</div>
           <div style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 800 }}>AdsFlow</div>
-          <div style={{ fontSize: 12, color: "var(--tx3)" }}>Amazon Ads Dashboard</div>
+          <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("login.subtitle")}</div>
         </div>
 
         <div style={{ display: "flex", gap: 0, marginBottom: 20, background: "var(--s2)", borderRadius: 8, padding: 3 }}>
-          {["login", "register"].map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{
+          {["login", "register"].map(tabId => (
+            <button key={tabId} onClick={() => setTab(tabId)} style={{
               flex: 1, padding: "7px", borderRadius: 6, border: "none", cursor: "pointer",
-              background: tab === t ? "var(--s3)" : "transparent",
-              color: tab === t ? "var(--tx)" : "var(--tx3)", fontSize: 13, fontFamily: "var(--ui)",
+              background: tab === tabId ? "var(--s3)" : "transparent",
+              color: tab === tabId ? "var(--tx)" : "var(--tx3)", fontSize: 13, fontFamily: "var(--ui)",
               transition: "all .15s"
             }}>
-              {t === "login" ? "Войти" : "Регистрация"}
+              {tabId === "login" ? t("login.login") : t("login.register")}
             </button>
           ))}
         </div>
@@ -886,21 +927,21 @@ const LoginPage = ({ onLogin }) => {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {tab === "register" && (
             <>
-              <input placeholder="Ваше имя" {...f("name")} />
-              <input placeholder="Название организации" {...f("orgName")} />
+              <input placeholder={t("login.namePlaceholder")} {...f("name")} />
+              <input placeholder={t("login.orgPlaceholder")} {...f("orgName")} />
             </>
           )}
-          <input placeholder="Email" type="email" {...f("email")} />
-          <input placeholder="Пароль (мин. 8 символов)" type="password" {...f("password")}
+          <input placeholder={t("login.emailPlaceholder")} type="email" {...f("email")} />
+          <input placeholder={t("login.passwordPlaceholder")} type="password" {...f("password")}
             onKeyDown={e => e.key === "Enter" && submit()} />
           <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", padding: "10px" }} onClick={submit} disabled={loading}>
-            {loading ? <span className="loader" /> : tab === "login" ? "Войти" : "Создать аккаунт"}
+            {loading ? <span className="loader" /> : tab === "login" ? t("login.login") : t("login.createAccount")}
           </button>
         </div>
 
         {tab === "login" && (
           <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.12)", borderRadius: 8, fontSize: 11, color: "var(--tx3)" }}>
-            💡 Для демо: зарегистрируйтесь, затем подключите Amazon аккаунт в разделе Connections
+            {t("login.demoHint")}
           </div>
         )}
       </div>
@@ -909,19 +950,23 @@ const LoginPage = ({ onLogin }) => {
 };
 
 // ─── Placeholder pages ────────────────────────────────────────────────────────
-const PlaceholderPage = ({ title, desc }) => (
-  <div className="fade">
-    <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 8 }}>{title}</h1>
-    <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 20 }}>{desc}</div>
-    <div className="card" style={{ padding: "60px 32px", textAlign: "center", borderStyle: "dashed" }}>
-      <div style={{ fontSize: 36, marginBottom: 12, color: "var(--tx3)" }}>⚙</div>
-      <div style={{ fontSize: 14, color: "var(--tx3)" }}>Раздел в разработке — следующий спринт</div>
+const PlaceholderPage = ({ title, desc }) => {
+  const { t } = useI18n();
+  return (
+    <div className="fade">
+      <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 8 }}>{title}</h1>
+      <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 20 }}>{desc}</div>
+      <div className="card" style={{ padding: "60px 32px", textAlign: "center", borderStyle: "dashed" }}>
+        <div style={{ fontSize: 36, marginBottom: 12, color: "var(--tx3)" }}>⚙</div>
+        <div style={{ fontSize: 14, color: "var(--tx3)" }}>{t("placeholder.inDev")}</div>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
+  const { t } = useI18n();
   const [authed, setAuthed] = useState(!!localStorage.getItem("af_token"));
   const [user, setUser] = useState(null);
   const [workspace, setWorkspace] = useState(null);
@@ -965,14 +1010,14 @@ export default function App() {
   const pages = {
     overview: <OverviewPage workspaceId={wid} />,
     campaigns: <CampaignsPage workspaceId={wid} />,
-    keywords: <PlaceholderPage title="Keywords / Targets" desc="Управление ключевыми словами и таргетингом" />,
+    keywords: <PlaceholderPage title={t("placeholder.keywordsTitle")} desc={t("placeholder.keywordsDesc")} />,
     reports: <ReportsPage workspaceId={wid} />,
-    rules: <PlaceholderPage title="Rule Engine" desc="Автоматические правила оптимизации" />,
-    alerts: <PlaceholderPage title="Alerts" desc="Уведомления по метрикам" />,
-    ai: <PlaceholderPage title="AI Assistant" desc="Рекомендации и автопилот" />,
+    rules: <PlaceholderPage title={t("placeholder.rulesTitle")} desc={t("placeholder.rulesDesc")} />,
+    alerts: <PlaceholderPage title={t("placeholder.alertsTitle")} desc={t("placeholder.alertsDesc")} />,
+    ai: <PlaceholderPage title={t("placeholder.aiTitle")} desc={t("placeholder.aiDesc")} />,
     audit: <AuditPage workspaceId={wid} />,
     connect: <ConnectPage workspaceId={wid} onConnected={() => setActive("overview")} />,
-    settings: <PlaceholderPage title="Settings" desc="Настройки аккаунта и интеграций" />,
+    settings: <PlaceholderPage title={t("placeholder.settingsTitle")} desc={t("placeholder.settingsDesc")} />,
   };
 
   return (

@@ -27,11 +27,11 @@ const pendingStates = new Map();
  * Generate the Amazon OAuth authorization URL.
  * The state parameter is a CSRF token tied to the user session.
  */
-function buildAuthUrl(userId, orgId) {
+function buildAuthUrl(userId, orgId, region = "EU") {
   const state = crypto.randomBytes(24).toString("base64url");
 
-  // Store state for verification in callback (TTL: 10 minutes)
-  pendingStates.set(state, { userId, orgId, createdAt: Date.now() });
+  // Store state with region for verification in callback (TTL: 10 minutes)
+  pendingStates.set(state, { userId, orgId, region, createdAt: Date.now() });
   setTimeout(() => pendingStates.delete(state), 10 * 60 * 1000);
 
   const params = new URLSearchParams({
@@ -166,13 +166,14 @@ async function getValidAccessToken(connectionId) {
  * Save a new Amazon connection to the database.
  * Returns the created connection record.
  */
-async function saveConnection(tokenData, userId, orgId, workspaceId) {
+async function saveConnection(tokenData, userId, orgId, workspaceId, region = "EU") {
   const expiresAt = new Date(Date.now() + tokenData.expires_in * 1000);
 
   const { rows } = await query(
     `INSERT INTO amazon_connections
-       (org_id, workspace_id, access_token_enc, refresh_token_enc, token_expires_at, scopes, status, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
+       (org_id, workspace_id, access_token_enc, refresh_token_enc, token_expires_at, scopes, status, created_by, region)
+     VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8)
+     ON CONFLICT DO NOTHING
      RETURNING id, created_at`,
     [
       orgId,
@@ -182,10 +183,21 @@ async function saveConnection(tokenData, userId, orgId, workspaceId) {
       expiresAt,
       [AMAZON_ADS_SCOPE],
       userId,
+      region,
     ]
   );
 
-  logger.info("Amazon connection created", { connectionId: rows[0].id, orgId });
+  // If ON CONFLICT triggered, fetch existing
+  if (!rows[0]) {
+    const { rows: existing } = await query(
+      `SELECT id, created_at FROM amazon_connections WHERE org_id = $1 AND created_by = $2 ORDER BY created_at DESC LIMIT 1`,
+      [orgId, userId]
+    );
+    logger.info("Amazon connection updated", { connectionId: existing[0]?.id, orgId, region });
+    return existing[0];
+  }
+
+  logger.info("Amazon connection created", { connectionId: rows[0].id, orgId, region });
   return rows[0];
 }
 
