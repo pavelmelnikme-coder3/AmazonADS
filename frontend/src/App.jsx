@@ -597,6 +597,9 @@ const CampaignsPage = ({ workspaceId }) => {
   const [editId, setEditId] = useState(null);
   const [editState, setEditState] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [showBudgetModal, setShowBudgetModal] = useState(false);
+  const [budgetPct, setBudgetPct] = useState("");
 
   const { data, loading, reload } = useAsync(
     () => workspaceId
@@ -617,6 +620,39 @@ const CampaignsPage = ({ workspaceId }) => {
       alert(t("campaigns.errorUpdate") + e.message);
     }
     setSaving(false);
+  }
+
+  async function bulkStatus(state) {
+    setSaving(true);
+    try {
+      await post("/bulk/campaigns/status", { ids: Array.from(selected), state });
+      reload();
+      setSelected(new Set());
+    } catch (e) { alert(t("campaigns.errorUpdate") + e.message); }
+    setSaving(false);
+  }
+
+  async function bulkBudget() {
+    if (!budgetPct) return;
+    setSaving(true);
+    try {
+      await post("/bulk/campaigns/budget", { ids: Array.from(selected), adjustPct: parseFloat(budgetPct) });
+      reload();
+      setSelected(new Set());
+      setShowBudgetModal(false);
+      setBudgetPct("");
+    } catch (e) { alert(t("campaigns.errorUpdate") + e.message); }
+    setSaving(false);
+  }
+
+  function toggleSelect(id) {
+    const s = new Set(selected);
+    s.has(id) ? s.delete(id) : s.add(id);
+    setSelected(s);
+  }
+
+  function toggleAll() {
+    selected.size === campaigns.length ? setSelected(new Set()) : setSelected(new Set(campaigns.map(c => c.id)));
   }
 
   const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || ct;
@@ -641,6 +677,17 @@ const CampaignsPage = ({ workspaceId }) => {
         <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ {t("common.refresh")}</button>
       </div>
 
+      {selected.size > 0 && (
+        <div className="card fade" style={{ padding: "10px 16px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", borderColor: "rgba(59,130,246,.4)", background: "rgba(59,130,246,.05)" }}>
+          <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{t("campaigns.selected", { count: selected.size })}</span>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => bulkStatus("paused")} disabled={saving}>{t("campaigns.bulkPause")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => bulkStatus("enabled")} disabled={saving}>{t("campaigns.bulkEnable")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => bulkStatus("archived")} disabled={saving}>{t("campaigns.bulkArchive")}</button>
+          <button className="btn btn-teal" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setShowBudgetModal(true)}>{t("campaigns.bulkBudget")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px", marginLeft: "auto" }} onClick={() => setSelected(new Set())}>{t("common.cancel")}</button>
+        </div>
+      )}
+
       <div className="card" style={{ overflow: "hidden" }}>
         {loading
           ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}><span className="loader" style={{ width: 20, height: 20 }} /></div>
@@ -651,6 +698,9 @@ const CampaignsPage = ({ workspaceId }) => {
                 <table>
                   <thead>
                     <tr>
+                      <th style={{ width: 36 }}>
+                        <input type="checkbox" checked={selected.size === campaigns.length && campaigns.length > 0} onChange={toggleAll} />
+                      </th>
                       <th>{t("campaigns.colName")}</th><th>{t("campaigns.colType")}</th><th>{t("campaigns.colStatus")}</th>
                       <th style={{ textAlign: "right" }}>{t("campaigns.colBudget")}</th>
                       <th style={{ textAlign: "right" }}>Spend</th>
@@ -663,6 +713,7 @@ const CampaignsPage = ({ workspaceId }) => {
                   <tbody>
                     {campaigns.map(c => (
                       <tr key={c.id}>
+                        <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelect(c.id)} /></td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>{c.name}</td>
                         <td><span className="badge bg-bl">{typeLabel(c.campaign_type)}</span></td>
                         <td>
@@ -718,6 +769,25 @@ const CampaignsPage = ({ workspaceId }) => {
             )
         }
       </div>
+
+      {showBudgetModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div className="card fade" style={{ width: 360, padding: "24px 28px" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{t("campaigns.bulkBudgetTitle")}</div>
+            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 14 }}>{t("campaigns.bulkBudgetDesc", { count: selected.size })}</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 20 }}>
+              <input type="number" value={budgetPct} onChange={e => setBudgetPct(e.target.value)} style={{ flex: 1 }} placeholder="+10 or -10" />
+              <span style={{ color: "var(--tx2)" }}>%</span>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn btn-primary" onClick={bulkBudget} disabled={saving || !budgetPct}>
+                {saving ? <span className="loader" /> : t("campaigns.bulkApply")}
+              </button>
+              <button className="btn btn-ghost" onClick={() => setShowBudgetModal(false)}>{t("common.cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -871,6 +941,665 @@ const AuditPage = ({ workspaceId }) => {
   );
 };
 
+// ─── Keywords Page ────────────────────────────────────────────────────────────
+const KeywordsPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState(new Set());
+  const [editId, setEditId] = useState(null);
+  const [editBid, setEditBid] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [bulkPct, setBulkPct] = useState("");
+  const [showBulkModal, setShowBulkModal] = useState(false);
+
+  const { data: keywords, loading, reload } = useAsync(
+    () => workspaceId ? get("/keywords", { search: search || undefined, limit: 200 }) : Promise.resolve([]),
+    [workspaceId, search]
+  );
+
+  function toggleSelect(id) {
+    const s = new Set(selected);
+    s.has(id) ? s.delete(id) : s.add(id);
+    setSelected(s);
+  }
+
+  function toggleAll() {
+    if (!keywords?.length) return;
+    selected.size === keywords.length ? setSelected(new Set()) : setSelected(new Set(keywords.map(k => k.id)));
+  }
+
+  async function saveBid(id) {
+    setSaving(true);
+    try {
+      await patch(`/keywords/${id}`, { bid: parseFloat(editBid) });
+      reload();
+      setEditId(null);
+    } catch (e) { alert(t("common.error") + e.message); }
+    setSaving(false);
+  }
+
+  async function bulkBidUpdate() {
+    if (!bulkPct || !selected.size) return;
+    setSaving(true);
+    try {
+      await post("/bulk/keywords/bid", { ids: Array.from(selected), adjustPct: parseFloat(bulkPct) });
+      reload();
+      setSelected(new Set());
+      setShowBulkModal(false);
+      setBulkPct("");
+    } catch (e) { alert(t("common.error") + e.message); }
+    setSaving(false);
+  }
+
+  const matchCls = mt => ({ exact: "bg-grn", phrase: "bg-bl", broad: "bg-amb" })[mt] || "bg-bl";
+
+  return (
+    <div className="fade">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("keywords.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("keywords.count", { count: keywords?.length ?? "—" })}</div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <input placeholder={t("keywords.searchPlaceholder")} value={search} onChange={e => setSearch(e.target.value)} style={{ width: 220 }} />
+        <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ {t("common.refresh")}</button>
+      </div>
+
+      {selected.size > 0 && (
+        <div className="card fade" style={{ padding: "10px 16px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", borderColor: "rgba(59,130,246,.4)", background: "rgba(59,130,246,.05)" }}>
+          <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{t("keywords.selected", { count: selected.size })}</span>
+          <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setShowBulkModal(true)}>{t("keywords.bulkBid")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setSelected(new Set())}>{t("common.cancel")}</button>
+        </div>
+      )}
+
+      <div className="card" style={{ overflow: "hidden" }}>
+        {loading
+          ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+          : !keywords?.length
+            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("keywords.noKeywords")}</div>
+            : (
+              <div style={{ overflowX: "auto" }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 36 }}>
+                        <input type="checkbox" checked={selected.size === keywords.length && keywords.length > 0} onChange={toggleAll} />
+                      </th>
+                      <th>{t("keywords.colKeyword")}</th>
+                      <th>{t("keywords.colMatch")}</th>
+                      <th>{t("keywords.colStatus")}</th>
+                      <th style={{ textAlign: "right" }}>{t("keywords.colBid")}</th>
+                      <th>{t("keywords.colCampaign")}</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {keywords.map(kw => (
+                      <tr key={kw.id}>
+                        <td><input type="checkbox" checked={selected.has(kw.id)} onChange={() => toggleSelect(kw.id)} /></td>
+                        <td style={{ fontWeight: 500 }}>{kw.keyword_text}</td>
+                        <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>
+                        <td>
+                          <span className={`tag ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}>
+                            <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
+                            {kw.state}
+                          </span>
+                        </td>
+                        <td className="num" style={{ textAlign: "right" }}>
+                          {editId === kw.id
+                            ? (
+                              <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                                <input type="number" step="0.01" value={editBid} onChange={e => setEditBid(e.target.value)} style={{ width: 70, fontSize: 11, padding: "3px 6px" }} autoFocus />
+                                <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => saveBid(kw.id)} disabled={saving}>✓</button>
+                                <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditId(null)}>✕</button>
+                              </div>
+                            )
+                            : (
+                              <span style={{ cursor: "pointer", color: "var(--ac2)" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}>
+                                ${parseFloat(kw.bid || 0).toFixed(2)}
+                              </span>
+                            )
+                          }
+                        </td>
+                        <td style={{ fontSize: 11, color: "var(--tx3)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kw.campaign_name}</td>
+                        <td>
+                          {editId !== kw.id && (
+                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}>
+                              {t("keywords.editBid")}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+        }
+      </div>
+
+      {showBulkModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div className="card fade" style={{ width: 360, padding: "24px 28px" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{t("keywords.bulkBidTitle")}</div>
+            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 14 }}>{t("keywords.bulkBidDesc", { count: selected.size })}</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 20 }}>
+              <input type="number" value={bulkPct} onChange={e => setBulkPct(e.target.value)} style={{ flex: 1 }} placeholder="+10 or -10" />
+              <span style={{ color: "var(--tx2)" }}>%</span>
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn btn-primary" onClick={bulkBidUpdate} disabled={saving || !bulkPct}>
+                {saving ? <span className="loader" /> : t("keywords.applyBid")}
+              </button>
+              <button className="btn btn-ghost" onClick={() => setShowBulkModal(false)}>{t("common.cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Condition / Action type definitions ──────────────────────────────────────
+const CONDITION_TYPES = [
+  { value: "acos_gt",        label: "ACOS >" },
+  { value: "spend_gt",       label: "Spend >" },
+  { value: "ctr_lt",         label: "CTR <" },
+  { value: "impressions_lt", label: "Impressions <" },
+];
+const ACTION_TYPES = [
+  { value: "pause_campaign",     label: "Pause Campaign",        hasValue: false },
+  { value: "adjust_bid_pct",     label: "Adjust Bid %",          hasValue: true },
+  { value: "adjust_budget_pct",  label: "Adjust Budget %",       hasValue: true },
+  { value: "add_negative_keyword", label: "Add Negative Keyword", hasValue: true, isText: true },
+];
+
+// ─── Rules Page ───────────────────────────────────────────────────────────────
+const RulesPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [showModal, setShowModal] = useState(false);
+  const [editRule, setEditRule] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    name: "", conditions: [{ type: "acos_gt", value: 30 }],
+    actions: [{ type: "pause_campaign" }], schedule_type: "daily", dry_run: false,
+  });
+
+  const { data: rules, loading, reload } = useAsync(
+    () => workspaceId ? get("/rules") : Promise.resolve([]),
+    [workspaceId]
+  );
+
+  function openCreate() {
+    setEditRule(null);
+    setForm({ name: "", conditions: [{ type: "acos_gt", value: 30 }], actions: [{ type: "pause_campaign" }], schedule_type: "daily", dry_run: false });
+    setShowModal(true);
+  }
+
+  function openEdit(rule) {
+    setEditRule(rule);
+    const conds = typeof rule.conditions === "string" ? JSON.parse(rule.conditions) : rule.conditions;
+    const acts  = typeof rule.actions   === "string" ? JSON.parse(rule.actions)   : rule.actions;
+    setForm({
+      name: rule.name,
+      conditions: Array.isArray(conds) ? conds : [conds],
+      actions:    Array.isArray(acts)  ? acts  : [acts],
+      schedule_type: rule.schedule_type || "daily",
+      dry_run: rule.dry_run,
+    });
+    setShowModal(true);
+  }
+
+  async function saveRule() {
+    if (!form.name) return alert(t("rules.alertName"));
+    setSaving(true);
+    try {
+      if (editRule) {
+        await apiFetch(`/rules/${editRule.id}`, { method: "PUT", body: JSON.stringify(form) });
+      } else {
+        await post("/rules", form);
+      }
+      reload();
+      setShowModal(false);
+    } catch (e) { alert(t("common.error") + e.message); }
+    setSaving(false);
+  }
+
+  async function deleteRule(id) {
+    if (!confirm(t("rules.deleteConfirm"))) return;
+    await del(`/rules/${id}`);
+    reload();
+  }
+
+  async function toggleRule(id) {
+    await patch(`/rules/${id}/toggle`);
+    reload();
+  }
+
+  function updCond(i, field, val) {
+    setForm(f => { const c = [...f.conditions]; c[i] = { ...c[i], [field]: val }; return { ...f, conditions: c }; });
+  }
+  function updAct(i, field, val) {
+    setForm(f => { const a = [...f.actions]; a[i] = { ...a[i], [field]: val }; return { ...f, actions: a }; });
+  }
+
+  const condLabel = type => CONDITION_TYPES.find(c => c.value === type)?.label || type;
+  const actLabel  = type => ACTION_TYPES.find(a => a.value === type)?.label || type;
+
+  return (
+    <div className="fade">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("rules.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("rules.subtitle")}</div>
+        </div>
+        <button className="btn btn-primary" onClick={openCreate}>+ {t("rules.newRule")}</button>
+      </div>
+
+      <div className="card" style={{ overflow: "hidden" }}>
+        {loading
+          ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+          : !rules?.length
+            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("rules.noRules")}</div>
+            : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>{t("rules.colName")}</th>
+                    <th>{t("rules.colCondition")}</th>
+                    <th>{t("rules.colAction")}</th>
+                    <th>{t("rules.colSchedule")}</th>
+                    <th>{t("rules.colLastRun")}</th>
+                    <th>{t("rules.colActive")}</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rules.map(rule => {
+                    const conds = (() => { try { const v = typeof rule.conditions === "string" ? JSON.parse(rule.conditions) : rule.conditions; return Array.isArray(v) ? v : [v]; } catch { return []; } })();
+                    const acts  = (() => { try { const v = typeof rule.actions   === "string" ? JSON.parse(rule.actions)   : rule.actions;   return Array.isArray(v) ? v : [v]; } catch { return []; } })();
+                    return (
+                      <tr key={rule.id}>
+                        <td style={{ fontWeight: 500 }}>
+                          {rule.name}
+                          {rule.dry_run && <span className="badge bg-amb" style={{ marginLeft: 6, fontSize: 9 }}>DRY</span>}
+                        </td>
+                        <td style={{ fontSize: 11, color: "var(--tx2)" }}>
+                          {conds.map((c, i) => <div key={i}>{condLabel(c.type)} {c.value}</div>)}
+                        </td>
+                        <td style={{ fontSize: 11, color: "var(--tx2)" }}>
+                          {acts.map((a, i) => <div key={i}>{actLabel(a.type)}{a.value !== undefined ? ` ${a.value > 0 ? "+" : ""}${a.value}${!ACTION_TYPES.find(x => x.value === a.type)?.isText ? "%" : ""}` : ""}</div>)}
+                        </td>
+                        <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{rule.schedule_type || "daily"}</span></td>
+                        <td style={{ fontSize: 11, color: "var(--tx3)" }}>{rule.last_run_at ? new Date(rule.last_run_at).toLocaleString() : "—"}</td>
+                        <td>
+                          <button onClick={() => toggleRule(rule.id)} style={{
+                            width: 34, height: 18, borderRadius: 9, border: "none", cursor: "pointer",
+                            background: rule.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s",
+                          }}>
+                            <span style={{ position: "absolute", top: 2, left: rule.is_active ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
+                          </button>
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openEdit(rule)}>{t("common.edit")}</button>
+                            <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteRule(rule.id)}>✕</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )
+        }
+      </div>
+
+      {showModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "20px", zIndex: 1000 }}>
+          <div className="card fade" style={{ width: 560, padding: "24px 28px" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
+              {editRule ? t("rules.editRule") : t("rules.newRule")}
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.name")}</div>
+              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ width: "100%" }} placeholder={t("rules.namePlaceholder")} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.conditions")}</div>
+              {form.conditions.map((cond, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                  <select value={cond.type} onChange={e => updCond(i, "type", e.target.value)} style={{ flex: 1 }}>
+                    {CONDITION_TYPES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
+                  </select>
+                  <input type="number" value={cond.value} onChange={e => updCond(i, "value", parseFloat(e.target.value))} style={{ width: 80 }} />
+                  {form.conditions.length > 1 && (
+                    <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setForm(f => ({ ...f, conditions: f.conditions.filter((_, idx) => idx !== i) }))}>✕</button>
+                  )}
+                </div>
+              ))}
+              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setForm(f => ({ ...f, conditions: [...f.conditions, { type: "acos_gt", value: 30 }] }))}>+ {t("rules.addCondition")}</button>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.actions")}</div>
+              {form.actions.map((action, i) => {
+                const def = ACTION_TYPES.find(a => a.value === action.type);
+                return (
+                  <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                    <select value={action.type} onChange={e => updAct(i, "type", e.target.value)} style={{ flex: 1 }}>
+                      {ACTION_TYPES.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                    </select>
+                    {def?.hasValue && (
+                      <input
+                        type={def.isText ? "text" : "number"}
+                        value={action.value ?? ""}
+                        onChange={e => updAct(i, "value", def.isText ? e.target.value : parseFloat(e.target.value))}
+                        style={{ width: 80 }}
+                        placeholder={def.isText ? "keyword" : "%"}
+                      />
+                    )}
+                    {form.actions.length > 1 && (
+                      <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setForm(f => ({ ...f, actions: f.actions.filter((_, idx) => idx !== i) }))}>✕</button>
+                    )}
+                  </div>
+                );
+              })}
+              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setForm(f => ({ ...f, actions: [...f.actions, { type: "pause_campaign" }] }))}>+ {t("rules.addAction")}</button>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.schedule")}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {["hourly", "daily"].map(s => (
+                  <button key={s} onClick={() => setForm(f => ({ ...f, schedule_type: s }))} className={`btn ${form.schedule_type === s ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 14px" }}>
+                    {t("rules.schedule_" + s)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer", fontSize: 13 }}>
+                <input type="checkbox" checked={form.dry_run} onChange={e => setForm(f => ({ ...f, dry_run: e.target.checked }))} />
+                {t("rules.dryRun")}
+              </label>
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn btn-primary" onClick={saveRule} disabled={saving}>
+                {saving ? <span className="loader" /> : t("rules.save")}
+              </button>
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>{t("common.cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Alerts Page ──────────────────────────────────────────────────────────────
+const ALERT_METRICS   = ["acos", "roas", "spend", "impressions", "ctr", "cpc"];
+const ALERT_OPERATORS = [{ value: "gt", label: ">" }, { value: "gte", label: ">=" }, { value: "lt", label: "<" }, { value: "lte", label: "<=" }];
+
+const AlertsPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [tab, setTab] = useState("configs");
+  const [showModal, setShowModal] = useState(false);
+  const [editConfig, setEditConfig] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24 });
+
+  const { data: configs, loading: cl, reload: reloadConfigs } = useAsync(
+    () => workspaceId ? get("/alerts/configs") : Promise.resolve([]),
+    [workspaceId]
+  );
+  const { data: instances, loading: il, reload: reloadInstances } = useAsync(
+    () => workspaceId ? get("/alerts", { status: "open" }) : Promise.resolve([]),
+    [workspaceId]
+  );
+
+  function openCreate() {
+    setEditConfig(null);
+    setForm({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24 });
+    setShowModal(true);
+  }
+
+  function openEdit(config) {
+    setEditConfig(config);
+    const cond = typeof config.conditions === "string" ? JSON.parse(config.conditions) : config.conditions;
+    const ch   = typeof config.channels   === "string" ? JSON.parse(config.channels)   : config.channels;
+    setForm({
+      name: config.name, metric: cond.metric || config.alert_type,
+      operator: cond.operator || "gt", value: cond.value || 0,
+      channels: ch || { in_app: true, email: false }, cooldown_hours: config.suppression_hours || 24,
+    });
+    setShowModal(true);
+  }
+
+  async function saveConfig() {
+    if (!form.name) return alert(t("alerts.alertName"));
+    setSaving(true);
+    try {
+      if (editConfig) {
+        await apiFetch(`/alerts/configs/${editConfig.id}`, { method: "PUT", body: JSON.stringify(form) });
+      } else {
+        await post("/alerts/configs", form);
+      }
+      reloadConfigs();
+      setShowModal(false);
+    } catch (e) { alert(t("common.error") + e.message); }
+    setSaving(false);
+  }
+
+  async function deleteConfig(id) {
+    if (!confirm(t("alerts.deleteConfirm"))) return;
+    await del(`/alerts/configs/${id}`);
+    reloadConfigs();
+  }
+
+  async function toggleConfig(id) {
+    await patch(`/alerts/configs/${id}/toggle`);
+    reloadConfigs();
+  }
+
+  async function acknowledge(id) {
+    await patch(`/alerts/${id}/acknowledge`);
+    reloadInstances();
+  }
+
+  const operLabel = op => ALERT_OPERATORS.find(o => o.value === op)?.label || op;
+
+  return (
+    <div className="fade">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("alerts.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("alerts.subtitle")}</div>
+        </div>
+        {tab === "configs" && <button className="btn btn-primary" onClick={openCreate}>+ {t("alerts.newAlert")}</button>}
+      </div>
+
+      <div style={{ display: "flex", gap: 4, marginBottom: 14 }}>
+        {["configs", "instances"].map(tabId => (
+          <button key={tabId} onClick={() => setTab(tabId)} className={`btn ${tab === tabId ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
+            {t("alerts.tab_" + tabId)}
+            {tabId === "instances" && instances?.length > 0 && (
+              <span className="badge bg-red" style={{ marginLeft: 6, fontSize: 9, padding: "1px 5px" }}>{instances.length}</span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {tab === "configs" && (
+        <div className="card" style={{ overflow: "hidden" }}>
+          {cl
+            ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+            : !configs?.length
+              ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noAlerts")}</div>
+              : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("alerts.colName")}</th>
+                      <th>{t("alerts.colMetric")}</th>
+                      <th>{t("alerts.colThreshold")}</th>
+                      <th>{t("alerts.colChannels")}</th>
+                      <th>{t("alerts.colCooldown")}</th>
+                      <th>{t("alerts.colActive")}</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {configs.map(config => {
+                      const cond = (() => { try { return typeof config.conditions === "string" ? JSON.parse(config.conditions) : config.conditions; } catch { return {}; } })();
+                      const ch   = (() => { try { return typeof config.channels   === "string" ? JSON.parse(config.channels)   : config.channels;   } catch { return {}; } })();
+                      return (
+                        <tr key={config.id}>
+                          <td style={{ fontWeight: 500 }}>{config.name}</td>
+                          <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{(cond.metric || config.alert_type || "").toUpperCase()}</span></td>
+                          <td className="num">{operLabel(cond.operator)} {cond.value}</td>
+                          <td>
+                            <div style={{ display: "flex", gap: 4 }}>
+                              {ch?.in_app && <span className="badge bg-pur" style={{ fontSize: 9 }}>in-app</span>}
+                              {ch?.email  && <span className="badge bg-grn" style={{ fontSize: 9 }}>email</span>}
+                            </div>
+                          </td>
+                          <td className="num">{config.suppression_hours}h</td>
+                          <td>
+                            <button onClick={() => toggleConfig(config.id)} style={{
+                              width: 34, height: 18, borderRadius: 9, border: "none", cursor: "pointer",
+                              background: config.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s",
+                            }}>
+                              <span style={{ position: "absolute", top: 2, left: config.is_active ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
+                            </button>
+                          </td>
+                          <td>
+                            <div style={{ display: "flex", gap: 4 }}>
+                              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openEdit(config)}>{t("common.edit")}</button>
+                              <button className="btn btn-red"   style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteConfig(config.id)}>✕</button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )
+          }
+        </div>
+      )}
+
+      {tab === "instances" && (
+        <div className="card" style={{ overflow: "hidden" }}>
+          {il
+            ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+            : !instances?.length
+              ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noInstances")}</div>
+              : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("alerts.colTime")}</th>
+                      <th>{t("alerts.colAlert")}</th>
+                      <th>{t("alerts.colSeverity")}</th>
+                      <th>{t("alerts.colEntity")}</th>
+                      <th>{t("alerts.colStatus")}</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {instances.map(inst => (
+                      <tr key={inst.id}>
+                        <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(inst.created_at).toLocaleString()}</td>
+                        <td style={{ fontWeight: 500, fontSize: 12 }}>{inst.config_name || inst.title}</td>
+                        <td>
+                          <span className={`badge ${inst.severity === "critical" || inst.severity === "high" ? "bg-red" : inst.severity === "medium" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 10 }}>
+                            {inst.severity}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: 11, color: "var(--tx2)" }}>{inst.entity_name || "—"}</td>
+                        <td><span className={`badge ${inst.status === "open" ? "bg-amb" : "bg-grn"}`} style={{ fontSize: 10 }}>{inst.status}</span></td>
+                        <td>
+                          {inst.status === "open" && (
+                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => acknowledge(inst.id)}>{t("alerts.acknowledge")}</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+          }
+        </div>
+      )}
+
+      {showModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div className="card fade" style={{ width: 480, padding: "24px 28px" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
+              {editConfig ? t("alerts.editAlert") : t("alerts.newAlert")}
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.name")}</div>
+              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ width: "100%" }} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.threshold")}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select value={form.metric} onChange={e => setForm(f => ({ ...f, metric: e.target.value }))} style={{ flex: 1 }}>
+                  {ALERT_METRICS.map(m => <option key={m} value={m}>{m.toUpperCase()}</option>)}
+                </select>
+                <select value={form.operator} onChange={e => setForm(f => ({ ...f, operator: e.target.value }))} style={{ width: 60 }}>
+                  {ALERT_OPERATORS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                <input type="number" value={form.value} onChange={e => setForm(f => ({ ...f, value: parseFloat(e.target.value) }))} style={{ width: 80 }} />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.channels")}</div>
+              <div style={{ display: "flex", gap: 16 }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer", fontSize: 13 }}>
+                  <input type="checkbox" checked={form.channels.in_app} onChange={e => setForm(f => ({ ...f, channels: { ...f.channels, in_app: e.target.checked } }))} />
+                  {t("alerts.channelInApp")}
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", cursor: "pointer", fontSize: 13 }}>
+                  <input type="checkbox" checked={form.channels.email} onChange={e => setForm(f => ({ ...f, channels: { ...f.channels, email: e.target.checked } }))} />
+                  {t("alerts.channelEmail")}
+                </label>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.cooldown")}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="number" value={form.cooldown_hours} onChange={e => setForm(f => ({ ...f, cooldown_hours: parseInt(e.target.value) }))} style={{ width: 80 }} />
+                <span style={{ fontSize: 13, color: "var(--tx2)" }}>h</span>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn btn-primary" onClick={saveConfig} disabled={saving}>
+                {saving ? <span className="loader" /> : t("rules.save")}
+              </button>
+              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>{t("common.cancel")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Login Page ───────────────────────────────────────────────────────────────
 const LoginPage = ({ onLogin }) => {
   const { t } = useI18n();
@@ -1010,10 +1739,10 @@ export default function App() {
   const pages = {
     overview: <OverviewPage workspaceId={wid} />,
     campaigns: <CampaignsPage workspaceId={wid} />,
-    keywords: <PlaceholderPage title={t("placeholder.keywordsTitle")} desc={t("placeholder.keywordsDesc")} />,
+    keywords: <KeywordsPage workspaceId={wid} />,
     reports: <ReportsPage workspaceId={wid} />,
-    rules: <PlaceholderPage title={t("placeholder.rulesTitle")} desc={t("placeholder.rulesDesc")} />,
-    alerts: <PlaceholderPage title={t("placeholder.alertsTitle")} desc={t("placeholder.alertsDesc")} />,
+    rules: <RulesPage workspaceId={wid} />,
+    alerts: <AlertsPage workspaceId={wid} />,
     ai: <PlaceholderPage title={t("placeholder.aiTitle")} desc={t("placeholder.aiDesc")} />,
     audit: <AuditPage workspaceId={wid} />,
     connect: <ConnectPage workspaceId={wid} onConnected={() => setActive("overview")} />,

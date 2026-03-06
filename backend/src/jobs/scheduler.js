@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleEngine } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 
@@ -57,7 +57,29 @@ async function startScheduler() {
     null, true, "UTC"
   );
 
-  jobs = [entitySyncJob, reportSyncJob];
+  // ─── Rule engine: every hour ───────────────────────────────────────────────
+  const ruleEngineJob = new CronJob(
+    "0 * * * *",
+    async () => {
+      logger.info("Cron: Queuing rule engine for all workspaces");
+      try {
+        const { rows } = await query(
+          `SELECT DISTINCT w.id FROM workspaces w
+           JOIN rules r ON r.workspace_id = w.id
+           WHERE r.is_active = TRUE`
+        );
+        for (const { id } of rows) {
+          await queueRuleEngine(id);
+        }
+        logger.info(`Cron: Queued rule engine for ${rows.length} workspaces`);
+      } catch (err) {
+        logger.error("Cron rule engine failed", { error: err.message });
+      }
+    },
+    null, true, "UTC"
+  );
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob];
   logger.info("Scheduler started");
 }
 

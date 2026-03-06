@@ -27,6 +27,7 @@ const alertsRoutes = require("./routes/alerts");
 const auditRoutes = require("./routes/audit");
 const aiRoutes = require("./routes/ai");
 const jobsRoutes = require("./routes/jobs");
+const bulkRoutes = require("./routes/bulk");
 
 const app = express();
 
@@ -81,6 +82,7 @@ app.use(`${API}/alerts`, alertsRoutes);
 app.use(`${API}/audit`, auditRoutes);
 app.use(`${API}/ai`, aiRoutes);
 app.use(`${API}/jobs`, jobsRoutes);
+app.use(`${API}/bulk`, bulkRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
