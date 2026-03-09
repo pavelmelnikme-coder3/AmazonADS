@@ -1,12 +1,22 @@
 import { useI18n } from "../i18n/index.jsx";
 
+const LANGUAGES = [
+  { code: "en", label: "EN", flag: "🇬🇧" },
+  { code: "ru", label: "RU", flag: "🇷🇺" },
+  { code: "de", label: "DE", flag: "🇩🇪" },
+];
+
 export default function LanguageSwitcher() {
   const { locale, setLocale } = useI18n();
 
+  const currentIndex = LANGUAGES.findIndex((l) => l.code === locale);
+  const current = LANGUAGES[currentIndex] ?? LANGUAGES[0];
+  const next = LANGUAGES[(currentIndex + 1) % LANGUAGES.length];
+
   return (
     <button
-      onClick={() => setLocale(locale === "ru" ? "en" : "ru")}
-      title={locale === "ru" ? "Switch to English" : "Переключить на русский"}
+      onClick={() => setLocale(next.code)}
+      title={`Switch to ${next.label}`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -23,7 +33,7 @@ export default function LanguageSwitcher() {
         whiteSpace: "nowrap",
       }}
     >
-      {locale === "ru" ? "🇷🇺 RU" : "🇺🇸 EN"}
+      {current.flag} {current.label}
     </button>
   );
 }

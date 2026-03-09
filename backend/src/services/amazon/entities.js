@@ -1,6 +1,7 @@
 /**
  * Amazon Ads Entity Services
- * Fetches and syncs: Profiles, Campaigns, Ad Groups, Keywords
+ * Fetches and syncs: Profiles, Campaigns, Ad Groups, Keywords,
+ *                    Portfolios, Product Ads, Targets, Negative Keywords, Negative Targets
  *
  * All operations use the centralized adsClient with rate limiting.
  */
@@ -18,10 +19,6 @@ const REGION_URLS = {
 
 // ─── PROFILES ─────────────────────────────────────────────────────────────────
 
-/**
- * List all Amazon Ads profiles for a connection.
- * Tries the connection's stored region first, then falls back to all regions.
- */
 async function fetchProfiles(connectionId) {
   const { rows: [conn] } = await query(
     "SELECT id, org_id, region FROM amazon_connections WHERE id = $1",
@@ -33,7 +30,6 @@ async function fetchProfiles(connectionId) {
   const axios = require("axios");
   const accessToken = await getValidAccessToken(connectionId);
 
-  // Try stored region first, then all others as fallback
   const storedRegion = conn.region || "EU";
   const regionsToTry = [storedRegion, ...Object.keys(REGION_URLS).filter(r => r !== storedRegion)];
 
@@ -62,7 +58,6 @@ async function fetchProfiles(connectionId) {
     }
   }
 
-  // Update region in DB if we found profiles in a different region
   if (successRegion && successRegion !== storedRegion) {
     await query("UPDATE amazon_connections SET region = $1 WHERE id = $2", [successRegion, connectionId]);
   }
@@ -70,15 +65,7 @@ async function fetchProfiles(connectionId) {
   return allProfiles;
 }
 
-/**
- * Save profiles to DB after user selects which ones to attach.
- */
 async function upsertProfiles(connectionId, profiles) {
-  const { rows: [conn] } = await query(
-    "SELECT org_id FROM amazon_connections WHERE id = $1",
-    [connectionId]
-  );
-
   const saved = [];
   for (const p of profiles) {
     const { rows } = await query(
@@ -111,13 +98,9 @@ async function upsertProfiles(connectionId, profiles) {
     );
     saved.push(rows[0]);
   }
-
   return saved;
 }
 
-/**
- * Attach a profile to a workspace and queue initial sync.
- */
 async function attachProfileToWorkspace(profileDbId, workspaceId) {
   await query(
     `UPDATE amazon_profiles
@@ -127,29 +110,57 @@ async function attachProfileToWorkspace(profileDbId, workspaceId) {
   );
 }
 
+// ─── Shared base opts helper ──────────────────────────────────────────────────
+function baseOpts(profile) {
+  return {
+    connectionId: profile.connection_id,
+    profileId: String(profile.profile_id),
+    marketplace: profile.marketplace_id,
+    countryCode: profile.country_code || profile.marketplace,
+  };
+}
+
 // ─── CAMPAIGNS ────────────────────────────────────────────────────────────────
 
 const CAMPAIGN_ENDPOINTS = {
-  SP: "/v2/sp/campaigns",
-  SB: "/v2/sb/campaigns",
-  SD: "/v2/sd/campaigns",
+  SP: "/sp/campaigns",
+  SB: "/sb/v4/campaigns",
+  SD: "/sd/campaigns",
 };
 
-/**
- * Fetch all campaigns for a profile from Amazon.
- * Returns combined SP + SB + SD campaigns.
- */
 async function fetchCampaigns(profile) {
-  const { connection_id, profile_id, marketplace_id } = profile;
-  const base = { connectionId: connection_id, profileId: String(profile_id), marketplace: marketplace_id };
+  const base = baseOpts(profile);
+  logger.info("fetchCampaigns: profile fields", {
+    dbId: profile.id,
+    amazonProfileId: profile.profile_id,
+    marketplace_id: profile.marketplace_id,
+    country_code: profile.country_code,
+    marketplace: profile.marketplace,
+  });
 
   const results = await Promise.allSettled([
-    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SP, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns" })
+    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SP, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
       .then(r => r.map(c => ({ ...c, campaignType: "sponsoredProducts" }))),
-    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SB, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns" })
-      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredBrands" }))),
-    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SD, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns" })
-      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredDisplay" }))),
+    // SB: skip gracefully on 401/403/404
+    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SB, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
+      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredBrands" })))
+      .catch(err => {
+        if (err.status === 401 || err.status === 403 || err.status === 404) {
+          logger.info("SB campaigns skipped", { profileId: base.profileId, status: err.status });
+          return [];
+        }
+        throw err;
+      }),
+    // SD: skip gracefully on 401/403
+    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SD, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
+      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredDisplay" })))
+      .catch(err => {
+        if (err.status === 401 || err.status === 403) {
+          logger.info("SD campaigns skipped", { profileId: base.profileId, status: err.status });
+          return [];
+        }
+        throw err;
+      }),
   ]);
 
   const campaigns = [];
@@ -160,13 +171,9 @@ async function fetchCampaigns(profile) {
       logger.warn("Failed to fetch some campaign types", { error: result.reason?.message });
     }
   }
-
   return campaigns;
 }
 
-/**
- * Upsert campaigns into DB.
- */
 async function syncCampaigns(profileDbRecord, amazonCampaigns) {
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
   let upserted = 0;
@@ -188,24 +195,16 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
          synced_at = NOW(),
          updated_at = NOW()`,
       [
-        workspaceId,
-        profileDbId,
-        String(c.campaignId),
-        c.name,
-        c.campaignType,
-        c.targetingType || null,
-        c.state || "enabled",
-        c.dailyBudget || null,
-        c.startDate || null,
-        c.endDate || null,
-        c.bidding?.strategy || null,
-        JSON.stringify(c),
+        workspaceId, profileDbId,
+        String(c.campaignId), c.name, c.campaignType,
+        c.targetingType || null, c.state || "enabled",
+        c.dailyBudget || null, c.startDate || null, c.endDate || null,
+        c.bidding?.strategy || null, JSON.stringify(c),
       ]
     );
     upserted++;
   }
 
-  // Update sync state
   await query(
     `INSERT INTO sync_state (profile_id, entity_type, last_full_sync, last_sync_status)
      VALUES ($1, 'campaigns', NOW(), 'synced')
@@ -221,20 +220,19 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
 // ─── AD GROUPS ────────────────────────────────────────────────────────────────
 
 const AD_GROUP_ENDPOINTS = {
-  SP: "/v2/sp/adGroups",
-  SB: "/v2/sb/adGroups",
-  SD: "/v2/sd/adGroups",
+  SP: "/sp/adGroups",
+  SB: "/sb/v4/adGroups",
+  SD: "/sd/adGroups",
 };
 
 async function fetchAdGroups(profile, campaignType = "SP") {
-  const { connection_id, profile_id, marketplace_id } = profile;
+  const base = baseOpts(profile);
   return getAll({
-    connectionId: connection_id,
-    profileId: String(profile_id),
-    marketplace: marketplace_id,
+    ...base,
     path: AD_GROUP_ENDPOINTS[campaignType],
     params: { stateFilter: "enabled,paused,archived" },
     group: "ad_groups",
+    responseKey: "adGroups",
   });
 }
 
@@ -242,7 +240,6 @@ async function syncAdGroups(profileDbRecord, amazonAdGroups, campaignType) {
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
 
   for (const ag of amazonAdGroups) {
-    // Get our internal campaign ID
     const { rows: [camp] } = await query(
       "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
       [profileDbId, String(ag.campaignId)]
@@ -268,13 +265,26 @@ async function syncAdGroups(profileDbRecord, amazonAdGroups, campaignType) {
 // ─── KEYWORDS ────────────────────────────────────────────────────────────────
 
 async function fetchKeywords(profile) {
-  const { connection_id, profile_id, marketplace_id } = profile;
-  const base = { connectionId: connection_id, profileId: String(profile_id), marketplace: marketplace_id };
+  const base = baseOpts(profile);
 
   const [spKws, sbKws] = await Promise.allSettled([
-    getAll({ ...base, path: "/v2/sp/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords" }),
-    getAll({ ...base, path: "/v2/sb/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords" }),
+    // debug: true → logs raw first page so we can diagnose count=0 issues
+    getAll({ ...base, path: "/sp/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords", responseKey: "keywords", debug: true }),
+    getAll({ ...base, path: "/sb/v4/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords", responseKey: "keywords", debug: true })
+      .catch(err => {
+        if (err.status === 401 || err.status === 403 || err.status === 404) {
+          logger.info("SB keywords skipped", { profileId: base.profileId, status: err.status });
+          return [];
+        }
+        throw err;
+      }),
   ]);
+
+  logger.info("fetchKeywords results", {
+    profileId: base.profileId,
+    spCount: spKws.status === "fulfilled" ? spKws.value.length : `ERROR: ${spKws.reason?.message}`,
+    sbCount: sbKws.status === "fulfilled" ? sbKws.value.length : `ERROR: ${sbKws.reason?.message}`,
+  });
 
   return [
     ...(spKws.status === "fulfilled" ? spKws.value : []),
@@ -313,6 +323,302 @@ async function syncKeywords(profileDbRecord, amazonKeywords) {
   logger.info("Keywords synced", { profileDbId, count: amazonKeywords.length });
 }
 
+// ─── PORTFOLIOS ──────────────────────────────────────────────────────────────
+
+async function fetchPortfolios(profile) {
+  const base = baseOpts(profile);
+  const result = await getAll({
+    ...base,
+    path: "/portfolios",
+    params: { portfolioStateFilter: "enabled,paused" },
+    group: "default",
+    responseKey: "portfolios",
+    debug: true,
+  });
+  logger.info("fetchPortfolios result", { profileId: base.profileId, count: result.length });
+  return result;
+}
+
+async function syncPortfolios(profileDbRecord, amazonPortfolios) {
+  const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+
+  for (const p of amazonPortfolios) {
+    await query(
+      `INSERT INTO portfolios
+         (workspace_id, profile_id, amazon_portfolio_id, name, state,
+          budget_amount, budget_currency, budget_start_date, budget_end_date, raw_data, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+       ON CONFLICT (profile_id, amazon_portfolio_id)
+       DO UPDATE SET
+         name = EXCLUDED.name, state = EXCLUDED.state,
+         budget_amount = EXCLUDED.budget_amount,
+         budget_currency = EXCLUDED.budget_currency,
+         budget_start_date = EXCLUDED.budget_start_date,
+         budget_end_date = EXCLUDED.budget_end_date,
+         raw_data = EXCLUDED.raw_data,
+         synced_at = NOW(), updated_at = NOW()`,
+      [
+        workspaceId, profileDbId,
+        String(p.portfolioId), p.name, p.state || "enabled",
+        p.budget?.amount || null, p.budget?.currencyCode || null,
+        p.budget?.startDate || null, p.budget?.endDate || null,
+        JSON.stringify(p),
+      ]
+    );
+  }
+
+  logger.info("Portfolios synced", { profileDbId, count: amazonPortfolios.length });
+  return amazonPortfolios.length;
+}
+
+// ─── PRODUCT ADS ─────────────────────────────────────────────────────────────
+
+async function fetchProductAds(profile) {
+  const base = baseOpts(profile);
+  return getAll({
+    ...base,
+    path: "/sp/productAds",
+    params: { stateFilter: "enabled,paused,archived" },
+    group: "ad_groups",
+    responseKey: "productAds",
+  });
+}
+
+async function syncProductAds(profileDbRecord, amazonProductAds) {
+  const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+
+  for (const ad of amazonProductAds) {
+    // Resolve internal campaign/ad_group IDs
+    const { rows: [camp] } = await query(
+      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
+      [profileDbId, String(ad.campaignId)]
+    );
+    const { rows: [ag] } = await query(
+      "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
+      [profileDbId, String(ad.adGroupId)]
+    );
+
+    await query(
+      `INSERT INTO product_ads
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_ad_id, asin, sku, state, raw_data, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+       ON CONFLICT (profile_id, amazon_ad_id)
+       DO UPDATE SET
+         asin = EXCLUDED.asin, sku = EXCLUDED.sku, state = EXCLUDED.state,
+         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
+      [
+        workspaceId, profileDbId,
+        camp?.id || null, ag?.id || null,
+        String(ad.adId), ad.asin || null, ad.sku || null,
+        ad.state || "enabled", JSON.stringify(ad),
+      ]
+    );
+  }
+
+  logger.info("Product ads synced", { profileDbId, count: amazonProductAds.length });
+  return amazonProductAds.length;
+}
+
+// ─── TARGETS ─────────────────────────────────────────────────────────────────
+
+const TARGET_ENDPOINTS = {
+  SP: { path: "/sp/targets",  responseKey: "targetingClauses" },
+  SD: { path: "/sd/targets",  responseKey: "targetingClauses" },
+};
+
+async function fetchTargets(profile, adType = "SP") {
+  const base = baseOpts(profile);
+  const ep = TARGET_ENDPOINTS[adType];
+  return getAll({
+    ...base,
+    path: ep.path,
+    params: { stateFilter: "enabled,paused,archived" },
+    group: "ad_groups",
+    responseKey: ep.responseKey,
+  }).catch(err => {
+    if (err.status === 401 || err.status === 403 || err.status === 404) {
+      logger.info(`${adType} targets skipped`, { profileId: base.profileId, status: err.status });
+      return [];
+    }
+    throw err;
+  });
+}
+
+async function syncTargets(profileDbRecord, amazonTargets, adType = "SP") {
+  const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+
+  for (const t of amazonTargets) {
+    const { rows: [camp] } = await query(
+      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
+      [profileDbId, String(t.campaignId)]
+    );
+    const { rows: [ag] } = t.adGroupId ? await query(
+      "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
+      [profileDbId, String(t.adGroupId)]
+    ) : { rows: [null] };
+
+    await query(
+      `INSERT INTO targets
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_target_id, ad_type,
+          expression_type, expression, resolved_expression, state, bid, raw_data, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+       ON CONFLICT (profile_id, amazon_target_id)
+       DO UPDATE SET
+         state = EXCLUDED.state, bid = EXCLUDED.bid,
+         expression = EXCLUDED.expression,
+         resolved_expression = EXCLUDED.resolved_expression,
+         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
+      [
+        workspaceId, profileDbId,
+        camp?.id || null, ag?.id || null,
+        String(t.targetId), adType,
+        t.expressionType || null,
+        t.expression ? JSON.stringify(t.expression) : null,
+        t.resolvedExpression ? JSON.stringify(t.resolvedExpression) : null,
+        t.state || "enabled", t.bid || null,
+        JSON.stringify(t),
+      ]
+    );
+  }
+
+  logger.info("Targets synced", { profileDbId, adType, count: amazonTargets.length });
+  return amazonTargets.length;
+}
+
+// ─── NEGATIVE KEYWORDS ───────────────────────────────────────────────────────
+
+async function fetchNegativeKeywords(profile) {
+  const base = baseOpts(profile);
+
+  const [adGroupLevel, campaignLevel] = await Promise.allSettled([
+    // Ad-group level negative keywords
+    getAll({ ...base, path: "/sp/negativeKeywords", params: { stateFilter: "enabled,archived" }, group: "keywords", responseKey: "negativeKeywords" })
+      .then(r => r.map(kw => ({ ...kw, _level: "ad_group" }))),
+    // Campaign level negative keywords
+    getAll({ ...base, path: "/sp/campaignNegativeKeywords", params: { stateFilter: "enabled,archived" }, group: "keywords", responseKey: "negativeKeywords" })
+      .then(r => r.map(kw => ({ ...kw, _level: "campaign" }))),
+  ]);
+
+  logger.info("fetchNegativeKeywords results", {
+    profileId: base.profileId,
+    adGroupLevel: adGroupLevel.status === "fulfilled" ? adGroupLevel.value.length : `ERROR: ${adGroupLevel.reason?.message}`,
+    campaignLevel: campaignLevel.status === "fulfilled" ? campaignLevel.value.length : `ERROR: ${campaignLevel.reason?.message}`,
+  });
+
+  return [
+    ...(adGroupLevel.status === "fulfilled" ? adGroupLevel.value : []),
+    ...(campaignLevel.status === "fulfilled" ? campaignLevel.value : []),
+  ];
+}
+
+async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
+  const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+
+  for (const kw of amazonNegKeywords) {
+    const { rows: [camp] } = await query(
+      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
+      [profileDbId, String(kw.campaignId)]
+    );
+
+    let agId = null;
+    if (kw.adGroupId) {
+      const { rows: [ag] } = await query(
+        "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
+        [profileDbId, String(kw.adGroupId)]
+      );
+      agId = ag?.id || null;
+    }
+
+    await query(
+      `INSERT INTO negative_keywords
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_keyword_id,
+          keyword_text, match_type, level, raw_data, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+       ON CONFLICT (profile_id, amazon_neg_keyword_id)
+       DO UPDATE SET
+         keyword_text = EXCLUDED.keyword_text, match_type = EXCLUDED.match_type,
+         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
+      [
+        workspaceId, profileDbId,
+        camp?.id || null, agId,
+        String(kw.keywordId), kw.keywordText, kw.matchType || "negativeExact",
+        kw._level || "ad_group", JSON.stringify(kw),
+      ]
+    );
+  }
+
+  logger.info("Negative keywords synced", { profileDbId, count: amazonNegKeywords.length });
+  return amazonNegKeywords.length;
+}
+
+// ─── NEGATIVE TARGETS ────────────────────────────────────────────────────────
+
+const NEG_TARGET_ENDPOINTS = {
+  SP: { path: "/sp/negativeTargets",  responseKey: "negativeTargetingClauses" },
+  SD: { path: "/sd/negativeTargets",  responseKey: "negativeTargetingClauses" },
+};
+
+async function fetchNegativeTargets(profile, adType = "SP") {
+  const base = baseOpts(profile);
+  const ep = NEG_TARGET_ENDPOINTS[adType];
+  return getAll({
+    ...base,
+    path: ep.path,
+    params: { stateFilter: "enabled,archived" },
+    group: "ad_groups",
+    responseKey: ep.responseKey,
+  }).catch(err => {
+    if (err.status === 401 || err.status === 403 || err.status === 404) {
+      logger.info(`${adType} negative targets skipped`, { profileId: base.profileId, status: err.status });
+      return [];
+    }
+    throw err;
+  });
+}
+
+async function syncNegativeTargets(profileDbRecord, amazonNegTargets, adType = "SP") {
+  const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+
+  for (const t of amazonNegTargets) {
+    const { rows: [camp] } = await query(
+      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
+      [profileDbId, String(t.campaignId)]
+    );
+    let agId = null;
+    if (t.adGroupId) {
+      const { rows: [ag] } = await query(
+        "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
+        [profileDbId, String(t.adGroupId)]
+      );
+      agId = ag?.id || null;
+    }
+
+    await query(
+      `INSERT INTO negative_targets
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_target_id, ad_type,
+          expression, expression_type, level, raw_data, synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+       ON CONFLICT (profile_id, amazon_neg_target_id)
+       DO UPDATE SET
+         expression = EXCLUDED.expression,
+         expression_type = EXCLUDED.expression_type,
+         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
+      [
+        workspaceId, profileDbId,
+        camp?.id || null, agId,
+        String(t.targetId), adType,
+        t.expression ? JSON.stringify(t.expression) : null,
+        t.expressionType || null,
+        t.adGroupId ? "ad_group" : "campaign",
+        JSON.stringify(t),
+      ]
+    );
+  }
+
+  logger.info("Negative targets synced", { profileDbId, adType, count: amazonNegTargets.length });
+  return amazonNegTargets.length;
+}
+
 module.exports = {
   fetchProfiles,
   upsertProfiles,
@@ -323,4 +629,14 @@ module.exports = {
   syncAdGroups,
   fetchKeywords,
   syncKeywords,
+  fetchPortfolios,
+  syncPortfolios,
+  fetchProductAds,
+  syncProductAds,
+  fetchTargets,
+  syncTargets,
+  fetchNegativeKeywords,
+  syncNegativeKeywords,
+  fetchNegativeTargets,
+  syncNegativeTargets,
 };

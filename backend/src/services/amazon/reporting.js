@@ -22,49 +22,53 @@ const gunzip = promisify(zlib.gunzip);
 const REPORTING_BASE = "/reporting/reports";
 
 // ─── Report Type Definitions ──────────────────────────────────────────────────
-// Map our internal types to Amazon's v3 reportType strings
+// Map our internal types to Amazon's v3 reportType strings + exact column names.
+// SB reporting v3 is in preview — excluded until GA.
 const REPORT_CONFIGS = {
   SP: {
     campaign: {
       reportType: "spCampaigns",
       groupBy: ["campaign"],
-      metrics: ["impressions","clicks","cost","purchases1d","purchases7d","purchases14d","purchases30d",
-                "purchasesSameSku14d","sales1d","sales7d","sales14d","sales30d","unitsSoldClicks14d",
-                "topOfSearchImpressionShare","placementProductPage","placementTop"],
-    },
-    ad_group: {
-      reportType: "spAdGroups",
-      groupBy: ["adGroup"],
-      metrics: ["impressions","clicks","cost","purchases14d","sales14d"],
+      metrics: ["campaignId","campaignName","impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
     },
     keyword: {
       reportType: "spKeywords",
-      groupBy: ["keyword"],
-      metrics: ["impressions","clicks","cost","purchases14d","sales14d","keywordId","keywordText","matchType"],
+      groupBy: ["adGroup"],
+      metrics: ["keywordId","keywordText","matchType","keyword",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d",
+        "topOfSearchImpressionShare","campaignBudgetCurrencyCode","currency","date"],
     },
     target: {
-      reportType: "spTargets",
-      groupBy: ["target"],
-      metrics: ["impressions","clicks","cost","purchases14d","sales14d","targetingText","targetingType"],
+      reportType: "spTargeting",
+      groupBy: ["targeting"],
+      metrics: ["campaignId","campaignName","adGroupId","adGroupName",
+        "targeting","keywordId","keyword","keywordBid","keywordType","matchType",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d",
+        "portfolioId","campaignBudgetCurrencyCode","date"],
     },
-  },
-  SB: {
-    campaign: {
-      reportType: "sbCampaigns",
-      groupBy: ["campaign"],
-      metrics: ["impressions","clicks","cost","purchases14d","sales14d","newToBrandOrders14d","newToBrandSales14d"],
-    },
-    keyword: {
-      reportType: "sbKeywords",
-      groupBy: ["keyword"],
-      metrics: ["impressions","clicks","cost","purchases14d","sales14d","keywordText","matchType"],
+    advertised_product: {
+      reportType: "spAdvertisedProduct",
+      groupBy: ["advertiser"],
+      metrics: ["campaignId","campaignName","adGroupId","adGroupName",
+        "advertisedAsin","advertisedSku",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
     },
   },
   SD: {
     campaign: {
       reportType: "sdCampaigns",
       groupBy: ["campaign"],
-      metrics: ["impressions","clicks","cost","purchases14d","sales14d","viewsRemarketingPurchases14d"],
+      metrics: ["campaignId","campaignName","impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
     },
   },
 };
@@ -74,12 +78,12 @@ const REPORT_CONFIGS = {
  * Submit a report request to Amazon Ads v3 API.
  * Returns the reportId (Amazon's ID for polling).
  */
-async function createReportRequest({ profile, campaignType, reportLevel, startDate, endDate, granularity = "DAY" }) {
+async function createReportRequest({ profile, campaignType, reportLevel, startDate, endDate, granularity = "DAILY" }) {
   const config = REPORT_CONFIGS[campaignType]?.[reportLevel];
   if (!config) throw new Error(`Unsupported report: ${campaignType}/${reportLevel}`);
 
-  const { connection_id, profile_id, marketplace_id, timezone } = profile;
-  const baseUrl = getBaseUrl(marketplace_id);
+  const { connection_id, profile_id, marketplace_id, country_code, marketplace, timezone } = profile;
+  const baseUrl = getBaseUrl(marketplace_id, country_code || marketplace);
 
   const accessToken = await getValidAccessToken(connection_id);
 
@@ -97,27 +101,41 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
     },
   };
 
-  const response = await axios.post(
-    `${baseUrl}/reporting/reports`,
-    body,
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
-        "Amazon-Advertising-API-Scope": String(profile_id),
-        "Content-Type": "application/json",
-      },
-      timeout: 15000,
-    }
-  );
+  let response;
+  try {
+    response = await axios.post(
+      `${baseUrl}/reporting/reports`,
+      body,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile_id),
+          "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
+        },
+        timeout: 15000,
+      }
+    );
+  } catch (err) {
+    logger.error("Amazon Reporting API error response", {
+      status: err.response?.status,
+      data: JSON.stringify(err.response?.data),
+      requestBody: JSON.stringify(body),
+      baseUrl,
+      profileId: profile_id,
+      campaignType,
+      reportLevel,
+    });
+    throw err;
+  }
 
   return response.data.reportId;
 }
 
 // ─── Poll Report Status ────────────────────────────────────────────────────────
 async function pollReportStatus(profile, amazonReportId) {
-  const { connection_id, profile_id, marketplace_id } = profile;
-  const baseUrl = getBaseUrl(marketplace_id);
+  const { connection_id, profile_id, marketplace_id, country_code, marketplace } = profile;
+  const baseUrl = getBaseUrl(marketplace_id, country_code || marketplace);
   const accessToken = await getValidAccessToken(connection_id);
 
   const response = await axios.get(
@@ -248,6 +266,8 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
       endDate,
     });
 
+    logger.info("Report requested from Amazon", { requestId, amazonReportId, campaignType, reportLevel, startDate, endDate });
+
     await query(
       "UPDATE report_requests SET amazon_report_id = $1, status = 'requested', requested_at = NOW() WHERE id = $2",
       [amazonReportId, requestId]
@@ -262,7 +282,7 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
       await sleep(pollIntervalMs);
 
       const statusData = await pollReportStatus(profileDbRecord, amazonReportId);
-      logger.debug("Report poll", { requestId, amazonReportId, status: statusData.status });
+      logger.info("Report poll", { requestId, amazonReportId, status: statusData.status });
 
       if (statusData.status === "COMPLETED") {
         // 4. Download
@@ -301,18 +321,41 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function getBaseUrl(marketplaceId) {
-  const MARKETPLACE_REGION = require("./adsClient").MARKETPLACE_REGION || {};
-  // Default to NA
-  return process.env.AMAZON_ADS_API_URL || "https://advertising-api.amazon.com";
+const API_URLS_REPORTING = {
+  NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+  EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+  FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+};
+
+const MARKETPLACE_REGION_REPORTING = {
+  ATVPDKIKX0DER: "NA", A2EUQ1WTGCTBG2: "NA", A1AM78C64UM0Y8: "NA",
+  A1F83G8C2ARO7P: "EU", A1PA6795UKMFR9: "EU", APJ6JRA9NG5V4: "EU",
+  A13V1IB3VIYZZH: "EU", A1RKKUPIHCS9HS: "EU", A17E79C6D8DWNP: "EU",
+  A2VIGQ35RCS4UG: "EU", A1MNDV6DTONNN6: "EU", A2NODRKZP88ZB9: "EU",
+  A39IBJ37TRP1C6: "FE", A1VC38T7YXB528: "FE", A21TJRUUN4KGV:  "FE",
+};
+
+const COUNTRY_REGION_REPORTING = {
+  US: "NA", CA: "NA", MX: "NA",
+  GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU",
+  ES: "EU", NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU",
+  JP: "FE", AU: "FE", SG: "FE", IN: "FE",
+};
+
+function getBaseUrl(marketplaceId, countryCode) {
+  const region = MARKETPLACE_REGION_REPORTING[marketplaceId]
+    || COUNTRY_REGION_REPORTING[(countryCode || "").toUpperCase()]
+    || "EU"; // default EU since most profiles are EU
+  return API_URLS_REPORTING[region];
 }
 
 function getEntityId(row, level) {
   const idFields = {
-    campaign: "campaignId",
-    ad_group: "adGroupId",
-    keyword: "keywordId",
-    target: "targetId",
+    campaign:           "campaignId",
+    ad_group:           "adGroupId",
+    keyword:            "keywordId",
+    target:             "keyword",        // spTargeting groupBy=targeting uses keyword as id
+    advertised_product: "advertisedAsin", // spAdvertisedProduct — no adId in columns
   };
   return String(row[idFields[level]] || row.campaignId || "unknown");
 }
@@ -321,11 +364,82 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ─── Metrics Backfill: queue all report types for a workspace ─────────────────
+/**
+ * Queue individual report-pipeline BullMQ jobs for all profiles × all report types.
+ * dateFrom defaults to 60 days ago, dateTo to yesterday.
+ * Called by the metrics-backfill worker — does NOT run reports inline, just queues them.
+ *
+ * @param {string} workspaceId
+ * @param {Function} queueReportPipelineFn  - workers.queueReportPipeline
+ * @param {string} [dateFrom]
+ * @param {string} [dateTo]
+ * @returns {{ profileCount, jobsQueued, dateFrom, dateTo }}
+ */
+async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, dateFrom, dateTo) {
+  const toDate = dateTo || (() => {
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    return d.toISOString().split("T")[0];
+  })();
+  const fromDate = dateFrom || (() => {
+    const d = new Date(); d.setDate(d.getDate() - 60);
+    return d.toISOString().split("T")[0];
+  })();
+
+  const { rows: profiles } = await query(
+    `SELECT p.id FROM amazon_profiles p
+     JOIN amazon_connections c ON c.id = p.connection_id
+     WHERE p.workspace_id = $1 AND p.is_attached = TRUE AND c.status = 'active'`,
+    [workspaceId]
+  );
+
+  // Report types to backfill. SB v3 reporting is in preview — excluded.
+  const reportTypes = [
+    ["SP", "campaign"],
+    ["SP", "keyword"],
+    ["SP", "target"],
+    ["SP", "advertised_product"],
+    ["SD", "campaign"],
+  ];
+
+  // Amazon daily reports max date range = 31 days — split into chunks
+  const MAX_DAYS = 31;
+  const dateChunks = [];
+  let chunkStart = new Date(fromDate);
+  const endDate = new Date(toDate);
+  while (chunkStart <= endDate) {
+    const chunkEnd = new Date(chunkStart);
+    chunkEnd.setDate(chunkEnd.getDate() + MAX_DAYS - 1);
+    if (chunkEnd > endDate) chunkEnd.setTime(endDate.getTime());
+    dateChunks.push([
+      chunkStart.toISOString().split("T")[0],
+      chunkEnd.toISOString().split("T")[0],
+    ]);
+    chunkStart = new Date(chunkEnd);
+    chunkStart.setDate(chunkStart.getDate() + 1);
+  }
+
+  let jobsQueued = 0;
+  for (const { id: profileId } of profiles) {
+    for (const [campaignType, reportLevel] of reportTypes) {
+      for (const [chunkFrom, chunkTo] of dateChunks) {
+        await queueReportPipelineFn(profileId, campaignType, reportLevel, chunkFrom, chunkTo);
+        logger.info("Queued metrics report job", { profileId, campaignType, reportLevel, chunkFrom, chunkTo });
+        jobsQueued++;
+      }
+    }
+  }
+
+  logger.info("Metrics backfill queued", { workspaceId, profileCount: profiles.length, jobsQueued, chunks: dateChunks.length, fromDate, toDate });
+  return { profileCount: profiles.length, jobsQueued, dateFrom: fromDate, dateTo: toDate };
+}
+
 module.exports = {
   createReportRequest,
   pollReportStatus,
   downloadReport,
   ingestReportData,
   runReportingPipeline,
+  queueMetricsBackfillJobs,
   REPORT_CONFIGS,
 };

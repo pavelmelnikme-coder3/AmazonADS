@@ -17,13 +17,19 @@ const logger = require("../../config/logger");
 const { getRedis } = require("../../config/redis");
 
 // ─── API Base URLs by region ──────────────────────────────────────────────────
+// Always force https:// — env vars may accidentally contain http://
+function forceHttps(url) {
+  if (!url) return url;
+  return url.replace(/^http:\/\//i, "https://");
+}
+
 const API_URLS = {
-  NA: process.env.AMAZON_ADS_API_URL || "https://advertising-api.amazon.com",
-  EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
-  FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+  NA: forceHttps(process.env.AMAZON_ADS_API_URL)    || "https://advertising-api.amazon.com",
+  EU: forceHttps(process.env.AMAZON_ADS_API_EU_URL) || "https://advertising-api-eu.amazon.com",
+  FE: forceHttps(process.env.AMAZON_ADS_API_FE_URL) || "https://advertising-api-fe.amazon.com",
 };
 
-// Marketplace → region mapping
+// Amazon marketplace string ID → region
 const MARKETPLACE_REGION = {
   ATVPDKIKX0DER: "NA", // US
   A2EUQ1WTGCTBG2: "NA", // CA
@@ -35,9 +41,23 @@ const MARKETPLACE_REGION = {
   A1RKKUPIHCS9HS: "EU", // ES
   A17E79C6D8DWNP: "EU", // SA
   A2VIGQ35RCS4UG: "EU", // AE
+  A1MNDV6DTONNN6: "EU", // NL
+  A2NODRKZP88ZB9: "EU", // SE
+  A1C3SOZRARQ6R3: "EU", // PL
+  A33AVAJ2PDY3EV: "EU", // TR
   A39IBJ37TRP1C6: "FE", // AU
   A1VC38T7YXB528: "FE", // JP
-  A21TJRUUN4KGV: "FE",  // IN
+  A21TJRUUN4KGV:  "FE", // IN
+  A19VAU5U5O7RUS: "FE", // SG
+};
+
+// Country code → region fallback (used when marketplace string ID is missing/unknown)
+const COUNTRY_REGION = {
+  US: "NA", CA: "NA", MX: "NA",
+  GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU",
+  ES: "EU", NL: "EU", SE: "EU", PL: "EU", TR: "EU",
+  SA: "EU", AE: "EU", BE: "EU", EG: "EU",
+  JP: "FE", AU: "FE", SG: "FE", IN: "FE",
 };
 
 // ─── Rate limit config per endpoint group ────────────────────────────────────
@@ -85,31 +105,44 @@ function recordSuccess(profileId) {
   circuitState.delete(profileId);
 }
 
+// ─── Versioned Accept headers for SP v3 endpoints ─────────────────────────────
+// Amazon Ads API v3 requires content-type versioning for SP sub-resources
+function getAcceptHeader(path) {
+  if (path.includes("/sp/adGroups"))           return "application/vnd.spAdGroup.v3+json";
+  if (path.includes("/sp/keywords"))           return "application/vnd.spKeyword.v3+json";
+  if (path.includes("/sp/productAds"))         return "application/vnd.spProductAd.v3+json";
+  if (path.includes("/sp/negativeKeywords"))   return "application/vnd.spNegativeKeyword.v3+json";
+  if (path.includes("/sp/negativeTargets"))    return "application/vnd.spNegativeTargetingClause.v3+json";
+  if (path.includes("/sp/targets"))            return "application/vnd.spTargetingClause.v3+json";
+  if (path.includes("/sp/campaigns"))          return "application/vnd.spCampaign.v3+json";
+  return "application/json";
+}
+
 // ─── Core request function ────────────────────────────────────────────────────
 /**
  * Make an authenticated request to Amazon Ads API.
  *
  * @param {Object} options
  * @param {string}  options.connectionId - DB connection UUID
- * @param {string}  options.profileId    - Amazon profile ID (numeric string)
- * @param {string}  options.marketplace  - marketplace ID
+ * @param {string}  options.profileId    - Amazon profile ID (numeric string) — used as API Scope header
+ * @param {string}  options.marketplace  - Amazon marketplace string ID (e.g. "A1PA6795UKMFR9")
+ * @param {string}  [options.countryCode]- ISO country code fallback for region (e.g. "DE"), used when marketplace ID is unknown
  * @param {string}  options.method       - HTTP method
- * @param {string}  options.path         - API path (e.g., "/v2/campaigns")
+ * @param {string}  options.path         - API path (e.g., "/sp/campaigns")
  * @param {Object}  [options.params]     - query params
  * @param {Object}  [options.data]       - request body
  * @param {string}  [options.group]      - rate limit group
- * @param {number}  [options.version]    - API version (default: 2)
  */
 async function adsRequest({
   connectionId,
   profileId,
   marketplace,
+  countryCode,
   method,
   path,
   params,
   data,
   group = "default",
-  version = 2,
 }) {
   if (isCircuitOpen(profileId)) {
     throw Object.assign(
@@ -118,7 +151,10 @@ async function adsRequest({
     );
   }
 
-  const region = MARKETPLACE_REGION[marketplace] || "NA";
+  // Resolve region: try marketplace string ID first, then country code, then default EU
+  const region = MARKETPLACE_REGION[marketplace]
+    || COUNTRY_REGION[(countryCode || "").toUpperCase()]
+    || "EU";
   const baseUrl = API_URLS[region];
 
   let lastError;
@@ -126,6 +162,19 @@ async function adsRequest({
     try {
       // Get a valid access token (auto-refreshes if needed)
       const accessToken = await getValidAccessToken(connectionId);
+
+      // Log right before every request so we can see exactly what is sent
+      logger.info("Amazon Ads API request", {
+        connectionId,          // DB UUID of the connection whose token is used
+        profileId,             // Amazon numeric profile ID — sent as API Scope header
+        scopeHeader: profileId,
+        marketplace,
+        countryCode,
+        region,
+        url: `${baseUrl}${path}`,
+        method,
+        attempt,
+      });
 
       const response = await axios({
         method,
@@ -135,9 +184,9 @@ async function adsRequest({
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
-          "Amazon-Advertising-API-Scope": profileId,
-          "Content-Type": "application/json",
-          "Accept": "application/json",
+          "Amazon-Advertising-API-Scope": profileId,  // must be the Amazon numeric profile ID
+          "Accept": getAcceptHeader(path),
+          "Content-Type": path.startsWith("/sp/") ? getAcceptHeader(path) : "application/json",
         },
         timeout: 30000,
         validateStatus: null, // Handle all status codes manually
@@ -221,6 +270,9 @@ function patch(opts) { return adsRequest({ ...opts, method: "PATCH" }); }
 /**
  * Paginated GET — automatically follows pages and collects all results.
  * Amazon uses startIndex + count pagination for most list endpoints.
+ *
+ * @param {string} [opts.responseKey] - if set, unwrap page[responseKey] instead of assuming plain array
+ *                                      (Amazon Ads API v3 wraps results: { campaigns: [...] })
  */
 async function getAll(opts, pageSize = 100) {
   const results = [];
@@ -232,7 +284,29 @@ async function getAll(opts, pageSize = 100) {
       params: { ...opts.params, startIndex, count: pageSize },
     });
 
-    const items = Array.isArray(page) ? page : [];
+    // Log the raw first-page response when debug is requested (helps diagnose count=0 issues)
+    if (startIndex === 0 && opts.debug) {
+      logger.info("getAll raw first page response", {
+        path: opts.path,
+        responseKey: opts.responseKey,
+        isArray: Array.isArray(page),
+        topLevelKeys: page && typeof page === "object" ? Object.keys(page) : [],
+        sample: JSON.stringify(page).slice(0, 600),
+      });
+    }
+
+    let items;
+    if (Array.isArray(page)) {
+      items = page;
+    } else if (opts.responseKey && Array.isArray(page?.[opts.responseKey])) {
+      items = page[opts.responseKey];
+    } else {
+      // Try common wrapper keys as fallback
+      const knownKeys = ["campaigns", "adGroups", "keywords", "ads", "targetingClauses", "productAds", "portfolios"];
+      const found = knownKeys.find(k => Array.isArray(page?.[k]));
+      items = found ? page[found] : [];
+    }
+
     results.push(...items);
 
     if (items.length < pageSize) break;

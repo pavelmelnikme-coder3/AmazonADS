@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleEngine } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleEngine, queueMetricsBackfill, queueAiAnalysis } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 
@@ -18,7 +18,7 @@ async function startScheduler() {
            WHERE p.is_attached = TRUE AND c.status = 'active'`
         );
         for (const { id } of rows) {
-          await queueEntitySync(id, ["campaigns", "ad_groups", "keywords"]);
+          await queueEntitySync(id, ["campaigns", "ad_groups", "keywords", "product_ads", "targets", "negative_keywords", "negative_targets", "portfolios"]);
         }
         logger.info(`Cron: Queued entity sync for ${rows.length} profiles`);
       } catch (err) {
@@ -79,7 +79,56 @@ async function startScheduler() {
     null, true, "UTC"
   );
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob];
+  // ─── Daily metrics backfill: every day at 06:30 UTC ──────────────────────
+  const metricsBackfillJob = new CronJob(
+    "30 6 * * *",
+    async () => {
+      logger.info("Cron: Queuing daily metrics backfill (last 2 days) for all workspaces");
+      try {
+        const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+        const twoDaysAgo = new Date(); twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+        const dateTo   = yesterday.toISOString().split("T")[0];
+        const dateFrom = twoDaysAgo.toISOString().split("T")[0];
+
+        const { rows } = await query(
+          `SELECT DISTINCT p.workspace_id FROM amazon_profiles p
+           JOIN amazon_connections c ON c.id = p.connection_id
+           WHERE p.is_attached = TRUE AND c.status = 'active' AND p.workspace_id IS NOT NULL`
+        );
+        for (const { workspace_id } of rows) {
+          await queueMetricsBackfill(workspace_id, dateFrom, dateTo);
+        }
+        logger.info(`Cron: Queued metrics backfill for ${rows.length} workspaces`);
+      } catch (err) {
+        logger.error("Cron metrics backfill failed", { error: err.message });
+      }
+    },
+    null, true, "UTC"
+  );
+
+  // ─── Daily AI analysis: every day at 07:00 UTC ────────────────────────────
+  const aiAnalysisJob = new CronJob(
+    "0 7 * * *",
+    async () => {
+      logger.info("Cron: Queuing AI analysis for all active workspaces");
+      try {
+        const { rows } = await query(
+          `SELECT DISTINCT p.workspace_id FROM amazon_profiles p
+           JOIN amazon_connections c ON c.id = p.connection_id
+           WHERE p.is_attached = TRUE AND c.status = 'active' AND p.workspace_id IS NOT NULL`
+        );
+        for (const { workspace_id } of rows) {
+          await queueAiAnalysis(workspace_id);
+        }
+        logger.info(`Cron: Queued AI analysis for ${rows.length} workspaces`);
+      } catch (err) {
+        logger.error("Cron AI analysis failed", { error: err.message });
+      }
+    },
+    null, true, "UTC"
+  );
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob];
   logger.info("Scheduler started");
 }
 

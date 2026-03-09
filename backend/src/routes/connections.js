@@ -15,6 +15,7 @@ const { requireAuth, requireWorkspace, requireRole } = require("../middleware/au
 const {
   buildAuthUrl,
   exchangeCodeForTokens,
+  refreshAccessToken,
   saveConnection,
   revokeConnection,
   validateState,
@@ -26,6 +27,56 @@ const { writeAudit } = require("./audit");
 
 const router = express.Router();
 router.use(requireAuth);
+
+// GET /connections/sync/status
+// Returns sync state for all attached profiles in the workspace
+router.get("/sync/status", async (req, res, next) => {
+  try {
+    const workspaceId = req.headers["x-workspace-id"] || req.query.workspaceId;
+
+    const params = [req.orgId];
+    const wsFilter = workspaceId ? "AND p.workspace_id = $2" : "";
+    if (workspaceId) params.push(workspaceId);
+
+    const { rows: profiles } = await query(
+      `SELECT p.id, p.account_name, p.marketplace, p.sync_status, p.last_synced_at,
+              p.connection_id,
+              c.last_error, c.error_count,
+              (SELECT count(*)::int FROM campaigns WHERE profile_id = p.id) AS campaign_count,
+              (SELECT count(*)::int FROM keywords WHERE profile_id = p.id) AS keyword_count
+       FROM amazon_profiles p
+       JOIN amazon_connections c ON c.id = p.connection_id
+       WHERE p.is_attached = TRUE AND c.org_id = $1 AND c.status != 'revoked'
+       ${wsFilter}
+       ORDER BY p.created_at`,
+      params
+    );
+
+    const activeSyncCount = profiles.filter(
+      p => p.sync_status === "syncing" || p.sync_status === "pending"
+    ).length;
+
+    const lastError = profiles.find(p => p.last_error)?.last_error || null;
+
+    res.json({
+      profiles: profiles.map(p => ({
+        id: p.id,
+        connectionId: p.connection_id,
+        accountName: p.account_name,
+        marketplace: p.marketplace,
+        syncStatus: p.sync_status,
+        lastSyncedAt: p.last_synced_at,
+        campaignCount: p.campaign_count,
+        keywordCount: p.keyword_count,
+        error: p.last_error,
+      })),
+      activeSyncCount,
+      lastError,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /connections/amazon/init
 // Returns the Amazon OAuth URL for the user to redirect to
@@ -169,6 +220,110 @@ router.get("/:id/profiles", async (req, res, next) => {
       [req.params.id, req.orgId]
     );
     res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /connections/:id/reconnect
+// Refresh the access token using the stored refresh token
+router.post("/:id/reconnect", async (req, res, next) => {
+  try {
+    const { rows: [conn] } = await query(
+      "SELECT id FROM amazon_connections WHERE id = $1 AND org_id = $2 AND status != 'revoked'",
+      [req.params.id, req.orgId]
+    );
+    if (!conn) return res.status(404).json({ error: "Connection not found" });
+
+    await refreshAccessToken(req.params.id);
+
+    const { rows: [updated] } = await query(
+      "SELECT id, status, last_refresh_at FROM amazon_connections WHERE id = $1",
+      [req.params.id]
+    );
+
+    await writeAudit({
+      orgId: req.orgId,
+      actorId: req.user.id,
+      actorName: req.user.name,
+      action: "connection.reconnected",
+      entityType: "connection",
+      entityId: req.params.id,
+      source: "ui",
+    });
+
+    logger.info("Connection reconnected", { connectionId: req.params.id });
+    res.json({ success: true, connection: { id: updated.id, status: updated.status, lastRefreshAt: updated.last_refresh_at } });
+  } catch (err) {
+    // Mark connection as error state
+    await query(
+      `UPDATE amazon_connections
+       SET status = 'error', last_error = $1, error_count = error_count + 1, updated_at = NOW()
+       WHERE id = $2`,
+      [err.message, req.params.id]
+    ).catch(() => {});
+    logger.error("Connection reconnect failed", { connectionId: req.params.id, error: err.message });
+    next(err);
+  }
+});
+
+// POST /connections/:id/sync
+// Re-queue sync for all attached profiles of a connection
+router.post("/:id/sync", async (req, res, next) => {
+  try {
+    const { rows: [conn] } = await query(
+      "SELECT id FROM amazon_connections WHERE id = $1 AND org_id = $2 AND status != 'revoked'",
+      [req.params.id, req.orgId]
+    );
+    if (!conn) return res.status(404).json({ error: "Connection not found" });
+
+    // Clean up duplicate profile rows: keep only the newest row per (profile_id, connection_id) pair.
+    // This handles stale rows created by re-connecting the same Amazon account.
+    const { rowCount: cleaned } = await query(`
+      DELETE FROM amazon_profiles
+      WHERE id NOT IN (
+        SELECT DISTINCT ON (profile_id, connection_id) id
+        FROM amazon_profiles
+        ORDER BY profile_id, connection_id, created_at DESC
+      )
+    `);
+    if (cleaned > 0) {
+      logger.info("Cleaned up duplicate profile rows", { connectionId: req.params.id, removed: cleaned });
+    }
+
+    // Fetch profiles strictly scoped to this connection (never bleed into another connection's profiles)
+    const { rows: profiles } = await query(
+      "SELECT id, profile_id FROM amazon_profiles WHERE connection_id = $1 AND is_attached = TRUE",
+      [req.params.id]
+    );
+
+    logger.info("Sync requested", {
+      connectionId: req.params.id,
+      profileCount: profiles.length,
+      profileDbIds: profiles.map(p => p.id),
+      amazonProfileIds: profiles.map(p => p.profile_id),
+    });
+
+    for (const p of profiles) {
+      await queueEntitySync(p.id, ["campaigns", "ad_groups", "keywords", "product_ads", "targets", "negative_keywords", "negative_targets", "portfolios"], 1);
+      await query(
+        "UPDATE amazon_profiles SET sync_status = 'pending', updated_at = NOW() WHERE id = $1",
+        [p.id]
+      );
+    }
+
+    await writeAudit({
+      orgId: req.orgId,
+      actorId: req.user.id,
+      actorName: req.user.name,
+      action: "connection.sync_requested",
+      entityType: "connection",
+      entityId: req.params.id,
+      source: "ui",
+    });
+
+    logger.info("Sync re-queued", { connectionId: req.params.id, profileCount: profiles.length });
+    res.json({ queued: profiles.length, profileIds: profiles.map(p => p.id) });
   } catch (err) {
     next(err);
   }

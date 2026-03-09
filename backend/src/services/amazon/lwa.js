@@ -156,10 +156,13 @@ async function getValidAccessToken(connectionId) {
   // Refresh if expired or expiring soon
   if (expiresAt.getTime() - Date.now() < fiveMinutes) {
     const refreshed = await refreshAccessToken(connectionId);
+    logger.info("getValidAccessToken: refreshed token", { connectionId, tokenLength: refreshed.accessToken?.length, tokenPreview: refreshed.accessToken?.slice(0, 20) });
     return refreshed.accessToken;
   }
 
-  return decrypt(conn.access_token_enc);
+  const token = decrypt(conn.access_token_enc);
+  logger.info("getValidAccessToken: decrypted token", { connectionId, tokenLength: token?.length, tokenPreview: token?.slice(0, 20) });
+  return token;
 }
 
 /**

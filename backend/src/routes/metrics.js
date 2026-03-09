@@ -2,6 +2,8 @@ const express = require("express");
 const router = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
+const { queueMetricsBackfill } = require("../jobs/workers");
+const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
 
@@ -124,6 +126,31 @@ router.get("/top-campaigns", async (req, res, next) => {
     );
 
     res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /metrics/backfill
+// Queue a metrics backfill job for the current workspace (last 60 days by default)
+router.post("/backfill", async (req, res, next) => {
+  try {
+    logger.info("POST /metrics/backfill reached", { workspaceId: req.workspaceId, body: req.body });
+    const { dateFrom, dateTo } = req.body;
+
+    const dateTo_  = dateTo || (() => {
+      const d = new Date(); d.setDate(d.getDate() - 1);
+      return d.toISOString().split("T")[0];
+    })();
+    const dateFrom_ = dateFrom || (() => {
+      const d = new Date(); d.setDate(d.getDate() - 60);
+      return d.toISOString().split("T")[0];
+    })();
+
+    const job = await queueMetricsBackfill(req.workspaceId, dateFrom_, dateTo_);
+
+    logger.info("Metrics backfill queued", { workspaceId: req.workspaceId, dateFrom: dateFrom_, dateTo: dateTo_, jobId: job.id });
+    res.json({ queued: true, jobId: job.id, dateFrom: dateFrom_, dateTo: dateTo_ });
   } catch (err) {
     next(err);
   }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
+import SyncStatusToast from "./components/SyncStatusToast.jsx";
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const Styles = () => (
@@ -19,6 +20,7 @@ const Styles = () => (
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
     @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+    @keyframes syncProgress{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
     .fade{animation:fadeIn .3s ease both}
     .card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;transition:border-color .2s}
     .card:hover{border-color:var(--b2)}
@@ -83,7 +85,17 @@ async function apiFetch(path, opts = {}) {
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
-const get = (p, q) => apiFetch(p + (q ? "?" + new URLSearchParams(q) : ""));
+const get = (p, q) => {
+  if (q) {
+    // Strip undefined/null/empty values so they don't appear as "?key=undefined" in the URL
+    const clean = Object.fromEntries(
+      Object.entries(q).filter(([, v]) => v !== undefined && v !== null && v !== "")
+    );
+    const qs = new URLSearchParams(clean).toString();
+    return apiFetch(p + (qs ? "?" + qs : ""));
+  }
+  return apiFetch(p);
+};
 const post = (p, b) => apiFetch(p, { method: "POST", body: JSON.stringify(b) });
 const patch = (p, b) => apiFetch(p, { method: "PATCH", body: JSON.stringify(b) });
 const del = (p) => apiFetch(p, { method: "DELETE" });
@@ -212,7 +224,7 @@ const Sidebar = ({ active, setActive, user, workspace }) => {
 };
 
 // ─── Connect / OAuth Page ─────────────────────────────────────────────────────
-const ConnectPage = ({ workspaceId, onConnected }) => {
+const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
   const { t } = useI18n();
   const [step, setStep] = useState("list"); // list, connecting, profiles, done
   const [connections, setConnections] = useState([]);
@@ -223,6 +235,7 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
   const [error, setError] = useState(null);
   const [msg, setMsg] = useState(null);
   const [region, setRegion] = useState("EU"); // NA, EU, FE
+  const [rowState, setRowState] = useState({}); // { [id]: { loading: 'reconnect'|'sync'|null, error: null|string, success: null|'reconnect'|'sync' } }
 
   const REGIONS = [
     { value: "NA", label: "🇺🇸 North America", desc: "US, Canada, Mexico" },
@@ -305,11 +318,79 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
     setConnections(c => c.filter(x => x.id !== id));
   }
 
+  function setRow(id, patch) {
+    setRowState(s => ({ ...s, [id]: { ...s[id], ...patch } }));
+  }
+
+  async function reconnectConnection(id) {
+    setRow(id, { loading: "reconnect", error: null, success: null });
+    try {
+      await post(`/connections/${id}/reconnect`, {});
+      setRow(id, { loading: null, error: null, success: "reconnect" });
+      get("/connections").then(setConnections).catch(() => {});
+      onSyncStarted?.();
+      setTimeout(() => setRow(id, { success: null }), 2500);
+    } catch (e) {
+      setRow(id, { loading: null, error: e.message, success: null });
+    }
+  }
+
+  async function forceSyncConnection(id) {
+    setRow(id, { loading: "sync", error: null, success: null });
+    try {
+      await post(`/connections/${id}/sync`, {});
+      setRow(id, { loading: null, error: null, success: "sync" });
+      onSyncStarted?.();
+      setTimeout(() => setRow(id, { success: null }), 2500);
+    } catch (e) {
+      setRow(id, { loading: null, error: e.message, success: null });
+    }
+  }
+
+  const [backfillState, setBackfillState] = useState({ loading: false, success: false, error: null });
+
+  async function triggerMetricsBackfill() {
+    setBackfillState({ loading: true, success: false, error: null });
+    try {
+      await post("/metrics/backfill", {});
+      setBackfillState({ loading: false, success: true, error: null });
+      setTimeout(() => setBackfillState({ loading: false, success: false, error: null }), 4000);
+    } catch (e) {
+      setBackfillState({ loading: false, success: false, error: e.message });
+    }
+  }
+
   return (
     <div className="fade">
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("connect.title")}</h1>
-        <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("connect.subtitle")}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("connect.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("connect.subtitle")}</div>
+        </div>
+        {connections.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+            <button
+              className="btn btn-primary"
+              disabled={backfillState.loading}
+              onClick={triggerMetricsBackfill}
+              title={t("metrics.backfillDesc")}
+              style={{ fontSize: 13, whiteSpace: "nowrap" }}
+            >
+              {backfillState.loading
+                ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ width: 12, height: 12, border: "2px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
+                    {t("metrics.backfill")}
+                  </span>
+                : t("metrics.backfill")}
+            </button>
+            {backfillState.success && (
+              <div style={{ fontSize: 12, color: "var(--teal)" }}>✓ {t("metrics.backfillStarted")}</div>
+            )}
+            {backfillState.error && (
+              <div style={{ fontSize: 12, color: "var(--red)" }}>{t("metrics.backfillError")}{backfillState.error}</div>
+            )}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -326,17 +407,76 @@ const ConnectPage = ({ workspaceId, onConnected }) => {
               <table>
                 <thead><tr><th>{t("connect.colAccount")}</th><th>{t("connect.colProfiles")}</th><th>{t("connect.colStatus")}</th><th>{t("connect.colUpdated")}</th><th></th></tr></thead>
                 <tbody>
-                  {connections.map(c => (
-                    <tr key={c.id}>
-                      <td><span className="mono" style={{ fontSize: 11, color: "var(--tx2)" }}>{c.id.slice(0, 8)}…</span> {c.amazon_email || ""}</td>
-                      <td className="num">{c.profile_count}</td>
-                      <td><span className={`badge ${c.status === "active" ? "bg-grn" : "bg-red"}`}>● {c.status}</span></td>
-                      <td style={{ color: "var(--tx3)", fontSize: 12 }}>{c.last_refresh_at ? new Date(c.last_refresh_at).toLocaleString("ru") : "—"}</td>
-                      <td>
-                        <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => revokeConnection(c.id)}>{t("connect.disconnect")}</button>
-                      </td>
-                    </tr>
-                  ))}
+                  {connections.map(c => {
+                    const rs = rowState[c.id] || {};
+                    const isReconnecting = rs.loading === "reconnect";
+                    const isSyncing = rs.loading === "sync";
+                    const rowBg = rs.success === "reconnect"
+                      ? "rgba(59,130,246,.07)"
+                      : rs.success === "sync"
+                      ? "rgba(20,184,166,.07)"
+                      : undefined;
+                    return (
+                      <tr key={c.id} style={{ background: rowBg, transition: "background .4s" }}>
+                        <td><span className="mono" style={{ fontSize: 11, color: "var(--tx2)" }}>{c.id.slice(0, 8)}…</span> {c.amazon_email || ""}</td>
+                        <td className="num">{c.profile_count}</td>
+                        <td><span className={`badge ${c.status === "active" ? "bg-grn" : "bg-red"}`}>● {c.status}</span></td>
+                        <td style={{ color: "var(--tx3)", fontSize: 12 }}>{c.last_refresh_at ? new Date(c.last_refresh_at).toLocaleString("ru") : "—"}</td>
+                        <td>
+                          <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                            {/* Reconnect button */}
+                            <button
+                              title={t("connections.reconnect")}
+                              disabled={!!rs.loading}
+                              onClick={() => reconnectConnection(c.id)}
+                              style={{
+                                width: 28, height: 28, padding: 0, borderRadius: 6,
+                                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                background: "rgba(59,130,246,.1)", color: "var(--ac2)",
+                                border: "1px solid rgba(59,130,246,.2)",
+                                cursor: rs.loading ? "not-allowed" : "pointer",
+                                opacity: rs.loading ? .5 : 1, fontSize: 14, transition: "all .15s",
+                              }}
+                            >
+                              {isReconnecting
+                                ? <span style={{ width: 10, height: 10, border: "2px solid rgba(96,165,250,.3)", borderTopColor: "var(--ac2)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
+                                : "↻"}
+                            </button>
+                            {/* Force sync button */}
+                            <button
+                              title={t("connections.forceSync")}
+                              disabled={!!rs.loading}
+                              onClick={() => forceSyncConnection(c.id)}
+                              style={{
+                                width: 28, height: 28, padding: 0, borderRadius: 6,
+                                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                background: "rgba(20,184,166,.1)", color: "var(--teal)",
+                                border: "1px solid rgba(20,184,166,.2)",
+                                cursor: rs.loading ? "not-allowed" : "pointer",
+                                opacity: rs.loading ? .5 : 1, fontSize: 13, transition: "all .15s",
+                              }}
+                            >
+                              {isSyncing
+                                ? <span style={{ width: 10, height: 10, border: "2px solid rgba(20,184,166,.3)", borderTopColor: "var(--teal)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
+                                : "⬇"}
+                            </button>
+                            {/* Disconnect button */}
+                            <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => revokeConnection(c.id)}>{t("connect.disconnect")}</button>
+                          </div>
+                          {rs.error && (
+                            <div style={{ fontSize: 11, color: "var(--red)", marginTop: 5, maxWidth: 240 }}>
+                              {t("connections.reconnectError")}{rs.error}
+                            </div>
+                          )}
+                          {rs.success && (
+                            <div style={{ fontSize: 11, color: rs.success === "reconnect" ? "var(--ac2)" : "var(--teal)", marginTop: 5 }}>
+                              {rs.success === "reconnect" ? t("connections.reconnectSuccess") : t("connections.syncStarted")}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -602,9 +742,13 @@ const CampaignsPage = ({ workspaceId }) => {
   const [budgetPct, setBudgetPct] = useState("");
 
   const { data, loading, reload } = useAsync(
-    () => workspaceId
-      ? get("/campaigns", { status: filter !== "all" ? filter : undefined, search: search || undefined, limit: 100 })
-      : Promise.resolve({ data: [], pagination: {} }),
+    () => {
+      if (!workspaceId) return Promise.resolve({ data: [], pagination: {} });
+      const params = { limit: 100 };
+      if (filter && filter !== "all") params.status = filter;
+      if (search && search.trim()) params.search = search.trim();
+      return get("/campaigns", params);
+    },
     [workspaceId, filter, search]
   );
 
@@ -1679,6 +1823,319 @@ const LoginPage = ({ onLogin }) => {
 };
 
 // ─── Placeholder pages ────────────────────────────────────────────────────────
+// ─── AI Page ──────────────────────────────────────────────────────────────────
+const RISK_COLORS = { low: "var(--grn)", medium: "var(--amb)", high: "var(--red)" };
+const RISK_BG = { low: "rgba(34,197,94,.1)", medium: "rgba(245,158,11,.1)", high: "rgba(239,68,68,.1)" };
+const TYPE_LABELS = {
+  bid_increase: "↑ Bid", bid_decrease: "↓ Bid",
+  budget_increase: "↑ Budget", budget_decrease: "↓ Budget",
+  pause_campaign: "⏸ Pause", enable_campaign: "▶ Enable",
+  add_negative_keyword: "⊖ Neg. KW", change_bidding_strategy: "⟳ Strategy",
+};
+
+function AIPage({ workspaceId }) {
+  const { t } = useI18n();
+  const [filter, setFilter] = useState("pending");
+  const [running, setRunning] = useState(false);
+  const [runMsg, setRunMsg] = useState(null);
+  const [applying, setApplying] = useState(null);
+  const [confirmRec, setConfirmRec] = useState(null);
+  const [previewRec, setPreviewRec] = useState(null);
+  const [previewData, setPreviewData] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  const { data: recs, loading, reload } = useAsync(
+    () => get("/ai/recommendations", { status: filter === "all" ? undefined : filter }),
+    [filter]
+  );
+
+  const showToast = (msg, ok = true) => {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  async function handleRunAnalysis() {
+    setRunning(true); setRunMsg(null);
+    try {
+      const locale = localStorage.getItem("af_locale") || "en";
+      await apiFetch("/ai/run", {
+        method: "POST",
+        body: JSON.stringify({ locale }),
+        headers: { "x-locale": locale },
+      });
+      setRunMsg(t("ai.analysisQueued"));
+      setTimeout(() => { reload(); setRunMsg(null); }, 8000);
+    } catch (e) {
+      setRunMsg(t("common.error") + e.message);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function handleApply(rec) {
+    setApplying(rec.id);
+    try {
+      await post(`/ai/recommendations/${rec.id}/apply`, {});
+      showToast(t("ai.applySuccess"));
+      reload();
+    } catch (e) {
+      showToast(t("ai.applyError") + ": " + e.message, false);
+    } finally {
+      setApplying(null);
+      setConfirmRec(null);
+    }
+  }
+
+  async function handleDismiss(rec) {
+    try {
+      await post(`/ai/recommendations/${rec.id}/dismiss`, {});
+      reload();
+    } catch (e) {
+      showToast(t("common.error") + e.message, false);
+    }
+  }
+
+  async function handlePreview(rec) {
+    setPreviewRec(rec);
+    setPreviewLoading(true);
+    setPreviewData(null);
+    try {
+      const data = await post(`/ai/recommendations/${rec.id}/preview`, {});
+      setPreviewData(data.changes || []);
+    } catch (e) {
+      setPreviewData([]);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  const pendingCount  = (recs || []).filter(r => r.status === "pending").length;
+  const appliedCount  = (recs || []).filter(r => r.status === "applied").length;
+  const dismissedCount = (recs || []).filter(r => r.status === "dismissed").length;
+
+  const FILTERS = [
+    { key: "all",       label: t("ai.filterAll") },
+    { key: "pending",   label: t("ai.filterPending") },
+    { key: "applied",   label: t("ai.filterApplied") },
+    { key: "dismissed", label: t("ai.filterDismissed") },
+  ];
+
+  return (
+    <div className="fade">
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: "fixed", top: 24, right: 24, zIndex: 9999,
+          background: toast.ok ? "var(--grn)" : "var(--red)",
+          color: "#fff", padding: "10px 18px", borderRadius: 8,
+          fontSize: 13, fontWeight: 500, animation: "slideDown .2s ease",
+        }}>{toast.msg}</div>
+      )}
+
+      {/* Confirm Apply Modal */}
+      {confirmRec && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div className="card" style={{ padding: 28, maxWidth: 440, width: "90%" }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>{t("ai.confirmApply")}</div>
+            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 6 }}><strong>{confirmRec.title}</strong></div>
+            <div style={{ fontSize: 12, color: "var(--tx3)", marginBottom: 20 }}>{confirmRec.rationale}</div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setConfirmRec(null)}>{t("common.cancel")}</button>
+              <button className="btn btn-primary" disabled={applying === confirmRec.id} onClick={() => handleApply(confirmRec)}>
+                {applying === confirmRec.id ? <span className="loader" /> : t("ai.confirmApplyBtn")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Preview Modal */}
+      {previewRec && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div className="card" style={{ padding: 28, maxWidth: 600, width: "90%", maxHeight: "80vh", overflow: "auto" }}>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 14 }}>{t("ai.previewTitle")}: {previewRec.title}</div>
+            {previewLoading ? (
+              <div style={{ textAlign: "center", padding: 30 }}><span className="loader" /></div>
+            ) : previewData?.length ? (
+              <table style={{ marginBottom: 16 }}>
+                <thead><tr>
+                  <th>{t("ai.entity")}</th>
+                  <th>{t("ai.field")}</th>
+                  <th>{t("ai.current")}</th>
+                  <th>{t("ai.new")}</th>
+                </tr></thead>
+                <tbody>
+                  {previewData.map((ch, i) => (
+                    <tr key={i}>
+                      <td><span className="mono" style={{ fontSize: 11 }}>{ch.entity_name}</span></td>
+                      <td><span className="mono" style={{ fontSize: 11 }}>{ch.field}</span></td>
+                      <td style={{ color: "var(--red)" }}>{String(ch.current_value ?? "—")}</td>
+                      <td style={{ color: "var(--grn)" }}>{String(ch.new_value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ color: "var(--tx3)", fontSize: 13, marginBottom: 16 }}>No entity details available.</div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => { setPreviewRec(null); setPreviewData(null); }}>{t("common.cancel")}</button>
+              {previewRec.status === "pending" && (
+                <button className="btn btn-primary" onClick={() => { setPreviewRec(null); setConfirmRec(previewRec); }}>
+                  {t("ai.apply")}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700 }}>{t("ai.title")}</h1>
+          <div style={{ fontSize: 12, color: "var(--tx3)", marginTop: 4 }}>Claude · Amazon Ads Optimizer</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {runMsg && <span style={{ fontSize: 12, color: "var(--teal)" }}>{runMsg}</span>}
+          <button className="btn btn-primary" disabled={running} onClick={handleRunAnalysis} style={{ gap: 8 }}>
+            {running ? <><span className="loader" /> {t("ai.running")}</> : <>✦ {t("ai.runAnalysis")}</>}
+          </button>
+        </div>
+      </div>
+
+      {/* Stats bar */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: t("ai.filterPending"), count: pendingCount, color: "var(--ac2)" },
+          { label: t("ai.filterApplied"), count: appliedCount, color: "var(--grn)" },
+          { label: t("ai.filterDismissed"), count: dismissedCount, color: "var(--tx3)" },
+        ].map(s => (
+          <div key={s.label} className="card" style={{ padding: "10px 18px", display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 600, color: s.color }}>{s.count}</span>
+            <span style={{ fontSize: 12, color: "var(--tx2)" }}>{s.label}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Filter tabs */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 18, borderBottom: "1px solid var(--b1)", paddingBottom: 12 }}>
+        {FILTERS.map(f => (
+          <button key={f.key} onClick={() => setFilter(f.key)} style={{
+            padding: "5px 14px", borderRadius: 100, fontSize: 12, fontWeight: 500,
+            border: "1px solid " + (filter === f.key ? "var(--ac)" : "var(--b2)"),
+            background: filter === f.key ? "rgba(59,130,246,.15)" : "transparent",
+            color: filter === f.key ? "var(--ac2)" : "var(--tx2)",
+            cursor: "pointer",
+          }}>{f.label}</button>
+        ))}
+      </div>
+
+      {/* Recommendations list */}
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 60, color: "var(--tx3)" }}>
+          <span className="loader" style={{ width: 24, height: 24, borderWidth: 3 }} />
+        </div>
+      ) : !recs?.length ? (
+        <div className="card" style={{ padding: "60px 32px", textAlign: "center" }}>
+          <div style={{ fontSize: 36, marginBottom: 12 }}>✦</div>
+          <div style={{ color: "var(--tx2)", fontSize: 14 }}>{t("ai.noRecs")}</div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {recs.map(rec => {
+            const actions = typeof rec.actions === "string" ? JSON.parse(rec.actions) : (rec.actions || []);
+            const riskColor = RISK_COLORS[rec.risk_level] || "var(--tx2)";
+            const riskBg = RISK_BG[rec.risk_level] || "transparent";
+            const riskLabel = rec.risk_level === "low" ? t("ai.riskLow") : rec.risk_level === "high" ? t("ai.riskHigh") : t("ai.riskMedium");
+            const isPending = rec.status === "pending";
+
+            return (
+              <div key={rec.id} className="card fade" style={{
+                padding: "18px 22px",
+                opacity: rec.status !== "pending" ? 0.65 : 1,
+                borderColor: isPending ? "var(--b1)" : "var(--b2)",
+              }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
+                  {/* Left: type badge + content */}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                      <span style={{
+                        padding: "2px 10px", borderRadius: 100, fontSize: 11, fontWeight: 600,
+                        background: "rgba(59,130,246,.12)", color: "var(--ac2)", fontFamily: "var(--mono)",
+                      }}>{TYPE_LABELS[rec.type] || rec.type}</span>
+                      <span style={{ padding: "2px 10px", borderRadius: 100, fontSize: 11, fontWeight: 500, background: riskBg, color: riskColor }}>
+                        {riskLabel}
+                      </span>
+                      {rec.status !== "pending" && (
+                        <span style={{ padding: "2px 10px", borderRadius: 100, fontSize: 11, fontWeight: 500, background: "var(--s3)", color: "var(--tx3)" }}>
+                          {rec.status === "applied" ? t("ai.applied") : t("ai.dismissed")}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{rec.title}</div>
+                    <div style={{ fontSize: 12, color: "var(--tx2)", lineHeight: 1.6, marginBottom: rec.expected_effect ? 8 : 0 }}>{rec.rationale}</div>
+
+                    {rec.expected_effect && (
+                      <div style={{
+                        fontSize: 12, marginTop: 6, padding: "6px 12px", borderRadius: 6,
+                        background: "rgba(20,184,166,.08)", color: "var(--teal)", borderLeft: "2px solid var(--teal)",
+                      }}>
+                        <strong>{t("ai.expectedEffect")}:</strong> {rec.expected_effect}
+                      </div>
+                    )}
+
+                    {actions.length > 0 && (
+                      <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {actions.map((a, i) => (
+                          <span key={i} style={{
+                            fontSize: 11, padding: "2px 8px", borderRadius: 4,
+                            background: "var(--s3)", color: "var(--tx3)", fontFamily: "var(--mono)",
+                          }}>
+                            {a.action_type} · {a.entity_type}
+                            {a.params && Object.entries(a.params).map(([k, v]) => ` · ${k}: ${v}`).join("")}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: action buttons */}
+                  {isPending && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                      <button className="btn btn-green" style={{ fontSize: 12, padding: "5px 12px" }}
+                        disabled={applying === rec.id}
+                        onClick={() => setConfirmRec(rec)}>
+                        {applying === rec.id ? <span className="loader" /> : <>✓ {t("ai.apply")}</>}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }}
+                        onClick={() => handlePreview(rec)}>
+                        👁 {t("ai.preview")}
+                      </button>
+                      <button className="btn btn-red" style={{ fontSize: 12, padding: "5px 12px" }}
+                        onClick={() => handleDismiss(rec)}>
+                        ✗ {t("ai.dismiss")}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const PlaceholderPage = ({ title, desc }) => {
   const { t } = useI18n();
   return (
@@ -1700,6 +2157,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   const [active, setActive] = useState("overview");
+  const [syncTrigger, setSyncTrigger] = useState(0);
 
   // Handle OAuth callback on page load
   useEffect(() => {
@@ -1743,9 +2201,9 @@ export default function App() {
     reports: <ReportsPage workspaceId={wid} />,
     rules: <RulesPage workspaceId={wid} />,
     alerts: <AlertsPage workspaceId={wid} />,
-    ai: <PlaceholderPage title={t("placeholder.aiTitle")} desc={t("placeholder.aiDesc")} />,
+    ai: <AIPage workspaceId={wid} />,
     audit: <AuditPage workspaceId={wid} />,
-    connect: <ConnectPage workspaceId={wid} onConnected={() => setActive("overview")} />,
+    connect: <ConnectPage workspaceId={wid} onConnected={() => { setActive("overview"); setSyncTrigger(t => t + 1); }} onSyncStarted={() => setSyncTrigger(t => t + 1)} />,
     settings: <PlaceholderPage title={t("placeholder.settingsTitle")} desc={t("placeholder.settingsDesc")} />,
   };
 
@@ -1758,6 +2216,7 @@ export default function App() {
           {pages[active]}
         </main>
       </div>
+      <SyncStatusToast triggerShow={syncTrigger} />
     </>
   );
 }

@@ -12,20 +12,28 @@ router.use(requireAuth, requireWorkspace);
 router.get("/", async (req, res, next) => {
   try {
     const {
-      status, type, search, sortBy = "spend", sortDir = "desc",
+      sortBy = "spend", sortDir = "desc",
       page = 1, limit = 50
     } = req.query;
+
+    // Guard: treat the literal string "undefined" or "all" as no filter
+    const status = req.query.status && req.query.status !== "undefined" && req.query.status !== "all"
+      ? req.query.status : null;
+    const type   = req.query.type   && req.query.type   !== "undefined" && req.query.type   !== "all"
+      ? req.query.type : null;
+    const search = req.query.search && req.query.search !== "undefined"
+      ? req.query.search.trim() : null;
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const conditions = ["c.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
 
-    if (status && status !== "all") {
+    if (status) {
       conditions.push(`c.state = $${pi++}`);
       params.push(status);
     }
-    if (type && type !== "all") {
+    if (type) {
       conditions.push(`c.campaign_type = $${pi++}`);
       params.push(type === "SP" ? "sponsoredProducts" : type === "SB" ? "sponsoredBrands" : "sponsoredDisplay");
     }

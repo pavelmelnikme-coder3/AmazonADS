@@ -1,8 +1,9 @@
 import { createContext, useContext, useState } from "react";
 import en from "./en.js";
 import ru from "./ru.js";
+import de from "./de.js";
 
-const locales = { en, ru };
+const locales = { en, ru, de };
 
 const I18nContext = createContext(null);
 

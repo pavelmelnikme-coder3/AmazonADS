@@ -1,22 +1,34 @@
 /**
  * BullMQ Job Queue Configuration
- * Workers: entity sync, report pipeline, bulk operations
+ * Workers: entity sync, report pipeline, bulk operations, rule engine, metrics backfill
  */
 
 const { Queue, Worker, QueueEvents } = require("bullmq");
 const { createRedisConnection } = require("../config/redis");
 const logger = require("../config/logger");
-const { fetchCampaigns, syncCampaigns, fetchAdGroups, syncAdGroups, fetchKeywords, syncKeywords } = require("../services/amazon/entities");
-const { runReportingPipeline } = require("../services/amazon/reporting");
+const {
+  fetchCampaigns, syncCampaigns,
+  fetchAdGroups, syncAdGroups,
+  fetchKeywords, syncKeywords,
+  fetchPortfolios, syncPortfolios,
+  fetchProductAds, syncProductAds,
+  fetchTargets, syncTargets,
+  fetchNegativeKeywords, syncNegativeKeywords,
+  fetchNegativeTargets, syncNegativeTargets,
+} = require("../services/amazon/entities");
+const { runReportingPipeline, queueMetricsBackfillJobs } = require("../services/amazon/reporting");
+const { generateRecommendations } = require("../services/ai/orchestrator");
 const { query } = require("../db/pool");
 
 // ─── Queue definitions ────────────────────────────────────────────────────────
 const QUEUES = {
-  ENTITY_SYNC:   "entity-sync",
-  REPORT:        "report-pipeline",
-  BULK_OPS:      "bulk-operations",
-  RULE_ENGINE:   "rule-engine",
-  ALERT_CHECK:   "alert-check",
+  ENTITY_SYNC:      "entity-sync",
+  REPORT:           "report-pipeline",
+  BULK_OPS:         "bulk-operations",
+  RULE_ENGINE:      "rule-engine",
+  ALERT_CHECK:      "alert-check",
+  METRICS_BACKFILL: "metrics-backfill",
+  AI_ANALYSIS:      "ai-analysis",
 };
 
 const defaultJobOptions = {
@@ -39,7 +51,7 @@ function getQueue(name) {
 }
 
 // ─── Add jobs ─────────────────────────────────────────────────────────────────
-async function queueEntitySync(profileId, entityTypes = ["campaigns", "ad_groups", "keywords"], priority = 5) {
+async function queueEntitySync(profileId, entityTypes = ["campaigns", "ad_groups", "keywords", "portfolios", "product_ads", "targets", "negative_keywords", "negative_targets"], priority = 5) {
   const queue = getQueue(QUEUES.ENTITY_SYNC);
   return queue.add("sync", { profileId, entityTypes }, { priority });
 }
@@ -49,6 +61,16 @@ async function queueReportPipeline(profileId, campaignType, reportLevel, startDa
   return queue.add("run", { profileId, campaignType, reportLevel, startDate, endDate });
 }
 
+async function queueMetricsBackfill(workspaceId, dateFrom, dateTo) {
+  const queue = getQueue(QUEUES.METRICS_BACKFILL);
+  return queue.add("backfill", { workspaceId, dateFrom, dateTo }, { priority: 3 });
+}
+
+async function queueAiAnalysis(workspaceId, locale = "en") {
+  const queue = getQueue(QUEUES.AI_ANALYSIS);
+  return queue.add("analyze", { workspaceId, locale }, { priority: 5 });
+}
+
 async function queueRuleEngine(workspaceId) {
   const queue = getQueue(QUEUES.RULE_ENGINE);
   return queue.add("evaluate", { workspaceId });
@@ -56,7 +78,6 @@ async function queueRuleEngine(workspaceId) {
 
 async function queueBulkOperation(workspaceId, operationType, items) {
   const queue = getQueue(QUEUES.BULK_OPS);
-  // Split into batches of 100
   const batchSize = 100;
   for (let i = 0; i < items.length; i += batchSize) {
     await queue.add("batch", {
@@ -72,27 +93,33 @@ async function queueBulkOperation(workspaceId, operationType, items) {
 let workers = [];
 
 async function startWorkers() {
-  // Entity Sync Worker
+  // ─── Entity Sync Worker ────────────────────────────────────────────────────
   const syncWorker = new Worker(
     QUEUES.ENTITY_SYNC,
     async (job) => {
       const { profileId, entityTypes } = job.data;
       logger.info("Entity sync started", { profileId, entityTypes });
 
-      // Get profile with connection info
       const { rows } = await query(
-        `SELECT p.*, c.id as connection_id, c.status as conn_status
+        `SELECT p.*, c.status as conn_status
          FROM amazon_profiles p
          JOIN amazon_connections c ON c.id = p.connection_id
          WHERE p.id = $1 AND p.is_attached = TRUE`,
         [profileId]
       );
 
-      if (!rows.length) {
-        throw new Error(`Profile ${profileId} not found or not attached`);
-      }
-
+      if (!rows.length) throw new Error(`Profile ${profileId} not found or not attached`);
       const profile = rows[0];
+
+      logger.info("Entity sync: using connection for profile", {
+        profileDbId: profile.id,
+        amazonProfileId: profile.profile_id,
+        connectionId: profile.connection_id,
+        connStatus: profile.conn_status,
+        marketplace: profile.marketplace,
+        marketplaceId: profile.marketplace_id,
+      });
+
       if (profile.conn_status !== "active") {
         throw new Error(`Connection ${profile.connection_id} is not active (status: ${profile.conn_status})`);
       }
@@ -103,17 +130,30 @@ async function startWorkers() {
       );
 
       const results = {};
+      let progress = 5;
 
-      if (entityTypes.includes("campaigns")) {
-        await job.updateProgress(10);
-        const campaigns = await fetchCampaigns(profile);
-        const count = await syncCampaigns(profile, campaigns);
-        results.campaigns = count;
-        logger.info("Campaigns synced", { profileId, count });
+      // ── Portfolios (first — campaigns may reference them) ──────────────────
+      if (entityTypes.includes("portfolios")) {
+        await job.updateProgress(progress); progress += 5;
+        try {
+          const portfolios = await fetchPortfolios(profile);
+          results.portfolios = await syncPortfolios(profile, portfolios);
+        } catch (e) {
+          logger.warn("Failed to sync portfolios", { error: e.message });
+          results.portfolios = 0;
+        }
       }
 
+      // ── Campaigns ─────────────────────────────────────────────────────────
+      if (entityTypes.includes("campaigns")) {
+        await job.updateProgress(progress); progress += 15;
+        const campaigns = await fetchCampaigns(profile);
+        results.campaigns = await syncCampaigns(profile, campaigns);
+      }
+
+      // ── Ad Groups ─────────────────────────────────────────────────────────
       if (entityTypes.includes("ad_groups")) {
-        await job.updateProgress(40);
+        await job.updateProgress(progress); progress += 10;
         for (const type of ["SP", "SB", "SD"]) {
           try {
             const adGroups = await fetchAdGroups(profile, type);
@@ -125,11 +165,62 @@ async function startWorkers() {
         }
       }
 
+      // ── Keywords ──────────────────────────────────────────────────────────
       if (entityTypes.includes("keywords")) {
-        await job.updateProgress(70);
+        await job.updateProgress(progress); progress += 10;
         const keywords = await fetchKeywords(profile);
         await syncKeywords(profile, keywords);
         results.keywords = keywords.length;
+      }
+
+      // ── Product Ads ───────────────────────────────────────────────────────
+      if (entityTypes.includes("product_ads")) {
+        await job.updateProgress(progress); progress += 10;
+        try {
+          const productAds = await fetchProductAds(profile);
+          results.product_ads = await syncProductAds(profile, productAds);
+        } catch (e) {
+          logger.warn("Failed to sync product ads", { error: e.message });
+          results.product_ads = 0;
+        }
+      }
+
+      // ── Targets (SP + SD) ─────────────────────────────────────────────────
+      if (entityTypes.includes("targets")) {
+        await job.updateProgress(progress); progress += 10;
+        for (const type of ["SP", "SD"]) {
+          try {
+            const targets = await fetchTargets(profile, type);
+            results.targets = (results.targets || 0) + await syncTargets(profile, targets, type);
+          } catch (e) {
+            logger.warn(`Failed to sync ${type} targets`, { error: e.message });
+          }
+        }
+      }
+
+      // ── Negative Keywords ─────────────────────────────────────────────────
+      if (entityTypes.includes("negative_keywords")) {
+        await job.updateProgress(progress); progress += 10;
+        try {
+          const negKws = await fetchNegativeKeywords(profile);
+          results.negative_keywords = await syncNegativeKeywords(profile, negKws);
+        } catch (e) {
+          logger.warn("Failed to sync negative keywords", { error: e.message });
+          results.negative_keywords = 0;
+        }
+      }
+
+      // ── Negative Targets ──────────────────────────────────────────────────
+      if (entityTypes.includes("negative_targets")) {
+        await job.updateProgress(progress); progress += 5;
+        for (const type of ["SP", "SD"]) {
+          try {
+            const negTargets = await fetchNegativeTargets(profile, type);
+            results.negative_targets = (results.negative_targets || 0) + await syncNegativeTargets(profile, negTargets, type);
+          } catch (e) {
+            logger.warn(`Failed to sync ${type} negative targets`, { error: e.message });
+          }
+        }
       }
 
       await job.updateProgress(100);
@@ -141,10 +232,7 @@ async function startWorkers() {
       logger.info("Entity sync completed", { profileId, results });
       return results;
     },
-    {
-      connection: createRedisConnection(),
-      concurrency: 3,
-    }
+    { connection: createRedisConnection(), concurrency: 3 }
   );
 
   syncWorker.on("failed", async (job, err) => {
@@ -157,7 +245,7 @@ async function startWorkers() {
     }
   });
 
-  // Report Pipeline Worker
+  // ─── Report Pipeline Worker ────────────────────────────────────────────────
   const reportWorker = new Worker(
     QUEUES.REPORT,
     async (job) => {
@@ -165,7 +253,7 @@ async function startWorkers() {
       logger.info("Report pipeline started", { profileId, campaignType, reportLevel, startDate, endDate });
 
       const { rows } = await query(
-        `SELECT p.*, c.id as connection_id
+        `SELECT p.*, c.status as conn_status
          FROM amazon_profiles p
          JOIN amazon_connections c ON c.id = p.connection_id
          WHERE p.id = $1`,
@@ -182,14 +270,30 @@ async function startWorkers() {
         endDate,
       });
     },
-    {
-      connection: createRedisConnection(),
-      concurrency: 2, // Limit concurrent report downloads
-    }
+    { connection: createRedisConnection(), concurrency: 2 }
   );
 
   reportWorker.on("failed", (job, err) => {
     logger.error("Report pipeline failed", { jobId: job?.id, error: err.message });
+  });
+
+  // ─── Metrics Backfill Worker ───────────────────────────────────────────────
+  const backfillWorker = new Worker(
+    QUEUES.METRICS_BACKFILL,
+    async (job) => {
+      const { workspaceId, dateFrom, dateTo } = job.data;
+      logger.info("Metrics backfill started", { workspaceId, dateFrom, dateTo });
+
+      const result = await queueMetricsBackfillJobs(workspaceId, queueReportPipeline, dateFrom, dateTo);
+
+      logger.info("Metrics backfill queued report jobs", result);
+      return result;
+    },
+    { connection: createRedisConnection(), concurrency: 1 }
+  );
+
+  backfillWorker.on("failed", (job, err) => {
+    logger.error("Metrics backfill failed", { jobId: job?.id, error: err.message });
   });
 
   // ─── Rule Engine Worker ────────────────────────────────────────────────────
@@ -211,12 +315,11 @@ async function startWorkers() {
           const actions    = typeof rule.actions === "string"    ? JSON.parse(rule.actions)    : rule.actions;
           const safety     = typeof rule.safety === "string"     ? JSON.parse(rule.safety)     : rule.safety;
 
-          // Fetch campaigns with aggregated 7-day metrics
           const { rows: campaigns } = await query(
             `SELECT c.id, c.name, c.state, c.daily_budget,
                     COALESCE(m.cost, 0) as spend,
                     COALESCE(m.impressions, 0) as impressions,
-                    COALESCE(m.ctr, 0) as ctr,
+                    CASE WHEN SUM(m.impressions) > 0 THEN SUM(m.clicks)::numeric / SUM(m.impressions) END as ctr,
                     m.acos_14d as acos
              FROM campaigns c
              LEFT JOIN (
@@ -234,8 +337,7 @@ async function startWorkers() {
 
           const condsArr = Array.isArray(conditions) ? conditions : [conditions];
           const actsArr  = Array.isArray(actions)    ? actions    : [actions];
-
-          const matched = campaigns.filter(c => evaluateConditions(condsArr, c));
+          const matched  = campaigns.filter(c => evaluateConditions(condsArr, c));
           let actionsExecuted = 0;
 
           if (!rule.dry_run && matched.length > 0) {
@@ -269,7 +371,42 @@ async function startWorkers() {
     logger.error("Rule engine worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, ruleEngineWorker];
+  // ─── AI Analysis Worker ────────────────────────────────────────────────────
+  const aiWorker = new Worker(
+    QUEUES.AI_ANALYSIS,
+    async (job) => {
+      const { workspaceId, locale = "en" } = job.data;
+      logger.info("AI analysis worker started", { workspaceId, locale });
+
+      // Get all attached profiles for the workspace
+      const { rows: profiles } = await query(
+        `SELECT p.id FROM amazon_profiles p
+         JOIN amazon_connections c ON c.id = p.connection_id
+         WHERE p.workspace_id = $1 AND p.is_attached = TRUE AND c.status = 'active'`,
+        [workspaceId]
+      );
+
+      if (!profiles.length) {
+        logger.info("AI analysis: no active profiles", { workspaceId });
+        return { workspaceId, recommendations: 0 };
+      }
+
+      let total = 0;
+      // Run for the workspace (pass null profileDbId to aggregate all profiles)
+      const recs = await generateRecommendations(workspaceId, null, locale);
+      total += recs.length;
+
+      logger.info("AI analysis worker completed", { workspaceId, recommendations: total });
+      return { workspaceId, recommendations: total };
+    },
+    { connection: createRedisConnection(), concurrency: 1 }
+  );
+
+  aiWorker.on("failed", (job, err) => {
+    logger.error("AI analysis worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, aiWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 }
 
@@ -324,8 +461,10 @@ module.exports = {
   getQueue,
   queueEntitySync,
   queueReportPipeline,
+  queueMetricsBackfill,
   queueBulkOperation,
   queueRuleEngine,
+  queueAiAnalysis,
   startWorkers,
   stopWorkers,
   QUEUES,
