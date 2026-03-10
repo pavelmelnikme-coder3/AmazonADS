@@ -122,56 +122,96 @@ function baseOpts(profile) {
 
 // ─── CAMPAIGNS ────────────────────────────────────────────────────────────────
 
-const CAMPAIGN_ENDPOINTS = {
-  SP: "/sp/campaigns",
-  SB: "/sb/v4/campaigns",
-  SD: "/sd/campaigns",
-};
-
 async function fetchCampaigns(profile) {
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const COUNTRY_REGION = {
+    US: "NA", CA: "NA", MX: "NA",
+    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
+    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
+    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
+  };
+  const API_URLS = {
+    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+  };
+  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
+  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
+
   const base = baseOpts(profile);
-  logger.info("fetchCampaigns: profile fields", {
-    dbId: profile.id,
-    amazonProfileId: profile.profile_id,
-    marketplace_id: profile.marketplace_id,
-    country_code: profile.country_code,
-    marketplace: profile.marketplace,
-  });
 
-  const results = await Promise.allSettled([
-    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SP, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
-      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredProducts" }))),
-    // SB: skip gracefully on 401/403/404
-    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SB, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
-      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredBrands" })))
-      .catch(err => {
-        if (err.status === 401 || err.status === 403 || err.status === 404) {
-          logger.info("SB campaigns skipped", { profileId: base.profileId, status: err.status });
-          return [];
-        }
-        throw err;
-      }),
-    // SD: skip gracefully on 401/403
-    getAll({ ...base, path: CAMPAIGN_ENDPOINTS.SD, params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
-      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredDisplay" })))
-      .catch(err => {
-        if (err.status === 401 || err.status === 403) {
-          logger.info("SD campaigns skipped", { profileId: base.profileId, status: err.status });
-          return [];
-        }
-        throw err;
-      }),
-  ]);
+  // --- SP Campaigns via POST /sp/campaigns/list ---
+  const spCampaigns = [];
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    const mediaType = "application/vnd.spCampaign.v3+json";
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+        maxResults: 100,
+      };
+      if (nextToken) body.nextToken = nextToken;
 
-  const campaigns = [];
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      campaigns.push(...result.value);
-    } else {
-      logger.warn("Failed to fetch some campaign types", { error: result.reason?.message });
-    }
+      const response = await axios.post(`${baseUrl}/sp/campaigns/list`, body, {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile.profile_id),
+          "Content-Type": mediaType,
+          "Accept": mediaType,
+        },
+        timeout: 30000,
+      });
+
+      const data = response.data;
+      const batch = Array.isArray(data.campaigns) ? data.campaigns : [];
+      batch.forEach(c => { c.campaignType = "sponsoredProducts"; });
+      spCampaigns.push(...batch);
+      nextToken = data.nextToken || null;
+      page++;
+      logger.info("SP campaigns list page", { profileId: profile.profile_id, page, count: batch.length, total: data.totalResults, hasMore: !!nextToken });
+    } while (nextToken && page < 400);
+
+    logger.info("SP campaigns fetch complete", { profileId: profile.profile_id, total: spCampaigns.length });
+  } catch (err) {
+    logger.error("SP campaigns list failed", {
+      profileId: profile.profile_id,
+      status: err.response?.status,
+      error: JSON.stringify(err.response?.data) || err.message,
+    });
   }
-  return campaigns;
+
+  // --- SB Campaigns (still GET-based, v4) ---
+  let sbCampaigns = [];
+  try {
+    sbCampaigns = (await getAll({ ...base, path: "/sb/v4/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" }))
+      .map(c => ({ ...c, campaignType: "sponsoredBrands" }));
+    logger.info("SB campaigns fetch complete", { profileId: profile.profile_id, total: sbCampaigns.length });
+  } catch (err) {
+    const status = err.status || err.response?.status;
+    if ([401, 403, 404].includes(status)) logger.info("SB campaigns skipped", { profileId: profile.profile_id, status });
+    else logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message });
+  }
+
+  // --- SD Campaigns (still GET-based) ---
+  let sdCampaigns = [];
+  try {
+    sdCampaigns = (await getAll({ ...base, path: "/sd/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" }))
+      .map(c => ({ ...c, campaignType: "sponsoredDisplay" }));
+    logger.info("SD campaigns fetch complete", { profileId: profile.profile_id, total: sdCampaigns.length });
+  } catch (err) {
+    const status = err.status || err.response?.status;
+    if ([401, 403, 404].includes(status)) logger.info("SD campaigns skipped", { profileId: profile.profile_id, status });
+    else logger.warn("SD campaigns failed", { profileId: profile.profile_id, error: err.message });
+  }
+
+  const all = [...spCampaigns, ...sbCampaigns, ...sdCampaigns];
+  logger.info("fetchCampaigns complete", { profileId: profile.profile_id, sp: spCampaigns.length, sb: sbCampaigns.length, sd: sdCampaigns.length, total: all.length });
+  return all;
 }
 
 async function syncCampaigns(profileDbRecord, amazonCampaigns) {
@@ -197,8 +237,8 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
       [
         workspaceId, profileDbId,
         String(c.campaignId), c.name, c.campaignType,
-        c.targetingType || null, c.state || "enabled",
-        c.dailyBudget || null, c.startDate || null, c.endDate || null,
+        c.targetingType || null, (c.state || "ENABLED").toLowerCase(),
+        c.dailyBudget ?? c.budget?.budget ?? null, c.startDate || null, c.endDate || null,
         c.bidding?.strategy || null, JSON.stringify(c),
       ]
     );
@@ -219,20 +259,84 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
 
 // ─── AD GROUPS ────────────────────────────────────────────────────────────────
 
-const AD_GROUP_ENDPOINTS = {
-  SP: "/sp/adGroups",
-  SB: "/sb/v4/adGroups",
-  SD: "/sd/adGroups",
-};
-
 async function fetchAdGroups(profile, campaignType = "SP") {
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const COUNTRY_REGION = {
+    US: "NA", CA: "NA", MX: "NA",
+    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
+    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
+    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
+  };
+  const API_URLS = {
+    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+  };
+  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
+  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
   const base = baseOpts(profile);
+
+  if (campaignType === "SP") {
+    const spAdGroups = [];
+    try {
+      const accessToken = await getValidAccessToken(profile.connection_id);
+      const mediaType = "application/vnd.spAdGroup.v3+json";
+      let nextToken = null;
+      let page = 0;
+      do {
+        const body = {
+          stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+          maxResults: 100,
+        };
+        if (nextToken) body.nextToken = nextToken;
+
+        const response = await axios.post(`${baseUrl}/sp/adGroups/list`, body, {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+            "Amazon-Advertising-API-Scope": String(profile.profile_id),
+            "Content-Type": mediaType,
+            "Accept": mediaType,
+          },
+          timeout: 30000,
+        });
+
+        const data = response.data;
+        const batch = Array.isArray(data.adGroups) ? data.adGroups : [];
+        spAdGroups.push(...batch);
+        nextToken = data.nextToken || null;
+        page++;
+        logger.info("SP adGroups list page", { profileId: profile.profile_id, page, count: batch.length, hasMore: !!nextToken });
+      } while (nextToken && page < 400);
+
+      logger.info("SP adGroups fetch complete", { profileId: profile.profile_id, total: spAdGroups.length });
+    } catch (err) {
+      logger.error("SP adGroups list failed", {
+        profileId: profile.profile_id,
+        status: err.response?.status,
+        error: JSON.stringify(err.response?.data) || err.message,
+      });
+    }
+    return spAdGroups;
+  }
+
+  // SB and SD — still GET-based
+  const AD_GROUP_ENDPOINTS = { SB: "/sb/v4/adGroups", SD: "/sd/adGroups" };
   return getAll({
     ...base,
     path: AD_GROUP_ENDPOINTS[campaignType],
     params: { stateFilter: "enabled,paused,archived" },
     group: "ad_groups",
     responseKey: "adGroups",
+  }).catch(err => {
+    const status = err.status || err.response?.status;
+    if ([401, 403, 404].includes(status)) {
+      logger.info(`${campaignType} adGroups skipped`, { profileId: profile.profile_id, status });
+      return [];
+    }
+    throw err;
   });
 }
 
@@ -255,7 +359,7 @@ async function syncAdGroups(profileDbRecord, amazonAdGroups, campaignType) {
          name = EXCLUDED.name, state = EXCLUDED.state,
          default_bid = EXCLUDED.default_bid, raw_data = EXCLUDED.raw_data,
          synced_at = NOW(), updated_at = NOW()`,
-      [workspaceId, profileDbId, camp.id, String(ag.adGroupId), ag.name, ag.state || "enabled", ag.defaultBid || null, JSON.stringify(ag)]
+      [workspaceId, profileDbId, camp.id, String(ag.adGroupId), ag.name, (ag.state || "ENABLED").toLowerCase(), ag.defaultBid || null, JSON.stringify(ag)]
     );
   }
 
@@ -265,35 +369,121 @@ async function syncAdGroups(profileDbRecord, amazonAdGroups, campaignType) {
 // ─── KEYWORDS ────────────────────────────────────────────────────────────────
 
 async function fetchKeywords(profile) {
-  const base = baseOpts(profile);
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
 
-  const [spKws, sbKws] = await Promise.allSettled([
-    // debug: true → logs raw first page so we can diagnose count=0 issues
-    getAll({ ...base, path: "/sp/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords", responseKey: "keywords", debug: true }),
-    getAll({ ...base, path: "/sb/v4/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords", responseKey: "keywords", debug: true })
-      .catch(err => {
-        if (err.status === 401 || err.status === 403 || err.status === 404) {
-          logger.info("SB keywords skipped", { profileId: base.profileId, status: err.status });
-          return [];
+  const COUNTRY_REGION = {
+    US: "NA", CA: "NA", MX: "NA",
+    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
+    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
+    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
+  };
+  const API_URLS = {
+    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+  };
+  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
+  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
+
+  const mediaType = "application/vnd.spKeyword.v3+json";
+
+  // --- SP Keywords via POST /sp/keywords/list ---
+  const spKeywords = [];
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+        maxResults: 100,
+      };
+      if (nextToken) body.nextToken = nextToken;
+
+      logger.info("SP keywords list request", {
+        profileId: profile.profile_id,
+        page,
+        hasNextToken: !!nextToken,
+        url: `${baseUrl}/sp/keywords/list`,
+      });
+
+      const response = await axios.post(
+        `${baseUrl}/sp/keywords/list`,
+        body,
+        {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+            "Amazon-Advertising-API-Scope": String(profile.profile_id),
+            "Content-Type": mediaType,
+            "Accept": mediaType,
+          },
+          timeout: 30000,
         }
-        throw err;
-      }),
-  ]);
+      );
 
-  logger.info("fetchKeywords results", {
-    profileId: base.profileId,
-    spCount: spKws.status === "fulfilled" ? spKws.value.length : `ERROR: ${spKws.reason?.message}`,
-    sbCount: sbKws.status === "fulfilled" ? sbKws.value.length : `ERROR: ${sbKws.reason?.message}`,
-  });
+      const data = response.data;
+      const batch = Array.isArray(data.keywords) ? data.keywords : [];
+      spKeywords.push(...batch);
+      nextToken = data.nextToken || null;
+      page++;
 
-  return [
-    ...(spKws.status === "fulfilled" ? spKws.value : []),
-    ...(sbKws.status === "fulfilled" ? sbKws.value : []),
-  ];
+      logger.info("SP keywords list page done", {
+        profileId: profile.profile_id,
+        page,
+        batchCount: batch.length,
+        totalSoFar: spKeywords.length,
+        hasMore: !!nextToken,
+        totalResults: data.totalResults,
+      });
+    } while (nextToken && page < 400); // safety cap: 10,000 keywords max
+
+    logger.info("SP keywords fetch complete", {
+      profileId: profile.profile_id,
+      total: spKeywords.length,
+    });
+  } catch (err) {
+    const status = err.response?.status;
+    const errData = err.response?.data;
+    logger.error("SP keywords list failed", {
+      profileId: profile.profile_id,
+      status,
+      error: JSON.stringify(errData) || err.message,
+    });
+    // Don't throw — continue with 0 SP keywords, still try SB
+  }
+
+  // --- SB Keywords via getAll (SB v4 still uses GET + startIndex) ---
+  const base = baseOpts(profile);
+  let sbKeywords = [];
+  try {
+    sbKeywords = await getAll({
+      ...base,
+      path: "/sb/v4/keywords",
+      params: { stateFilter: "enabled,paused,archived" },
+      group: "keywords",
+      responseKey: "keywords",
+    });
+    logger.info("SB keywords fetch complete", {
+      profileId: profile.profile_id,
+      total: sbKeywords.length,
+    });
+  } catch (err) {
+    const status = err.status || err.response?.status;
+    if ([401, 403, 404].includes(status)) {
+      logger.info("SB keywords skipped (no access)", { profileId: profile.profile_id, status });
+    } else {
+      logger.warn("SB keywords failed", { profileId: profile.profile_id, error: err.message });
+    }
+  }
+
+  return [...spKeywords, ...sbKeywords];
 }
 
 async function syncKeywords(profileDbRecord, amazonKeywords) {
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+  let inserted = 0;
 
   for (const kw of amazonKeywords) {
     const { rows: [ag] } = await query(
@@ -315,12 +505,14 @@ async function syncKeywords(profileDbRecord, amazonKeywords) {
       [
         workspaceId, profileDbId, ag.id, ag.campaign_id,
         String(kw.keywordId), kw.keywordText, kw.matchType || "exact",
-        kw.state || "enabled", kw.bid || null, JSON.stringify(kw),
+        (kw.state || "ENABLED").toLowerCase(), kw.bid || null, JSON.stringify(kw),
       ]
     );
+    inserted++;
   }
 
-  logger.info("Keywords synced", { profileDbId, count: amazonKeywords.length });
+  logger.info("Keywords synced", { profileDbId, count: inserted, fetched: amazonKeywords.length });
+  return inserted;
 }
 
 // ─── PORTFOLIOS ──────────────────────────────────────────────────────────────
