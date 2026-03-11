@@ -5,11 +5,14 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
 
-// GET /keywords — returns { data, total, page, limit }
+// GET /keywords — returns { data, pagination: { total, page, limit, pages } }
 router.get("/", async (req, res, next) => {
   try {
-    const { campaignId, adGroupId, state, search, limit = 200, page = 1, sortBy = "keyword_text", sortDir = "asc" } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const VALID_LIMITS = [25, 50, 100, 200, 500];
+    const { campaignId, adGroupId, state, search, page = 1, sortBy = "keyword_text", sortDir = "asc" } = req.query;
+    const rawLimit = parseInt(req.query.limit);
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 100;
+    const offset = (parseInt(page) - 1) * limit;
     const conditions = ["k.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
@@ -42,7 +45,16 @@ router.get("/", async (req, res, next) => {
       query(`SELECT COUNT(*) as total FROM keywords k ${where}`, params),
     ]);
 
-    res.json({ data: rows, total: parseInt(countRows[0].total), page: parseInt(page), limit: parseInt(limit) });
+    const total = parseInt(countRows[0].total);
+    res.json({
+      data: rows,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit,
+        pages: Math.ceil(total / limit),
+      },
+    });
   } catch (err) { next(err); }
 });
 

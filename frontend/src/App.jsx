@@ -1227,6 +1227,23 @@ const AuditPage = ({ workspaceId }) => {
   );
 };
 
+// ─── Pagination helper ────────────────────────────────────────────────────────
+function getPageRange(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages = new Set([1, total, current]);
+  if (current > 1) pages.add(current - 1);
+  if (current < total) pages.add(current + 1);
+  const sorted = [...pages].sort((a, b) => a - b);
+  const result = [];
+  let prev = 0;
+  for (const p of sorted) {
+    if (p - prev > 1) result.push("...");
+    result.push(p);
+    prev = p;
+  }
+  return result;
+}
+
 // ─── Keywords Page ────────────────────────────────────────────────────────────
 const KeywordsPage = ({ workspaceId }) => {
   const { t } = useI18n();
@@ -1240,6 +1257,8 @@ const KeywordsPage = ({ workspaceId }) => {
   const [saving, setSaving] = useState(false);
   const [bulkPct, setBulkPct] = useState("");
   const [kwToast, setKwToast] = useState(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
 
   function handleKwSort(field) {
     const isText = ["keyword_text", "match_type", "state", "campaign"].includes(field);
@@ -1247,15 +1266,22 @@ const KeywordsPage = ({ workspaceId }) => {
     else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
   }
 
+  useEffect(() => { setPage(1); }, [search, stateFilter, sortBy, sortDir]);
+
+  useEffect(() => {
+    document.querySelector(".fade")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [page]);
+
   const { data: kwResponse, loading, reload } = useAsync(
     () => workspaceId
-      ? get("/keywords", { search: search || undefined, state: stateFilter || undefined, limit: 200, sortBy, sortDir })
-      : Promise.resolve({ data: [], total: 0 }),
-    [workspaceId, search, stateFilter, sortBy, sortDir]
+      ? get("/keywords", { search: search || undefined, state: stateFilter || undefined, limit: pageSize, page, sortBy, sortDir })
+      : Promise.resolve({ data: [], pagination: { total: 0, page: 1, limit: 100, pages: 0 } }),
+    [workspaceId, search, stateFilter, sortBy, sortDir, page, pageSize]
   );
 
   const keywords = kwResponse?.data ?? [];
-  const kwTotal = kwResponse?.total ?? 0;
+  const kwTotal = kwResponse?.pagination?.total ?? 0;
+  const totalPages = kwResponse?.pagination?.pages ?? 1;
 
   function toggleSelect(id) {
     const s = new Set(selected);
@@ -1414,6 +1440,52 @@ const KeywordsPage = ({ workspaceId }) => {
             )
         }
       </div>
+
+      {/* Pagination controls */}
+      {kwTotal > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
+          {/* Left: page size selector */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
+            Показывать по:
+            {[25, 50, 100, 200, 500].map(size => (
+              <button
+                key={size}
+                onClick={() => { setPageSize(size); setPage(1); }}
+                className={`btn ${pageSize === size ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}
+              >
+                {size}
+              </button>
+            ))}
+          </div>
+
+          {/* Center: range info */}
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>
+            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, kwTotal)} из {kwTotal.toLocaleString()}
+          </div>
+
+          {/* Right: prev/next + page numbers */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>
+              ← Назад
+            </button>
+            {getPageRange(page, totalPages).map((p, i) =>
+              p === "..."
+                ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+                : <button key={p}
+                    onClick={() => setPage(p)}
+                    className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
+                    style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}
+                  >{p}</button>
+            )}
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>
+              Вперёд →
+            </button>
+          </div>
+        </div>
+      )}
 
     </div>
   );
