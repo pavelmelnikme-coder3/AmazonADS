@@ -1,374 +1,364 @@
 # AdsFlow — Amazon Ads Dashboard
 
-> SaaS-дашборд для управления рекламными кампаниями Amazon Ads (Sponsored Products, Sponsored Display) с AI-рекомендациями на базе Claude.
+Полноценный дашборд для управления Amazon Ads кампаниями с AI-рекомендациями, автоматическими правилами, кастомизируемым обзорным дашбордом и поддержкой SP/SB/SD типов кампаний.
 
-<<<<<<< Updated upstream
-## 🏗 Архитектура
-=======
-[![Node.js](https://img.shields.io/badge/Node.js-20-green)](https://nodejs.org)
-[![React](https://img.shields.io/badge/React-18-blue)](https://react.dev)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)](https://postgresql.org)
-[![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)](https://docker.com)
+## ⚡ Быстрый старт
 
----
+### 1. Получить Amazon LwA credentials
 
-## ✨ Features
+1. Перейти на https://developer.amazon.com/apps-and-games/console/app/list
+2. Нажать **Create a New Security Profile**
+3. Заполнить: Profile Name, Description, Privacy URL
+4. Перейти в **Web Settings → Allowed Return URLs**: добавить `http://localhost:3000/connect/amazon/callback`
+5. Скопировать **Client ID** и **Client Secret**
+6. Получить доступ к Amazon Advertising API: https://advertising.amazon.com/API/docs/en-us/onboarding/overview
 
-- **OAuth 2.0** — Login with Amazon (LwA), токены зашифрованы AES-256
-- **Entity sync** — кампании, группы объявлений, ключевые слова, таргеты, product ads, портфели, негативы (8 типов сущностей)
-- **Metrics pipeline** — Amazon Reporting API v3, 60-дневный backfill, GZIP JSON парсинг, 13K+ строк метрик
-- **AI Recommendations** — Claude (claude-sonnet-4-20250514) анализирует данные кампаний, генерирует рекомендации с Apply/Preview/Dismiss на EN/RU/DE
-- **Bulk operations** — пауза/активация/архивирование кампаний, массовое изменение ставок и бюджетов
-- **Rule engine** — автоматические правила с условиями и действиями
-- **Alerts** — пороговые уведомления
-- **Audit log** — полная история изменений
-- **Multilingual UI** — English 🇬🇧 / Русский 🇷🇺 / Deutsch 🇩🇪
-
----
-
-## 🛠 Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Frontend | React 18, Vite, Recharts |
-| Backend | Node.js 20, Express 4 |
-| Database | PostgreSQL 16 |
-| Queue | Redis 7 + BullMQ |
-| AI | Anthropic Claude (claude-sonnet-4-20250514) |
-| Auth | JWT + LwA OAuth 2.0 + AES-256 |
-| Infra | Docker Compose |
-
----
-
-## 🏗 Architecture
->>>>>>> Stashed changes
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          Browser                                 │
-│              React 18 + Vite (port 3000)                        │
-│  Pages: Overview · Campaigns · Keywords · Reports · Rules ·     │
-│         Alerts · AI Assistant · Audit · Connections             │
-└─────────────────────────┬────────────────────────────────────────┘
-                          │ HTTP / REST
-                          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│               Express API (port 4000)                            │
-│  /api/v1/auth · /connections · /campaigns · /keywords           │
-│  /metrics · /reports · /rules · /alerts · /ai · /audit · /bulk  │
-│                                                                  │
-│  Middleware: JWT auth · workspace resolver · rate limit (300/min)│
-└──────┬──────────────────┬────────────────────────────────────────┘
-       │                  │
-       ▼                  ▼
-┌────────────┐   ┌────────────────────────────────────────────────┐
-│ PostgreSQL │   │           BullMQ Workers (Redis)               │
-│     16     │   │                                                │
-│            │   │  entity-sync    — 8 entity types per profile  │
-│ 22 tables  │   │  report-pipeline — Amazon Reporting API v3    │
-│ 4 migrations│  │  metrics-backfill — 60-day GZIP JSON pipeline │
-│            │   │  rule-engine    — hourly rule evaluation       │
-│ Partitioned│   │  ai-analysis    — Claude recommendations       │
-│ fact table │   │  bulk-operations — mass campaign/bid updates  │
-└────────────┘   └──────────────────┬─────────────────────────────┘
-                                    │
-                          ┌─────────┴──────────┐
-                          │                    │
-                          ▼                    ▼
-               ┌──────────────────┐  ┌─────────────────────┐
-               │  Amazon Ads API  │  │  Anthropic Claude   │
-               │       v3         │  │  claude-sonnet-4    │
-               │  SP · SB · SD    │  │  -20250514          │
-               │  Reporting v3    │  │                     │
-               └──────────────────┘  └─────────────────────┘
-```
-
-### Cron Schedule
-
-| Job | Schedule | Description |
-|---|---|---|
-| Entity sync | `0 */2 * * *` | Sync all 8 entity types for active profiles |
-| Daily reports | `0 6 * * *` | Queue SP/SB/SD reports for yesterday |
-| Rule engine | `0 * * * *` | Evaluate automation rules for all workspaces |
-| Metrics backfill | `30 6 * * *` | Rolling 2-day metrics refresh |
-| AI analysis | `0 7 * * *` | Generate Claude recommendations for all workspaces |
-
----
-
-## 🗄 Database Schema
-
-22 tables across 4 migrations:
-
-```
-001_initial.sql
-├── organizations          — multi-tenant orgs
-├── users                  — JWT auth, roles
-├── workspaces             — workspace per org
-├── workspace_members      — RBAC
-├── amazon_connections     — LwA tokens (AES-256 encrypted)
-├── amazon_profiles        — per-marketplace advertisers
-├── campaigns              — SP/SB/SD campaigns
-├── ad_groups
-├── keywords
-├── fact_metrics_daily     — PARTITIONED by date (2024–2026)
-├── report_requests        — Amazon async report tracking
-├── audit_events           — immutable append-only log
-├── rules                  — automation rule DSL
-├── alert_configs
-├── alert_instances
-├── ai_recommendations     — Claude-generated, 7-day TTL
-└── sync_state
-
-004_extended_entities.sql
-├── portfolios
-├── product_ads
-├── targets
-├── negative_keywords
-├── negative_targets
-└── budget_rules
-```
-
----
-
-## 📋 Prerequisites
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) 24+
-- Amazon Developer account with LwA app ([developer.amazon.com](https://developer.amazon.com))
-- Anthropic API key ([console.anthropic.com](https://console.anthropic.com))
-
----
-
-## 🚀 Quick Start
+### 2. Настроить окружение
 
 ```bash
-# 1. Clone
-git clone <repo-url> adsflow
-cd adsflow
-
-# 2. Configure environment
 cp .env.example .env
-# Edit .env — fill in required values (see Environment Variables below)
-
-# 3. Start all services
-docker compose up -d
-
-# 4. Open in browser
-open http://localhost:3000
 ```
 
-First launch applies all migrations automatically. Register an account, then go to **Connections** to link your Amazon Ads account.
-
----
-
-## ⚙️ Environment Variables
-
-Create `.env` in the project root:
-
+Заполнить `.env`:
 ```env
-# PostgreSQL
-POSTGRES_PASSWORD=your_secure_password
-
-# Security
-JWT_SECRET=your_32_char_secret_here_minimum
-ENCRYPTION_KEY=your_32_byte_hex_key_for_aes256
-
-# Amazon Login with Amazon (LwA)
-# Create app at: https://developer.amazon.com/loginwithamazon/console/site/lwa/overview.html
-AMAZON_CLIENT_ID=amzn1.application-oa2-client.xxxxxxxx
-AMAZON_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+AMAZON_CLIENT_ID=amzn1.application-oa2-client.XXXX
+AMAZON_CLIENT_SECRET=your_secret_here
 AMAZON_REDIRECT_URI=http://localhost:3000/connect/amazon/callback
 
-# Anthropic (for AI recommendations)
-# Get key at: https://console.anthropic.com
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxx
+AMAZON_ADS_API_URL=https://advertising-api.amazon.com
+AMAZON_ADS_API_EU_URL=https://advertising-api-eu.amazon.com
+AMAZON_ADS_API_FE_URL=https://advertising-api-fe.amazon.com
+
+JWT_SECRET=$(openssl rand -base64 32)
+ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+POSTGRES_PASSWORD=your_db_password
 ```
 
----
-
-## 📡 API Reference
-
-All routes require `Authorization: Bearer <jwt>` and `x-workspace-id: <uuid>` headers (except `/auth`).
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/v1/auth/register` | Register user + org |
-| `POST` | `/api/v1/auth/login` | Login, returns JWT |
-| `GET` | `/api/v1/connections` | List Amazon connections |
-| `GET` | `/api/v1/campaigns` | List campaigns (filter: status, type, search) |
-| `PATCH` | `/api/v1/campaigns/bulk` | Bulk pause/enable/archive/budget |
-| `GET` | `/api/v1/keywords` | List keywords + targets |
-| `PATCH` | `/api/v1/keywords/bulk` | Bulk bid adjustment |
-| `GET` | `/api/v1/metrics/summary` | KPI summary with delta vs prior period |
-| `GET` | `/api/v1/metrics/top-campaigns` | Top N campaigns by metric |
-| `POST` | `/api/v1/metrics/backfill` | Trigger 60-day metrics backfill |
-| `POST` | `/api/v1/reports` | Queue Amazon Reporting API v3 job |
-| `GET` | `/api/v1/reports` | Report history |
-| `GET/POST` | `/api/v1/rules` | Automation rules CRUD |
-| `GET/POST` | `/api/v1/alerts` | Alert configs + instances |
-| `GET` | `/api/v1/audit` | Audit log |
-| `POST` | `/api/v1/ai/run` | Trigger Claude analysis |
-| `GET` | `/api/v1/ai/recommendations` | List recommendations |
-| `POST` | `/api/v1/ai/recommendations/:id/apply` | Apply recommendation |
-| `POST` | `/api/v1/ai/recommendations/:id/preview` | Preview diff |
-| `POST` | `/api/v1/ai/recommendations/:id/dismiss` | Dismiss |
-
----
-
-## 🤖 AI Recommendations
-
-The AI orchestrator pipeline:
-
-1. Pulls last 30 days of campaign metrics from `fact_metrics_daily`
-2. Builds a context snapshot: top spenders, high-ACoS campaigns (>30%), low-ROAS campaigns (<2x), zero-spend campaigns
-3. Sends to Claude with a structured JSON-only system prompt
-4. Parses 5–10 recommendations, each with:
-   - `type`: `bid_increase | bid_decrease | budget_increase | budget_decrease | pause_campaign | enable_campaign | add_negative_keyword | change_bidding_strategy`
-   - `title`, `rationale`, `expected_effect`, `risk_level`
-   - `actions[]`: entity-level changes with exact field → value diffs
-5. Saves to `ai_recommendations` with 7-day TTL
-
-Recommendations are generated in the user's UI language (EN/RU/DE) via locale header.
-
----
-
-## 🔄 Entity Sync
-
-Each sync job processes 8 entity types per Amazon profile:
-
-```
-portfolios → campaigns → ad_groups → keywords
-         → product_ads → targets (SP+SD)
-         → negative_keywords → negative_targets (SP+SD)
-```
-
-Portfolios are synced first as campaigns may reference them. All SP v3 endpoints use versioned `Accept: application/vnd.sp*.v3+json` headers. SB/SD endpoints skip gracefully on 401/403/404.
-
----
-
-## 📊 Metrics Pipeline
-
-Amazon Reporting API v3 async flow:
-
-```
-POST /reporting/reports
-  → Content-Type: application/vnd.createasyncreportrequest.v3+json
-  → Poll GET /reporting/reports/{id} every 10s (max 10 min)
-  → Download GZIP JSON from S3 presigned URL
-  → Parse → upsert into fact_metrics_daily
-```
-
-Report types: `spCampaigns`, `spKeywords`, `spTargeting`, `spAdvertisedProduct`, `sdCampaigns`
-
-60-day backfill splits date ranges into 31-day chunks (Amazon's daily report limit).
-
----
-
-## 🛡 Security
-
-- **Tokens**: LwA access + refresh tokens encrypted with AES-256-GCM before DB storage
-- **Auth**: JWT with configurable secret, 7-day expiry
-- **CSRF**: State parameter validation on OAuth callback
-- **Rate limiting**: 300 req/min per IP on all `/api/` routes
-- **Audit log**: Immutable (trigger prevents UPDATE/DELETE on `audit_events`)
-- **CORS**: Restricted to `FRONTEND_URL` origin
-
----
-
-## 🧑‍💻 Development
+### 3. Запустить
 
 ```bash
-# Start with logs
-docker compose up
-
-# Backend logs only
-docker logs adsflow_backend -f
-
-# Watch for AI/reporting activity
-docker logs adsflow_backend -f | grep -E "(AI|Report|Backfill|sync)"
-
-# Connect to Postgres
-docker exec -it adsflow_postgres psql -U adsflow -d adsflow
-
-# Apply a new migration manually
-docker exec adsflow_postgres psql -U adsflow -d adsflow \
-  -f /docker-entrypoint-initdb.d/005_your_migration.sql
-
-# Rebuild backend only
-docker compose up --build -d backend
+docker compose up -d
+docker compose logs -f backend
+curl http://localhost:4000/health
 ```
 
-### Project Structure
+### 4. Открыть приложение
+
+- **Frontend**: http://localhost:3000
+- **Backend API**: http://localhost:4000/api/v1
+
+### 5. Подключить Amazon
+
+1. Зарегистрироваться → Подключения → Connect Amazon Ads Account
+2. Авторизоваться на amazon.com
+3. Выбрать профили → ждать синк (~3-10 мин)
+
+---
+
+## 🏗 Архитектура
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  Frontend (React 18 + Vite)                       │
+│  Overview · Campaigns · Keywords · Reports · Rules · Alerts       │
+│  AI Assistant · Audit · Connections · Settings                    │
+│  i18n: EN / RU / DE                                              │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │ REST /api/v1
+┌────────────────────────────▼─────────────────────────────────────┐
+│                   Backend (Node.js / Express)                      │
+│  Auth/RBAC (JWT)  ·  Amazon OAuth (LwA)  ·  Ads API Client       │
+│  SP v3 POST /list  ·  SB v4  ·  SD                               │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │  BullMQ Workers (Redis)                                   │   │
+│  │  entity-sync · report-pipeline · rule-engine              │   │
+│  │  ai-analysis · metrics-backfill · bulk-operations         │   │
+│  └───────────────────────────────────────────────────────────┘   │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────────────┐
+│  PostgreSQL 16 (entities, metrics, rules, audit, user settings)   │
+│  Redis 7 (BullMQ queues)                                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📁 Структура проекта
 
 ```
 adsflow/
-├── backend/
-│   └── src/
-│       ├── app.js                  # Express bootstrap
-│       ├── config/                 # logger, redis, encryption
-│       ├── db/
-│       │   ├── pool.js
-│       │   └── migrations/         # 001–004 SQL migrations
-│       ├── jobs/
-│       │   ├── workers.js          # BullMQ workers (6 queues)
-│       │   └── scheduler.js        # Cron jobs (5 schedules)
-│       ├── middleware/
-│       │   └── auth.js             # JWT + workspace resolver
-│       ├── routes/                 # 14 Express routers
-│       └── services/
-│           ├── amazon/
-│           │   ├── adsClient.js    # Rate-limited API client
-│           │   ├── entities.js     # 8-type entity sync
-│           │   ├── lwa.js          # OAuth token management
-│           │   └── reporting.js    # Async report pipeline
-│           └── ai/
-│               └── orchestrator.js # Claude recommendations
-├── frontend/
-│   └── src/
-│       ├── App.jsx                 # All pages (single-file SPA)
-│       ├── components/             # LanguageSwitcher, SyncStatusToast
-│       └── i18n/                   # en.js · ru.js · de.js
-└── docker-compose.yml
+├── docker-compose.yml
+├── .env.example
+├── backend/src/
+│   ├── app.js                     # Express entry point
+│   ├── config/
+│   │   ├── logger.js              # Winston
+│   │   ├── redis.js               # BullMQ connection
+│   │   └── encryption.js          # AES-256-GCM
+│   ├── db/
+│   │   ├── pool.js                # PostgreSQL pool
+│   │   └── migrations/
+│   │       ├── 001_initial.sql    # Core schema
+│   │       └── 002_add_region.sql # Amazon region column
+│   ├── middleware/auth.js          # JWT + RBAC (loads user.settings)
+│   ├── services/amazon/
+│   │   ├── lwa.js                 # OAuth + token refresh
+│   │   ├── adsClient.js           # HTTP client, rate limiting
+│   │   ├── entities.js            # Sync: SP v3 POST /list + SB/SD
+│   │   └── reporting.js           # Reporting API v3 async pipeline
+│   ├── jobs/
+│   │   ├── workers.js             # 7 BullMQ workers
+│   │   └── scheduler.js           # Smart scheduler (hourly/daily/weekly)
+│   └── routes/
+│       ├── auth.js                # POST /login, GET /me, PATCH /me
+│       ├── connections.js         # OAuth + PATCH /:id/schedule + POST /:id/sync
+│       ├── profiles.js
+│       ├── campaigns.js           # Server-side sort + pagination
+│       ├── keywords.js            # Server-side sort + pagination
+│       ├── metrics.js             # /summary, /top-campaigns, /by-type
+│       ├── reports.js             # Paginated
+│       ├── rules.js               # Paginated
+│       ├── alerts.js              # Paginated (configs + instances)
+│       ├── audit.js               # Server-side sort + pagination
+│       ├── ai.js
+│       └── jobs.js
+└── frontend/src/
+    ├── App.jsx                    # SPA — все страницы + компоненты
+    └── i18n/
+        ├── en.js
+        ├── ru.js
+        └── de.js
 ```
 
-<<<<<<< Updated upstream
-## 🔑 Ключевые API endpoints
+---
 
+## 🔑 API endpoints
+
+### Auth & User Settings
 | Метод | URL | Описание |
 |-------|-----|----------|
 | POST | `/auth/register` | Регистрация |
-| POST | `/auth/login` | Вход |
-| GET | `/connections/amazon/init` | Получить OAuth URL |
-| POST | `/connections/amazon/callback` | Обработать callback с кодом |
-| POST | `/connections/:id/profiles/attach` | Привязать профили к workspace |
-| GET | `/campaigns` | Список кампаний с метриками |
-| PATCH | `/campaigns/:id` | Изменить статус/бюджет |
-| GET | `/metrics/summary` | KPI агрегация |
-| GET | `/metrics/top-campaigns` | Топ кампании |
+| POST | `/auth/login` | Вход → JWT + `user.settings` |
+| GET  | `/auth/me` | Текущий пользователь + `settings` |
+| PATCH | `/auth/me` | Обновить `user.settings` (dashboard layout и др.) |
+
+### Connections & Sync
+| Метод | URL | Описание |
+|-------|-----|----------|
+| GET  | `/connections` | Список подключений (включает `sync_schedule`) |
+| GET  | `/connections/amazon/init` | OAuth URL |
+| POST | `/connections/amazon/callback` | OAuth callback |
+| PATCH | `/connections/:id/schedule` | Расписание (`hourly`/`daily`/`weekly`) |
+| POST | `/connections/:id/sync` | Запустить entity sync вручную |
+| POST | `/connections/:id/profiles/attach` | Привязать профили |
+
+### Campaigns & Keywords
+| Метод | URL | Описание |
+|-------|-----|----------|
+| GET  | `/campaigns` | Список, сортировка, фильтры, пагинация |
+| PATCH | `/campaigns/:id` | state / budget |
+| POST | `/campaigns/bulk` | Bulk update |
+| GET  | `/keywords` | Список, сортировка, фильтры, пагинация |
+| PATCH | `/keywords/bulk` | Bulk bid update |
+
+### Metrics
+| Метод | URL | Описание |
+|-------|-----|----------|
+| GET | `/metrics/summary` | KPI + дельты к пред. периоду + тренд по дням |
+| GET | `/metrics/top-campaigns` | Топ кампании по spend |
+| GET | `/metrics/by-type` | Разбивка по типу кампании (SP / SD / SB) |
+
+### Reports, Rules, Alerts
+| Метод | URL | Описание |
+|-------|-----|----------|
+| GET  | `/reports` | Список запросов отчётов (пагинация) |
 | POST | `/reports` | Запустить отчёт |
-| GET | `/audit` | Лог изменений |
+| GET  | `/rules` | Список правил (пагинация) |
+| POST/PATCH/DELETE | `/rules/:id` | CRUD правила |
+| POST | `/rules/:id/run` | Запуск (`dry_run` поддерживается) |
+| GET  | `/alerts` | Конфиги оповещений (пагинация) |
+| GET  | `/alerts/instances` | Срабатывания (пагинация) |
+| PATCH | `/alerts/:id/acknowledge` | Подтвердить оповещение |
 
-## 🔄 Roadmap
+### Audit & AI
+| Метод | URL | Описание |
+|-------|-----|----------|
+| GET  | `/audit` | Журнал событий (сортировка + пагинация) |
+| GET  | `/ai/recommendations` | AI рекомендации |
+| POST | `/ai/recommendations/:id/apply` | Применить |
+| POST | `/ai/recommendations/:id/dismiss` | Отклонить |
 
-- [x] **Этап 1**: OAuth + Profiles + Entities sync + Campaigns table + Reports v3 + Audit
-- [x] **Этап 2**: Bulk ops + Rule engine + Alerts + Keywords management
-- [ ] **Этап 3**: AI Orchestrator + Recommendations + Preview/Apply
-- [ ] **Этап 4**: Automated runs + DSP/AMC integration
+---
+
+## 📊 Страницы приложения
+
+### Обзор — кастомизируемый дашборд
+
+Переключатель **7d / 14d / 30d** · кнопки **↺ Обновить** и **⟳ Синхронизировать** · **⊞ Настроить**
+
+**16 виджетов:**
+
+| Группа | Виджеты |
+|--------|---------|
+| KPI (half-width) | Spend, Sales, ACOS, ROAS, Клики, Показы, Заказы, CTR, CPC |
+| Графики (full-width) | Динамика Spend (барчарт по дням), Мульти-тренд (клики + продажи) |
+| Таблицы (full-width) | Топ кампании, По типу кампании (SP/SB/SD) |
+| Другое | Оповещения (half), ИИ Рекомендации (full), Статус синхронизации (half) |
+
+**Дефолт:** Spend · Sales · ACOS · ROAS · Клики · Показы · Динамика Spend · Топ кампании
+
+**Режим ⊞ Настроить:**
+- Палитра с кнопками `✓ активен` / `+ добавить` по группам
+- Контролы на каждом виджете: **↑↓** (позиция) · **⇔** (half↔full) · **✕** (удалить)
+- **↺ Сброс** — вернуть дефолтный лейаут
+- Автосохранение debounced 800ms → `PATCH /auth/me` → `users.settings.dashboardLayout`
+- Лейаут **индивидуален** для каждого пользователя, персистентен между сессиями
+
+### Кампании
+- Сортировка по любому столбцу (server-side), фильтр статуса, поиск, пагинация 25/50/100/200
+
+### Ключевые слова
+- 33 689+ записей, сортировка, фильтр, поиск, bid inline, пагинация 25/50/100/200/500
+
+### Отчёты · Правила · Оповещения · Аудит
+- Пагинация на каждой странице с выбором размера страницы и smart page range
+
+### Подключения
+- Расписание синхронизации per-connection: **Каждый час / Раз в день / Раз в неделю**
+- Кнопка ручного запуска синхронизации
+
+---
+
+## ⚙️ Умный планировщик синхронизации
+
+```
+scheduler.js — запускается каждый час, проверяет все подключения:
+  hourly  → синк если прошло > 1 час
+  daily   → синк если прошло > 23 часа
+  weekly  → синк если прошло > 6.5 суток
+```
+
+Расписание в `amazon_connections.sync_schedule TEXT DEFAULT 'daily' CHECK IN ('hourly','daily','weekly')`.
+
+---
+
+## 🗄 DB изменения (run directly, not via migration files)
+
+```sql
+-- Пользовательские настройки (лейаут дашборда и др.)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}';
+
+-- Расписание синхронизации
+ALTER TABLE amazon_connections
+  ADD COLUMN IF NOT EXISTS sync_schedule TEXT NOT NULL DEFAULT 'daily'
+  CHECK (sync_schedule IN ('hourly','daily','weekly'));
+```
+
+---
+
+## ⚠️ Amazon SP v3 — критические детали
+
+Amazon Sponsored Products API v3 **требует POST /list** (не GET).
+
+```
+POST /sp/campaigns/list    Content-Type: application/vnd.spCampaign.v3+json
+POST /sp/adGroups/list     Content-Type: application/vnd.spAdGroup.v3+json
+POST /sp/keywords/list     Content-Type: application/vnd.spKeyword.v3+json
+```
+
+Тело:
+```json
+{ "stateFilter": { "include": ["ENABLED","PAUSED","ARCHIVED"] }, "maxResults": 100, "nextToken": "..." }
+```
+
+- `state` в UPPERCASE → нормализуем `.toLowerCase()`
+- `budget` → `c.dailyBudget ?? c.budget?.budget`
+- Пагинация: `nextToken` (не `startIndex`)
+
+SB v4 и SD используют GET-endpoints.
+
+---
+
+## 🤖 AI Orchestrator
+
+Claude claude-sonnet-4-20250514 анализирует метрики, генерирует рекомендации EN/RU/DE.
+Типы: `bid_adjustment`, `budget_increase`, `campaign_pause`, `keyword_add`, `targeting_optimization`.
+
+---
+
+## ⚙️ Rule Engine
+
+Условия: `acos_gt` · `spend_gt` · `ctr_lt` · `impressions_lt`
+Действия: `pause_campaign` · `adjust_bid_pct` · `adjust_budget_pct`
+Safety: `max_change_pct` (20%), `min_bid`/`max_bid`. `dry_run: true` — симуляция.
+
+---
+
+## 👥 RBAC
+
+`owner` > `admin` > `media_buyer` / `ai_operator` / `analyst` > `read_only`
+
+---
 
 ## 🛡 Безопасность
 
-- LwA tokens шифруются AES-256-GCM до записи в БД
-- Refresh tokens никогда не передаются на frontend
-- CSRF защита через state parameter в OAuth
-- JWT с 7-дневным TTL
-- Rate limiting на все публичные endpoints
-- Audit log — append-only (триггер в PostgreSQL запрещает UPDATE/DELETE)
-- RBAC проверки на каждом защищённом endpoint
+- LwA tokens: AES-256-GCM в БД
+- JWT: 7-дневный TTL
+- Audit log: append-only (PostgreSQL триггер)
+- CSRF: state parameter в OAuth
 
-=======
->>>>>>> Stashed changes
 ---
 
-## 📄 License
+## 🔧 Отладка
 
-MIT
+```bash
+# Пересобрать backend
+docker compose build --no-cache backend && docker compose up -d backend
+
+# Проверить код внутри контейнера
+docker exec adsflow_backend node -e \
+  "console.log(require('fs').readFileSync('/app/src/routes/campaigns.js','utf8').slice(0,300))"
+```
+
+> ⚠️ API всегда через Vite proxy (`/api/v1/...` порт **3000**), не напрямую на 4000.
+
+---
+
+## ✅ Реализовано
+
+### Core
+- [x] Auth (JWT, 6 ролей RBAC)
+- [x] Amazon OAuth LwA, авто-refresh, мультирегион (NA/EU/FE)
+- [x] Entity sync: SP v3 POST /list, SB v4, SD
+- [x] Metrics: KPI + дельты + тренды + `/by-type` разбивка
+- [x] Reports: Reporting API v3 async pipeline
+- [x] Bulk Operations: BullMQ batch jobs
+- [x] Rule Engine: dry_run, hourly cron
+- [x] Alerts: ACOS/ROAS/budget пороги
+- [x] AI Orchestrator: Claude Sonnet, EN/RU/DE
+- [x] Audit Log: append-only
+- [x] i18n: EN / RU / DE · Dark theme
+
+### UI/UX
+- [x] **Server-side сортировка** по всем столбцам (Campaigns, Keywords, Audit)
+- [x] **Пагинация на 6 страницах** — выбор размера + smart page range с `…`
+
+| Страница | Варианты | Дефолт |
+|---|---|---|
+| Campaigns | 25/50/100/200 | 100 |
+| Keywords | 25/50/100/200/500 | 100 |
+| Reports | 25/50/100 | 50 |
+| Rules | 10/25/50/100 | 25 |
+| Alerts | 10/25/50/100 | 25 |
+| Audit | 25/50/100/200 | 50 |
+
+- [x] **Синхронизация**: кнопки Обновить/Синхронизировать на Обзоре
+- [x] **Расписание синхронизации** per-connection (hourly/daily/weekly)
+- [x] **Умный планировщик** — нет дублирования синков
+- [x] **Кастомизируемый дашборд** — 16 виджетов, ↑↓ reorder, ⇔ resize, add/remove, сброс, сохранение в БД
+
+## 🚧 Known Issues / TODO
+
+- `negativeKeywords`: нужна миграция на `POST /sp/negativeKeywords/list`
+- Settings Workspace: timezone/currency dropdown обрезает текст
