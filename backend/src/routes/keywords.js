@@ -5,42 +5,57 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
 
-// GET /keywords
+// GET /keywords — returns { data, total, page, limit }
 router.get("/", async (req, res, next) => {
   try {
-    const { campaignId, adGroupId, search, limit = 100, page = 1 } = req.query;
+    const { campaignId, adGroupId, state, search, limit = 200, page = 1, sortBy = "keyword_text", sortDir = "asc" } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const conditions = ["k.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
-    if (campaignId) { conditions.push(`k.campaign_id = $${pi++}`); params.push(campaignId); }
-    if (adGroupId)  { conditions.push(`k.ad_group_id = $${pi++}`); params.push(adGroupId); }
-    if (search)     { conditions.push(`k.keyword_text ILIKE $${pi++}`); params.push(`%${search}%`); }
+    if (campaignId) { conditions.push(`k.campaign_id = $${pi++}`);        params.push(campaignId); }
+    if (adGroupId)  { conditions.push(`k.ad_group_id = $${pi++}`);        params.push(adGroupId); }
+    if (state)      { conditions.push(`k.state = $${pi++}`);              params.push(state); }
+    if (search)     { conditions.push(`k.keyword_text ILIKE $${pi++}`);   params.push(`%${search}%`); }
     const where = "WHERE " + conditions.join(" AND ");
-    const { rows } = await query(
-      `SELECT k.*, c.name as campaign_name, ag.name as ad_group_name
-       FROM keywords k
-       JOIN campaigns c ON c.id = k.campaign_id
-       JOIN ad_groups ag ON ag.id = k.ad_group_id
-       ${where} ORDER BY k.keyword_text
-       LIMIT ${parseInt(limit)} OFFSET $${pi}`,
-      [...params, offset]
-    );
-    res.json(rows);
+
+    const allowedSortKw = {
+      keyword_text: "k.keyword_text",
+      match_type:   "k.match_type",
+      state:        "k.state",
+      bid:          "k.bid",
+      campaign:     "c.name",
+    };
+    const orderField = allowedSortKw[sortBy] || "k.keyword_text";
+    const orderDir   = sortDir === "asc" ? "ASC" : "DESC";
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        `SELECT k.*, c.name as campaign_name, c.campaign_type, ag.name as ad_group_name
+         FROM keywords k
+         JOIN campaigns c ON c.id = k.campaign_id
+         JOIN ad_groups ag ON ag.id = k.ad_group_id
+         ${where} ORDER BY ${orderField} ${orderDir} NULLS LAST
+         LIMIT ${parseInt(limit)} OFFSET $${pi}`,
+        [...params, offset]
+      ),
+      query(`SELECT COUNT(*) as total FROM keywords k ${where}`, params),
+    ]);
+
+    res.json({ data: rows, total: parseInt(countRows[0].total), page: parseInt(page), limit: parseInt(limit) });
   } catch (err) { next(err); }
 });
 
-// PATCH /keywords/bulk — must be before /:id to avoid route conflict
+// PATCH /keywords/bulk — bulk bid/state update
 router.patch("/bulk", async (req, res, next) => {
   try {
-    const { updates } = req.body; // [{id, bid?, state?}]
+    const { updates } = req.body;
     if (!updates?.length) return res.status(400).json({ error: "updates required" });
     let updated = 0;
     for (const { id, bid, state } of updates) {
-      const sets = [];
-      const vals = [];
+      const sets = [], vals = [];
       let pi = 1;
-      if (bid !== undefined)   { sets.push(`bid = $${pi++}`);   vals.push(bid); }
+      if (bid   !== undefined) { sets.push(`bid = $${pi++}`);   vals.push(bid); }
       if (state !== undefined) { sets.push(`state = $${pi++}`); vals.push(state); }
       if (!sets.length) continue;
       vals.push(id, req.workspaceId);
@@ -54,14 +69,13 @@ router.patch("/bulk", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /keywords/:id — update bid or state
+// PATCH /keywords/:id — single bid/state update
 router.patch("/:id", async (req, res, next) => {
   try {
     const { bid, state } = req.body;
-    const sets = [];
-    const vals = [];
+    const sets = [], vals = [];
     let pi = 1;
-    if (bid !== undefined)   { sets.push(`bid = $${pi++}`);   vals.push(bid); }
+    if (bid   !== undefined) { sets.push(`bid = $${pi++}`);   vals.push(bid); }
     if (state !== undefined) { sets.push(`state = $${pi++}`); vals.push(state); }
     if (!sets.length) return res.status(400).json({ error: "bid or state required" });
     vals.push(req.params.id, req.workspaceId);

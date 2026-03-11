@@ -730,11 +730,35 @@ const OverviewPage = ({ workspaceId }) => {
   );
 };
 
+// ─── SortHeader — reusable sortable column header ─────────────────────────────
+const SortHeader = ({ field, label, currentSort, currentDir, onSort, align = "left" }) => {
+  const active = currentSort === field;
+  return (
+    <th
+      onClick={() => onSort(field)}
+      style={{
+        cursor: "pointer",
+        userSelect: "none",
+        textAlign: align,
+        whiteSpace: "nowrap",
+        color: active ? "var(--ac2)" : "var(--tx2)",
+      }}
+    >
+      {label}{" "}
+      <span style={{ fontSize: 10, opacity: active ? 1 : 0.3 }}>
+        {active ? (currentDir === "asc" ? "↑" : "↓") : "↕"}
+      </span>
+    </th>
+  );
+};
+
 // ─── Campaigns Page (real data) ───────────────────────────────────────────────
 const CampaignsPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("spend");
+  const [sortDir, setSortDir] = useState("desc");
   const [editId, setEditId] = useState(null);
   const [editState, setEditState] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -742,15 +766,21 @@ const CampaignsPage = ({ workspaceId }) => {
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [budgetPct, setBudgetPct] = useState("");
 
+  function handleCampSort(field) {
+    const isText = ["name", "state"].includes(field);
+    if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
+    else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
+  }
+
   const { data, loading, reload } = useAsync(
     () => {
       if (!workspaceId) return Promise.resolve({ data: [], pagination: {} });
-      const params = { limit: 100 };
+      const params = { limit: 100, sortBy, sortDir };
       if (filter && filter !== "all") params.status = filter;
       if (search && search.trim()) params.search = search.trim();
       return get("/campaigns", params);
     },
-    [workspaceId, filter, search]
+    [workspaceId, filter, search, sortBy, sortDir]
   );
 
   const campaigns = data?.data || [];
@@ -846,12 +876,14 @@ const CampaignsPage = ({ workspaceId }) => {
                       <th style={{ width: 36 }}>
                         <input type="checkbox" checked={selected.size === campaigns.length && campaigns.length > 0} onChange={toggleAll} />
                       </th>
-                      <th>{t("campaigns.colName")}</th><th>{t("campaigns.colType")}</th><th>{t("campaigns.colStatus")}</th>
-                      <th style={{ textAlign: "right" }}>{t("campaigns.colBudget")}</th>
-                      <th style={{ textAlign: "right" }}>Spend</th>
-                      <th style={{ textAlign: "right" }}>Sales</th>
-                      <th style={{ textAlign: "right" }}>ACOS</th>
-                      <th style={{ textAlign: "right" }}>ROAS</th>
+                      <SortHeader field="name"    label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} />
+                      <th>{t("campaigns.colType")}</th>
+                      <SortHeader field="state"   label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} />
+                      <SortHeader field="budget"  label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
+                      <SortHeader field="spend"   label="Spend"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
+                      <SortHeader field="sales"   label="Sales"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
+                      <SortHeader field="acos"    label="ACOS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
+                      <SortHeader field="roas"    label="ROAS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
                       <th></th>
                     </tr>
                   </thead>
@@ -1045,10 +1077,27 @@ const ReportsPage = ({ workspaceId }) => {
 // ─── Audit Page ───────────────────────────────────────────────────────────────
 const AuditPage = ({ workspaceId }) => {
   const { t } = useI18n();
+  const [sortBy, setSortBy] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+
   const { data: events, loading, reload } = useAsync(
     () => workspaceId ? get("/audit", { limit: 50 }) : Promise.resolve([]),
     [workspaceId]
   );
+
+  function handleAuditSort(field) {
+    if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
+    else { setSortBy(field); setSortDir("asc"); }
+  }
+
+  const sorted = events?.length
+    ? [...events].sort((a, b) => {
+        const v1 = a[sortBy] ?? "";
+        const v2 = b[sortBy] ?? "";
+        const cmp = v1 < v2 ? -1 : v1 > v2 ? 1 : 0;
+        return sortDir === "asc" ? cmp : -cmp;
+      })
+    : (events ?? []);
 
   return (
     <div className="fade">
@@ -1066,9 +1115,17 @@ const AuditPage = ({ workspaceId }) => {
             ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
             : (
               <table>
-                <thead><tr><th>{t("audit.colTime")}</th><th>{t("audit.colUser")}</th><th>{t("audit.colAction")}</th><th>{t("audit.colEntity")}</th><th>{t("audit.colSource")}</th></tr></thead>
+                <thead>
+                  <tr>
+                    <SortHeader field="date"        label={t("audit.colTime")}   currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
+                    <SortHeader field="actor_name"  label={t("audit.colUser")}   currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
+                    <SortHeader field="action"      label={t("audit.colAction")} currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
+                    <SortHeader field="entity_type" label={t("audit.colEntity")} currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
+                    <th>{t("audit.colSource")}</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {events.map(e => (
+                  {sorted.map(e => (
                     <tr key={e.id}>
                       <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(e.created_at).toLocaleString("ru")}</td>
                       <td style={{ fontSize: 12 }}>{e.actor_name || e.actor_type}</td>
@@ -1091,6 +1148,8 @@ const KeywordsPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [search, setSearch] = useState("");
   const [stateFilter, setStateFilter] = useState("");
+  const [sortBy, setSortBy] = useState("keyword_text");
+  const [sortDir, setSortDir] = useState("asc");
   const [selected, setSelected] = useState(new Set());
   const [editId, setEditId] = useState(null);
   const [editBid, setEditBid] = useState("");
@@ -1098,11 +1157,17 @@ const KeywordsPage = ({ workspaceId }) => {
   const [bulkPct, setBulkPct] = useState("");
   const [kwToast, setKwToast] = useState(null);
 
+  function handleKwSort(field) {
+    const isText = ["keyword_text", "match_type", "state", "campaign"].includes(field);
+    if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
+    else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
+  }
+
   const { data: kwResponse, loading, reload } = useAsync(
     () => workspaceId
-      ? get("/keywords", { search: search || undefined, state: stateFilter || undefined, limit: 200 })
+      ? get("/keywords", { search: search || undefined, state: stateFilter || undefined, limit: 200, sortBy, sortDir })
       : Promise.resolve({ data: [], total: 0 }),
-    [workspaceId, search, stateFilter]
+    [workspaceId, search, stateFilter, sortBy, sortDir]
   );
 
   const keywords = kwResponse?.data ?? [];
@@ -1213,11 +1278,11 @@ const KeywordsPage = ({ workspaceId }) => {
                       <th style={{ width: 36 }}>
                         <input type="checkbox" checked={selected.size === keywords.length && keywords.length > 0} onChange={toggleAll} />
                       </th>
-                      <th>{t("keywords.colKeyword")}</th>
-                      <th>{t("keywords.colMatch")}</th>
-                      <th>{t("keywords.colStatus")}</th>
-                      <th style={{ textAlign: "right" }}>{t("keywords.colBid")}</th>
-                      <th>{t("keywords.colCampaign")}</th>
+                      <SortHeader field="keyword_text" label={t("keywords.colKeyword")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
+                      <SortHeader field="match_type"   label={t("keywords.colMatch")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
+                      <SortHeader field="state"        label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
+                      <SortHeader field="bid"          label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" />
+                      <SortHeader field="campaign"     label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
                       <th></th>
                     </tr>
                   </thead>

@@ -43,7 +43,17 @@ router.get("/", async (req, res, next) => {
     }
 
     const where = "WHERE " + conditions.join(" AND ");
-    const allowedSort = { spend: "COALESCE(m.cost,0)", sales: "COALESCE(m.sales_14d,0)", acos: "m.acos_14d", roas: "m.roas_14d", name: "c.name" };
+    const allowedSort = {
+      spend:       "COALESCE(m.cost,0)",
+      sales:       "COALESCE(m.sales_14d,0)",
+      acos:        "m.acos_14d",
+      roas:        "m.roas_14d",
+      name:        "c.name",
+      budget:      "c.daily_budget",
+      state:       "c.state",
+      clicks:      "COALESCE(m.clicks,0)",
+      impressions: "COALESCE(m.impressions,0)",
+    };
     const orderField = allowedSort[sortBy] || "COALESCE(m.cost,0)";
     const orderDir = sortDir === "asc" ? "ASC" : "DESC";
 
