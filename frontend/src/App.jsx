@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
@@ -1089,17 +1090,23 @@ const AuditPage = ({ workspaceId }) => {
 const KeywordsPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [search, setSearch] = useState("");
+  const [stateFilter, setStateFilter] = useState("");
   const [selected, setSelected] = useState(new Set());
   const [editId, setEditId] = useState(null);
   const [editBid, setEditBid] = useState("");
   const [saving, setSaving] = useState(false);
   const [bulkPct, setBulkPct] = useState("");
-  const [showBulkModal, setShowBulkModal] = useState(false);
+  const [kwToast, setKwToast] = useState(null);
 
-  const { data: keywords, loading, reload } = useAsync(
-    () => workspaceId ? get("/keywords", { search: search || undefined, limit: 200 }) : Promise.resolve([]),
-    [workspaceId, search]
+  const { data: kwResponse, loading, reload } = useAsync(
+    () => workspaceId
+      ? get("/keywords", { search: search || undefined, state: stateFilter || undefined, limit: 200 })
+      : Promise.resolve({ data: [], total: 0 }),
+    [workspaceId, search, stateFilter]
   );
+
+  const keywords = kwResponse?.data ?? [];
+  const kwTotal = kwResponse?.total ?? 0;
 
   function toggleSelect(id) {
     const s = new Set(selected);
@@ -1123,14 +1130,21 @@ const KeywordsPage = ({ workspaceId }) => {
   }
 
   async function bulkBidUpdate() {
-    if (!bulkPct || !selected.size) return;
+    const pct = parseFloat(bulkPct);
+    if (!pct || !selected.size) return;
     setSaving(true);
     try {
-      await post("/bulk/keywords/bid", { ids: Array.from(selected), adjustPct: parseFloat(bulkPct) });
+      const updates = Array.from(selected).map(id => {
+        const kw = keywords.find(k => k.id === id);
+        const newBid = Math.max(0.02, parseFloat(kw?.bid || 0.02) * (1 + pct / 100));
+        return { id, bid: parseFloat(newBid.toFixed(2)) };
+      });
+      await patch("/keywords/bulk", { updates });
       reload();
       setSelected(new Set());
-      setShowBulkModal(false);
       setBulkPct("");
+      setKwToast(`Обновлено ${updates.length} ставок`);
+      setTimeout(() => setKwToast(null), 3000);
     } catch (e) { alert(t("common.error") + e.message); }
     setSaving(false);
   }
@@ -1142,19 +1156,46 @@ const KeywordsPage = ({ workspaceId }) => {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
         <div>
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("keywords.title")}</h1>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("keywords.count", { count: keywords?.length ?? "—" })}</div>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{kwTotal.toLocaleString()} ключевых слов</div>
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+      {kwToast && createPortal(
+        <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, background: "var(--grn)", color: "#fff", padding: "10px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 20px rgba(0,0,0,.3)" }}>
+          {kwToast}
+        </div>,
+        document.body
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center" }}>
         <input placeholder={t("keywords.searchPlaceholder")} value={search} onChange={e => setSearch(e.target.value)} style={{ width: 220 }} />
+        <select value={stateFilter} onChange={e => setStateFilter(e.target.value)} style={{ width: 130 }}>
+          <option value="">All States</option>
+          <option value="enabled">Enabled</option>
+          <option value="paused">Paused</option>
+          <option value="archived">Archived</option>
+        </select>
         <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ {t("common.refresh")}</button>
       </div>
 
       {selected.size > 0 && (
-        <div className="card fade" style={{ padding: "10px 16px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", borderColor: "rgba(59,130,246,.4)", background: "rgba(59,130,246,.05)" }}>
-          <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{t("keywords.selected", { count: selected.size })}</span>
-          <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setShowBulkModal(true)}>{t("keywords.bulkBid")}</button>
+        <div className="card fade" style={{ padding: "10px 16px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderColor: "rgba(59,130,246,.4)", background: "rgba(59,130,246,.05)" }}>
+          <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{selected.size} выбрано</span>
+          <span style={{ fontSize: 12, color: "var(--tx2)" }}>Изм. ставку на:</span>
+          <input
+            type="number"
+            value={bulkPct}
+            onChange={e => setBulkPct(e.target.value)}
+            placeholder="0"
+            min="-100" max="100"
+            style={{ width: 70, fontSize: 12, padding: "4px 8px" }}
+          />
+          <span style={{ fontSize: 12, color: "var(--tx2)" }}>%</span>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => setBulkPct("10")}>+10%</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => setBulkPct("-10")}>-10%</button>
+          <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={bulkBidUpdate} disabled={saving || !bulkPct}>
+            {saving ? <span className="loader" /> : "Применить"}
+          </button>
           <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setSelected(new Set())}>{t("common.cancel")}</button>
         </div>
       )}
@@ -1225,76 +1266,118 @@ const KeywordsPage = ({ workspaceId }) => {
         }
       </div>
 
-      {showBulkModal && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div className="card fade" style={{ width: 360, padding: "24px 28px" }}>
-            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{t("keywords.bulkBidTitle")}</div>
-            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 14 }}>{t("keywords.bulkBidDesc", { count: selected.size })}</div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 20 }}>
-              <input type="number" value={bulkPct} onChange={e => setBulkPct(e.target.value)} style={{ flex: 1 }} placeholder="+10 or -10" />
-              <span style={{ color: "var(--tx2)" }}>%</span>
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <button className="btn btn-primary" onClick={bulkBidUpdate} disabled={saving || !bulkPct}>
-                {saving ? <span className="loader" /> : t("keywords.applyBid")}
-              </button>
-              <button className="btn btn-ghost" onClick={() => setShowBulkModal(false)}>{t("common.cancel")}</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
 
-// ─── Condition / Action type definitions ──────────────────────────────────────
-const CONDITION_TYPES = [
-  { value: "acos_gt",        label: "ACOS >" },
-  { value: "spend_gt",       label: "Spend >" },
-  { value: "ctr_lt",         label: "CTR <" },
-  { value: "impressions_lt", label: "Impressions <" },
+// ─── Condition / Action type definitions (new DSL) ────────────────────────────
+const COND_FIELDS = [
+  { value: "acos",         label: "ACoS",        unit: "%" },
+  { value: "roas",         label: "ROAS",        unit: ""  },
+  { value: "cpc",          label: "CPC",         unit: "$" },
+  { value: "ctr",          label: "CTR",         unit: "%" },
+  { value: "spend",        label: "Spend",       unit: "$" },
+  { value: "clicks",       label: "Clicks",      unit: ""  },
+  { value: "impressions",  label: "Impressions", unit: ""  },
+  { value: "orders",       label: "Orders",      unit: ""  },
+  { value: "daily_budget", label: "Budget",      unit: "$" },
 ];
-const ACTION_TYPES = [
-  { value: "pause_campaign",     label: "Pause Campaign",        hasValue: false },
-  { value: "adjust_bid_pct",     label: "Adjust Bid %",          hasValue: true },
-  { value: "adjust_budget_pct",  label: "Adjust Budget %",       hasValue: true },
-  { value: "add_negative_keyword", label: "Add Negative Keyword", hasValue: true, isText: true },
+const COND_OPS = [
+  { value: "gt",  label: ">" },
+  { value: "lt",  label: "<" },
+  { value: "gte", label: ">=" },
+  { value: "lte", label: "<=" },
+  { value: "eq",  label: "=" },
+  { value: "neq", label: "≠" },
 ];
+const ACT_TYPES = [
+  { value: "adjust_bid",     label: "Adjust Bid",     hasValue: true,  unit: "%" },
+  { value: "set_bid",        label: "Set Bid",        hasValue: true,  unit: "$" },
+  { value: "adjust_budget",  label: "Adjust Budget",  hasValue: true,  unit: "%" },
+  { value: "set_budget",     label: "Set Budget",     hasValue: true,  unit: "$" },
+  { value: "pause_campaign",  label: "Pause Campaign",  hasValue: false },
+  { value: "enable_campaign", label: "Enable Campaign", hasValue: false },
+];
+
+function relTime(ts) {
+  if (!ts) return null;
+  const diff = Date.now() - new Date(ts).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+function condSummary(conds) {
+  return (Array.isArray(conds) ? conds : []).map(c => {
+    const f = COND_FIELDS.find(x => x.value === c.field);
+    const o = COND_OPS.find(x => x.value === c.operator);
+    return `${f?.label || c.field} ${o?.label || c.operator} ${c.value}${f?.unit || ""}`;
+  }).join(" AND ");
+}
+function actSummary(acts) {
+  return (Array.isArray(acts) ? acts : []).map(a => {
+    const d = ACT_TYPES.find(x => x.value === a.type);
+    if (!d?.hasValue) return d?.label || a.type;
+    return `${d.label} ${a.value}${d.unit || ""}`;
+  }).join(", ");
+}
+function parseRuleJSON(val, fallback) {
+  if (!val) return fallback;
+  if (typeof val === "string") { try { return JSON.parse(val); } catch { return fallback; } }
+  return val;
+}
+const EMPTY_RULE_FORM = {
+  name: "", schedule_type: "daily", dry_run: false,
+  conditions: [{ field: "acos", operator: "gt", value: 30 }],
+  actions:    [{ type: "pause_campaign" }],
+  safety:     { max_change_pct: 20, min_bid: 0.02, max_bid: 50, min_budget: 1, max_budget: 10000 },
+};
 
 // ─── Rules Page ───────────────────────────────────────────────────────────────
 const RulesPage = ({ workspaceId }) => {
   const { t } = useI18n();
-  const [showModal, setShowModal] = useState(false);
-  const [editRule, setEditRule] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    name: "", conditions: [{ type: "acos_gt", value: 30 }],
-    actions: [{ type: "pause_campaign" }], schedule_type: "daily", dry_run: false,
-  });
+  const [showModal,     setShowModal]     = useState(false);
+  const [editRule,      setEditRule]      = useState(null);
+  const [saving,        setSaving]        = useState(false);
+  const [form,          setForm]          = useState(EMPTY_RULE_FORM);
+  const [showSafety,    setShowSafety]    = useState(false);
+  const [historyRule,   setHistoryRule]   = useState(null);
+  const [historyData,   setHistoryData]   = useState(null);
+  const [expandedExec,  setExpandedExec]  = useState(null);
+  const [previewRule,   setPreviewRule]   = useState(null);
+  const [previewData,   setPreviewData]   = useState(null);
+  const [previewLoad,   setPreviewLoad]   = useState(false);
+  const [toast,         setToast]         = useState(null);
+  const [running,       setRunning]       = useState({});
 
   const { data: rules, loading, reload } = useAsync(
     () => workspaceId ? get("/rules") : Promise.resolve([]),
     [workspaceId]
   );
 
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  }
+
   function openCreate() {
-    setEditRule(null);
-    setForm({ name: "", conditions: [{ type: "acos_gt", value: 30 }], actions: [{ type: "pause_campaign" }], schedule_type: "daily", dry_run: false });
-    setShowModal(true);
+    setEditRule(null); setForm(EMPTY_RULE_FORM); setShowSafety(false); setShowModal(true);
   }
 
   function openEdit(rule) {
     setEditRule(rule);
-    const conds = typeof rule.conditions === "string" ? JSON.parse(rule.conditions) : rule.conditions;
-    const acts  = typeof rule.actions   === "string" ? JSON.parse(rule.actions)   : rule.actions;
+    const conds = parseRuleJSON(rule.conditions, EMPTY_RULE_FORM.conditions);
+    const acts  = parseRuleJSON(rule.actions,    EMPTY_RULE_FORM.actions);
+    const saf   = parseRuleJSON(rule.safety,     EMPTY_RULE_FORM.safety);
     setForm({
-      name: rule.name,
+      name: rule.name, schedule_type: rule.schedule_type || "daily", dry_run: !!rule.dry_run,
       conditions: Array.isArray(conds) ? conds : [conds],
       actions:    Array.isArray(acts)  ? acts  : [acts],
-      schedule_type: rule.schedule_type || "daily",
-      dry_run: rule.dry_run,
+      safety:     saf || EMPTY_RULE_FORM.safety,
     });
-    setShowModal(true);
+    setShowSafety(false); setShowModal(true);
   }
 
   async function saveRule() {
@@ -1306,183 +1389,350 @@ const RulesPage = ({ workspaceId }) => {
       } else {
         await post("/rules", form);
       }
-      reload();
-      setShowModal(false);
+      reload(); setShowModal(false);
     } catch (e) { alert(t("common.error") + e.message); }
     setSaving(false);
   }
 
   async function deleteRule(id) {
-    if (!confirm(t("rules.deleteConfirm"))) return;
-    await del(`/rules/${id}`);
-    reload();
+    if (!confirm(t("rules.confirmDelete"))) return;
+    await del(`/rules/${id}`); reload();
   }
 
   async function toggleRule(id) {
-    await patch(`/rules/${id}/toggle`);
-    reload();
+    await patch(`/rules/${id}/toggle`); reload();
   }
 
-  function updCond(i, field, val) {
-    setForm(f => { const c = [...f.conditions]; c[i] = { ...c[i], [field]: val }; return { ...f, conditions: c }; });
-  }
-  function updAct(i, field, val) {
-    setForm(f => { const a = [...f.actions]; a[i] = { ...a[i], [field]: val }; return { ...f, actions: a }; });
+  async function runNow(rule) {
+    setRunning(r => ({ ...r, [rule.id]: true }));
+    try {
+      await post(`/rules/${rule.id}/run`, {});
+      showToast(t("rules.queued"));
+      setTimeout(() => { reload(); setRunning(r => ({ ...r, [rule.id]: false })); }, 3000);
+    } catch (e) {
+      alert(t("common.error") + e.message);
+      setRunning(r => ({ ...r, [rule.id]: false }));
+    }
   }
 
-  const condLabel = type => CONDITION_TYPES.find(c => c.value === type)?.label || type;
-  const actLabel  = type => ACTION_TYPES.find(a => a.value === type)?.label || type;
+  async function openHistory(rule) {
+    setHistoryRule(rule); setHistoryData(null); setExpandedExec(null);
+    try { setHistoryData(await get(`/rules/${rule.id}/executions`)); }
+    catch { setHistoryData([]); }
+  }
+
+  async function openPreview(rule) {
+    setPreviewRule(rule); setPreviewData(null); setPreviewLoad(true);
+    try { setPreviewData(await get(`/rules/${rule.id}/preview`)); }
+    catch (e) { setPreviewData({ matched: 0, actions: [], error: e.message }); }
+    setPreviewLoad(false);
+  }
+
+  function updCond(i, f, v) {
+    setForm(fm => { const c = [...fm.conditions]; c[i] = { ...c[i], [f]: v }; return { ...fm, conditions: c }; });
+  }
+  function updAct(i, f, v) {
+    setForm(fm => { const a = [...fm.actions]; a[i] = { ...a[i], [f]: v }; return { ...fm, actions: a }; });
+  }
+  function updSafety(k, v) {
+    setForm(fm => ({ ...fm, safety: { ...fm.safety, [k]: v } }));
+  }
+
+  const statusColor = s => ({ success: "var(--grn)", error: "var(--red)", running: "var(--amb)" }[s] || "var(--b3)");
+  const dot = s => <span style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor(s), display: "inline-block", marginRight: 5 }} />;
+
+  const MODAL_WRAP = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", boxSizing: "border-box" };
+  const LABEL_STYLE = { fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" };
 
   return (
     <div className="fade">
+      {toast && (
+        <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, background: "var(--grn)", color: "#fff", padding: "10px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 20px rgba(0,0,0,.3)" }}>
+          {toast}
+        </div>
+      )}
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("rules.title")}</h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("rules.subtitle")}</div>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ {t("rules.newRule")}</button>
+        <button className="btn btn-primary" onClick={openCreate}>{t("rules.newRule")}</button>
       </div>
 
-      <div className="card" style={{ overflow: "hidden" }}>
-        {loading
-          ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-          : !rules?.length
-            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("rules.noRules")}</div>
-            : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>{t("rules.colName")}</th>
-                    <th>{t("rules.colCondition")}</th>
-                    <th>{t("rules.colAction")}</th>
-                    <th>{t("rules.colSchedule")}</th>
-                    <th>{t("rules.colLastRun")}</th>
-                    <th>{t("rules.colActive")}</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rules.map(rule => {
-                    const conds = (() => { try { const v = typeof rule.conditions === "string" ? JSON.parse(rule.conditions) : rule.conditions; return Array.isArray(v) ? v : [v]; } catch { return []; } })();
-                    const acts  = (() => { try { const v = typeof rule.actions   === "string" ? JSON.parse(rule.actions)   : rule.actions;   return Array.isArray(v) ? v : [v]; } catch { return []; } })();
-                    return (
-                      <tr key={rule.id}>
-                        <td style={{ fontWeight: 500 }}>
-                          {rule.name}
-                          {rule.dry_run && <span className="badge bg-amb" style={{ marginLeft: 6, fontSize: 9 }}>DRY</span>}
-                        </td>
-                        <td style={{ fontSize: 11, color: "var(--tx2)" }}>
-                          {conds.map((c, i) => <div key={i}>{condLabel(c.type)} {c.value}</div>)}
-                        </td>
-                        <td style={{ fontSize: 11, color: "var(--tx2)" }}>
-                          {acts.map((a, i) => <div key={i}>{actLabel(a.type)}{a.value !== undefined ? ` ${a.value > 0 ? "+" : ""}${a.value}${!ACTION_TYPES.find(x => x.value === a.type)?.isText ? "%" : ""}` : ""}</div>)}
-                        </td>
-                        <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{rule.schedule_type || "daily"}</span></td>
-                        <td style={{ fontSize: 11, color: "var(--tx3)" }}>{rule.last_run_at ? new Date(rule.last_run_at).toLocaleString() : "—"}</td>
-                        <td>
-                          <button onClick={() => toggleRule(rule.id)} style={{
-                            width: 34, height: 18, borderRadius: 9, border: "none", cursor: "pointer",
-                            background: rule.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s",
-                          }}>
-                            <span style={{ position: "absolute", top: 2, left: rule.is_active ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
-                          </button>
-                        </td>
-                        <td>
-                          <div style={{ display: "flex", gap: 4 }}>
-                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openEdit(rule)}>{t("common.edit")}</button>
-                            <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteRule(rule.id)}>✕</button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )
-        }
-      </div>
-
-      {showModal && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "20px", zIndex: 1000 }}>
-          <div className="card fade" style={{ width: 560, padding: "24px 28px" }}>
-            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
-              {editRule ? t("rules.editRule") : t("rules.newRule")}
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.name")}</div>
-              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ width: "100%" }} placeholder={t("rules.namePlaceholder")} />
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.conditions")}</div>
-              {form.conditions.map((cond, i) => (
-                <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                  <select value={cond.type} onChange={e => updCond(i, "type", e.target.value)} style={{ flex: 1 }}>
-                    {CONDITION_TYPES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
-                  </select>
-                  <input type="number" value={cond.value} onChange={e => updCond(i, "value", parseFloat(e.target.value))} style={{ width: 80 }} />
-                  {form.conditions.length > 1 && (
-                    <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setForm(f => ({ ...f, conditions: f.conditions.filter((_, idx) => idx !== i) }))}>✕</button>
-                  )}
-                </div>
-              ))}
-              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setForm(f => ({ ...f, conditions: [...f.conditions, { type: "acos_gt", value: 30 }] }))}>+ {t("rules.addCondition")}</button>
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.actions")}</div>
-              {form.actions.map((action, i) => {
-                const def = ACTION_TYPES.find(a => a.value === action.type);
+      {loading
+        ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+        : !rules?.length
+          ? <div className="card" style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("rules.noRules")}</div>
+          : <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {rules.map(rule => {
+                const conds = parseRuleJSON(rule.conditions, []);
+                const acts  = parseRuleJSON(rule.actions, []);
+                const isRunning = running[rule.id];
                 return (
-                  <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                    <select value={action.type} onChange={e => updAct(i, "type", e.target.value)} style={{ flex: 1 }}>
-                      {ACTION_TYPES.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
-                    </select>
-                    {def?.hasValue && (
-                      <input
-                        type={def.isText ? "text" : "number"}
-                        value={action.value ?? ""}
-                        onChange={e => updAct(i, "value", def.isText ? e.target.value : parseFloat(e.target.value))}
-                        style={{ width: 80 }}
-                        placeholder={def.isText ? "keyword" : "%"}
-                      />
-                    )}
-                    {form.actions.length > 1 && (
-                      <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setForm(f => ({ ...f, actions: f.actions.filter((_, idx) => idx !== i) }))}>✕</button>
-                    )}
+                  <div key={rule.id} className="card" style={{ padding: "16px 20px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontWeight: 600, fontSize: 15 }}>{rule.name}</span>
+                        <span className={`badge ${rule.schedule_type === "hourly" ? "bg-bl" : "bg-grn"}`} style={{ fontSize: 10 }}>
+                          {t(rule.schedule_type === "hourly" ? "rules.hourly" : "rules.daily")}
+                        </span>
+                        {rule.dry_run && <span className="badge bg-amb" style={{ fontSize: 10 }}>{t("rules.dryRun")}</span>}
+                      </div>
+                      <button onClick={() => toggleRule(rule.id)} style={{ width: 36, height: 20, borderRadius: 10, border: "none", cursor: "pointer", flexShrink: 0, background: rule.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s" }}>
+                        <span style={{ position: "absolute", top: 3, left: rule.is_active ? 17 : 3, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
+                      </button>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 5 }}>
+                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", fontSize: 10, textTransform: "uppercase", marginRight: 4 }}>IF</span>
+                      {condSummary(conds) || "—"}
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 12 }}>
+                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", fontSize: 10, textTransform: "uppercase", marginRight: 4 }}>THEN</span>
+                      {actSummary(acts) || "—"}
+                    </div>
+                    <div style={{ display: "flex", gap: 16, fontSize: 11, color: "var(--tx3)", marginBottom: 12, flexWrap: "wrap" }}>
+                      <span>{dot(rule.last_run_status)}{t("rules.lastRun")}: {relTime(rule.last_run_at) || t("rules.neverRun")}</span>
+                      {rule.run_count > 0 && <span>Runs: {rule.run_count}</span>}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button className="btn btn-primary" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => runNow(rule)} disabled={isRunning}>
+                        {isRunning ? <span className="loader" /> : `▶ ${t("rules.runNow")}`}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => openPreview(rule)}>
+                        {t("rules.preview")}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => openEdit(rule)}>{t("common.edit")}</button>
+                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => openHistory(rule)}>{t("rules.history")}</button>
+                      <button className="btn btn-red"   style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => deleteRule(rule.id)}>✕</button>
+                    </div>
                   </div>
                 );
               })}
-              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setForm(f => ({ ...f, actions: [...f.actions, { type: "pause_campaign" }] }))}>+ {t("rules.addAction")}</button>
+            </div>
+      }
+
+      {/* ── Rule Builder Modal ──────────────────────────────────────────────── */}
+      {showModal && createPortal(
+        <div style={MODAL_WRAP}>
+          <div style={{ background: "#1a1d2e", borderRadius: "12px", padding: "28px", width: "100%", maxWidth: "560px", position: "relative", margin: "0 auto" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
+              {editRule ? `✎ ${t("rules.editRule")}` : t("rules.newRule")}
             </div>
 
+            {/* Name */}
             <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("rules.schedule")}</div>
+              <div style={LABEL_STYLE}>{t("rules.name")}</div>
+              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ width: "100%" }} placeholder={t("rules.namePlaceholder")} />
+            </div>
+
+            {/* Schedule */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={LABEL_STYLE}>{t("rules.schedule")}</div>
               <div style={{ display: "flex", gap: 8 }}>
-                {["hourly", "daily"].map(s => (
-                  <button key={s} onClick={() => setForm(f => ({ ...f, schedule_type: s }))} className={`btn ${form.schedule_type === s ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 14px" }}>
+                {["hourly","daily"].map(s => (
+                  <button key={s} onClick={() => setForm(f => ({ ...f, schedule_type: s }))}
+                    className={`btn ${form.schedule_type === s ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 14px" }}>
                     {t("rules.schedule_" + s)}
                   </button>
                 ))}
               </div>
             </div>
 
-            <div style={{ marginBottom: 20 }}>
+            {/* Dry Run */}
+            <div style={{ marginBottom: 14 }}>
               <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer", fontSize: 13 }}>
                 <input type="checkbox" checked={form.dry_run} onChange={e => setForm(f => ({ ...f, dry_run: e.target.checked }))} />
                 {t("rules.dryRun")}
               </label>
+              {form.dry_run && <div style={{ fontSize: 11, color: "var(--amb)", marginTop: 4, marginLeft: 22 }}>{t("rules.dryRunDesc")}</div>}
+            </div>
+
+            {/* Conditions */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={LABEL_STYLE}>{t("rules.conditions")}</div>
+              {form.conditions.map((cond, i) => (
+                <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
+                  <select value={cond.field || "acos"} onChange={e => updCond(i, "field", e.target.value)} style={{ flex: 1 }}>
+                    {COND_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  </select>
+                  <select value={cond.operator || "gt"} onChange={e => updCond(i, "operator", e.target.value)} style={{ width: 60 }}>
+                    {COND_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                  <input type="number" value={cond.value ?? ""} onChange={e => updCond(i, "value", parseFloat(e.target.value) || 0)} style={{ width: 80 }} />
+                  {form.conditions.length > 1 && (
+                    <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }}
+                      onClick={() => setForm(f => ({ ...f, conditions: f.conditions.filter((_, idx) => idx !== i) }))}>✕</button>
+                  )}
+                </div>
+              ))}
+              {form.conditions.length < 5 && (
+                <button className="btn btn-ghost" style={{ fontSize: 11 }}
+                  onClick={() => setForm(f => ({ ...f, conditions: [...f.conditions, { field: "acos", operator: "gt", value: 30 }] }))}>
+                  {t("rules.addCondition")}
+                </button>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={LABEL_STYLE}>{t("rules.actions")}</div>
+              {form.actions.map((action, i) => {
+                const def = ACT_TYPES.find(a => a.value === action.type);
+                return (
+                  <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
+                    <select value={action.type} onChange={e => updAct(i, "type", e.target.value)} style={{ flex: 1 }}>
+                      {ACT_TYPES.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                    </select>
+                    {def?.hasValue && (
+                      <>
+                        <input type="number" value={action.value ?? ""} onChange={e => updAct(i, "value", parseFloat(e.target.value) || 0)} style={{ width: 70 }} />
+                        <span style={{ fontSize: 12, color: "var(--tx3)", minWidth: 14 }}>{def.unit}</span>
+                      </>
+                    )}
+                    {form.actions.length > 1 && (
+                      <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }}
+                        onClick={() => setForm(f => ({ ...f, actions: f.actions.filter((_, idx) => idx !== i) }))}>✕</button>
+                    )}
+                  </div>
+                );
+              })}
+              {form.actions.length < 3 && (
+                <button className="btn btn-ghost" style={{ fontSize: 11 }}
+                  onClick={() => setForm(f => ({ ...f, actions: [...f.actions, { type: "pause_campaign" }] }))}>
+                  {t("rules.addAction")}
+                </button>
+              )}
+            </div>
+
+            {/* Safety Limits (collapsible) */}
+            <div style={{ marginBottom: 20 }}>
+              <button className="btn btn-ghost" style={{ fontSize: 11, marginBottom: showSafety ? 10 : 0 }}
+                onClick={() => setShowSafety(s => !s)}>
+                {showSafety ? "▾" : "▸"} {t("rules.safety")}
+              </button>
+              {showSafety && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                  {[
+                    { key: "max_change_pct", label: "Max change", unit: "%" },
+                    { key: "min_bid",        label: "Min bid",    unit: "$" },
+                    { key: "max_bid",        label: "Max bid",    unit: "$" },
+                    { key: "min_budget",     label: "Min budget", unit: "$" },
+                    { key: "max_budget",     label: "Max budget", unit: "$" },
+                  ].map(({ key, label, unit }) => (
+                    <div key={key}>
+                      <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>{label} ({unit})</div>
+                      <input type="number" value={form.safety[key] ?? ""} style={{ width: "100%" }}
+                        onChange={e => updSafety(key, parseFloat(e.target.value) || 0)} />
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div style={{ display: "flex", gap: 10 }}>
               <button className="btn btn-primary" onClick={saveRule} disabled={saving}>
-                {saving ? <span className="loader" /> : t("rules.save")}
+                {saving ? <span className="loader" /> : t("rules.saveRule")}
               </button>
               <button className="btn btn-ghost" onClick={() => setShowModal(false)}>{t("common.cancel")}</button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ── Execution History Modal ─────────────────────────────────────────── */}
+      {historyRule && createPortal(
+        <div style={MODAL_WRAP}>
+          <div className="card fade" style={{ width: 700, padding: "24px 28px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
+                {t("rules.history")}: {historyRule.name}
+              </div>
+              <button className="btn btn-ghost" onClick={() => setHistoryRule(null)}>✕</button>
+            </div>
+            {!historyData
+              ? <div style={{ textAlign: "center", padding: 30 }}><span className="loader" /></div>
+              : !historyData.length
+                ? <div style={{ color: "var(--tx3)", fontSize: 13 }}>{t("rules.neverRun")}</div>
+                : historyData.map(exec => (
+                    <div key={exec.id} style={{ borderBottom: "1px solid var(--b1)", paddingBottom: 10, marginBottom: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          {dot(exec.status)}
+                          <span style={{ fontSize: 12 }}>{new Date(exec.started_at).toLocaleString()}</span>
+                          {exec.dry_run && <span className="badge bg-amb" style={{ fontSize: 9 }}>DRY</span>}
+                        </div>
+                        <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 11, color: "var(--tx3)" }}>
+                          <span>{t("rules.evaluated")}: {exec.entities_evaluated}</span>
+                          <span>{t("rules.matched")}: {exec.entities_matched}</span>
+                          <span>Actions: {exec.actions_taken}</span>
+                          <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 6px" }}
+                            onClick={() => setExpandedExec(expandedExec === exec.id ? null : exec.id)}>
+                            {expandedExec === exec.id ? "▴" : "▾"}
+                          </button>
+                        </div>
+                      </div>
+                      {expandedExec === exec.id && Array.isArray(exec.summary) && exec.summary.length > 0 && (
+                        <table style={{ marginTop: 10, fontSize: 11 }}>
+                          <thead><tr><th>Entity</th><th>Action</th><th>Before → After</th><th>Applied</th></tr></thead>
+                          <tbody>
+                            {exec.summary.map((s, idx) => (
+                              <tr key={idx}>
+                                <td>{s.entityName}</td>
+                                <td>{s.action}</td>
+                                <td style={{ fontFamily: "var(--mono)" }}>{s.oldValue !== undefined ? `${s.oldValue} → ${s.newValue}` : s.error || "—"}</td>
+                                <td>{s.applied ? "✓" : "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  ))
+            }
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ── Preview Modal ───────────────────────────────────────────────────── */}
+      {previewRule && createPortal(
+        <div style={MODAL_WRAP}>
+          <div className="card fade" style={{ width: 700, padding: "24px 28px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
+                {t("rules.preview")}: {previewRule.name}
+              </div>
+              <button className="btn btn-ghost" onClick={() => setPreviewRule(null)}>✕</button>
+            </div>
+            {previewLoad
+              ? <div style={{ textAlign: "center", padding: 30 }}><span className="loader" /></div>
+              : !previewData?.actions?.length
+                ? <div style={{ color: "var(--tx3)", fontSize: 13 }}>{t("rules.noMatches")}</div>
+                : <>
+                    <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 12 }}>
+                      {t("rules.matched")}: {previewData.matched}
+                    </div>
+                    <table style={{ fontSize: 12 }}>
+                      <thead><tr><th>Entity</th><th>Action</th><th>Before → After</th></tr></thead>
+                      <tbody>
+                        {previewData.actions.map((s, i) => (
+                          <tr key={i}>
+                            <td>{s.entityName}</td>
+                            <td>{s.action}</td>
+                            <td style={{ fontFamily: "var(--mono)" }}>
+                              {s.oldValue !== undefined ? `${s.oldValue} → ${s.newValue}` : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
+            }
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -2136,6 +2386,490 @@ function AIPage({ workspaceId }) {
   );
 }
 
+// ─── Settings Page ────────────────────────────────────────────────────────────
+function avatarColor(name = "") {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = name.charCodeAt(i) + ((h << 5) - h);
+  return `hsl(${h % 360},55%,45%)`;
+}
+function initials(name = "") {
+  return name.split(" ").slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
+}
+function pwStrength(pw = "") {
+  let score = 0;
+  if (pw.length >= 8)              score++;
+  if (pw.length >= 12)             score++;
+  if (/[A-Z]/.test(pw))           score++;
+  if (/[0-9]/.test(pw))           score++;
+  if (/[^A-Za-z0-9]/.test(pw))   score++;
+  if (score <= 1) return { label: "Weak",   color: "var(--red)" };
+  if (score === 2) return { label: "Fair",   color: "var(--amb)" };
+  if (score === 3) return { label: "Good",   color: "#EAB308" };
+  return              { label: "Strong", color: "var(--grn)" };
+}
+
+const WORKSPACE_ROLES = [
+  { value: "admin",       label: "Admin",        desc: "Full access, can manage team" },
+  { value: "analyst",     label: "Analyst",      desc: "View + edit campaigns and reports" },
+  { value: "media_buyer", label: "Media Buyer",  desc: "Edit campaigns, bids, budgets" },
+  { value: "ai_operator", label: "AI Operator",  desc: "Run AI analysis, apply recommendations" },
+  { value: "read_only",   label: "Read Only",    desc: "View-only access" },
+];
+
+function Toggle({ checked, onChange }) {
+  return (
+    <button onClick={() => onChange(!checked)} style={{
+      width: 40, height: 22, borderRadius: 11, border: "none", cursor: "pointer",
+      background: checked ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s", flexShrink: 0,
+    }}>
+      <span style={{ position: "absolute", top: 3, left: checked ? 19 : 3, width: 16, height: 16, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
+    </button>
+  );
+}
+
+const SettingsPage = ({ workspaceId, user: appUser }) => {
+  const { t } = useI18n();
+  const [tab, setTab] = useState("profile");
+  const [toast, setToast] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  // Profile state
+  const [profile, setProfile] = useState(null);
+  const [profileForm, setProfileForm] = useState({ name: "", email: "" });
+  const [pwForm, setPwForm] = useState({ current_password: "", new_password: "", confirm: "" });
+  const [pwErr, setPwErr] = useState("");
+
+  // Workspace state
+  const [wsData, setWsData] = useState(null);
+  const [wsForm, setWsForm] = useState({ name: "", description: "", settings: {} });
+
+  // Members state
+  const [members, setMembers] = useState(null);
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteForm, setInviteForm] = useState({ email: "", name: "", workspace_role: "analyst" });
+  const [inviteErr, setInviteErr] = useState({});
+
+  // Notifications state
+  const [notifs, setNotifs] = useState(null);
+
+  // Danger zone state
+  const [showDeleteWs, setShowDeleteWs] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+
+  function showToast(msg, isErr = false) {
+    setToast({ msg, isErr });
+    setTimeout(() => setToast(null), 3000);
+  }
+
+  // Load data when tab changes
+  useEffect(() => {
+    if (tab === "profile" && !profile) {
+      get("/settings/profile").then(d => { setProfile(d); setProfileForm({ name: d.name, email: d.email }); }).catch(() => {});
+    }
+    if (tab === "workspace" && !wsData) {
+      get("/settings/workspace").then(d => {
+        setWsData(d);
+        const s = typeof d.settings === "string" ? JSON.parse(d.settings) : (d.settings || {});
+        setWsForm({ name: d.name, description: d.description || "", settings: s });
+      }).catch(() => {});
+    }
+    if (tab === "team" && !members) {
+      get("/settings/members").then(setMembers).catch(() => setMembers([]));
+    }
+    if (tab === "notifications" && !notifs) {
+      get("/settings/notifications").then(setNotifs).catch(() => {});
+    }
+  }, [tab]);
+
+  async function saveProfile() {
+    setSaving(true);
+    try {
+      const d = await apiFetch("/settings/profile", { method: "PATCH", body: JSON.stringify(profileForm) });
+      setProfile(d); showToast(t("settings.saveChanges") + " ✓");
+    } catch (e) { showToast(e.message, true); }
+    setSaving(false);
+  }
+
+  async function savePassword() {
+    setPwErr("");
+    if (pwForm.new_password !== pwForm.confirm) { setPwErr(t("settings.confirmPassword") + " mismatch"); return; }
+    if (pwForm.new_password.length < 8) { setPwErr("Min 8 characters"); return; }
+    setSaving(true);
+    try {
+      await apiFetch("/settings/profile/password", { method: "PATCH", body: JSON.stringify(pwForm) });
+      setPwForm({ current_password: "", new_password: "", confirm: "" });
+      showToast(t("settings.changePassword") + " ✓");
+    } catch (e) { setPwErr(e.message); }
+    setSaving(false);
+  }
+
+  async function saveWorkspace() {
+    setSaving(true);
+    try {
+      const d = await apiFetch("/settings/workspace", { method: "PATCH", body: JSON.stringify(wsForm) });
+      setWsData(d); showToast(t("settings.saveChanges") + " ✓");
+    } catch (e) { showToast(e.message, true); }
+    setSaving(false);
+  }
+
+  async function sendInvite() {
+    const errs = {};
+    if (!inviteForm.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inviteForm.email)) errs.email = "Valid email required";
+    if (!inviteForm.name?.trim()) errs.name = "Name required";
+    setInviteErr(errs);
+    if (Object.keys(errs).length) return;
+    setSaving(true);
+    try {
+      await post("/settings/members/invite", inviteForm);
+      showToast(t("settings.invite") + " sent!");
+      setShowInvite(false);
+      setInviteForm({ email: "", name: "", workspace_role: "analyst" });
+      get("/settings/members").then(setMembers);
+    } catch (e) { showToast(e.message, true); }
+    setSaving(false);
+  }
+
+  async function changeMemberRole(userId, role) {
+    if (!confirm(`Change role to ${role}?`)) return;
+    try {
+      await apiFetch(`/settings/members/${userId}/role`, { method: "PATCH", body: JSON.stringify({ role }) });
+      get("/settings/members").then(setMembers);
+      showToast("Role updated");
+    } catch (e) { showToast(e.message, true); }
+  }
+
+  async function removeMember(userId, name) {
+    if (!confirm(`Remove ${name} from workspace?`)) return;
+    try {
+      await apiFetch(`/settings/members/${userId}`, { method: "DELETE" });
+      setMembers(m => m.filter(x => x.id !== userId));
+      showToast("Member removed");
+    } catch (e) { showToast(e.message, true); }
+  }
+
+  async function toggleNotif(key, val) {
+    const next = { ...notifs, [key]: val };
+    setNotifs(next);
+    try { await apiFetch("/settings/notifications", { method: "PATCH", body: JSON.stringify(next) }); }
+    catch (e) { showToast(e.message, true); }
+  }
+
+  async function deleteWorkspace() {
+    if (deleteConfirm !== wsData?.name) return;
+    try {
+      await apiFetch("/settings/workspace", { method: "DELETE" });
+      showToast("Workspace deleted");
+      setShowDeleteWs(false);
+      setTimeout(() => { localStorage.removeItem("af_token"); window.location.reload(); }, 1500);
+    } catch (e) { showToast(e.message, true); }
+  }
+
+  const myRole = members?.find(m => m.id === appUser?.id)?.workspace_role;
+  const canInvite = myRole === "owner" || myRole === "admin";
+  const canManageRoles = myRole === "owner" || myRole === "admin";
+  const canRemove = myRole === "owner" || myRole === "admin";
+  const isOwner = myRole === "owner";
+
+  const TABS = [
+    { id: "profile",       icon: "👤", label: t("settings.profile") },
+    { id: "workspace",     icon: "🏢", label: t("settings.workspace") },
+    { id: "team",          icon: "👥", label: t("settings.team") },
+    { id: "notifications", icon: "🔔", label: t("settings.notifications") },
+    { id: "security",      icon: "🔒", label: t("settings.security") },
+    { id: "danger",        icon: "⚠️", label: t("settings.dangerZone") },
+  ];
+
+  const SL = { fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" };
+  const INPUT_W = { width: "100%", marginBottom: 14 };
+  const SECTION = { marginBottom: 24 };
+
+  const roleBadge = role => {
+    const colors = { owner: "bg-pur", admin: "bg-bl", analyst: "bg-grn", media_buyer: "bg-amb", ai_operator: "bg-teal", read_only: "bg-red" };
+    return <span className={`badge ${colors[role] || "bg-grn"}`} style={{ fontSize: 10 }}>{role?.replace("_"," ")}</span>;
+  };
+
+  return (
+    <div className="fade" style={{ display: "flex", gap: 24, alignItems: "flex-start" }}>
+      {/* Toast */}
+      {toast && createPortal(
+        <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, background: toast.isErr ? "var(--red)" : "var(--grn)", color: "#fff", padding: "10px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 20px rgba(0,0,0,.3)" }}>
+          {toast.msg}
+        </div>,
+        document.body
+      )}
+
+      {/* Sidebar */}
+      <div className="card" style={{ width: 200, padding: "8px 0", flexShrink: 0 }}>
+        <div style={{ padding: "12px 16px 8px", fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("settings.title")}</div>
+        {TABS.map(tb => (
+          <button key={tb.id} onClick={() => setTab(tb.id)} style={{
+            display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "10px 16px",
+            background: tab === tb.id ? "var(--b1)" : "transparent", border: "none",
+            borderLeft: tab === tb.id ? "2px solid var(--ac)" : "2px solid transparent",
+            color: tab === tb.id ? "var(--tx)" : "var(--tx2)", cursor: "pointer", fontSize: 13,
+            fontFamily: "var(--ui)", textAlign: "left", transition: "all .15s",
+          }}>
+            <span>{tb.icon}</span>{tb.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{ flex: 1 }}>
+        <h1 style={{ fontFamily: "var(--disp)", fontSize: 20, fontWeight: 700, marginBottom: 20 }}>
+          {TABS.find(x => x.id === tab)?.label}
+        </h1>
+
+        {/* ── Profile ── */}
+        {tab === "profile" && (
+          <div className="card" style={{ padding: 24 }}>
+            {!profile ? <span className="loader" /> : <>
+              <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 24 }}>
+                <div style={{ width: 56, height: 56, borderRadius: "50%", background: avatarColor(profile.name), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: 700, color: "#fff", flexShrink: 0 }}>
+                  {initials(profile.name)}
+                </div>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>{profile.name}</div>
+                  <div style={{ fontSize: 12, color: "var(--tx2)" }}>{profile.email}</div>
+                  <div style={{ marginTop: 4 }}>{roleBadge(profile.role)}</div>
+                </div>
+              </div>
+              <div style={SECTION}>
+                <div style={SL}>{t("settings.profile")} Info</div>
+                <div style={SL}>Name</div>
+                <input value={profileForm.name} onChange={e => setProfileForm(f => ({...f, name: e.target.value}))} style={INPUT_W} />
+                <div style={SL}>Email</div>
+                <input value={profileForm.email} onChange={e => setProfileForm(f => ({...f, email: e.target.value}))} style={INPUT_W} />
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 12 }}>
+                  {t("settings.lastLogin")}: {relTime(profile.last_login_at) || "Never"}
+                </div>
+                <button className="btn btn-primary" onClick={saveProfile} disabled={saving}>
+                  {saving ? <span className="loader" /> : t("settings.saveChanges")}
+                </button>
+              </div>
+            </>}
+          </div>
+        )}
+
+        {/* ── Workspace ── */}
+        {tab === "workspace" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="card" style={{ padding: 24 }}>
+              {!wsData ? <span className="loader" /> : <>
+                <div style={SL}>Workspace Name</div>
+                <input value={wsForm.name} onChange={e => setWsForm(f => ({...f, name: e.target.value}))} style={INPUT_W} />
+                <div style={SL}>Description</div>
+                <textarea value={wsForm.description} onChange={e => setWsForm(f => ({...f, description: e.target.value}))}
+                  style={{ ...INPUT_W, height: 70, resize: "vertical", padding: "7px 12px", background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 7, color: "var(--tx)", fontFamily: "var(--ui)", fontSize: 13 }} />
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, marginBottom: 14 }}>
+                  {[
+                    { key: "timezone", label: "Timezone", opts: ["UTC","Europe/Berlin","Europe/London","America/New_York","America/Los_Angeles","Asia/Tokyo"] },
+                    { key: "default_attribution_window", label: "Attribution Window", opts: ["1d","7d","14d","30d"] },
+                    { key: "currency", label: "Currency", opts: ["EUR","USD","GBP","JPY","CAD","AUD","PLN","SEK"] },
+                  ].map(({ key, label, opts }) => (
+                    <div key={key}>
+                      <div style={SL}>{label}</div>
+                      <select value={wsForm.settings[key] || opts[0]} onChange={e => setWsForm(f => ({...f, settings: {...f.settings, [key]: e.target.value}}))} style={{ width: "100%", minWidth: 200 }}>
+                        {opts.map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn btn-primary" onClick={saveWorkspace} disabled={saving}>
+                  {saving ? <span className="loader" /> : t("settings.saveChanges")}
+                </button>
+              </>}
+            </div>
+            {wsData && (
+              <div className="card" style={{ padding: 20 }}>
+                <div style={SL}>Organization</div>
+                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <span style={{ fontWeight: 600 }}>{wsData.org_name}</span>
+                  <span className="badge bg-bl" style={{ fontSize: 10 }}>{wsData.plan}</span>
+                  <span style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{wsData.slug}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Team ── */}
+        {tab === "team" && (
+          <div className="card" style={{ overflow: "hidden" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px", borderBottom: "1px solid var(--b1)" }}>
+              <div style={{ fontWeight: 600 }}>Members ({members?.length ?? "…"})</div>
+              {canInvite && (
+                <button className="btn btn-primary" style={{ fontSize: 12 }} onClick={() => setShowInvite(true)}>+ {t("settings.invite")}</button>
+              )}
+            </div>
+            {!members ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div> : (
+              <table>
+                <thead><tr>
+                  <th>Member</th>
+                  <th>{t("settings.role")}</th>
+                  <th>{t("settings.lastLogin")}</th>
+                  <th></th>
+                </tr></thead>
+                <tbody>
+                  {members.map(m => (
+                    <tr key={m.id}>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: "50%", background: avatarColor(m.name), display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: "#fff", flexShrink: 0 }}>{initials(m.name)}</div>
+                          <div>
+                            <div style={{ fontWeight: 500, fontSize: 13 }}>{m.name}</div>
+                            <div style={{ fontSize: 11, color: "var(--tx3)" }}>{m.email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        {canManageRoles && m.workspace_role !== "owner" && m.id !== appUser?.id ? (
+                          <select value={m.workspace_role} onChange={e => changeMemberRole(m.id, e.target.value)}
+                            style={{ fontSize: 11, padding: "3px 6px", background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 5, color: "var(--tx)" }}>
+                            {WORKSPACE_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                          </select>
+                        ) : roleBadge(m.workspace_role)}
+                      </td>
+                      <td style={{ fontSize: 11, color: "var(--tx3)" }}>{relTime(m.last_login_at) || "Never"}</td>
+                      <td>
+                        {canRemove && m.workspace_role !== "owner" && m.id !== appUser?.id && (
+                          <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => removeMember(m.id, m.name)}>
+                            {t("settings.remove")}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+
+        {/* ── Notifications ── */}
+        {tab === "notifications" && (
+          <div className="card" style={{ padding: 24 }}>
+            {!notifs ? <span className="loader" /> : <>
+              {[
+                { heading: "Email Notifications", keys: [
+                  { key: "email_alerts",        label: "Campaign alerts" },
+                  { key: "email_weekly_report", label: "Weekly report" },
+                  { key: "email_ai_summary",    label: "AI summary" },
+                ]},
+                { heading: "Alert Types", keys: [
+                  { key: "alert_acos",       label: "High ACoS" },
+                  { key: "alert_budget",     label: "Budget overrun" },
+                  { key: "alert_roas",       label: "ROAS drop" },
+                  { key: "alert_zero_spend", label: "Zero-spend campaigns" },
+                ]},
+              ].map(({ heading, keys }) => (
+                <div key={heading} style={{ marginBottom: 24 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 12, color: "var(--tx2)" }}>{heading}</div>
+                  {keys.map(({ key, label }) => (
+                    <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                      <span style={{ fontSize: 13 }}>{label}</span>
+                      <Toggle checked={!!notifs[key]} onChange={v => toggleNotif(key, v)} />
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </>}
+          </div>
+        )}
+
+        {/* ── Security ── */}
+        {tab === "security" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div className="card" style={{ padding: 24 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 16 }}>{t("settings.changePassword")}</div>
+              <div style={SL}>{t("settings.currentPassword")}</div>
+              <input type="password" value={pwForm.current_password} onChange={e => setPwForm(f => ({...f, current_password: e.target.value}))} style={INPUT_W} />
+              <div style={SL}>{t("settings.newPassword")}</div>
+              <input type="password" value={pwForm.new_password} onChange={e => setPwForm(f => ({...f, new_password: e.target.value}))} style={{ ...INPUT_W, marginBottom: 6 }} />
+              {pwForm.new_password && (() => {
+                const s = pwStrength(pwForm.new_password);
+                return <div style={{ fontSize: 11, color: s.color, marginBottom: 14, fontWeight: 600 }}>{s.label}</div>;
+              })()}
+              <div style={SL}>{t("settings.confirmPassword")}</div>
+              <input type="password" value={pwForm.confirm} onChange={e => setPwForm(f => ({...f, confirm: e.target.value}))} style={INPUT_W} />
+              {pwErr && <div style={{ fontSize: 12, color: "var(--red)", marginBottom: 12 }}>{pwErr}</div>}
+              <button className="btn btn-primary" onClick={savePassword} disabled={saving}>
+                {saving ? <span className="loader" /> : t("settings.changePassword")}
+              </button>
+            </div>
+            <div className="card" style={{ padding: 20 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Current Session</div>
+              <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 12 }}>{navigator.userAgent.slice(0, 80)}</div>
+              <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => showToast("Feature coming soon")}>
+                Sign out all other sessions
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Danger Zone ── */}
+        {tab === "danger" && (
+          <div className="card" style={{ padding: 24, border: "1px solid var(--red)" }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "var(--red)", marginBottom: 8 }}>{t("settings.deleteWorkspace")}</div>
+            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 16 }}>
+              This action is irreversible. All data, campaigns and rules will be deleted.
+            </div>
+            <button className="btn btn-red" disabled={!isOwner} onClick={() => setShowDeleteWs(true)}>
+              {t("settings.deleteWorkspace")}
+            </button>
+            {!isOwner && <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 8 }}>Only the workspace owner can delete it.</div>}
+          </div>
+        )}
+      </div>
+
+      {/* ── Invite Modal ── */}
+      {showInvite && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", boxSizing: "border-box" }}>
+          <div style={{ background: "#1a1d2e", borderRadius: 12, padding: 28, width: "100%", maxWidth: 480, margin: "0 auto" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>{t("settings.inviteMember")}</div>
+            <div style={SL}>Email</div>
+            <input value={inviteForm.email} onChange={e => setInviteForm(f => ({...f, email: e.target.value}))} style={{ width: "100%", marginBottom: inviteErr.email ? 4 : 14 }} placeholder="colleague@example.com" />
+            {inviteErr.email && <div style={{ fontSize: 11, color: "var(--red)", marginBottom: 10 }}>{inviteErr.email}</div>}
+            <div style={SL}>Name</div>
+            <input value={inviteForm.name} onChange={e => setInviteForm(f => ({...f, name: e.target.value}))} style={{ width: "100%", marginBottom: inviteErr.name ? 4 : 14 }} placeholder="Full name" />
+            {inviteErr.name && <div style={{ fontSize: 11, color: "var(--red)", marginBottom: 10 }}>{inviteErr.name}</div>}
+            <div style={SL}>{t("settings.role")}</div>
+            <select value={inviteForm.workspace_role} onChange={e => setInviteForm(f => ({...f, workspace_role: e.target.value}))} style={{ width: "100%", marginBottom: 8 }}>
+              {WORKSPACE_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+            <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 20 }}>
+              {WORKSPACE_ROLES.find(r => r.value === inviteForm.workspace_role)?.desc}
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn btn-primary" onClick={sendInvite} disabled={saving}>{saving ? <span className="loader" /> : t("settings.invite")}</button>
+              <button className="btn btn-ghost" onClick={() => { setShowInvite(false); setInviteErr({}); }}>{t("common.cancel")}</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ── Delete Workspace Modal ── */}
+      {showDeleteWs && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", boxSizing: "border-box" }}>
+          <div style={{ background: "#1a1d2e", borderRadius: 12, padding: 28, width: "100%", maxWidth: 460, margin: "0 auto" }}>
+            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, color: "var(--red)", marginBottom: 12 }}>Delete Workspace</div>
+            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 16 }}>
+              Type <strong style={{ color: "var(--tx)" }}>{wsData?.name}</strong> to confirm deletion:
+            </div>
+            <input value={deleteConfirm} onChange={e => setDeleteConfirm(e.target.value)} style={{ width: "100%", marginBottom: 20 }} placeholder={wsData?.name} />
+            <div style={{ display: "flex", gap: 10 }}>
+              <button className="btn btn-red" disabled={deleteConfirm !== wsData?.name} onClick={deleteWorkspace}>Confirm Delete</button>
+              <button className="btn btn-ghost" onClick={() => { setShowDeleteWs(false); setDeleteConfirm(""); }}>{t("common.cancel")}</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+};
+
 const PlaceholderPage = ({ title, desc }) => {
   const { t } = useI18n();
   return (
@@ -2204,7 +2938,7 @@ export default function App() {
     ai: <AIPage workspaceId={wid} />,
     audit: <AuditPage workspaceId={wid} />,
     connect: <ConnectPage workspaceId={wid} onConnected={() => { setActive("overview"); setSyncTrigger(t => t + 1); }} onSyncStarted={() => setSyncTrigger(t => t + 1)} />,
-    settings: <PlaceholderPage title={t("placeholder.settingsTitle")} desc={t("placeholder.settingsDesc")} />,
+    settings: <SettingsPage workspaceId={wid} user={user} />,
   };
 
   return (

@@ -31,23 +31,34 @@ keywordsRouter.use(requireAuth, requireWorkspace);
 
 keywordsRouter.get("/", async (req, res, next) => {
   try {
-    const { campaignId, adGroupId, search, limit = 100, page = 1 } = req.query;
+    const { campaignId, adGroupId, state, search, limit = 200, page = 1 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const conditions = ["k.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
     if (campaignId) { conditions.push(`k.campaign_id = $${pi++}`); params.push(campaignId); }
-    if (adGroupId) { conditions.push(`k.ad_group_id = $${pi++}`); params.push(adGroupId); }
-    if (search) { conditions.push(`k.keyword_text ILIKE $${pi++}`); params.push(`%${search}%`); }
+    if (adGroupId)  { conditions.push(`k.ad_group_id = $${pi++}`); params.push(adGroupId); }
+    if (state)      { conditions.push(`k.state = $${pi++}`);       params.push(state); }
+    if (search)     { conditions.push(`k.keyword_text ILIKE $${pi++}`); params.push(`%${search}%`); }
     const where = "WHERE " + conditions.join(" AND ");
-    const { rows } = await query(
-      `SELECT k.*, c.name as campaign_name FROM keywords k
-       JOIN campaigns c ON c.id = k.campaign_id
-       ${where} ORDER BY k.keyword_text
-       LIMIT ${parseInt(limit)} OFFSET $${pi}`,
-      [...params, offset]
-    );
-    res.json(rows);
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        `SELECT k.*, c.name as campaign_name, c.campaign_type
+         FROM keywords k
+         JOIN campaigns c ON c.id = k.campaign_id
+         ${where}
+         ORDER BY k.keyword_text
+         LIMIT ${parseInt(limit)} OFFSET $${pi}`,
+        [...params, offset]
+      ),
+      query(
+        `SELECT COUNT(*) as total FROM keywords k ${where}`,
+        params
+      ),
+    ]);
+
+    res.json({ data: rows, total: parseInt(countRows[0].total), page: parseInt(page), limit: parseInt(limit) });
   } catch (err) { next(err); }
 });
 

@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleEngine, queueMetricsBackfill, queueAiAnalysis } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleEngine, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 
@@ -57,11 +57,12 @@ async function startScheduler() {
     null, true, "UTC"
   );
 
-  // ─── Rule engine: every hour ───────────────────────────────────────────────
+  // ─── Rule execution: every hour ────────────────────────────────────────────
+  // Queues a targeted execution per workspace; engine filters by schedule_type internally
   const ruleEngineJob = new CronJob(
     "0 * * * *",
     async () => {
-      logger.info("Cron: Queuing rule engine for all workspaces");
+      logger.info("Cron: Queuing rule execution for all workspaces with active rules");
       try {
         const { rows } = await query(
           `SELECT DISTINCT w.id FROM workspaces w
@@ -69,11 +70,11 @@ async function startScheduler() {
            WHERE r.is_active = TRUE`
         );
         for (const { id } of rows) {
-          await queueRuleEngine(id);
+          await queueRuleExecution(id);
         }
-        logger.info(`Cron: Queued rule engine for ${rows.length} workspaces`);
+        logger.info(`Cron: Queued rule execution for ${rows.length} workspaces`);
       } catch (err) {
-        logger.error("Cron rule engine failed", { error: err.message });
+        logger.error("Cron rule execution failed", { error: err.message });
       }
     },
     null, true, "UTC"

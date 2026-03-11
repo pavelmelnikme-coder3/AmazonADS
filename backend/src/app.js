@@ -9,6 +9,7 @@ const rateLimit = require("express-rate-limit");
 
 const logger = require("./config/logger");
 const { connectDB } = require("./db/pool");
+const { runMigrations } = require("./db/migrate");
 const { connectRedis } = require("./config/redis");
 const { startWorkers } = require("./jobs/workers");
 const { startScheduler } = require("./jobs/scheduler");
@@ -28,6 +29,7 @@ const auditRoutes = require("./routes/audit");
 const aiRoutes = require("./routes/ai");
 const jobsRoutes = require("./routes/jobs");
 const bulkRoutes = require("./routes/bulk");
+const settingsRoutes = require("./routes/settings");
 
 const app = express();
 
@@ -83,6 +85,7 @@ app.use(`${API}/audit`, auditRoutes);
 app.use(`${API}/ai`, aiRoutes);
 app.use(`${API}/jobs`, jobsRoutes);
 app.use(`${API}/bulk`, bulkRoutes);
+app.use(`${API}/settings`, settingsRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
@@ -109,6 +112,9 @@ async function bootstrap() {
   try {
     await connectDB();
     logger.info("✓ PostgreSQL connected");
+
+    await runMigrations();
+    logger.info("✓ Migrations applied");
 
     await connectRedis();
     logger.info("✓ Redis connected");

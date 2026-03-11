@@ -18,6 +18,7 @@ const {
 } = require("../services/amazon/entities");
 const { runReportingPipeline, queueMetricsBackfillJobs } = require("../services/amazon/reporting");
 const { generateRecommendations } = require("../services/ai/orchestrator");
+const { executeRules } = require("../services/rules/engine");
 const { query } = require("../db/pool");
 
 // ─── Queue definitions ────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ const QUEUES = {
   REPORT:           "report-pipeline",
   BULK_OPS:         "bulk-operations",
   RULE_ENGINE:      "rule-engine",
+  RULE_EXECUTION:   "rule-execution",
   ALERT_CHECK:      "alert-check",
   METRICS_BACKFILL: "metrics-backfill",
   AI_ANALYSIS:      "ai-analysis",
@@ -74,6 +76,11 @@ async function queueAiAnalysis(workspaceId, locale = "en") {
 async function queueRuleEngine(workspaceId) {
   const queue = getQueue(QUEUES.RULE_ENGINE);
   return queue.add("evaluate", { workspaceId });
+}
+
+async function queueRuleExecution(workspaceId, ruleId = null) {
+  const queue = getQueue(QUEUES.RULE_EXECUTION);
+  return queue.add("execute", { workspaceId, ruleId });
 }
 
 async function queueBulkOperation(workspaceId, operationType, items) {
@@ -169,8 +176,7 @@ async function startWorkers() {
       if (entityTypes.includes("keywords")) {
         await job.updateProgress(progress); progress += 10;
         const keywords = await fetchKeywords(profile);
-        await syncKeywords(profile, keywords);
-        results.keywords = keywords.length;
+        results.keywords = await syncKeywords(profile, keywords);
       }
 
       // ── Product Ads ───────────────────────────────────────────────────────
@@ -296,79 +302,38 @@ async function startWorkers() {
     logger.error("Metrics backfill failed", { jobId: job?.id, error: err.message });
   });
 
-  // ─── Rule Engine Worker ────────────────────────────────────────────────────
+  // ─── Rule Engine Worker (legacy scheduler-based) ──────────────────────────
   const ruleEngineWorker = new Worker(
     QUEUES.RULE_ENGINE,
     async (job) => {
       const { workspaceId } = job.data;
-      logger.info("Rule engine started", { workspaceId });
-
-      const { rows: rules } = await query(
-        "SELECT * FROM rules WHERE workspace_id = $1 AND is_active = TRUE",
-        [workspaceId]
-      );
-
-      const results = [];
-      for (const rule of rules) {
-        try {
-          const conditions = typeof rule.conditions === "string" ? JSON.parse(rule.conditions) : rule.conditions;
-          const actions    = typeof rule.actions === "string"    ? JSON.parse(rule.actions)    : rule.actions;
-          const safety     = typeof rule.safety === "string"     ? JSON.parse(rule.safety)     : rule.safety;
-
-          const { rows: campaigns } = await query(
-            `SELECT c.id, c.name, c.state, c.daily_budget,
-                    COALESCE(m.cost, 0) as spend,
-                    COALESCE(m.impressions, 0) as impressions,
-                    CASE WHEN SUM(m.impressions) > 0 THEN SUM(m.clicks)::numeric / SUM(m.impressions) END as ctr,
-                    m.acos_14d as acos
-             FROM campaigns c
-             LEFT JOIN (
-               SELECT amazon_id,
-                      SUM(cost) as cost, SUM(impressions) as impressions,
-                      CASE WHEN SUM(impressions) > 0 THEN SUM(clicks)::numeric / SUM(impressions) END as ctr,
-                      CASE WHEN SUM(sales_14d) > 0 THEN SUM(cost) / SUM(sales_14d) * 100 END as acos_14d
-               FROM fact_metrics_daily
-               WHERE workspace_id = $1 AND date >= NOW() - INTERVAL '7 days'
-               GROUP BY amazon_id
-             ) m ON m.amazon_id = c.amazon_campaign_id
-             WHERE c.workspace_id = $1 AND c.state != 'archived'`,
-            [workspaceId]
-          );
-
-          const condsArr = Array.isArray(conditions) ? conditions : [conditions];
-          const actsArr  = Array.isArray(actions)    ? actions    : [actions];
-          const matched  = campaigns.filter(c => evaluateConditions(condsArr, c));
-          let actionsExecuted = 0;
-
-          if (!rule.dry_run && matched.length > 0) {
-            for (const campaign of matched) {
-              for (const action of actsArr) {
-                await executeRuleAction(action, campaign, safety);
-                actionsExecuted++;
-              }
-            }
-          }
-
-          await query(
-            "UPDATE rules SET last_run_at = NOW(), last_run_result = $1, updated_at = NOW() WHERE id = $2",
-            [JSON.stringify({ matchCount: matched.length, actionsExecuted, dryRun: rule.dry_run }), rule.id]
-          );
-
-          results.push({ ruleId: rule.id, name: rule.name, matchCount: matched.length, actionsExecuted });
-          logger.info("Rule evaluated", { ruleId: rule.id, matchCount: matched.length, actionsExecuted });
-        } catch (e) {
-          logger.error("Rule evaluation failed", { ruleId: rule.id, error: e.message });
-        }
-      }
-
-      logger.info("Rule engine completed", { workspaceId, rules: results.length });
-      return { workspaceId, rules: results.length, results };
+      logger.info("Rule engine (legacy) started", { workspaceId });
+      const result = await executeRules(workspaceId, null);
+      logger.info("Rule engine (legacy) completed", { workspaceId, ...result });
+      return result;
     },
     { connection: createRedisConnection(), concurrency: 1 }
   );
 
   ruleEngineWorker.on("failed", (job, err) => {
     logger.error("Rule engine worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  // ─── Rule Execution Worker (targeted, per-rule) ────────────────────────────
+  const ruleExecutionWorker = new Worker(
+    QUEUES.RULE_EXECUTION,
+    async (job) => {
+      const { workspaceId, ruleId } = job.data;
+      logger.info("Rule execution started", { workspaceId, ruleId });
+      const result = await executeRules(workspaceId, ruleId || null);
+      logger.info("Rule execution completed", { workspaceId, ruleId, ...result });
+      return result;
+    },
+    { connection: createRedisConnection(), concurrency: 2 }
+  );
+
+  ruleExecutionWorker.on("failed", (job, err) => {
+    logger.error("Rule execution worker failed", { jobId: job?.id, error: err.message });
   });
 
   // ─── AI Analysis Worker ────────────────────────────────────────────────────
@@ -406,55 +371,13 @@ async function startWorkers() {
     logger.error("AI analysis worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, aiWorker];
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 }
 
 async function stopWorkers() {
   await Promise.all(workers.map((w) => w.close()));
   await Promise.all(Object.values(queues).map((q) => q.close()));
-}
-
-// ─── Rule engine helpers ──────────────────────────────────────────────────────
-function evaluateConditions(conditions, campaign) {
-  return conditions.every(({ type, value }) => {
-    switch (type) {
-      case "acos_gt":        return parseFloat(campaign.acos) > value;
-      case "spend_gt":       return parseFloat(campaign.spend) > value;
-      case "ctr_lt":         return parseFloat(campaign.ctr) < value;
-      case "impressions_lt": return parseInt(campaign.impressions) < value;
-      default: return false;
-    }
-  });
-}
-
-async function executeRuleAction(action, campaign, safety) {
-  const { max_change_pct = 20, min_bid = 0.02, max_bid = 50 } = safety || {};
-  switch (action.type) {
-    case "pause_campaign":
-      await query("UPDATE campaigns SET state = 'paused', updated_at = NOW() WHERE id = $1", [campaign.id]);
-      break;
-    case "adjust_bid_pct": {
-      const pct = Math.min(Math.abs(action.value), max_change_pct) * Math.sign(action.value);
-      await query(
-        `UPDATE keywords SET bid = GREATEST($1, LEAST($2, bid * (1 + $3::numeric / 100))), updated_at = NOW()
-         WHERE campaign_id = $4`,
-        [min_bid, max_bid, pct, campaign.id]
-      );
-      break;
-    }
-    case "adjust_budget_pct": {
-      const pct = Math.min(Math.abs(action.value), max_change_pct) * Math.sign(action.value);
-      await query(
-        "UPDATE campaigns SET daily_budget = GREATEST(0.01, daily_budget * (1 + $1::numeric / 100)), updated_at = NOW() WHERE id = $2",
-        [pct, campaign.id]
-      );
-      break;
-    }
-    case "add_negative_keyword":
-      logger.info("add_negative_keyword: requires API integration", { campaignId: campaign.id, keyword: action.keyword });
-      break;
-  }
 }
 
 module.exports = {
@@ -464,6 +387,7 @@ module.exports = {
   queueMetricsBackfill,
   queueBulkOperation,
   queueRuleEngine,
+  queueRuleExecution,
   queueAiAnalysis,
   startWorkers,
   stopWorkers,

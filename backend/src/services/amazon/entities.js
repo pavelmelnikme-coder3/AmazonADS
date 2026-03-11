@@ -680,45 +680,88 @@ async function syncTargets(profileDbRecord, amazonTargets, adType = "SP") {
 // ─── NEGATIVE KEYWORDS ───────────────────────────────────────────────────────
 
 async function fetchNegativeKeywords(profile) {
-  const base = baseOpts(profile);
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
 
-  const [adGroupLevel, campaignLevel] = await Promise.allSettled([
-    // Ad-group level negative keywords
-    getAll({ ...base, path: "/sp/negativeKeywords", params: { stateFilter: "enabled,archived" }, group: "keywords", responseKey: "negativeKeywords" })
-      .then(r => r.map(kw => ({ ...kw, _level: "ad_group" }))),
-    // Campaign level negative keywords
-    getAll({ ...base, path: "/sp/campaignNegativeKeywords", params: { stateFilter: "enabled,archived" }, group: "keywords", responseKey: "negativeKeywords" })
-      .then(r => r.map(kw => ({ ...kw, _level: "campaign" }))),
-  ]);
+  const COUNTRY_REGION = {
+    US: "NA", CA: "NA", MX: "NA",
+    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
+    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
+    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
+  };
+  const API_URLS = {
+    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+  };
+  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
+  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
 
-  logger.info("fetchNegativeKeywords results", {
-    profileId: base.profileId,
-    adGroupLevel: adGroupLevel.status === "fulfilled" ? adGroupLevel.value.length : `ERROR: ${adGroupLevel.reason?.message}`,
-    campaignLevel: campaignLevel.status === "fulfilled" ? campaignLevel.value.length : `ERROR: ${campaignLevel.reason?.message}`,
-  });
+  const spNegKws = [];
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    const mediaType = "application/vnd.spNegativeKeyword.v3+json";
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "ARCHIVED"] },
+        maxResults: 100,
+      };
+      if (nextToken) body.nextToken = nextToken;
 
-  return [
-    ...(adGroupLevel.status === "fulfilled" ? adGroupLevel.value : []),
-    ...(campaignLevel.status === "fulfilled" ? campaignLevel.value : []),
-  ];
+      const response = await axios.post(`${baseUrl}/sp/negativeKeywords/list`, body, {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile.profile_id),
+          "Content-Type": mediaType,
+          "Accept": mediaType,
+        },
+        timeout: 30000,
+      });
+
+      const data = response.data;
+      const batch = Array.isArray(data.negativeKeywords) ? data.negativeKeywords : [];
+      spNegKws.push(...batch);
+      nextToken = data.nextToken || null;
+      page++;
+    } while (nextToken && page < 400);
+
+    logger.info("SP negativeKeywords fetch complete", { profileId: profile.profile_id, total: spNegKws.length });
+  } catch (err) {
+    logger.error("SP negativeKeywords list failed", {
+      profileId: profile.profile_id,
+      status: err.response?.status,
+      error: JSON.stringify(err.response?.data) || err.message,
+    });
+  }
+  return spNegKws;
 }
 
 async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+  let inserted = 0;
 
   for (const kw of amazonNegKeywords) {
-    const { rows: [camp] } = await query(
-      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
-      [profileDbId, String(kw.campaignId)]
-    );
-
+    // SP v3 negativeKeywords are ad-group level — resolve ad_group and campaign
+    let campId = null;
     let agId = null;
+
     if (kw.adGroupId) {
       const { rows: [ag] } = await query(
-        "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
+        "SELECT id, campaign_id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
         [profileDbId, String(kw.adGroupId)]
       );
-      agId = ag?.id || null;
+      if (ag) { agId = ag.id; campId = ag.campaign_id; }
+    }
+
+    if (!campId && kw.campaignId) {
+      const { rows: [camp] } = await query(
+        "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
+        [profileDbId, String(kw.campaignId)]
+      );
+      campId = camp?.id || null;
     }
 
     await query(
@@ -732,15 +775,18 @@ async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
          raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
       [
         workspaceId, profileDbId,
-        camp?.id || null, agId,
-        String(kw.keywordId), kw.keywordText, kw.matchType || "negativeExact",
-        kw._level || "ad_group", JSON.stringify(kw),
+        campId, agId,
+        String(kw.keywordId), kw.keywordText,
+        (kw.matchType || "NEGATIVE_EXACT").toLowerCase(),
+        agId ? "ad_group" : "campaign",
+        JSON.stringify(kw),
       ]
     );
+    inserted++;
   }
 
-  logger.info("Negative keywords synced", { profileDbId, count: amazonNegKeywords.length });
-  return amazonNegKeywords.length;
+  logger.info("Negative keywords synced", { profileDbId, inserted });
+  return inserted;
 }
 
 // ─── NEGATIVE TARGETS ────────────────────────────────────────────────────────

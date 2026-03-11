@@ -1,6 +1,8 @@
 const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
+const { queueRuleExecution } = require("../jobs/workers");
+const { executeRules } = require("../services/rules/engine");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -96,6 +98,53 @@ router.patch("/:id/toggle", async (req, res, next) => {
     );
     if (!rule) return res.status(404).json({ error: "Rule not found" });
     res.json(rule);
+  } catch (err) { next(err); }
+});
+
+// GET /rules/:id/executions — last 20 executions
+router.get("/:id/executions", async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT * FROM rule_executions
+       WHERE rule_id = $1 AND workspace_id = $2
+       ORDER BY started_at DESC LIMIT 20`,
+      [req.params.id, req.workspaceId]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// POST /rules/:id/run — manual trigger
+router.post("/:id/run", async (req, res, next) => {
+  try {
+    // Verify rule belongs to workspace
+    const { rows } = await query(
+      "SELECT id FROM rules WHERE id = $1 AND workspace_id = $2",
+      [req.params.id, req.workspaceId]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Rule not found" });
+
+    const job = await queueRuleExecution(req.workspaceId, req.params.id);
+    res.json({ queued: true, jobId: job.id });
+  } catch (err) { next(err); }
+});
+
+// GET /rules/:id/preview — dry-run without saving
+router.get("/:id/preview", async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      "SELECT id FROM rules WHERE id = $1 AND workspace_id = $2",
+      [req.params.id, req.workspaceId]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Rule not found" });
+
+    const result = await executeRules(
+      req.workspaceId,
+      req.params.id,
+      { forceDryRun: true, saveExecution: false }
+    );
+    const ruleResult = result.results[0] || { matched: 0, summary: [] };
+    res.json({ matched: ruleResult.matched || 0, actions: ruleResult.summary || [] });
   } catch (err) { next(err); }
 });
 

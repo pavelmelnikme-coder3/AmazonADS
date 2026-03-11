@@ -60,8 +60,9 @@ async function requireWorkspace(req, res, next) {
     return res.status(403).json({ error: "Workspace not found or access denied" });
   }
 
-  req.workspace = rows[0];
-  req.workspaceId = workspaceId;
+  req.workspace    = rows[0];
+  req.workspaceId  = workspaceId;
+  req.workspaceRole = rows[0].workspace_role || null;
   next();
 }
 
