@@ -43,8 +43,11 @@ async function writeAudit({
 // GET /audit
 router.get("/", async (req, res, next) => {
   try {
-    const { entityType, source, actorId, limit = 50, page = 1 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const VALID_LIMITS = [25, 50, 100, 200];
+    const rawLimit = parseInt(req.query.limit);
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 50;
+    const { entityType, source, actorId, sortBy = "date", sortDir = "desc", page = 1 } = req.query;
+    const offset = (parseInt(page) - 1) * limit;
 
     const conditions = ["workspace_id = $1"];
     const params = [req.workspaceId];
@@ -56,16 +59,32 @@ router.get("/", async (req, res, next) => {
 
     const where = "WHERE " + conditions.join(" AND ");
 
-    const { rows } = await query(
-      `SELECT id, actor_name, actor_type, action, entity_type, entity_id, entity_name,
-              before_data, after_data, diff, source, created_at
-       FROM audit_events ${where}
-       ORDER BY created_at DESC
-       LIMIT $${pi++} OFFSET $${pi}`,
-      [...params, parseInt(limit), offset]
-    );
+    const allowedSort = {
+      date:        "created_at",
+      actor_name:  "actor_name",
+      action:      "action",
+      entity_type: "entity_type",
+    };
+    const orderField = allowedSort[sortBy] || "created_at";
+    const orderDir = sortDir === "asc" ? "ASC" : "DESC";
 
-    res.json(rows);
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        `SELECT id, actor_name, actor_type, action, entity_type, entity_id, entity_name,
+                before_data, after_data, diff, source, created_at
+         FROM audit_events ${where}
+         ORDER BY ${orderField} ${orderDir}
+         LIMIT $${pi} OFFSET $${pi + 1}`,
+        [...params, limit, offset]
+      ),
+      query(`SELECT COUNT(*) as total FROM audit_events ${where}`, params),
+    ]);
+
+    const total = parseInt(countRows[0].total);
+    res.json({
+      data: rows,
+      pagination: { total, page: parseInt(page), limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) {
     next(err);
   }

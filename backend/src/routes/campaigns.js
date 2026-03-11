@@ -11,10 +11,13 @@ router.use(requireAuth, requireWorkspace);
 // GET /campaigns
 router.get("/", async (req, res, next) => {
   try {
+    const VALID_LIMITS = [25, 50, 100, 200];
+    const rawLimit = parseInt(req.query.limit);
     const {
       sortBy = "spend", sortDir = "desc",
-      page = 1, limit = 50
+      page = 1,
     } = req.query;
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 100;
 
     // Guard: treat the literal string "undefined" or "all" as no filter
     const status = req.query.status && req.query.status !== "undefined" && req.query.status !== "all"
@@ -24,7 +27,7 @@ router.get("/", async (req, res, next) => {
     const search = req.query.search && req.query.search !== "undefined"
       ? req.query.search.trim() : null;
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const offset = (parseInt(page) - 1) * limit;
     const conditions = ["c.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
@@ -91,7 +94,7 @@ router.get("/", async (req, res, next) => {
        ${where}
        ORDER BY ${orderField} ${orderDir} NULLS LAST
        LIMIT $${pi++} OFFSET $${pi++}`,
-      [...params, parseInt(limit), offset]
+      [...params, limit, offset]
     );
 
     const countResult = await query(
@@ -99,14 +102,10 @@ router.get("/", async (req, res, next) => {
       params.slice(0, pi - 2) // without limit/offset
     );
 
+    const total = parseInt(countResult.rows[0].total);
     res.json({
       data: rows,
-      pagination: {
-        total: parseInt(countResult.rows[0].total),
-        page: parseInt(page),
-        limit: parseInt(limit),
-        pages: Math.ceil(parseInt(countResult.rows[0].total) / parseInt(limit)),
-      },
+      pagination: { total, page: parseInt(page), limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     next(err);

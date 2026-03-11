@@ -10,11 +10,25 @@ router.use(requireAuth, requireWorkspace);
 // GET /alerts/configs
 router.get("/configs", async (req, res, next) => {
   try {
-    const { rows } = await query(
-      "SELECT * FROM alert_configs WHERE workspace_id = $1 ORDER BY created_at DESC",
-      [req.workspaceId]
-    );
-    res.json(rows);
+    const VALID_LIMITS = [10, 25, 50, 100];
+    const rawLimit = parseInt(req.query.limit);
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 25;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const offset = (page - 1) * limit;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        "SELECT * FROM alert_configs WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        [req.workspaceId, limit, offset]
+      ),
+      query("SELECT COUNT(*) as total FROM alert_configs WHERE workspace_id = $1", [req.workspaceId]),
+    ]);
+
+    const total = parseInt(countRows[0].total);
+    res.json({
+      data: rows,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) { next(err); }
 });
 
@@ -83,15 +97,32 @@ router.patch("/configs/:id/toggle", async (req, res, next) => {
 // GET /alerts
 router.get("/", async (req, res, next) => {
   try {
-    const { status = "open" } = req.query;
-    const { rows } = await query(
-      `SELECT ai.*, ac.name as config_name FROM alert_instances ai
-       LEFT JOIN alert_configs ac ON ac.id = ai.config_id
-       WHERE ai.workspace_id = $1 AND ai.status = $2
-       ORDER BY ai.created_at DESC LIMIT 50`,
-      [req.workspaceId, status]
-    );
-    res.json(rows);
+    const VALID_LIMITS = [10, 25, 50, 100];
+    const rawLimit = parseInt(req.query.limit);
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 25;
+    const { status = "open", page: pageParam = 1 } = req.query;
+    const page = Math.max(1, parseInt(pageParam));
+    const offset = (page - 1) * limit;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        `SELECT ai.*, ac.name as config_name FROM alert_instances ai
+         LEFT JOIN alert_configs ac ON ac.id = ai.config_id
+         WHERE ai.workspace_id = $1 AND ai.status = $2
+         ORDER BY ai.created_at DESC LIMIT $3 OFFSET $4`,
+        [req.workspaceId, status, limit, offset]
+      ),
+      query(
+        "SELECT COUNT(*) as total FROM alert_instances WHERE workspace_id = $1 AND status = $2",
+        [req.workspaceId, status]
+      ),
+    ]);
+
+    const total = parseInt(countRows[0].total);
+    res.json({
+      data: rows,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) { next(err); }
 });
 

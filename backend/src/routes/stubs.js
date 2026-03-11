@@ -83,14 +83,28 @@ reportsRouter.use(requireAuth, requireWorkspace);
 
 reportsRouter.get("/", async (req, res, next) => {
   try {
-    const { rows } = await query(
-      `SELECT id, campaign_type, report_type, date_start, date_end,
-              status, row_count, triggered_by, created_at, completed_at, error_message
-       FROM report_requests WHERE workspace_id = $1
-       ORDER BY created_at DESC LIMIT 50`,
-      [req.workspaceId]
-    );
-    res.json(rows);
+    const VALID_LIMITS = [25, 50, 100];
+    const rawLimit = parseInt(req.query.limit);
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 50;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const offset = (page - 1) * limit;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        `SELECT id, campaign_type, report_type, date_start, date_end,
+                status, row_count, triggered_by, created_at, completed_at, error_message
+         FROM report_requests WHERE workspace_id = $1
+         ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+        [req.workspaceId, limit, offset]
+      ),
+      query("SELECT COUNT(*) as total FROM report_requests WHERE workspace_id = $1", [req.workspaceId]),
+    ]);
+
+    const total = parseInt(countRows[0].total);
+    res.json({
+      data: rows,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) { next(err); }
 });
 

@@ -10,11 +10,25 @@ router.use(requireAuth, requireWorkspace);
 // GET /rules
 router.get("/", async (req, res, next) => {
   try {
-    const { rows } = await query(
-      "SELECT * FROM rules WHERE workspace_id = $1 ORDER BY created_at DESC",
-      [req.workspaceId]
-    );
-    res.json(rows);
+    const VALID_LIMITS = [10, 25, 50, 100];
+    const rawLimit = parseInt(req.query.limit);
+    const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 25;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const offset = (page - 1) * limit;
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      query(
+        "SELECT * FROM rules WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        [req.workspaceId, limit, offset]
+      ),
+      query("SELECT COUNT(*) as total FROM rules WHERE workspace_id = $1", [req.workspaceId]),
+    ]);
+
+    const total = parseInt(countRows[0].total);
+    res.json({
+      data: rows,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) { next(err); }
 });
 

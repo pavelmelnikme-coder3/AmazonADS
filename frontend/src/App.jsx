@@ -843,6 +843,8 @@ const CampaignsPage = ({ workspaceId }) => {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("spend");
   const [sortDir, setSortDir] = useState("desc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
   const [editId, setEditId] = useState(null);
   const [editState, setEditState] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -856,15 +858,17 @@ const CampaignsPage = ({ workspaceId }) => {
     else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
   }
 
+  useEffect(() => { setPage(1); }, [filter, search, sortBy, sortDir]);
+
   const { data, loading, reload } = useAsync(
     () => {
       if (!workspaceId) return Promise.resolve({ data: [], pagination: {} });
-      const params = { limit: 100, sortBy, sortDir };
+      const params = { limit: pageSize, page, sortBy, sortDir };
       if (filter && filter !== "all") params.status = filter;
       if (search && search.trim()) params.search = search.trim();
       return get("/campaigns", params);
     },
-    [workspaceId, filter, search, sortBy, sortDir]
+    [workspaceId, filter, search, sortBy, sortDir, page, pageSize]
   );
 
   const campaigns = data?.data || [];
@@ -1031,6 +1035,33 @@ const CampaignsPage = ({ workspaceId }) => {
         }
       </div>
 
+      {(data?.pagination?.total > 0) && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
+            Показывать по:
+            {[25, 50, 100, 200].map(size => (
+              <button key={size} onClick={() => { setPageSize(size); setPage(1); }}
+                className={`btn ${pageSize === size ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>
+            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, data.pagination.total)} из {data.pagination.total.toLocaleString()}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← Назад</button>
+            {getPageRange(page, data.pagination.pages ?? 1).map((p, i) =>
+              p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+              : <button key={p} onClick={() => setPage(p)} className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
+                  style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
+            )}
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setPage(p => Math.min(data.pagination.pages ?? 1, p + 1))} disabled={page === (data.pagination.pages ?? 1)}>Вперёд →</button>
+          </div>
+        </div>
+      )}
+
       {showBudgetModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
           <div className="card fade" style={{ width: 360, padding: "24px 28px" }}>
@@ -1059,10 +1090,12 @@ const ReportsPage = ({ workspaceId }) => {
   const [form, setForm] = useState({ campaignType: "SP", reportLevel: "campaign", startDate: "", endDate: "" });
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
-  const { data: reports, loading, reload } = useAsync(
-    () => workspaceId ? get("/reports") : Promise.resolve([]),
-    [workspaceId]
+  const { data: reportsData, loading, reload } = useAsync(
+    () => workspaceId ? get("/reports", { page, limit: pageSize }) : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, page, pageSize]
   );
 
   const { data: profilesList } = useAsync(
@@ -1129,13 +1162,13 @@ const ReportsPage = ({ workspaceId }) => {
           </div>
           {loading
             ? <div style={{ padding: 30, textAlign: "center" }}><span className="loader" /></div>
-            : !reports?.length
+            : !reportsData?.data?.length
               ? <div style={{ padding: "30px 20px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("reports.noReports")}</div>
               : (
                 <table>
                   <thead><tr><th>{t("reports.colType")}</th><th>{t("reports.colPeriod")}</th><th>{t("reports.colStatus")}</th><th>{t("reports.colRows")}</th><th>{t("reports.colCreated")}</th></tr></thead>
                   <tbody>
-                    {reports.map(r => (
+                    {reportsData.data.map(r => (
                       <tr key={r.id}>
                         <td><span className="badge bg-bl">{r.campaign_type}</span> <span style={{ fontSize: 11, color: "var(--tx3)" }}>{r.report_type}</span></td>
                         <td className="num" style={{ fontSize: 11 }}>{r.date_start} → {r.date_end}</td>
@@ -1152,6 +1185,31 @@ const ReportsPage = ({ workspaceId }) => {
                 </table>
               )
           }
+          {(reportsData?.pagination?.total > 0) && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", flexWrap: "wrap", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--tx2)" }}>
+                {[25, 50, 100].map(size => (
+                  <button key={size} onClick={() => { setPageSize(size); setPage(1); }}
+                    className={`btn ${pageSize === size ? "btn-primary" : "btn-ghost"}`}
+                    style={{ fontSize: 11, padding: "3px 8px" }}>{size}</button>
+                ))}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--tx2)" }}>
+                {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, reportsData.pagination.total)} из {reportsData.pagination.total}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }}
+                  onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>←</button>
+                {getPageRange(page, reportsData.pagination.pages ?? 1).map((p, i) =>
+                  p === "..." ? <span key={`e${i}`} style={{ padding: "0 4px", color: "var(--tx3)" }}>…</span>
+                  : <button key={p} onClick={() => setPage(p)} className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
+                      style={{ fontSize: 11, padding: "3px 7px", minWidth: 28 }}>{p}</button>
+                )}
+                <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }}
+                  onClick={() => setPage(p => Math.min(reportsData.pagination.pages ?? 1, p + 1))} disabled={page === (reportsData.pagination.pages ?? 1)}>→</button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1163,25 +1221,24 @@ const AuditPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [sortBy, setSortBy] = useState("date");
   const [sortDir, setSortDir] = useState("desc");
-
-  const { data: events, loading, reload } = useAsync(
-    () => workspaceId ? get("/audit", { limit: 50 }) : Promise.resolve([]),
-    [workspaceId]
-  );
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
 
   function handleAuditSort(field) {
     if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
-    else { setSortBy(field); setSortDir("asc"); }
+    else { setSortBy(field); setSortDir("asc"); setPage(1); }
   }
 
-  const sorted = events?.length
-    ? [...events].sort((a, b) => {
-        const v1 = a[sortBy] ?? "";
-        const v2 = b[sortBy] ?? "";
-        const cmp = v1 < v2 ? -1 : v1 > v2 ? 1 : 0;
-        return sortDir === "asc" ? cmp : -cmp;
-      })
-    : (events ?? []);
+  const { data: auditData, loading, reload } = useAsync(
+    () => workspaceId
+      ? get("/audit", { limit: pageSize, page, sortBy, sortDir })
+      : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, page, pageSize, sortBy, sortDir]
+  );
+
+  const events = auditData?.data ?? [];
+  const auditTotal = auditData?.pagination?.total ?? 0;
+  const auditPages = auditData?.pagination?.pages ?? 1;
 
   return (
     <div className="fade">
@@ -1195,7 +1252,7 @@ const AuditPage = ({ workspaceId }) => {
       <div className="card" style={{ overflow: "hidden" }}>
         {loading
           ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-          : !events?.length
+          : !events.length
             ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
             : (
               <table>
@@ -1209,7 +1266,7 @@ const AuditPage = ({ workspaceId }) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map(e => (
+                  {events.map(e => (
                     <tr key={e.id}>
                       <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(e.created_at).toLocaleString("ru")}</td>
                       <td style={{ fontSize: 12 }}>{e.actor_name || e.actor_type}</td>
@@ -1223,6 +1280,32 @@ const AuditPage = ({ workspaceId }) => {
             )
         }
       </div>
+      {auditTotal > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
+            Показывать по:
+            {[25, 50, 100, 200].map(size => (
+              <button key={size} onClick={() => { setPageSize(size); setPage(1); }}
+                className={`btn ${pageSize === size ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>
+            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, auditTotal)} из {auditTotal.toLocaleString()}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← Назад</button>
+            {getPageRange(page, auditPages).map((p, i) =>
+              p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+              : <button key={p} onClick={() => setPage(p)} className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
+                  style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
+            )}
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setPage(p => Math.min(auditPages, p + 1))} disabled={page === auditPages}>Вперёд →</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1573,10 +1656,17 @@ const RulesPage = ({ workspaceId }) => {
   const [toast,         setToast]         = useState(null);
   const [running,       setRunning]       = useState({});
 
-  const { data: rules, loading, reload } = useAsync(
-    () => workspaceId ? get("/rules") : Promise.resolve([]),
-    [workspaceId]
+  const [rulesPage, setRulesPage] = useState(1);
+  const [rulesPageSize, setRulesPageSize] = useState(25);
+
+  const { data: rulesData, loading, reload } = useAsync(
+    () => workspaceId
+      ? get("/rules", { page: rulesPage, limit: rulesPageSize })
+      : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, rulesPage, rulesPageSize]
   );
+
+  const rules = rulesData?.data ?? [];
 
   function showToast(msg) {
     setToast(msg);
@@ -1683,7 +1773,7 @@ const RulesPage = ({ workspaceId }) => {
 
       {loading
         ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-        : !rules?.length
+        : !rules.length
           ? <div className="card" style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("rules.noRules")}</div>
           : <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {rules.map(rule => {
@@ -1732,6 +1822,33 @@ const RulesPage = ({ workspaceId }) => {
               })}
             </div>
       }
+
+      {(rulesData?.pagination?.total > 0) && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
+            Показывать по:
+            {[10, 25, 50, 100].map(size => (
+              <button key={size} onClick={() => { setRulesPageSize(size); setRulesPage(1); }}
+                className={`btn ${rulesPageSize === size ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>
+            {((rulesPage - 1) * rulesPageSize) + 1}–{Math.min(rulesPage * rulesPageSize, rulesData.pagination.total)} из {rulesData.pagination.total.toLocaleString()}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setRulesPage(p => Math.max(1, p - 1))} disabled={rulesPage === 1}>← Назад</button>
+            {getPageRange(rulesPage, rulesData.pagination.pages ?? 1).map((p, i) =>
+              p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+              : <button key={p} onClick={() => setRulesPage(p)} className={`btn ${rulesPage === p ? "btn-primary" : "btn-ghost"}`}
+                  style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
+            )}
+            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+              onClick={() => setRulesPage(p => Math.min(rulesData.pagination.pages ?? 1, p + 1))} disabled={rulesPage === (rulesData.pagination.pages ?? 1)}>Вперёд →</button>
+          </div>
+        </div>
+      )}
 
       {/* ── Rule Builder Modal ──────────────────────────────────────────────── */}
       {showModal && createPortal(
@@ -1971,14 +2088,21 @@ const AlertsPage = ({ workspaceId }) => {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24 });
 
-  const { data: configs, loading: cl, reload: reloadConfigs } = useAsync(
-    () => workspaceId ? get("/alerts/configs") : Promise.resolve([]),
-    [workspaceId]
+  const [configPage, setConfigPage] = useState(1);
+  const [configPageSize, setConfigPageSize] = useState(25);
+  const [instancePage, setInstancePage] = useState(1);
+  const [instancePageSize, setInstancePageSize] = useState(25);
+
+  const { data: configsData, loading: cl, reload: reloadConfigs } = useAsync(
+    () => workspaceId ? get("/alerts/configs", { page: configPage, limit: configPageSize }) : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, configPage, configPageSize]
   );
-  const { data: instances, loading: il, reload: reloadInstances } = useAsync(
-    () => workspaceId ? get("/alerts", { status: "open" }) : Promise.resolve([]),
-    [workspaceId]
+  const { data: instancesData, loading: il, reload: reloadInstances } = useAsync(
+    () => workspaceId ? get("/alerts", { status: "open", page: instancePage, limit: instancePageSize }) : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, instancePage, instancePageSize]
   );
+  const configs = configsData?.data ?? [];
+  const instances = instancesData?.data ?? [];
 
   function openCreate() {
     setEditConfig(null);
@@ -2045,114 +2169,168 @@ const AlertsPage = ({ workspaceId }) => {
         {["configs", "instances"].map(tabId => (
           <button key={tabId} onClick={() => setTab(tabId)} className={`btn ${tab === tabId ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
             {t("alerts.tab_" + tabId)}
-            {tabId === "instances" && instances?.length > 0 && (
-              <span className="badge bg-red" style={{ marginLeft: 6, fontSize: 9, padding: "1px 5px" }}>{instances.length}</span>
+            {tabId === "instances" && (instancesData?.pagination?.total > 0) && (
+              <span className="badge bg-red" style={{ marginLeft: 6, fontSize: 9, padding: "1px 5px" }}>{instancesData.pagination.total}</span>
             )}
           </button>
         ))}
       </div>
 
       {tab === "configs" && (
-        <div className="card" style={{ overflow: "hidden" }}>
-          {cl
-            ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-            : !configs?.length
-              ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noAlerts")}</div>
-              : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("alerts.colName")}</th>
-                      <th>{t("alerts.colMetric")}</th>
-                      <th>{t("alerts.colThreshold")}</th>
-                      <th>{t("alerts.colChannels")}</th>
-                      <th>{t("alerts.colCooldown")}</th>
-                      <th>{t("alerts.colActive")}</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {configs.map(config => {
-                      const cond = (() => { try { return typeof config.conditions === "string" ? JSON.parse(config.conditions) : config.conditions; } catch { return {}; } })();
-                      const ch   = (() => { try { return typeof config.channels   === "string" ? JSON.parse(config.channels)   : config.channels;   } catch { return {}; } })();
-                      return (
-                        <tr key={config.id}>
-                          <td style={{ fontWeight: 500 }}>{config.name}</td>
-                          <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{(cond.metric || config.alert_type || "").toUpperCase()}</span></td>
-                          <td className="num">{operLabel(cond.operator)} {cond.value}</td>
-                          <td>
-                            <div style={{ display: "flex", gap: 4 }}>
-                              {ch?.in_app && <span className="badge bg-pur" style={{ fontSize: 9 }}>in-app</span>}
-                              {ch?.email  && <span className="badge bg-grn" style={{ fontSize: 9 }}>email</span>}
-                            </div>
-                          </td>
-                          <td className="num">{config.suppression_hours}h</td>
-                          <td>
-                            <button onClick={() => toggleConfig(config.id)} style={{
-                              width: 34, height: 18, borderRadius: 9, border: "none", cursor: "pointer",
-                              background: config.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s",
-                            }}>
-                              <span style={{ position: "absolute", top: 2, left: config.is_active ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
-                            </button>
-                          </td>
-                          <td>
-                            <div style={{ display: "flex", gap: 4 }}>
-                              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openEdit(config)}>{t("common.edit")}</button>
-                              <button className="btn btn-red"   style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteConfig(config.id)}>✕</button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )
-          }
-        </div>
+        <>
+          <div className="card" style={{ overflow: "hidden" }}>
+            {cl
+              ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+              : !configs.length
+                ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noAlerts")}</div>
+                : (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("alerts.colName")}</th>
+                        <th>{t("alerts.colMetric")}</th>
+                        <th>{t("alerts.colThreshold")}</th>
+                        <th>{t("alerts.colChannels")}</th>
+                        <th>{t("alerts.colCooldown")}</th>
+                        <th>{t("alerts.colActive")}</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {configs.map(config => {
+                        const cond = (() => { try { return typeof config.conditions === "string" ? JSON.parse(config.conditions) : config.conditions; } catch { return {}; } })();
+                        const ch   = (() => { try { return typeof config.channels   === "string" ? JSON.parse(config.channels)   : config.channels;   } catch { return {}; } })();
+                        return (
+                          <tr key={config.id}>
+                            <td style={{ fontWeight: 500 }}>{config.name}</td>
+                            <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{(cond.metric || config.alert_type || "").toUpperCase()}</span></td>
+                            <td className="num">{operLabel(cond.operator)} {cond.value}</td>
+                            <td>
+                              <div style={{ display: "flex", gap: 4 }}>
+                                {ch?.in_app && <span className="badge bg-pur" style={{ fontSize: 9 }}>in-app</span>}
+                                {ch?.email  && <span className="badge bg-grn" style={{ fontSize: 9 }}>email</span>}
+                              </div>
+                            </td>
+                            <td className="num">{config.suppression_hours}h</td>
+                            <td>
+                              <button onClick={() => toggleConfig(config.id)} style={{
+                                width: 34, height: 18, borderRadius: 9, border: "none", cursor: "pointer",
+                                background: config.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s",
+                              }}>
+                                <span style={{ position: "absolute", top: 2, left: config.is_active ? 16 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
+                              </button>
+                            </td>
+                            <td>
+                              <div style={{ display: "flex", gap: 4 }}>
+                                <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openEdit(config)}>{t("common.edit")}</button>
+                                <button className="btn btn-red"   style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteConfig(config.id)}>✕</button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )
+            }
+          </div>
+          {(configsData?.pagination?.total > 0) && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
+                {[10, 25, 50, 100].map(size => (
+                  <button key={size} onClick={() => { setConfigPageSize(size); setConfigPage(1); }}
+                    className={`btn ${configPageSize === size ? "btn-primary" : "btn-ghost"}`}
+                    style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
+                ))}
+              </div>
+              <div style={{ fontSize: 13, color: "var(--tx2)" }}>
+                {((configPage - 1) * configPageSize) + 1}–{Math.min(configPage * configPageSize, configsData.pagination.total)} из {configsData.pagination.total}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+                  onClick={() => setConfigPage(p => Math.max(1, p - 1))} disabled={configPage === 1}>← Назад</button>
+                {getPageRange(configPage, configsData.pagination.pages ?? 1).map((p, i) =>
+                  p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+                  : <button key={p} onClick={() => setConfigPage(p)} className={`btn ${configPage === p ? "btn-primary" : "btn-ghost"}`}
+                      style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
+                )}
+                <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+                  onClick={() => setConfigPage(p => Math.min(configsData.pagination.pages ?? 1, p + 1))} disabled={configPage === (configsData.pagination.pages ?? 1)}>Вперёд →</button>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {tab === "instances" && (
-        <div className="card" style={{ overflow: "hidden" }}>
-          {il
-            ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-            : !instances?.length
-              ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noInstances")}</div>
-              : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>{t("alerts.colTime")}</th>
-                      <th>{t("alerts.colAlert")}</th>
-                      <th>{t("alerts.colSeverity")}</th>
-                      <th>{t("alerts.colEntity")}</th>
-                      <th>{t("alerts.colStatus")}</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {instances.map(inst => (
-                      <tr key={inst.id}>
-                        <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(inst.created_at).toLocaleString()}</td>
-                        <td style={{ fontWeight: 500, fontSize: 12 }}>{inst.config_name || inst.title}</td>
-                        <td>
-                          <span className={`badge ${inst.severity === "critical" || inst.severity === "high" ? "bg-red" : inst.severity === "medium" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 10 }}>
-                            {inst.severity}
-                          </span>
-                        </td>
-                        <td style={{ fontSize: 11, color: "var(--tx2)" }}>{inst.entity_name || "—"}</td>
-                        <td><span className={`badge ${inst.status === "open" ? "bg-amb" : "bg-grn"}`} style={{ fontSize: 10 }}>{inst.status}</span></td>
-                        <td>
-                          {inst.status === "open" && (
-                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => acknowledge(inst.id)}>{t("alerts.acknowledge")}</button>
-                          )}
-                        </td>
+        <>
+          <div className="card" style={{ overflow: "hidden" }}>
+            {il
+              ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+              : !instances.length
+                ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noInstances")}</div>
+                : (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t("alerts.colTime")}</th>
+                        <th>{t("alerts.colAlert")}</th>
+                        <th>{t("alerts.colSeverity")}</th>
+                        <th>{t("alerts.colEntity")}</th>
+                        <th>{t("alerts.colStatus")}</th>
+                        <th></th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )
-          }
-        </div>
+                    </thead>
+                    <tbody>
+                      {instances.map(inst => (
+                        <tr key={inst.id}>
+                          <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(inst.created_at).toLocaleString()}</td>
+                          <td style={{ fontWeight: 500, fontSize: 12 }}>{inst.config_name || inst.title}</td>
+                          <td>
+                            <span className={`badge ${inst.severity === "critical" || inst.severity === "high" ? "bg-red" : inst.severity === "medium" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 10 }}>
+                              {inst.severity}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: 11, color: "var(--tx2)" }}>{inst.entity_name || "—"}</td>
+                          <td><span className={`badge ${inst.status === "open" ? "bg-amb" : "bg-grn"}`} style={{ fontSize: 10 }}>{inst.status}</span></td>
+                          <td>
+                            {inst.status === "open" && (
+                              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => acknowledge(inst.id)}>{t("alerts.acknowledge")}</button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )
+            }
+          </div>
+          {(instancesData?.pagination?.total > 0) && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
+                {[10, 25, 50, 100].map(size => (
+                  <button key={size} onClick={() => { setInstancePageSize(size); setInstancePage(1); }}
+                    className={`btn ${instancePageSize === size ? "btn-primary" : "btn-ghost"}`}
+                    style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
+                ))}
+              </div>
+              <div style={{ fontSize: 13, color: "var(--tx2)" }}>
+                {((instancePage - 1) * instancePageSize) + 1}–{Math.min(instancePage * instancePageSize, instancesData.pagination.total)} из {instancesData.pagination.total}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+                  onClick={() => setInstancePage(p => Math.max(1, p - 1))} disabled={instancePage === 1}>← Назад</button>
+                {getPageRange(instancePage, instancesData.pagination.pages ?? 1).map((p, i) =>
+                  p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+                  : <button key={p} onClick={() => setInstancePage(p)} className={`btn ${instancePage === p ? "btn-primary" : "btn-ghost"}`}
+                      style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
+                )}
+                <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+                  onClick={() => setInstancePage(p => Math.min(instancesData.pagination.pages ?? 1, p + 1))} disabled={instancePage === (instancesData.pagination.pages ?? 1)}>Вперёд →</button>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {showModal && (
