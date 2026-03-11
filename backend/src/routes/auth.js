@@ -82,7 +82,7 @@ router.post(
       const { email, password } = req.body;
 
       const { rows } = await query(
-        "SELECT id, org_id, email, password_hash, name, role, is_active FROM users WHERE email = $1",
+        "SELECT id, org_id, email, password_hash, name, role, is_active, settings FROM users WHERE email = $1",
         [email]
       );
 
@@ -108,7 +108,7 @@ router.post(
       const tokens = generateTokens(user.id);
       res.json({
         ...tokens,
-        user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: user.org_id },
+        user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: user.org_id, settings: user.settings || {} },
         workspaces,
       });
     } catch (err) {
@@ -127,7 +127,25 @@ router.get("/me", requireAuth, async (req, res) => {
     [req.user.id]
   );
 
-  res.json({ user: req.user, workspaces });
+  res.json({ user: { ...req.user, settings: req.user.settings || {} }, workspaces });
+});
+
+// PATCH /auth/me — update user settings
+router.patch("/me", requireAuth, async (req, res, next) => {
+  try {
+    const { settings } = req.body;
+    if (!settings || typeof settings !== "object") {
+      return res.status(400).json({ error: "settings object required" });
+    }
+    const { rows: [user] } = await query(
+      `UPDATE users
+       SET settings = settings || $1::jsonb, updated_at = NOW()
+       WHERE id = $2
+       RETURNING id, email, name, role, settings`,
+      [JSON.stringify(settings), req.user.id]
+    );
+    res.json({ user });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

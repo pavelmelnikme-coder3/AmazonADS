@@ -632,12 +632,47 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
   );
 };
 
+// ─── Dashboard widget registry ────────────────────────────────────────────────
+const WIDGET_DEFS = [
+  { id: "kpi_spend",       label: "Spend",            group: "kpi",   defaultSize: "half", desc: "Total spend for period" },
+  { id: "kpi_sales",       label: "Sales",            group: "kpi",   defaultSize: "half", desc: "Sales for period" },
+  { id: "kpi_acos",        label: "ACOS",             group: "kpi",   defaultSize: "half", desc: "Advertising cost of sales" },
+  { id: "kpi_roas",        label: "ROAS",             group: "kpi",   defaultSize: "half", desc: "Return on ad spend" },
+  { id: "kpi_clicks",      label: "Clicks",           group: "kpi",   defaultSize: "half", desc: "Click count" },
+  { id: "kpi_impressions", label: "Impressions",      group: "kpi",   defaultSize: "half", desc: "Impression count" },
+  { id: "kpi_orders",      label: "Orders",           group: "kpi",   defaultSize: "half", desc: "Order count" },
+  { id: "kpi_ctr",         label: "CTR",              group: "kpi",   defaultSize: "half", desc: "Click-through rate" },
+  { id: "kpi_cpc",         label: "CPC",              group: "kpi",   defaultSize: "half", desc: "Cost per click" },
+  { id: "chart_spend",     label: "Spend Trend",      group: "chart", defaultSize: "full", desc: "Daily spend bar chart" },
+  { id: "chart_trend",     label: "Multi-trend",      group: "chart", defaultSize: "full", desc: "Clicks & sales by day" },
+  { id: "table_campaigns", label: "Top Campaigns",    group: "table", defaultSize: "full", desc: "Best campaigns by spend" },
+  { id: "table_type",      label: "By Campaign Type", group: "table", defaultSize: "full", desc: "SP / SD / SB breakdown" },
+  { id: "widget_alerts",   label: "Alerts",           group: "other", defaultSize: "half", desc: "Active alerts" },
+  { id: "widget_ai",       label: "AI Recs",          group: "other", defaultSize: "full", desc: "AI recommendations" },
+  { id: "widget_sync",     label: "Sync Status",      group: "other", defaultSize: "half", desc: "Profile sync status" },
+];
+const DEFAULT_LAYOUT = [
+  { id: "kpi_spend",       size: "half" },
+  { id: "kpi_sales",       size: "half" },
+  { id: "kpi_acos",        size: "half" },
+  { id: "kpi_roas",        size: "half" },
+  { id: "kpi_clicks",      size: "half" },
+  { id: "kpi_impressions", size: "half" },
+  { id: "chart_spend",     size: "full" },
+  { id: "table_campaigns", size: "full" },
+];
+
 // ─── Overview Page (real data) ────────────────────────────────────────────────
-const OverviewPage = ({ workspaceId }) => {
+const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const { t } = useI18n();
   const [range, setRange] = useState("7");
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState(null);
+  const [editMode, setEditMode] = useState(false);
+  const [layout, setLayout] = useState(() => user?.settings?.dashboardLayout || DEFAULT_LAYOUT);
+  const [saveStatus, setSaveStatus] = useState(null);
+  const saveTimerRef = useRef(null);
+
   const endDate = new Date().toISOString().split("T")[0];
   const startDate = new Date(Date.now() - parseInt(range) * 86400000).toISOString().split("T")[0];
 
@@ -645,16 +680,33 @@ const OverviewPage = ({ workspaceId }) => {
     () => workspaceId ? get("/metrics/summary", { startDate, endDate, workspaceId }) : Promise.resolve(null),
     [workspaceId, range]
   );
-
-  const { data: topCampaigns, loading: tl, reload: reloadTopCampaigns } = useAsync(
+  const { data: topCampaigns, reload: reloadTopCampaigns } = useAsync(
     () => workspaceId ? get("/metrics/top-campaigns", { startDate, endDate, limit: 5 }) : Promise.resolve([]),
     [workspaceId, range]
   );
-
   const { data: profiles, reload: reloadProfiles } = useAsync(
     () => workspaceId ? get("/profiles", { workspaceId }) : Promise.resolve([]),
     [workspaceId]
   );
+  const { data: byType } = useAsync(
+    () => workspaceId ? get("/metrics/by-type", { startDate, endDate }) : Promise.resolve([]),
+    [workspaceId, range]
+  );
+  const { data: alertsData } = useAsync(
+    () => workspaceId ? get("/alerts", { limit: 5 }) : Promise.resolve({ data: [] }),
+    [workspaceId]
+  );
+  const { data: aiRecs } = useAsync(
+    () => workspaceId ? get("/ai/recommendations") : Promise.resolve([]),
+    [workspaceId]
+  );
+
+  // Update layout when user settings load
+  useEffect(() => {
+    if (user?.settings?.dashboardLayout) {
+      setLayout(user.settings.dashboardLayout);
+    }
+  }, [user?.settings?.dashboardLayout]);
 
   async function handleSync() {
     if (syncing) return;
@@ -662,83 +714,328 @@ const OverviewPage = ({ workspaceId }) => {
     try {
       const connections = await get("/connections");
       const activeConnIds = [...new Set(
-        (profiles || [])
-          .filter(p => p.is_attached)
-          .map(p => p.connection_id)
-          .filter(Boolean)
+        (profiles || []).filter(p => p.is_attached).map(p => p.connection_id).filter(Boolean)
       )];
       const toSync = activeConnIds.length
         ? activeConnIds
         : connections.filter(c => c.status === "active").map(c => c.id);
-
       let synced = 0;
       for (const connId of toSync) {
-        try {
-          const r = await post(`/connections/${connId}/sync`, {});
-          synced += r.queued || r.profiles || 1;
-        } catch (e) { /* ignore individual failures */ }
+        try { const r = await post(`/connections/${connId}/sync`, {}); synced += r.queued || r.profiles || 1; } catch {}
       }
       setSyncMsg(`✓ Синхронизация запущена для ${synced} профилей`);
       setTimeout(() => setSyncMsg(null), 4000);
-    } catch (e) {
+    } catch {
       setSyncMsg("⚠ Ошибка синхронизации");
       setTimeout(() => setSyncMsg(null), 4000);
     }
     setSyncing(false);
   }
 
+  const saveLayout = (newLayout) => {
+    setLayout(newLayout);
+    setSaveStatus("saving");
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        await patch("/auth/me", { settings: { dashboardLayout: newLayout } });
+        if (onSettingsUpdate) onSettingsUpdate({ dashboardLayout: newLayout });
+        setSaveStatus("saved");
+        setTimeout(() => setSaveStatus(null), 2000);
+      } catch {
+        setSaveStatus(null);
+      }
+    }, 800);
+  };
+
+  const moveWidget = (idx, dir) => {
+    const next = [...layout];
+    const swap = idx + dir;
+    if (swap < 0 || swap >= next.length) return;
+    [next[idx], next[swap]] = [next[swap], next[idx]];
+    saveLayout(next);
+  };
+  const toggleWidget = (widgetId) => {
+    const exists = layout.find(w => w.id === widgetId);
+    const def = WIDGET_DEFS.find(d => d.id === widgetId);
+    if (exists) {
+      saveLayout(layout.filter(w => w.id !== widgetId));
+    } else {
+      saveLayout([...layout, { id: widgetId, size: def.defaultSize }]);
+    }
+  };
+  const toggleSize = (idx) => {
+    const next = [...layout];
+    next[idx] = { ...next[idx], size: next[idx].size === "full" ? "half" : "full" };
+    saveLayout(next);
+  };
+  const resetLayout = () => saveLayout(DEFAULT_LAYOUT);
+
   const hasData = summary?.totals;
   const totals = summary?.totals || {};
-  const d = summary?.deltas || {};
+  const deltas = summary?.deltas || {};
   const trend = summary?.trend || [];
-
-  const kpis = [
-    { label: t("overview.kpiSpend"), value: hasData ? `$${parseFloat(totals.spend).toLocaleString("en", { maximumFractionDigits: 0 })}` : "—", delta: d.spend, color: "#60A5FA" },
-    { label: t("overview.kpiSales"), value: hasData ? `$${parseFloat(totals.sales).toLocaleString("en", { maximumFractionDigits: 0 })}` : "—", delta: d.sales, color: "#22C55E" },
-    { label: "ACOS", value: hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—", delta: d.acos, color: "#F59E0B" },
-    { label: "ROAS", value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: d.roas, color: "#A78BFA" },
-    { label: t("overview.kpiClicks"), value: hasData ? parseInt(totals.clicks).toLocaleString() : "—", delta: null, color: "#14B8A6" },
-    { label: t("overview.kpiImpressions"), value: hasData ? (parseInt(totals.impressions) / 1000).toFixed(0) + "K" : "—", delta: null, color: "#F472B6" },
-  ];
-
   const spendTrend = trend.map(r => parseFloat(r.spend));
+
+  const fmt$ = v => `$${parseFloat(v || 0).toLocaleString("en", { maximumFractionDigits: 0 })}`;
+  const fmtN = v => parseInt(v || 0).toLocaleString();
+
+  const kpiMap = {
+    kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: spendTrend },
+    kpi_sales:       { label: t("overview.kpiSales"),       value: hasData ? fmt$(totals.sales)       : "—", delta: deltas.sales, color: "#22C55E", spark: [] },
+    kpi_acos:        { label: "ACOS",                        value: hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—", delta: deltas.acos,  color: "#F59E0B", spark: [] },
+    kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: [] },
+    kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: [] },
+    kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: [] },
+    kpi_orders:      { label: "Orders",                      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: [] },
+    kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: [] },
+    kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: [] },
+  };
+
+  const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || (ct || "").slice(0, 3).toUpperCase();
+
+  function renderWidget(item) {
+    if (item.id.startsWith("kpi_")) {
+      const kpi = kpiMap[item.id];
+      if (!kpi) return null;
+      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} loading={sl} />;
+    }
+
+    if (item.id === "chart_spend") {
+      return (
+        <div className="card" style={{ padding: "18px 20px" }}>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("overview.spendByDay")}</div>
+          {trend.length === 0
+            ? <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            : <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64 }}>
+                {trend.map((r, i) => {
+                  const max = Math.max(...trend.map(x => parseFloat(x.spend)));
+                  const h = max > 0 ? Math.max((parseFloat(r.spend) / max) * 56, 3) : 3;
+                  return (
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }} title={`$${parseFloat(r.spend).toFixed(0)}`}>
+                      <div style={{ width: "100%", height: h, background: "linear-gradient(to top, #3B82F6, #60A5FA88)", borderRadius: "3px 3px 0 0" }} />
+                      <span style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)" }}>
+                        {new Date(r.date).toLocaleDateString("en", { weekday: "short" }).slice(0, 2)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+          }
+        </div>
+      );
+    }
+
+    if (item.id === "chart_trend") {
+      const metrics = [
+        { key: "clicks", label: "Clicks", color: "#14B8A6" },
+        { key: "sales",  label: "Sales",  color: "#22C55E" },
+      ];
+      return (
+        <div className="card" style={{ padding: "18px 20px" }}>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Multi-trend</div>
+          {trend.length === 0
+            ? <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {metrics.map(({ key, label, color }) => (
+                  <div key={key}>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginBottom: 4, textTransform: "uppercase" }}>{label}</div>
+                    <Spark data={trend.map(r => parseFloat(r[key] || 0))} color={color} h={28} />
+                  </div>
+                ))}
+              </div>
+          }
+        </div>
+      );
+    }
+
+    if (item.id === "table_campaigns") {
+      return (
+        <div className="card" style={{ overflow: "hidden" }}>
+          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("overview.topCampaigns")}</div>
+          {!topCampaigns?.length
+            ? <div style={{ padding: "20px", textAlign: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            : <table>
+                <thead><tr>
+                  <th>{t("overview.colCampaign")}</th>
+                  <th>{t("overview.colType")}</th>
+                  <th style={{ textAlign: "right" }}>Spend</th>
+                  <th style={{ textAlign: "right" }}>Sales</th>
+                  <th style={{ textAlign: "right" }}>ACOS</th>
+                  <th style={{ textAlign: "right" }}>ROAS</th>
+                </tr></thead>
+                <tbody>
+                  {topCampaigns.map(c => (
+                    <tr key={c.id}>
+                      <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</td>
+                      <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{typeLabel(c.campaign_type)}</span></td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend).toFixed(0)}</td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
+                      <td className="num" style={{ textAlign: "right", color: parseFloat(c.acos) > 20 ? "var(--red)" : "var(--grn)" }}>
+                        {parseFloat(c.acos) > 0 ? `${parseFloat(c.acos).toFixed(1)}%` : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
+                        {parseFloat(c.roas) > 0 ? `${parseFloat(c.roas).toFixed(2)}×` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+          }
+        </div>
+      );
+    }
+
+    if (item.id === "table_type") {
+      const rows = byType || [];
+      return (
+        <div className="card" style={{ overflow: "hidden" }}>
+          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>By Campaign Type</div>
+          {!rows.length
+            ? <div style={{ padding: "20px", textAlign: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            : <table>
+                <thead><tr>
+                  <th>Type</th>
+                  <th style={{ textAlign: "right" }}>Spend</th>
+                  <th style={{ textAlign: "right" }}>Sales</th>
+                  <th style={{ textAlign: "right" }}>ACOS</th>
+                  <th style={{ textAlign: "right" }}>ROAS</th>
+                  <th style={{ textAlign: "right" }}>Clicks</th>
+                </tr></thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={i}>
+                      <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{typeLabel(r.campaign_type)}</span></td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(r.spend || 0).toFixed(0)}</td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{parseFloat(r.sales || 0) > 0 ? `$${parseFloat(r.sales).toFixed(0)}` : "—"}</td>
+                      <td className="num" style={{ textAlign: "right", color: parseFloat(r.acos || 0) > 20 ? "var(--red)" : "var(--grn)" }}>
+                        {parseFloat(r.acos || 0) > 0 ? `${parseFloat(r.acos).toFixed(1)}%` : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
+                        {parseFloat(r.roas || 0) > 0 ? `${parseFloat(r.roas).toFixed(2)}×` : "—"}
+                      </td>
+                      <td className="num" style={{ textAlign: "right" }}>{parseInt(r.clicks || 0).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+          }
+        </div>
+      );
+    }
+
+    if (item.id === "widget_alerts") {
+      const alerts = alertsData?.data || [];
+      return (
+        <div className="card" style={{ padding: "14px 18px" }}>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Alerts</div>
+          {!alerts.length
+            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>No active alerts</div>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {alerts.slice(0, 3).map(a => (
+                  <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                    <span className={`badge ${a.severity === "high" || a.severity === "critical" ? "bg-red" : a.severity === "medium" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 9 }}>{a.severity || "info"}</span>
+                    <span style={{ color: "var(--tx2)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.config_name || a.title || "Alert"}</span>
+                  </div>
+                ))}
+              </div>
+          }
+        </div>
+      );
+    }
+
+    if (item.id === "widget_ai") {
+      const recs = Array.isArray(aiRecs) ? aiRecs : [];
+      return (
+        <div className="card" style={{ padding: "14px 18px" }}>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>AI Recommendations</div>
+          {!recs.length
+            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>No recommendations</div>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {recs.slice(0, 3).map(r => (
+                  <div key={r.id} style={{ borderBottom: "1px solid var(--b1)", paddingBottom: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <span className="badge bg-bl" style={{ fontSize: 9 }}>{r.type || "rec"}</span>
+                      <span className={`badge ${r.risk_level === "high" ? "bg-red" : r.risk_level === "low" ? "bg-grn" : "bg-amb"}`} style={{ fontSize: 9 }}>{r.risk_level || "medium"}</span>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 500 }}>{r.title}</div>
+                  </div>
+                ))}
+              </div>
+          }
+        </div>
+      );
+    }
+
+    if (item.id === "widget_sync") {
+      const syncProfiles = profiles || [];
+      return (
+        <div className="card" style={{ padding: "14px 18px" }}>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Sync Status</div>
+          {!syncProfiles.length
+            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>No profiles</div>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {syncProfiles.slice(0, 5).map(p => (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: p.sync_status === "synced" ? "var(--grn)" : "var(--amb)", display: "inline-block", flexShrink: 0 }} />
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.account_name || p.marketplace || "Profile"}</span>
+                    <span style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{p.sync_status || "?"}</span>
+                  </div>
+                ))}
+              </div>
+          }
+        </div>
+      );
+    }
+
+    return null;
+  }
 
   const activeProfiles = profiles?.filter(p => p.sync_status === "synced") || [];
 
   return (
     <div className="fade">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
+      {/* ── Header ── */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div>
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("overview.title")}</h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>
             {activeProfiles.length > 0
               ? t("overview.profilesSynced", { count: activeProfiles.length })
-              : <span style={{ color: "var(--amb)" }}>{t("overview.noProfilesWarning")}<span style={{ color: "var(--ac2)", cursor: "pointer" }} onClick={() => {}}>{t("overview.connectAmazon")}</span></span>
+              : <span style={{ color: "var(--amb)" }}>{t("overview.noProfilesWarning")}<span style={{ color: "var(--ac2)", cursor: "pointer" }}>{t("overview.connectAmazon")}</span></span>
             }
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {!editMode && saveStatus === "saved" && <span style={{ fontSize: 12, color: "var(--grn)" }}>✓</span>}
           <button
             className="btn btn-ghost"
-            style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}
+            style={{ fontSize: 12, padding: "5px 12px" }}
             onClick={() => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); }}
           >
             ↺ {t("overview.refreshData")}
           </button>
           <button
             className="btn btn-primary"
-            style={{ fontSize: 12, padding: "5px 14px", display: "flex", alignItems: "center", gap: 5 }}
+            style={{ fontSize: 12, padding: "5px 14px" }}
             onClick={handleSync}
             disabled={syncing}
           >
             {syncing ? <span className="loader" style={{ width: 12, height: 12, borderWidth: 2 }} /> : "⟳"}
-            {syncing ? "Синхронизация..." : t("overview.syncAll")}
+            {syncing ? "…" : t("overview.syncAll")}
           </button>
           {["7", "14", "30"].map(d => (
             <button key={d} onClick={() => setRange(d)} className={`btn ${range === d ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
               {d}d
             </button>
           ))}
+          <button
+            onClick={() => setEditMode(e => !e)}
+            className={editMode ? "btn btn-primary" : "btn btn-ghost"}
+            style={{ fontSize: 12, padding: "5px 12px" }}
+          >
+            {editMode ? `✓ ${t("overview.done")}` : `⊞ ${t("overview.customize")}`}
+          </button>
         </div>
       </div>
 
@@ -760,56 +1057,104 @@ const OverviewPage = ({ workspaceId }) => {
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 20 }}>
-        {kpis.map((k, i) => (
-          <KPICard key={i} {...k} loading={sl} spark={i === 0 ? spendTrend : []} />
-        ))}
-      </div>
-
-      {/* Spend trend chart */}
-      {trend.length > 0 && (
-        <div className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("overview.spendByDay")}</div>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64 }}>
-            {trend.map((r, i) => {
-              const max = Math.max(...trend.map(x => parseFloat(x.spend)));
-              const h = max > 0 ? Math.max((parseFloat(r.spend) / max) * 56, 3) : 3;
-              return (
-                <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }} title={`$${parseFloat(r.spend).toFixed(0)}`}>
-                  <div style={{ width: "100%", height: h, background: "linear-gradient(to top, #3B82F6, #60A5FA88)", borderRadius: "3px 3px 0 0" }} />
-                  <span style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)" }}>
-                    {new Date(r.date).toLocaleDateString("en", { weekday: "short" }).slice(0, 2)}
-                  </span>
-                </div>
-              );
-            })}
+      {/* ── Widget palette (edit mode) ── */}
+      {editMode && (
+        <div className="card fade" style={{ padding: "16px 20px", marginBottom: 16, borderColor: "rgba(59,130,246,.3)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)" }}>{t("overview.widgetPalette")}</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {saveStatus === "saved" && <span style={{ fontSize: 12, color: "var(--grn)" }}>✓ {t("overview.saved")}</span>}
+              {saveStatus === "saving" && <span style={{ fontSize: 12, color: "var(--tx3)" }}>{t("overview.saving")}</span>}
+              <button onClick={resetLayout} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }}>↺ {t("overview.resetLayout")}</button>
+            </div>
           </div>
+          {[
+            { key: "kpi",   label: "KPI" },
+            { key: "chart", label: "Charts" },
+            { key: "table", label: "Tables" },
+            { key: "other", label: "Other" },
+          ].map(({ key, label }) => {
+            const groupDefs = WIDGET_DEFS.filter(d => d.group === key);
+            return (
+              <div key={key} style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)" }}>{label}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {groupDefs.map(def => {
+                    const active = layout.some(w => w.id === def.id);
+                    return (
+                      <button
+                        key={def.id}
+                        onClick={() => toggleWidget(def.id)}
+                        title={def.desc}
+                        style={{
+                          padding: "5px 12px", fontSize: 12, borderRadius: 6, cursor: "pointer",
+                          background: active ? "rgba(59,130,246,.15)" : "var(--s2)",
+                          border: active ? "1px solid rgba(59,130,246,.4)" : "1px solid var(--b2)",
+                          color: active ? "var(--ac2)" : "var(--tx2)",
+                          transition: "all .15s", fontFamily: "var(--ui)",
+                        }}
+                      >
+                        {active ? "✓ " : "+ "}{def.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* Top Campaigns */}
-      {(topCampaigns?.length > 0) && (
-        <div className="card" style={{ overflow: "hidden" }}>
-          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("overview.topCampaigns")}</div>
-          <table>
-            <thead><tr><th>{t("overview.colCampaign")}</th><th>{t("overview.colType")}</th><th style={{ textAlign: "right" }}>Spend</th><th style={{ textAlign: "right" }}>Sales</th><th style={{ textAlign: "right" }}>ACOS</th><th style={{ textAlign: "right" }}>ROAS</th></tr></thead>
-            <tbody>
-              {topCampaigns.map(c => (
-                <tr key={c.id}>
-                  <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</td>
-                  <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{c.campaign_type?.replace("sponsored", "").toUpperCase().slice(0, 2)}</span></td>
-                  <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend).toFixed(0)}</td>
-                  <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>${parseFloat(c.sales).toFixed(0)}</td>
-                  <td className="num" style={{ textAlign: "right", color: parseFloat(c.acos) > 20 ? "var(--red)" : "var(--grn)" }}>
-                    {parseFloat(c.acos).toFixed(1)}%
-                  </td>
-                  <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>{parseFloat(c.roas).toFixed(2)}×</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {/* ── Widget grid ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+        {layout.map((item, idx) => {
+          const def = WIDGET_DEFS.find(d => d.id === item.id);
+          if (!def) return null;
+          return (
+            <div
+              key={item.id}
+              style={{
+                gridColumn: item.size === "full" ? "1 / -1" : "span 1",
+                position: "relative",
+                ...(editMode ? { outline: "2px dashed rgba(59,130,246,.4)", outlineOffset: 2, borderRadius: 11 } : {}),
+              }}
+            >
+              {editMode && (
+                <div style={{ position: "absolute", top: 8, right: 8, zIndex: 10, display: "flex", gap: 4 }}>
+                  <button
+                    onClick={() => moveWidget(idx, -1)}
+                    disabled={idx === 0}
+                    style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: idx === 0 ? "not-allowed" : "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center", opacity: idx === 0 ? .4 : 1 }}
+                  >↑</button>
+                  <button
+                    onClick={() => moveWidget(idx, 1)}
+                    disabled={idx === layout.length - 1}
+                    style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: idx === layout.length - 1 ? "not-allowed" : "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center", opacity: idx === layout.length - 1 ? .4 : 1 }}
+                  >↓</button>
+                  {!item.id.startsWith("kpi_") && (
+                    <button
+                      onClick={() => toggleSize(idx)}
+                      title={item.size === "full" ? "Make narrow" : "Make wide"}
+                      style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center" }}
+                    >⇔</button>
+                  )}
+                  <button
+                    onClick={() => toggleWidget(item.id)}
+                    style={{ width: 24, height: 24, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--red)", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  >✕</button>
+                </div>
+              )}
+              {renderWidget(item)}
+            </div>
+          );
+        })}
+        {layout.length === 0 && (
+          <div style={{ gridColumn: "1/-1", padding: 60, textAlign: "center", color: "var(--tx3)", border: "2px dashed var(--b2)", borderRadius: 12 }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>⊞</div>
+            <div>No widgets — click «{t("overview.customize")}» to add</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -3327,8 +3672,12 @@ export default function App() {
 
   const wid = workspace?.id || localStorage.getItem("af_workspace");
 
+  const handleSettingsUpdate = (newSettings) => {
+    setUser(u => ({ ...u, settings: { ...(u?.settings || {}), ...newSettings } }));
+  };
+
   const pages = {
-    overview: <OverviewPage workspaceId={wid} />,
+    overview: <OverviewPage workspaceId={wid} user={user} onSettingsUpdate={handleSettingsUpdate} />,
     campaigns: <CampaignsPage workspaceId={wid} />,
     keywords: <KeywordsPage workspaceId={wid} />,
     reports: <ReportsPage workspaceId={wid} />,

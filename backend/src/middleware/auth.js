@@ -15,7 +15,7 @@ async function requireAuth(req, res, next) {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
 
     const { rows } = await query(
-      "SELECT id, org_id, email, name, role, is_active FROM users WHERE id = $1",
+      "SELECT id, org_id, email, name, role, is_active, settings FROM users WHERE id = $1",
       [payload.userId]
     );
 

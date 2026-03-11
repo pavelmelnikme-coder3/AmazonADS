@@ -66,6 +66,12 @@ export default {
     kpiImpressions: "Показы",
     syncAll: "Синхронизировать",
     refreshData: "Обновить",
+    customize: "Настроить",
+    done: "Готово",
+    resetLayout: "Сброс",
+    saved: "Сохранено",
+    saving: "Сохранение…",
+    widgetPalette: "Доступные виджеты",
   },
   campaigns: {
     title: "Кампании",

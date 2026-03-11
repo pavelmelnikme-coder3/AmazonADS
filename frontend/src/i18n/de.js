@@ -66,6 +66,12 @@ export default {
     kpiImpressions: "Impressionen",
     syncAll: "Synchronisieren",
     refreshData: "Aktualisieren",
+    customize: "Anpassen",
+    done: "Fertig",
+    resetLayout: "Zurücksetzen",
+    saved: "Gespeichert",
+    saving: "Speichern…",
+    widgetPalette: "Verfügbare Widgets",
   },
   campaigns: {
     title: "Kampagnen",

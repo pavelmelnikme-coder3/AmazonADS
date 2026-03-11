@@ -131,6 +131,27 @@ router.get("/top-campaigns", async (req, res, next) => {
   }
 });
 
+// GET /metrics/by-type — campaign type breakdown
+router.get("/by-type", async (req, res, next) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = startDate || new Date(Date.now() - 7*86400000).toISOString().split("T")[0];
+    const end = endDate || new Date().toISOString().split("T")[0];
+    const { rows } = await query(
+      `SELECT campaign_type,
+              SUM(impressions) as impressions, SUM(clicks) as clicks,
+              SUM(cost) as spend, SUM(sales_14d) as sales,
+              CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 END as acos,
+              CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas
+       FROM fact_metrics_daily
+       WHERE workspace_id = $1 AND date BETWEEN $2 AND $3 AND entity_type = 'campaign'
+       GROUP BY campaign_type ORDER BY SUM(cost) DESC`,
+      [req.workspaceId, start, end]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 // POST /metrics/backfill
 // Queue a metrics backfill job for the current workspace (last 60 days by default)
 router.post("/backfill", async (req, res, next) => {
