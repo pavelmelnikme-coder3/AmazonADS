@@ -47,6 +47,7 @@ export default {
     attachSelected: "Подключить выбранные ({count})",
     done: "Готово!",
     toConnections: "К подключениям",
+    schedule: "Расписание",
   },
   overview: {
     title: "Обзор",
@@ -63,6 +64,8 @@ export default {
     kpiSales: "Общие продажи",
     kpiClicks: "Клики",
     kpiImpressions: "Показы",
+    syncAll: "Синхронизировать",
+    refreshData: "Обновить",
   },
   campaigns: {
     title: "Кампании",

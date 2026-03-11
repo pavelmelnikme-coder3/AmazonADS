@@ -13,7 +13,7 @@ profilesRouter.get("/", async (req, res, next) => {
     const { rows } = await query(
       `SELECT p.id, p.profile_id, p.marketplace, p.country_code, p.currency_code,
               p.account_name, p.account_type, p.is_attached, p.sync_status, p.last_synced_at,
-              c.status as connection_status
+              p.connection_id, c.status as connection_status
        FROM amazon_profiles p
        JOIN amazon_connections c ON c.id = p.connection_id
        WHERE c.org_id = $1 ${workspaceId ? "AND p.workspace_id = $2" : ""}

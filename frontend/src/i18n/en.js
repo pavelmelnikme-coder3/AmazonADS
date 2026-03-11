@@ -47,6 +47,7 @@ export default {
     attachSelected: "Connect selected ({count})",
     done: "Done!",
     toConnections: "Back to connections",
+    schedule: "Schedule",
   },
   overview: {
     title: "Overview",
@@ -63,6 +64,8 @@ export default {
     kpiSales: "Total Sales",
     kpiClicks: "Clicks",
     kpiImpressions: "Impressions",
+    syncAll: "Sync Now",
+    refreshData: "Refresh",
   },
   campaigns: {
     title: "Campaigns",

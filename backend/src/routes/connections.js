@@ -192,7 +192,7 @@ router.get("/", async (req, res, next) => {
   try {
     const { rows } = await query(
       `SELECT c.id, c.status, c.amazon_email, c.created_at, c.last_refresh_at,
-              c.error_count, c.last_error,
+              c.error_count, c.last_error, c.sync_schedule,
               count(p.id) as profile_count
        FROM amazon_connections c
        LEFT JOIN amazon_profiles p ON p.connection_id = c.id
@@ -205,6 +205,22 @@ router.get("/", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// PATCH /connections/:id/schedule — update sync schedule
+router.patch("/:id/schedule", requireWorkspace, requireRole("owner", "admin"), async (req, res, next) => {
+  try {
+    const { schedule } = req.body;
+    if (!["hourly", "daily", "weekly"].includes(schedule)) {
+      return res.status(400).json({ error: "schedule must be hourly, daily, or weekly" });
+    }
+    const { rows: [conn] } = await query(
+      "UPDATE amazon_connections SET sync_schedule=$1, updated_at=NOW() WHERE id=$2 AND org_id=$3 RETURNING id, sync_schedule",
+      [schedule, req.params.id, req.orgId]
+    );
+    if (!conn) return res.status(404).json({ error: "Connection not found" });
+    res.json({ id: conn.id, sync_schedule: conn.sync_schedule });
+  } catch (err) { next(err); }
 });
 
 // GET /connections/:id/profiles

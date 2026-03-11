@@ -1,34 +1,58 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleEngine, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
+
+const SCHEDULE_INTERVALS = {
+  hourly: 60 * 60 * 1000,               // 1 hour
+  daily:  23 * 60 * 60 * 1000,          // 23 hours (avoid drift)
+  weekly: 6.5 * 24 * 60 * 60 * 1000,   // 6.5 days
+};
 
 let jobs = [];
 
 async function startScheduler() {
-  // ─── Daily entity sync: every 2 hours ────────────────────────────────────
-  const entitySyncJob = new CronJob(
-    "0 */2 * * *",
-    async () => {
-      logger.info("Cron: Queuing entity sync for all active profiles");
-      try {
-        const { rows } = await query(
-          `SELECT p.id FROM amazon_profiles p
-           JOIN amazon_connections c ON c.id = p.connection_id
-           WHERE p.is_attached = TRUE AND c.status = 'active'`
-        );
-        for (const { id } of rows) {
-          await queueEntitySync(id, ["campaigns", "ad_groups", "keywords", "product_ads", "targets", "negative_keywords", "negative_targets", "portfolios"]);
-        }
-        logger.info(`Cron: Queued entity sync for ${rows.length} profiles`);
-      } catch (err) {
-        logger.error("Cron entity sync failed", { error: err.message });
-      }
-    },
-    null, true, "UTC"
-  );
+  // ─── Smart entity sync: runs every hour, syncs only "due" connections ─────
+  const entitySyncJob = new CronJob("0 * * * *", async () => {
+    logger.info("Cron: Checking connections due for entity sync");
+    try {
+      const { rows: connections } = await query(`
+        SELECT
+          c.id as connection_id,
+          c.sync_schedule,
+          MAX(p.last_synced_at) as last_synced_at,
+          array_agg(p.id) FILTER (WHERE p.is_attached = TRUE) as profile_ids
+        FROM amazon_connections c
+        JOIN amazon_profiles p ON p.connection_id = c.id
+        WHERE c.status = 'active' AND p.is_attached = TRUE
+        GROUP BY c.id, c.sync_schedule
+      `);
 
-  // ─── Daily reports: every day at 06:00 UTC ────────────────────────────────
+      let syncCount = 0;
+      for (const conn of connections) {
+        const interval = SCHEDULE_INTERVALS[conn.sync_schedule] || SCHEDULE_INTERVALS.daily;
+        const lastSync = conn.last_synced_at ? new Date(conn.last_synced_at) : new Date(0);
+        const isDue = (Date.now() - lastSync.getTime()) >= interval;
+
+        if (isDue && conn.profile_ids?.length) {
+          for (const profileId of conn.profile_ids) {
+            await queueEntitySync(profileId, ["campaigns", "ad_groups", "keywords", "product_ads", "targets", "negative_keywords", "negative_targets", "portfolios"]);
+          }
+          syncCount += conn.profile_ids.length;
+          logger.info("Cron: Queued sync for connection", {
+            connectionId: conn.connection_id,
+            schedule: conn.sync_schedule,
+            profiles: conn.profile_ids.length,
+          });
+        }
+      }
+      logger.info(`Cron: Entity sync check complete — queued ${syncCount} profiles`);
+    } catch (err) {
+      logger.error("Cron entity sync failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  // ─── Daily reports: every day at 06:00 UTC ───────────────────────────────
   const reportSyncJob = new CronJob(
     `0 ${process.env.REPORT_SYNC_HOUR_UTC || 6} * * *`,
     async () => {
@@ -37,13 +61,11 @@ async function startScheduler() {
         const yesterday = new Date();
         yesterday.setDate(yesterday.getDate() - 1);
         const dateStr = yesterday.toISOString().split("T")[0];
-
         const { rows } = await query(
           `SELECT p.id FROM amazon_profiles p
            JOIN amazon_connections c ON c.id = p.connection_id
            WHERE p.is_attached = TRUE AND c.status = 'active'`
         );
-
         for (const { id } of rows) {
           for (const [type, level] of [["SP","campaign"],["SB","campaign"],["SD","campaign"]]) {
             await queueReportPipeline(id, type, level, dateStr, dateStr);
@@ -53,12 +75,10 @@ async function startScheduler() {
       } catch (err) {
         logger.error("Cron reports failed", { error: err.message });
       }
-    },
-    null, true, "UTC"
+    }, null, true, "UTC"
   );
 
   // ─── Rule execution: every hour ────────────────────────────────────────────
-  // Queues a targeted execution per workspace; engine filters by schedule_type internally
   const ruleEngineJob = new CronJob(
     "0 * * * *",
     async () => {
@@ -90,7 +110,6 @@ async function startScheduler() {
         const twoDaysAgo = new Date(); twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
         const dateTo   = yesterday.toISOString().split("T")[0];
         const dateFrom = twoDaysAgo.toISOString().split("T")[0];
-
         const { rows } = await query(
           `SELECT DISTINCT p.workspace_id FROM amazon_profiles p
            JOIN amazon_connections c ON c.id = p.connection_id
@@ -130,11 +149,9 @@ async function startScheduler() {
   );
 
   jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob];
-  logger.info("Scheduler started");
+  logger.info("Scheduler started with smart sync scheduling");
 }
 
-function stopScheduler() {
-  jobs.forEach((j) => j.stop());
-}
+function stopScheduler() { jobs.forEach(j => j.stop()); }
 
 module.exports = { startScheduler, stopScheduler };

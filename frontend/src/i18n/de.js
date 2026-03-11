@@ -47,6 +47,7 @@ export default {
     attachSelected: "Ausgewählte verbinden ({count})",
     done: "Fertig!",
     toConnections: "Zurück zu Verbindungen",
+    schedule: "Zeitplan",
   },
   overview: {
     title: "Übersicht",
@@ -63,6 +64,8 @@ export default {
     kpiSales: "Gesamtumsatz",
     kpiClicks: "Klicks",
     kpiImpressions: "Impressionen",
+    syncAll: "Synchronisieren",
+    refreshData: "Aktualisieren",
   },
   campaigns: {
     title: "Kampagnen",

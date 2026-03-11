@@ -348,6 +348,17 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
     }
   }
 
+  const [scheduleUpdating, setScheduleUpdating] = useState(null);
+
+  async function handleScheduleChange(connId, schedule) {
+    setScheduleUpdating(connId);
+    try {
+      await patch(`/connections/${connId}/schedule`, { schedule });
+      setConnections(cs => cs.map(c => c.id === connId ? { ...c, sync_schedule: schedule } : c));
+    } catch (e) { alert("Ошибка: " + e.message); }
+    setScheduleUpdating(null);
+  }
+
   const [backfillState, setBackfillState] = useState({ loading: false, success: false, error: null });
 
   async function triggerMetricsBackfill() {
@@ -406,7 +417,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
           {connections.length > 0 && (
             <div className="card" style={{ marginBottom: 20, overflow: "hidden" }}>
               <table>
-                <thead><tr><th>{t("connect.colAccount")}</th><th>{t("connect.colProfiles")}</th><th>{t("connect.colStatus")}</th><th>{t("connect.colUpdated")}</th><th></th></tr></thead>
+                <thead><tr><th>{t("connect.colAccount")}</th><th>{t("connect.colProfiles")}</th><th>{t("connect.colStatus")}</th><th>{t("connect.schedule")}</th><th>{t("connect.colUpdated")}</th><th></th></tr></thead>
                 <tbody>
                   {connections.map(c => {
                     const rs = rowState[c.id] || {};
@@ -422,6 +433,19 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                         <td><span className="mono" style={{ fontSize: 11, color: "var(--tx2)" }}>{c.id.slice(0, 8)}…</span> {c.amazon_email || ""}</td>
                         <td className="num">{c.profile_count}</td>
                         <td><span className={`badge ${c.status === "active" ? "bg-grn" : "bg-red"}`}>● {c.status}</span></td>
+                        <td>
+                          <select
+                            value={c.sync_schedule || "daily"}
+                            onChange={e => handleScheduleChange(c.id, e.target.value)}
+                            disabled={scheduleUpdating === c.id}
+                            style={{ fontSize: 11, padding: "3px 6px", background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)", cursor: "pointer" }}
+                          >
+                            <option value="hourly">⏰ Каждый час</option>
+                            <option value="daily">📅 Каждый день</option>
+                            <option value="weekly">📆 Каждую неделю</option>
+                          </select>
+                          {scheduleUpdating === c.id && <span className="loader" style={{ width: 10, height: 10, borderWidth: 2, marginLeft: 6, display: "inline-block" }} />}
+                        </td>
                         <td style={{ color: "var(--tx3)", fontSize: 12 }}>{c.last_refresh_at ? new Date(c.last_refresh_at).toLocaleString("ru") : "—"}</td>
                         <td>
                           <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
@@ -612,23 +636,56 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
 const OverviewPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [range, setRange] = useState("7");
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState(null);
   const endDate = new Date().toISOString().split("T")[0];
   const startDate = new Date(Date.now() - parseInt(range) * 86400000).toISOString().split("T")[0];
 
-  const { data: summary, loading: sl } = useAsync(
+  const { data: summary, loading: sl, reload: reloadSummary } = useAsync(
     () => workspaceId ? get("/metrics/summary", { startDate, endDate, workspaceId }) : Promise.resolve(null),
     [workspaceId, range]
   );
 
-  const { data: topCampaigns, loading: tl } = useAsync(
+  const { data: topCampaigns, loading: tl, reload: reloadTopCampaigns } = useAsync(
     () => workspaceId ? get("/metrics/top-campaigns", { startDate, endDate, limit: 5 }) : Promise.resolve([]),
     [workspaceId, range]
   );
 
-  const { data: profiles } = useAsync(
+  const { data: profiles, reload: reloadProfiles } = useAsync(
     () => workspaceId ? get("/profiles", { workspaceId }) : Promise.resolve([]),
     [workspaceId]
   );
+
+  async function handleSync() {
+    if (syncing) return;
+    setSyncing(true); setSyncMsg(null);
+    try {
+      const connections = await get("/connections");
+      const activeConnIds = [...new Set(
+        (profiles || [])
+          .filter(p => p.is_attached)
+          .map(p => p.connection_id)
+          .filter(Boolean)
+      )];
+      const toSync = activeConnIds.length
+        ? activeConnIds
+        : connections.filter(c => c.status === "active").map(c => c.id);
+
+      let synced = 0;
+      for (const connId of toSync) {
+        try {
+          const r = await post(`/connections/${connId}/sync`, {});
+          synced += r.queued || r.profiles || 1;
+        } catch (e) { /* ignore individual failures */ }
+      }
+      setSyncMsg(`✓ Синхронизация запущена для ${synced} профилей`);
+      setTimeout(() => setSyncMsg(null), 4000);
+    } catch (e) {
+      setSyncMsg("⚠ Ошибка синхронизации");
+      setTimeout(() => setSyncMsg(null), 4000);
+    }
+    setSyncing(false);
+  }
 
   const hasData = summary?.totals;
   const totals = summary?.totals || {};
@@ -660,7 +717,23 @@ const OverviewPage = ({ workspaceId }) => {
             }
           </div>
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}
+            onClick={() => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); }}
+          >
+            ↺ {t("overview.refreshData")}
+          </button>
+          <button
+            className="btn btn-primary"
+            style={{ fontSize: 12, padding: "5px 14px", display: "flex", alignItems: "center", gap: 5 }}
+            onClick={handleSync}
+            disabled={syncing}
+          >
+            {syncing ? <span className="loader" style={{ width: 12, height: 12, borderWidth: 2 }} /> : "⟳"}
+            {syncing ? "Синхронизация..." : t("overview.syncAll")}
+          </button>
           {["7", "14", "30"].map(d => (
             <button key={d} onClick={() => setRange(d)} className={`btn ${range === d ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
               {d}d
@@ -668,6 +741,17 @@ const OverviewPage = ({ workspaceId }) => {
           ))}
         </div>
       </div>
+
+      {syncMsg && (
+        <div style={{
+          marginBottom: 12, padding: "8px 14px", borderRadius: 8, fontSize: 13,
+          background: syncMsg.startsWith("✓") ? "rgba(34,197,94,.1)" : "rgba(239,68,68,.1)",
+          color: syncMsg.startsWith("✓") ? "var(--grn)" : "var(--red)",
+          border: `1px solid ${syncMsg.startsWith("✓") ? "rgba(34,197,94,.2)" : "rgba(239,68,68,.2)"}`,
+        }}>
+          {syncMsg}
+        </div>
+      )}
 
       {!hasData && !sl && (
         <div style={{ marginBottom: 16, padding: "14px 18px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.15)", borderRadius: 8, fontSize: 13 }}>
