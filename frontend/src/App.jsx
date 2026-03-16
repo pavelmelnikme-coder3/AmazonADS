@@ -162,6 +162,7 @@ const NAV = [
   { id: "products", icon: "◉" },
   { id: "keywords", icon: "◇" },
   { id: "reports", icon: "≋" },
+  { id: "analytics", icon: "⊞" },
   { id: "rules", icon: "⟁" },
   { id: "alerts", icon: "◎" },
   { id: "ai", icon: "✦" },
@@ -2312,6 +2313,294 @@ function parseRuleJSON(val, fallback) {
   if (typeof val === "string") { try { return JSON.parse(val); } catch { return fallback; } }
   return val;
 }
+// ─── Analytics / Analyst Report Page ─────────────────────────────────────────
+const AnalyticsPage = ({ workspaceId }) => {
+  const { t: tr } = useI18n();
+  const [rangeMode, setRangeMode] = useState("7");
+  const [customStart, setCustomStart] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 7);
+    return d.toISOString().split("T")[0];
+  });
+  const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().split("T")[0]);
+  const [generating, setGenerating] = useState(false);
+  const [showConfig, setShowConfig] = useState(false);
+  const [editRow, setEditRow] = useState(null);
+  const [saveMsg, setSaveMsg] = useState(null);
+  const [tick, setTick] = useState(0);
+
+  const endDate   = rangeMode !== "custom" ? new Date().toISOString().split("T")[0] : customEnd;
+  const startDate = rangeMode !== "custom"
+    ? new Date(Date.now() - parseInt(rangeMode) * 86400000).toISOString().split("T")[0]
+    : customStart;
+
+  const { data: config, loading: cfgLoading } = useAsync(
+    () => workspaceId ? get("/analytics-report/config") : Promise.resolve([]),
+    [workspaceId, tick]
+  );
+
+  const reloadConfig = () => setTick(t => t + 1);
+
+  const handleDownload = async () => {
+    setGenerating(true);
+    try {
+      const token = localStorage.getItem("af_token");
+      const wid   = workspaceId || localStorage.getItem("af_workspace");
+      const url   = `${(import.meta?.env?.VITE_API_URL) || "http://localhost:4000/api/v1"}/analytics-report/download?startDate=${startDate}&endDate=${endDate}`;
+      const resp  = await fetch(url, {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "x-workspace-id": wid,
+        },
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(text);
+      }
+      const blob = await resp.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${startDate.replace(/-/g,"_")}-${endDate.replace(/-/g,"_")}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      alert("Error generating report: " + err.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleSaveRow = async (row) => {
+    try {
+      await post("/analytics-report/config", {
+        ...row,
+        cogs_per_unit:      parseFloat(row.cogs_per_unit)      || 0,
+        shipping_per_unit:  parseFloat(row.shipping_per_unit)  || 0,
+        amazon_fee_pct:     parseFloat(row.amazon_fee_pct)     || -0.15,
+        vat_pct:            parseFloat(row.vat_pct)            || -0.19,
+        google_ads_weekly:  parseFloat(row.google_ads_weekly)  || 0,
+        facebook_ads_weekly:parseFloat(row.facebook_ads_weekly)|| 0,
+        sellable_quota:     parseInt(row.sellable_quota)       || 0,
+        label:              row.label ? parseInt(row.label) : null,
+      });
+      setSaveMsg("✓");
+      setTimeout(() => setSaveMsg(null), 2000);
+      reloadConfig();
+      setEditRow(null);
+    } catch (e) {
+      alert("Save error: " + e.message);
+    }
+  };
+
+  const EMPTY_ROW = {
+    asin:"", sku:"", label:"", product_name:"",
+    cogs_per_unit:0, shipping_per_unit:0,
+    amazon_fee_pct:-0.15, vat_pct:-0.19,
+    google_ads_weekly:0, facebook_ads_weekly:0, sellable_quota:0,
+  };
+
+  const CONFIG_FIELDS = ["asin","sku","label","product_name","cogs_per_unit","shipping_per_unit","amazon_fee_pct","vat_pct","google_ads_weekly","facebook_ads_weekly"];
+
+  return (
+    <div className="fade">
+      {/* ── Header ── */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:20, flexWrap:"wrap", gap:10 }}>
+        <div>
+          <h1 style={{ fontFamily:"var(--disp)", fontSize:22, fontWeight:700, marginBottom:4 }}>
+            {tr("analytics.title")}
+          </h1>
+          <div style={{ fontSize:12, color:"var(--tx3)" }}>{startDate} – {endDate}</div>
+        </div>
+        <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
+          {[["7","7d"],["14","14d"],["30","30d"]].map(([val,label]) => (
+            <button key={val}
+              onClick={() => setRangeMode(val)}
+              className={`btn ${rangeMode===val?"btn-primary":"btn-ghost"}`}
+              style={{ fontSize:12, padding:"5px 10px" }}>
+              {label}
+            </button>
+          ))}
+          <button
+            onClick={() => setRangeMode("custom")}
+            className={`btn ${rangeMode==="custom"?"btn-primary":"btn-ghost"}`}
+            style={{ fontSize:12, padding:"5px 10px" }}
+          >
+            📅 {rangeMode==="custom" ? `${customStart.slice(5)} – ${customEnd.slice(5)}` : "Custom"}
+          </button>
+          {rangeMode === "custom" && (
+            <>
+              <input type="date" value={customStart} max={customEnd}
+                onChange={e => setCustomStart(e.target.value)}
+                style={{ fontSize:12, padding:"4px 8px", borderRadius:6,
+                  background:"var(--s2)", border:"1px solid var(--b2)",
+                  color:"var(--tx)", outline:"none", cursor:"pointer" }} />
+              <span style={{ fontSize:12, color:"var(--tx3)" }}>→</span>
+              <input type="date" value={customEnd} min={customStart}
+                max={new Date().toISOString().split("T")[0]}
+                onChange={e => setCustomEnd(e.target.value)}
+                style={{ fontSize:12, padding:"4px 8px", borderRadius:6,
+                  background:"var(--s2)", border:"1px solid var(--b2)",
+                  color:"var(--tx)", outline:"none", cursor:"pointer" }} />
+            </>
+          )}
+          <button
+            onClick={handleDownload}
+            disabled={generating}
+            className="btn btn-primary"
+            style={{ fontSize:12, padding:"6px 16px", display:"flex", alignItems:"center", gap:6 }}
+          >
+            {generating ? tr("analytics.generating") : <>📥 {tr("analytics.download")}</>}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Info card ── */}
+      <div className="card" style={{ padding:"14px 18px", marginBottom:16,
+        border:"1px solid rgba(59,130,246,.25)", background:"rgba(59,130,246,.05)" }}>
+        <div style={{ fontSize:13, fontWeight:600, marginBottom:6, color:"var(--tx)" }}>Report contents</div>
+        <div style={{ fontSize:12, color:"var(--tx2)", lineHeight:1.8 }}>
+          <b>Sheet_1</b>: All SKUs — SP/SD/SB spend, sales, units, Real ACOS, BSR, P&amp;L formulas ·{" "}
+          <b>Лист1</b>: Summary by product group ·{" "}
+          <b>Лист2</b>: ASIN→SKU→Label reference
+        </div>
+        <div style={{ fontSize:11, color:"var(--tx3)", marginTop:6 }}>
+          Amazon fees, VAT, COGS, Shipping are calculated from cost config below.
+          Without config those columns will be 0.
+        </div>
+      </div>
+
+      {/* ── SKU Cost Config ── */}
+      <div className="card" style={{ overflow:"hidden" }}>
+        <div
+          onClick={() => setShowConfig(c => !c)}
+          style={{ padding:"14px 18px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", cursor:"pointer", userSelect:"none" }}
+        >
+          <div>
+            <div style={{ fontFamily:"var(--disp)", fontSize:14, fontWeight:600 }}>
+              {tr("analytics.configTitle")}
+              {saveMsg && <span style={{ fontSize:12, color:"var(--grn)", marginLeft:10 }}>{saveMsg}</span>}
+            </div>
+            <div style={{ fontSize:12, color:"var(--tx3)", marginTop:2 }}>
+              {tr("analytics.configSubtitle")}
+            </div>
+          </div>
+          <span style={{ fontSize:18, color:"var(--tx3)" }}>{showConfig ? "▲" : "▼"}</span>
+        </div>
+
+        {showConfig && (
+          <>
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ minWidth:900 }}>
+                <thead><tr>
+                  <th>ASIN</th>
+                  <th>SKU</th>
+                  <th style={{ textAlign:"center" }}>Label</th>
+                  <th>Name</th>
+                  <th style={{ textAlign:"right" }}>COGS/unit</th>
+                  <th style={{ textAlign:"right" }}>Ship/unit</th>
+                  <th style={{ textAlign:"right" }}>Amz fee</th>
+                  <th style={{ textAlign:"right" }}>VAT</th>
+                  <th style={{ textAlign:"right" }}>Google€/wk</th>
+                  <th style={{ textAlign:"right" }}>FB€/wk</th>
+                  <th></th>
+                </tr></thead>
+                <tbody>
+                  {cfgLoading ? (
+                    <tr><td colSpan={11} style={{ padding:16, textAlign:"center", color:"var(--tx3)", fontSize:12 }}>Loading…</td></tr>
+                  ) : (config || []).map(row => (
+                    editRow?.id === row.id ? (
+                      <tr key={row.id}>
+                        {CONFIG_FIELDS.map(field => (
+                          <td key={field} style={{ padding:"4px 6px" }}>
+                            <input
+                              value={editRow[field] ?? ""}
+                              onChange={e => setEditRow(r => ({ ...r, [field]: e.target.value }))}
+                              style={{ width:"100%", fontSize:11, padding:"2px 4px",
+                                background:"var(--s2)", border:"1px solid var(--b2)",
+                                borderRadius:4, color:"var(--tx)" }}
+                            />
+                          </td>
+                        ))}
+                        <td style={{ whiteSpace:"nowrap", padding:"4px 8px" }}>
+                          <button onClick={() => handleSaveRow(editRow)}
+                            className="btn btn-primary" style={{ fontSize:10, padding:"2px 8px" }}>
+                            {tr("analytics.save")}
+                          </button>
+                          <button onClick={() => setEditRow(null)}
+                            className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}>✕</button>
+                        </td>
+                      </tr>
+                    ) : (
+                      <tr key={row.id} onClick={() => setEditRow({ ...row })} style={{ cursor:"pointer" }}>
+                        <td style={{ fontFamily:"var(--mono)", fontSize:11 }}>{row.asin}</td>
+                        <td style={{ fontSize:11 }}>{row.sku}</td>
+                        <td style={{ textAlign:"center", fontSize:11 }}>{row.label}</td>
+                        <td style={{ fontSize:11, maxWidth:140, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          {row.product_name}
+                        </td>
+                        <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.cogs_per_unit).toFixed(2)}</td>
+                        <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.shipping_per_unit).toFixed(2)}</td>
+                        <td className="num" style={{ textAlign:"right", fontSize:11 }}>{(parseFloat(row.amazon_fee_pct)*100).toFixed(0)}%</td>
+                        <td className="num" style={{ textAlign:"right", fontSize:11 }}>{(parseFloat(row.vat_pct)*100).toFixed(0)}%</td>
+                        <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.google_ads_weekly).toFixed(2)}</td>
+                        <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.facebook_ads_weekly).toFixed(2)}</td>
+                        <td style={{ color:"var(--tx3)", fontSize:11 }}>✎</td>
+                      </tr>
+                    )
+                  ))}
+
+                  {/* Add new row */}
+                  {editRow?.id === "__new__" ? (
+                    <tr>
+                      {CONFIG_FIELDS.map(field => (
+                        <td key={field} style={{ padding:"4px 6px" }}>
+                          <input
+                            value={editRow[field] ?? ""}
+                            onChange={e => setEditRow(r => ({ ...r, [field]: e.target.value }))}
+                            placeholder={field === "amazon_fee_pct" ? "-0.15" : field === "vat_pct" ? "-0.19" : ""}
+                            style={{ width:"100%", fontSize:11, padding:"2px 4px",
+                              background:"var(--s2)", border:"1px solid var(--ac)",
+                              borderRadius:4, color:"var(--tx)" }}
+                          />
+                        </td>
+                      ))}
+                      <td style={{ whiteSpace:"nowrap", padding:"4px 8px" }}>
+                        <button onClick={() => handleSaveRow(editRow)}
+                          className="btn btn-primary" style={{ fontSize:10, padding:"2px 8px" }}>
+                          {tr("analytics.save")}
+                        </button>
+                        <button onClick={() => setEditRow(null)}
+                          className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}>✕</button>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr>
+                      <td colSpan={11} style={{ padding:"8px 14px" }}>
+                        <button
+                          onClick={() => setEditRow({ ...EMPTY_ROW, id:"__new__" })}
+                          className="btn btn-ghost"
+                          style={{ fontSize:11, padding:"4px 12px" }}>
+                          + {tr("analytics.addProduct")}
+                        </button>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {(!config || config.length === 0) && !editRow && (
+              <div style={{ padding:"16px 18px", color:"var(--tx3)", fontSize:13 }}>
+                {tr("analytics.noConfig")}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const EMPTY_RULE_FORM = {
   name: "", schedule_type: "daily", dry_run: false,
   conditions: [{ field: "acos", operator: "gt", value: 30 }],
@@ -4017,6 +4306,7 @@ export default function App() {
     products: <ProductsPage workspaceId={wid} />,
     keywords: <KeywordsPage workspaceId={wid} />,
     reports: <ReportsPage workspaceId={wid} />,
+    analytics: <AnalyticsPage workspaceId={wid} />,
     rules: <RulesPage workspaceId={wid} />,
     alerts: <AlertsPage workspaceId={wid} />,
     ai: <AIPage workspaceId={wid} />,
