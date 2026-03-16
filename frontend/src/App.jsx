@@ -159,6 +159,7 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
 const NAV = [
   { id: "overview", icon: "⬡" },
   { id: "campaigns", icon: "◈" },
+  { id: "products", icon: "◉" },
   { id: "keywords", icon: "◇" },
   { id: "reports", icon: "≋" },
   { id: "rules", icon: "⟁" },
@@ -663,6 +664,275 @@ const DEFAULT_LAYOUT = [
 ];
 
 // ─── Overview Page (real data) ────────────────────────────────────────────────
+// ─── Products / BSR Page ──────────────────────────────────────────────────────
+const ProductsPage = ({ workspaceId }) => {
+  const { t: tr } = useI18n();
+  const [newAsin, setNewAsin] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [refreshingId, setRefreshingId] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+  const [history, setHistory] = useState({});
+  const [error, setError] = useState(null);
+  const [tick, setTick] = useState(0);
+
+  const { data: products, loading } = useAsync(
+    () => workspaceId ? get("/products") : Promise.resolve([]),
+    [workspaceId, tick]
+  );
+
+  const reload = () => setTick(t => t + 1);
+
+  const handleAdd = async () => {
+    if (!newAsin.trim()) return;
+    setAdding(true); setError(null);
+    try {
+      await post("/products", { asin: newAsin.trim().toUpperCase() });
+      setNewAsin("");
+      reload();
+    } catch (e) {
+      setError(e.message || "Failed to add ASIN");
+    } finally { setAdding(false); }
+  };
+
+  const handleRefresh = async (id) => {
+    setRefreshingId(id); setError(null);
+    try {
+      await post(`/products/${id}/refresh`);
+      reload();
+    } catch (e) {
+      setError(e.message);
+    } finally { setRefreshingId(null); }
+  };
+
+  const handleHistory = async (id) => {
+    if (expandedId === id) { setExpandedId(null); return; }
+    setExpandedId(id);
+    if (!history[id]) {
+      try {
+        const data = await get(`/products/${id}/history`);
+        setHistory(h => ({ ...h, [id]: data }));
+      } catch {}
+    }
+  };
+
+  const handleDelete = async (id) => {
+    await del(`/products/${id}`);
+    reload();
+  };
+
+  return (
+    <div className="fade">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
+            {tr("products.title")}
+          </h1>
+          <div style={{ fontSize: 12, color: "var(--tx3)" }}>
+            {tr("products.spApiWarning")}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={newAsin}
+            onChange={e => setNewAsin(e.target.value.toUpperCase())}
+            onKeyDown={e => e.key === "Enter" && handleAdd()}
+            placeholder="B0XXXXXXXXXX"
+            maxLength={10}
+            style={{
+              padding: "6px 12px", borderRadius: 7, fontSize: 13,
+              background: "var(--s2)", border: "1px solid var(--b2)",
+              color: "var(--tx)", outline: "none", width: 150,
+              fontFamily: "var(--mono)", letterSpacing: "0.05em",
+            }}
+          />
+          <button
+            onClick={handleAdd}
+            disabled={adding || newAsin.length !== 10}
+            className="btn btn-primary"
+            style={{ fontSize: 12, padding: "6px 14px" }}
+          >
+            {adding ? "…" : tr("products.addAsin")}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{
+          background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)",
+          borderRadius: 8, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "var(--red)",
+        }}>
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ color: "var(--tx3)", fontSize: 13 }}>Loading…</div>
+      ) : (!products?.length) ? (
+        <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--tx3)" }}>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>📦</div>
+          <div>{tr("products.noProducts")}</div>
+          <div style={{ fontSize: 12, marginTop: 6, color: "var(--tx3)" }}>
+            Enter a 10-character ASIN above to start tracking
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {products.map(p => {
+            const allRanks = [
+              ...(p.classification_ranks || []),
+              ...(p.display_group_ranks || []),
+            ];
+            const hist = history[p.id] || [];
+            const isExpanded = expandedId === p.id;
+            const isRefreshing = refreshingId === p.id;
+            const bsrUpdated = p.bsr_updated_at
+              ? new Date(p.bsr_updated_at).toLocaleString("en", {
+                  day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+                })
+              : null;
+
+            return (
+              <div key={p.id} className="card" style={{ padding: "16px 20px" }}>
+                <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                  {p.image_url && (
+                    <img
+                      src={p.image_url} alt={p.asin}
+                      style={{ width: 56, height: 56, objectFit: "contain",
+                        borderRadius: 6, background: "var(--s2)", flexShrink: 0 }}
+                    />
+                  )}
+
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 4, flexWrap: "wrap" }}>
+                      <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--ac2)" }}>
+                        {p.asin}
+                      </span>
+                      {p.brand && (
+                        <span className="badge bg-bl" style={{ fontSize: 10 }}>{p.brand}</span>
+                      )}
+                      <span className="badge bg-bl" style={{ fontSize: 9 }}>{p.marketplace_id}</span>
+                      {bsrUpdated && (
+                        <span style={{ fontSize: 10, color: "var(--tx3)", marginLeft: "auto" }}>
+                          Updated: {bsrUpdated}
+                        </span>
+                      )}
+                    </div>
+                    {p.title && (
+                      <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 10,
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {p.title}
+                      </div>
+                    )}
+
+                    {allRanks.length > 0 ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {allRanks.map((r, i) => (
+                          <a
+                            key={i}
+                            href={r.link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              display: "inline-flex", alignItems: "center", gap: 6,
+                              padding: "4px 10px", borderRadius: 20, textDecoration: "none",
+                              background: i === 0 ? "rgba(59,130,246,.15)" : "var(--s2)",
+                              border: `1px solid ${i === 0 ? "rgba(59,130,246,.35)" : "var(--b2)"}`,
+                            }}
+                          >
+                            <span style={{
+                              fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
+                              color: i === 0 ? "var(--ac2)" : "var(--tx)",
+                            }}>
+                              #{r.rank.toLocaleString()}
+                            </span>
+                            <span style={{ fontSize: 11, color: "var(--tx3)" }}>
+                              {r.title}
+                            </span>
+                          </a>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12, color: "var(--tx3)" }}>
+                        No BSR data — configure SP_API_REFRESH_TOKEN in .env
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    <button
+                      onClick={() => handleHistory(p.id)}
+                      className="btn btn-ghost"
+                      style={{ fontSize: 11, padding: "4px 10px" }}
+                    >
+                      {isExpanded ? "▲" : "▼"} {tr("products.history")}
+                    </button>
+                    <button
+                      onClick={() => handleRefresh(p.id)}
+                      disabled={isRefreshing}
+                      className="btn btn-ghost"
+                      style={{ fontSize: 11, padding: "4px 10px" }}
+                    >
+                      {isRefreshing ? "…" : "↻"}
+                    </button>
+                    <button
+                      onClick={() => handleDelete(p.id)}
+                      className="btn btn-red"
+                      style={{ fontSize: 11, padding: "4px 8px" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+
+                {isExpanded && hist.length > 0 && (
+                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--b1)" }}>
+                    <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 8,
+                      fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>
+                      BSR History ({hist.length} points)
+                    </div>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 48 }}>
+                      {hist.map((snap, i) => {
+                        if (!snap.best_rank) return null;
+                        const ranks = hist.filter(s => s.best_rank).map(s => s.best_rank);
+                        const min = Math.min(...ranks);
+                        const max = Math.max(...ranks);
+                        const h = max > min
+                          ? Math.max(((max - snap.best_rank) / (max - min)) * 40 + 8, 4)
+                          : 24;
+                        const date = new Date(snap.captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" });
+                        return (
+                          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column",
+                            alignItems: "center", gap: 2 }}
+                            title={`#${snap.best_rank.toLocaleString()} • ${date}`}>
+                            <div style={{ width: "100%", height: h,
+                              background: "linear-gradient(to top, var(--ac), var(--ac2)88)",
+                              borderRadius: "2px 2px 0 0", transition: "height .2s" }} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between",
+                      fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
+                      <span>{new Date(hist[0]?.captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" })}</span>
+                      <span>Best: #{Math.min(...hist.filter(s => s.best_rank).map(s => s.best_rank)).toLocaleString()}</span>
+                      <span>{new Date(hist[hist.length - 1]?.captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" })}</span>
+                    </div>
+                  </div>
+                )}
+                {isExpanded && hist.length === 0 && (
+                  <div style={{ marginTop: 12, fontSize: 12, color: "var(--tx3)" }}>
+                    No history yet — BSR syncs every 6 hours
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const { t } = useI18n();
   const [rangeMode, setRangeMode] = useState("7");
@@ -3744,6 +4014,7 @@ export default function App() {
   const pages = {
     overview: <OverviewPage workspaceId={wid} user={user} onSettingsUpdate={handleSettingsUpdate} />,
     campaigns: <CampaignsPage workspaceId={wid} />,
+    products: <ProductsPage workspaceId={wid} />,
     keywords: <KeywordsPage workspaceId={wid} />,
     reports: <ReportsPage workspaceId={wid} />,
     rules: <RulesPage workspaceId={wid} />,

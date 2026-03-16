@@ -2,6 +2,7 @@ export default {
   nav: {
     overview: "Обзор",
     campaigns: "Кампании",
+    products: "Товары",
     keywords: "Ключевые слова",
     reports: "Отчёты",
     rules: "Правила",
@@ -73,6 +74,14 @@ export default {
     saving: "Сохранение…",
     widgetPalette: "Доступные виджеты",
     custom: "Период",
+  },
+  products: {
+    title: "Товары и BSR",
+    addAsin: "Добавить ASIN",
+    noProducts: "Нет отслеживаемых товаров",
+    spApiWarning: "SP-API не настроен — добавьте SP_API_* в .env для включения синхронизации BSR",
+    refresh: "Обновить BSR",
+    history: "История",
   },
   campaigns: {
     title: "Кампании",

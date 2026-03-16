@@ -2,6 +2,7 @@ export default {
   nav: {
     overview: "Overview",
     campaigns: "Campaigns",
+    products: "Products",
     keywords: "Keywords",
     reports: "Reports",
     rules: "Rules",
@@ -73,6 +74,14 @@ export default {
     saving: "Saving…",
     widgetPalette: "Available widgets",
     custom: "Custom",
+  },
+  products: {
+    title: "Products & BSR",
+    addAsin: "Add ASIN",
+    noProducts: "No products tracked yet",
+    spApiWarning: "SP-API not configured — add SP_API_* vars to .env to enable BSR sync",
+    refresh: "Refresh BSR",
+    history: "History",
   },
   campaigns: {
     title: "Campaigns",
