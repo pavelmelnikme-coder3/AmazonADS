@@ -72,6 +72,7 @@ export default {
     saved: "Сохранено",
     saving: "Сохранение…",
     widgetPalette: "Доступные виджеты",
+    custom: "Период",
   },
   campaigns: {
     title: "Кампании",

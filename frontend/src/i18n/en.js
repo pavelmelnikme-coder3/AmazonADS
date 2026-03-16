@@ -72,6 +72,7 @@ export default {
     saved: "Saved",
     saving: "Saving…",
     widgetPalette: "Available widgets",
+    custom: "Custom",
   },
   campaigns: {
     title: "Campaigns",

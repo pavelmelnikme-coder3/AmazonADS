@@ -72,6 +72,7 @@ export default {
     saved: "Gespeichert",
     saving: "Speichern…",
     widgetPalette: "Verfügbare Widgets",
+    custom: "Zeitraum",
   },
   campaigns: {
     title: "Kampagnen",

@@ -665,7 +665,12 @@ const DEFAULT_LAYOUT = [
 // ─── Overview Page (real data) ────────────────────────────────────────────────
 const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const { t } = useI18n();
-  const [range, setRange] = useState("7");
+  const [rangeMode, setRangeMode] = useState("7");
+  const [customStart, setCustomStart] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 30);
+    return d.toISOString().split("T")[0];
+  });
+  const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().split("T")[0]);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState(null);
   const [editMode, setEditMode] = useState(false);
@@ -673,16 +678,18 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const [saveStatus, setSaveStatus] = useState(null);
   const saveTimerRef = useRef(null);
 
-  const endDate = new Date().toISOString().split("T")[0];
-  const startDate = new Date(Date.now() - parseInt(range) * 86400000).toISOString().split("T")[0];
+  const endDate   = rangeMode !== "custom" ? new Date().toISOString().split("T")[0] : customEnd;
+  const startDate = rangeMode !== "custom"
+    ? new Date(Date.now() - parseInt(rangeMode) * 86400000).toISOString().split("T")[0]
+    : customStart;
 
   const { data: summary, loading: sl, reload: reloadSummary } = useAsync(
     () => workspaceId ? get("/metrics/summary", { startDate, endDate, workspaceId }) : Promise.resolve(null),
-    [workspaceId, range]
+    [workspaceId, startDate, endDate]
   );
   const { data: topCampaigns, reload: reloadTopCampaigns } = useAsync(
     () => workspaceId ? get("/metrics/top-campaigns", { startDate, endDate, limit: 5 }) : Promise.resolve([]),
-    [workspaceId, range]
+    [workspaceId, startDate, endDate]
   );
   const { data: profiles, reload: reloadProfiles } = useAsync(
     () => workspaceId ? get("/profiles", { workspaceId }) : Promise.resolve([]),
@@ -690,7 +697,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   );
   const { data: byType } = useAsync(
     () => workspaceId ? get("/metrics/by-type", { startDate, endDate }) : Promise.resolve([]),
-    [workspaceId, range]
+    [workspaceId, startDate, endDate]
   );
   const { data: alertsData } = useAsync(
     () => workspaceId ? get("/alerts", { limit: 5 }) : Promise.resolve({ data: [] }),
@@ -775,21 +782,32 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const totals = summary?.totals || {};
   const deltas = summary?.deltas || {};
   const trend = summary?.trend || [];
-  const spendTrend = trend.map(r => parseFloat(r.spend));
+
+  const sparkData = {
+    spend:       trend.map(r => parseFloat(r.spend || 0)),
+    sales:       trend.map(r => parseFloat(r.sales || 0)),
+    acos:        trend.map(r => parseFloat(r.acos || 0)),
+    roas:        trend.map(r => parseFloat(r.roas || 0)),
+    clicks:      trend.map(r => parseFloat(r.clicks || 0)),
+    impressions: trend.map(r => parseFloat(r.impressions || 0)),
+    orders:      trend.map(r => parseFloat(r.orders || 0)),
+    ctr:         trend.map(r => parseFloat(r.ctr || 0)),
+    cpc:         trend.map(r => parseFloat(r.cpc || 0)),
+  };
 
   const fmt$ = v => `$${parseFloat(v || 0).toLocaleString("en", { maximumFractionDigits: 0 })}`;
   const fmtN = v => parseInt(v || 0).toLocaleString();
 
   const kpiMap = {
-    kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: spendTrend },
-    kpi_sales:       { label: t("overview.kpiSales"),       value: hasData ? fmt$(totals.sales)       : "—", delta: deltas.sales, color: "#22C55E", spark: [] },
-    kpi_acos:        { label: "ACOS",                        value: hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—", delta: deltas.acos,  color: "#F59E0B", spark: [] },
-    kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: [] },
-    kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: [] },
-    kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: [] },
-    kpi_orders:      { label: "Orders",                      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: [] },
-    kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: [] },
-    kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: [] },
+    kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: sparkData.spend },
+    kpi_sales:       { label: t("overview.kpiSales"),       value: hasData ? fmt$(totals.sales)       : "—", delta: deltas.sales, color: "#22C55E", spark: sparkData.sales },
+    kpi_acos:        { label: "ACOS",                        value: hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—", delta: deltas.acos,  color: "#F59E0B", spark: sparkData.acos },
+    kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: sparkData.roas },
+    kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: sparkData.clicks },
+    kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: sparkData.impressions },
+    kpi_orders:      { label: "Orders",                      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: sparkData.orders },
+    kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: sparkData.ctr },
+    kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc },
   };
 
   const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || (ct || "").slice(0, 3).toUpperCase();
@@ -998,7 +1016,12 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
       {/* ── Header ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("overview.title")}</h1>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
+            {t("overview.title")}
+            <span style={{ fontSize: 12, color: "var(--tx3)", marginLeft: 10, fontFamily: "var(--mono)", fontWeight: 400 }}>
+              {startDate} – {endDate}
+            </span>
+          </h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>
             {activeProfiles.length > 0
               ? t("overview.profilesSynced", { count: activeProfiles.length })
@@ -1006,7 +1029,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
             }
           </div>
         </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           {!editMode && saveStatus === "saved" && <span style={{ fontSize: 12, color: "var(--grn)" }}>✓</span>}
           <button
             className="btn btn-ghost"
@@ -1024,11 +1047,53 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
             {syncing ? <span className="loader" style={{ width: 12, height: 12, borderWidth: 2 }} /> : "⟳"}
             {syncing ? "…" : t("overview.syncAll")}
           </button>
-          {["7", "14", "30"].map(d => (
-            <button key={d} onClick={() => setRange(d)} className={`btn ${range === d ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
-              {d}d
+          {[["7","7d"],["14","14d"],["30","30d"],["90","90d"]].map(([val,label]) => (
+            <button
+              key={val}
+              onClick={() => setRangeMode(val)}
+              className={`btn ${rangeMode===val ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize: 12, padding: "5px 12px" }}
+            >
+              {label}
             </button>
           ))}
+          <button
+            onClick={() => setRangeMode("custom")}
+            className={`btn ${rangeMode==="custom" ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize: 12, padding: "5px 12px" }}
+          >
+            📅 {rangeMode==="custom"
+              ? `${customStart.slice(5)} – ${customEnd.slice(5)}`
+              : t("overview.custom") || "Custom"}
+          </button>
+          {rangeMode === "custom" && (
+            <>
+              <input
+                type="date"
+                value={customStart}
+                max={customEnd}
+                onChange={e => setCustomStart(e.target.value)}
+                style={{
+                  fontSize: 12, padding: "4px 8px", borderRadius: 6,
+                  background: "var(--s2)", border: "1px solid var(--b2)",
+                  color: "var(--tx)", outline: "none", cursor: "pointer"
+                }}
+              />
+              <span style={{ fontSize: 12, color: "var(--tx3)" }}>→</span>
+              <input
+                type="date"
+                value={customEnd}
+                min={customStart}
+                max={new Date().toISOString().split("T")[0]}
+                onChange={e => setCustomEnd(e.target.value)}
+                style={{
+                  fontSize: 12, padding: "4px 8px", borderRadius: 6,
+                  background: "var(--s2)", border: "1px solid var(--b2)",
+                  color: "var(--tx)", outline: "none", cursor: "pointer"
+                }}
+              />
+            </>
+          )}
           <button
             onClick={() => setEditMode(e => !e)}
             className={editMode ? "btn btn-primary" : "btn btn-ghost"}

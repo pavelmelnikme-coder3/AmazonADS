@@ -44,8 +44,15 @@ router.get("/summary", async (req, res, next) => {
     // Daily trend
     const { rows: trend } = await query(
       `SELECT date,
-         SUM(impressions) as impressions, SUM(clicks) as clicks,
-         SUM(cost) as spend, SUM(sales_14d) as sales
+         SUM(impressions) as impressions,
+         SUM(clicks) as clicks,
+         SUM(cost) as spend,
+         SUM(sales_14d) as sales,
+         SUM(orders_14d) as orders,
+         CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::numeric/SUM(impressions)*100 ELSE 0 END as ctr,
+         CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) ELSE 0 END as cpc,
+         CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 ELSE 0 END as acos,
+         CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) ELSE 0 END as roas
        FROM fact_metrics_daily
        WHERE ${where} AND entity_type = 'campaign'
        GROUP BY date ORDER BY date`,
