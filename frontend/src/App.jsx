@@ -1744,8 +1744,8 @@ const CampaignsPage = ({ workspaceId }) => {
       )}
 
       {showBudgetModal && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div className="card fade" style={{ width: 360, padding: "24px 28px" }}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "24px 16px", zIndex: 1000 }}>
+          <div className="card fade" style={{ width: 360, padding: "24px 28px", margin: "0 auto", flexShrink: 0 }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{t("campaigns.bulkBudgetTitle")}</div>
             <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 14 }}>{t("campaigns.bulkBudgetDesc", { count: selected.size })}</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 20 }}>
@@ -2760,9 +2760,9 @@ const RulesPage = ({ workspaceId }) => {
       {/* ── Rule Form Modal ── */}
       {showForm && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
-          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div className="card" style={{ width:"100%", maxWidth:800, maxHeight:"90vh",
-            overflow:"auto", padding:"24px 28px" }}>
+          display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
+          <div className="card" style={{ width:"100%", maxWidth:800,
+            padding:"24px 28px", margin:"0 auto", flexShrink:0 }}>
             <div style={{ display:"flex", justifyContent:"space-between", marginBottom:20 }}>
               <div style={{ fontFamily:"var(--disp)", fontSize:18, fontWeight:700 }}>
                 {editRule ? "Редактировать правило" : "Новое правило"}
@@ -2983,9 +2983,9 @@ const RulesPage = ({ workspaceId }) => {
       {/* ── Run Result Modal ── */}
       {showResult && runResult[showResult] && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
-          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
-          <div className="card" style={{ width:"100%", maxWidth:700, maxHeight:"80vh",
-            overflow:"auto", padding:"24px 28px" }}>
+          display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
+          <div className="card" style={{ width:"100%", maxWidth:700,
+            padding:"24px 28px", margin:"0 auto", flexShrink:0 }}>
             {(() => {
               const r = runResult[showResult];
               return (
@@ -3443,8 +3443,8 @@ const AlertsPage = ({ workspaceId }) => {
       )}
 
       {showModal && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-          <div className="card fade" style={{ width: 480, padding: "24px 28px" }}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "24px 16px", zIndex: 1000 }}>
+          <div className="card fade" style={{ width: 480, padding: "24px 28px", margin: "0 auto", flexShrink: 0 }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
               {editConfig ? t("alerts.editAlert") : t("alerts.newAlert")}
             </div>
@@ -3721,8 +3721,8 @@ function AIPage({ workspaceId }) {
       {/* Confirm Apply Modal */}
       {confirmRec && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:1000,
-          display:"flex", alignItems:"center", justifyContent:"center" }}>
-          <div className="card" style={{ padding:28, maxWidth:440, width:"90%" }}>
+          display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
+          <div className="card" style={{ padding:28, maxWidth:440, width:"90%", margin:"0 auto", flexShrink:0 }}>
             <div style={{ fontWeight:700, fontSize:16, marginBottom:10 }}>{t("ai.confirmApply")}</div>
             <div style={{ fontSize:13, color:"var(--tx2)", marginBottom:6 }}><strong>{confirmRec.title}</strong></div>
             <div style={{ fontSize:12, color:"var(--tx3)", marginBottom:20 }}>{confirmRec.rationale}</div>
@@ -3739,8 +3739,8 @@ function AIPage({ workspaceId }) {
       {/* Preview Modal */}
       {previewRec && (
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:1000,
-          display:"flex", alignItems:"center", justifyContent:"center" }}>
-          <div className="card" style={{ padding:28, maxWidth:600, width:"90%", maxHeight:"80vh", overflow:"auto" }}>
+          display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
+          <div className="card" style={{ padding:28, maxWidth:600, width:"90%", margin:"0 auto", flexShrink:0 }}>
             <div style={{ fontWeight:700, fontSize:16, marginBottom:14 }}>{t("ai.previewTitle")}: {previewRec.title}</div>
             {previewLoading ? (
               <div style={{ textAlign:"center", padding:30 }}><span className="loader" /></div>
