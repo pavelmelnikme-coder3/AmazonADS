@@ -175,6 +175,40 @@ async function downloadReport(downloadUrl) {
   return JSON.parse(data);
 }
 
+// ─── Resolve Amazon entity ID to local UUID ───────────────────────────────────
+async function resolveEntityId(amazonId, entityType, workspaceId) {
+  if (!amazonId || amazonId === "unknown") return null;
+  try {
+    let result;
+    if (entityType === "keyword") {
+      result = await query(
+        "SELECT id FROM keywords WHERE amazon_keyword_id = $1 AND workspace_id = $2 LIMIT 1",
+        [String(amazonId), workspaceId]
+      );
+    } else if (entityType === "target") {
+      result = await query(
+        "SELECT id FROM targets WHERE amazon_target_id = $1 AND workspace_id = $2 LIMIT 1",
+        [String(amazonId), workspaceId]
+      );
+    } else if (entityType === "ad_group") {
+      result = await query(
+        "SELECT id FROM ad_groups WHERE amazon_ag_id = $1 AND workspace_id = $2 LIMIT 1",
+        [String(amazonId), workspaceId]
+      );
+    } else if (entityType === "campaign") {
+      result = await query(
+        "SELECT id FROM campaigns WHERE amazon_campaign_id = $1 AND workspace_id = $2 LIMIT 1",
+        [String(amazonId), workspaceId]
+      );
+    } else {
+      return null; // advertised_product (ASIN) — no matching table
+    }
+    return result?.rows?.[0]?.id || null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Ingest Report Data into fact_metrics_daily ───────────────────────────────
 /**
  * Parse downloaded report rows and upsert into the fact table.
@@ -184,29 +218,32 @@ async function ingestReportData({ reportRequestId, workspaceId, profileDbId, rep
 
   for (const row of rows) {
     try {
-      const entityId = getEntityId(row, reportLevel);
+      const amazonEntityId = getEntityId(row, reportLevel);
+      const entityUuid     = await resolveEntityId(amazonEntityId, reportLevel, workspaceId);
       const date = row.date || row.startDate;
 
       await query(
         `INSERT INTO fact_metrics_daily
-           (workspace_id, profile_id, date, entity_type, amazon_id,
+           (workspace_id, profile_id, date, entity_type, entity_id, amazon_id,
             campaign_type, impressions, clicks, cost,
             sales_1d, sales_7d, sales_14d, sales_30d,
             orders_1d, orders_7d, orders_14d, orders_30d,
             units_sold, report_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
          ON CONFLICT (profile_id, amazon_id, entity_type, date)
          DO UPDATE SET
            impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks,
            cost = EXCLUDED.cost, sales_14d = EXCLUDED.sales_14d,
            orders_14d = EXCLUDED.orders_14d, units_sold = EXCLUDED.units_sold,
-           report_id = EXCLUDED.report_id`,
+           report_id = EXCLUDED.report_id,
+           entity_id = COALESCE(EXCLUDED.entity_id, fact_metrics_daily.entity_id)`,
         [
           workspaceId,
           profileDbId,
           date,
           reportLevel,
-          entityId,
+          entityUuid,
+          amazonEntityId,
           row.campaignType || "SP",
           row.impressions || 0,
           row.clicks || 0,
@@ -354,7 +391,7 @@ function getEntityId(row, level) {
     campaign:           "campaignId",
     ad_group:           "adGroupId",
     keyword:            "keywordId",
-    target:             "keyword",        // spTargeting groupBy=targeting uses keyword as id
+    target:             "keywordId",      // spTargeting: use numeric keywordId for resolution
     advertised_product: "advertisedAsin", // spAdvertisedProduct — no adId in columns
   };
   return String(row[idFields[level]] || row.campaignId || "unknown");

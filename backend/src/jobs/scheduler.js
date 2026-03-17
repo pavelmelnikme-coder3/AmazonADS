@@ -67,7 +67,14 @@ async function startScheduler() {
            WHERE p.is_attached = TRUE AND c.status = 'active'`
         );
         for (const { id } of rows) {
-          for (const [type, level] of [["SP","campaign"],["SB","campaign"],["SD","campaign"]]) {
+          for (const [type, level] of [
+            ["SP", "campaign"],
+            ["SP", "keyword"],
+            ["SP", "target"],
+            ["SP", "advertised_product"],
+            ["SB", "campaign"],
+            ["SD", "campaign"],
+          ]) {
             await queueReportPipeline(id, type, level, dateStr, dateStr);
           }
         }

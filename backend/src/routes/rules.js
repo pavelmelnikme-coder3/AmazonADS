@@ -72,7 +72,7 @@ async function executeRule(rule, workspaceId, dryRun = false) {
        k.id, k.keyword_text, k.match_type, k.state, k.bid,
        k.campaign_id, k.ad_group_id,
        c.name  AS campaign_name, c.campaign_type,
-       ag.name AS ad_group_name,
+       ag.name AS ad_group_name, ag.amazon_ag_id,
        COALESCE(SUM(m.clicks), 0)      AS clicks,
        COALESCE(SUM(m.cost),   0)      AS spend,
        COALESCE(SUM(m.sales_14d), 0)   AS sales,
@@ -90,7 +90,8 @@ async function executeRule(rule, workspaceId, dryRun = false) {
      JOIN campaigns  c  ON c.id  = k.campaign_id
      JOIN ad_groups  ag ON ag.id = k.ad_group_id
      LEFT JOIN fact_metrics_daily m
-       ON m.entity_id = k.id AND m.entity_type = 'keyword'
+       ON m.amazon_id = k.amazon_keyword_id
+       AND m.entity_type = 'keyword'
        AND m.date BETWEEN $${pi++} AND $${pi++}
      WHERE ${kConds.join(" AND ")}
      GROUP BY k.id, k.keyword_text, k.match_type, k.state, k.bid,
