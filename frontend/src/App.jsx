@@ -1743,7 +1743,7 @@ const CampaignsPage = ({ workspaceId }) => {
         </div>
       )}
 
-      {showBudgetModal && (
+      {showBudgetModal && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "24px 16px", zIndex: 1000 }}>
           <div className="card fade" style={{ width: 360, padding: "24px 28px", margin: "0 auto", flexShrink: 0 }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{t("campaigns.bulkBudgetTitle")}</div>
@@ -1759,7 +1759,8 @@ const CampaignsPage = ({ workspaceId }) => {
               <button className="btn btn-ghost" onClick={() => setShowBudgetModal(false)}>{t("common.cancel")}</button>
             </div>
           </div>
-        </div>
+        </div>,
+      document.body
       )}
     </div>
   );
@@ -2758,7 +2759,7 @@ const RulesPage = ({ workspaceId }) => {
       </div>
 
       {/* ── Rule Form Modal ── */}
-      {showForm && (
+      {showForm && createPortal(
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
           display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
           <div className="card" style={{ width:"100%", maxWidth:800,
@@ -2977,11 +2978,12 @@ const RulesPage = ({ workspaceId }) => {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+      document.body
       )}
 
       {/* ── Run Result Modal ── */}
-      {showResult && runResult[showResult] && (
+      {showResult && runResult[showResult] && createPortal(
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
           display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
           <div className="card" style={{ width:"100%", maxWidth:700,
@@ -3055,7 +3057,8 @@ const RulesPage = ({ workspaceId }) => {
               );
             })()}
           </div>
-        </div>
+        </div>,
+      document.body
       )}
 
       {/* ── Rules List ── */}
@@ -3442,7 +3445,7 @@ const AlertsPage = ({ workspaceId }) => {
         </>
       )}
 
-      {showModal && (
+      {showModal && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "24px 16px", zIndex: 1000 }}>
           <div className="card fade" style={{ width: 480, padding: "24px 28px", margin: "0 auto", flexShrink: 0 }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
@@ -3496,7 +3499,8 @@ const AlertsPage = ({ workspaceId }) => {
               <button className="btn btn-ghost" onClick={() => setShowModal(false)}>{t("common.cancel")}</button>
             </div>
           </div>
-        </div>
+        </div>,
+      document.body
       )}
     </div>
   );
@@ -3719,7 +3723,7 @@ function AIPage({ workspaceId }) {
       )}
 
       {/* Confirm Apply Modal */}
-      {confirmRec && (
+      {confirmRec && createPortal(
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:1000,
           display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
           <div className="card" style={{ padding:28, maxWidth:440, width:"90%", margin:"0 auto", flexShrink:0 }}>
@@ -3733,11 +3737,12 @@ function AIPage({ workspaceId }) {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+      document.body
       )}
 
       {/* Preview Modal */}
-      {previewRec && (
+      {previewRec && createPortal(
         <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:1000,
           display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
           <div className="card" style={{ padding:28, maxWidth:600, width:"90%", margin:"0 auto", flexShrink:0 }}>
@@ -3771,7 +3776,8 @@ function AIPage({ workspaceId }) {
               )}
             </div>
           </div>
-        </div>
+        </div>,
+      document.body
       )}
 
       {/* ── Header ── */}
