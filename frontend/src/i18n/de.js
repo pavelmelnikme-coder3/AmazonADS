@@ -134,7 +134,10 @@ export default {
   rules: {
     title: "Regelwerk",
     subtitle: "Automatische Optimierungsregeln — stündlich oder täglich ausgeführt",
+    new: "Neue Regel",
     newRule: "+ Neue Regel",
+    inactive: "Inaktiv",
+    active: "Aktiv",
     editRule: "Regel bearbeiten",
     noRules: "Noch keine Regeln. Erstellen Sie Ihre erste Automatisierungsregel.",
     colName: "Name",
@@ -171,6 +174,12 @@ export default {
     neverRun: "Noch nie ausgeführt",
     queued: "Regel zur Ausführung eingereiht!",
     noMatches: "Keine Entitäten entsprechen diesen Bedingungen",
+    conditionsTitle: "Bedingungen (AND)",
+    actionsTitle: "Aktionen",
+    scopeTitle: "Bereich",
+    allKeywords: "Alle Keywords",
+    applied: "angewendet",
+    confirmDelete: "Regel löschen?",
   },
   alerts: {
     title: "Warnungen",

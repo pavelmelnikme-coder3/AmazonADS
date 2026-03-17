@@ -2602,444 +2602,584 @@ const AnalyticsPage = ({ workspaceId }) => {
 };
 
 const EMPTY_RULE_FORM = {
-  name: "", schedule_type: "daily", dry_run: false,
-  conditions: [{ field: "acos", operator: "gt", value: 30 }],
-  actions:    [{ type: "pause_campaign" }],
-  safety:     { max_change_pct: 20, min_bid: 0.02, max_bid: 50, min_budget: 1, max_budget: 10000 },
+  name: "", description: "", dry_run: false, is_active: true,
+  conditions: [{ metric: "clicks", op: "gte", value: "30" }],
+  actions:    [{ type: "pause_keyword", value: "" }],
+  scope:  { campaign_type: "", campaign_ids: [], ad_group_ids: [], match_types: [] },
+  safety: { min_bid: "0.02", max_bid: "50" },
 };
+
+const RULE_METRICS = [
+  { value:"clicks",      label:"Клики" },
+  { value:"spend",       label:"Расход (€)" },
+  { value:"sales",       label:"Продажи (€)" },
+  { value:"orders",      label:"Заказы" },
+  { value:"impressions", label:"Показы" },
+  { value:"acos",        label:"ACOS (%)" },
+  { value:"roas",        label:"ROAS (x)" },
+  { value:"ctr",         label:"CTR (%)" },
+  { value:"cpc",         label:"CPC (€)" },
+];
+const RULE_OPS = [
+  { value:"gte", label:"≥" },
+  { value:"gt",  label:">" },
+  { value:"lte", label:"≤" },
+  { value:"lt",  label:"<" },
+  { value:"eq",  label:"=" },
+  { value:"neq", label:"≠" },
+];
+const RULE_ACTIONS_LIST = [
+  { value:"pause_keyword",  label:"⏸ Остановить ключевое слово" },
+  { value:"enable_keyword", label:"▶ Запустить ключевое слово" },
+  { value:"adjust_bid_pct", label:"⚡ Изменить ставку на %" },
+  { value:"set_bid",        label:"🎯 Установить ставку" },
+];
+const RULE_MATCH_TYPES = [
+  { value:"exact",  label:"Exact" },
+  { value:"phrase", label:"Phrase" },
+  { value:"broad",  label:"Broad" },
+];
+const RULE_CAMP_TYPES = [
+  { value:"",                   label:"Все типы" },
+  { value:"sponsoredProducts",  label:"Sponsored Products" },
+  { value:"sponsoredBrands",    label:"Sponsored Brands" },
+  { value:"sponsoredDisplay",   label:"Sponsored Display" },
+];
 
 // ─── Rules Page ───────────────────────────────────────────────────────────────
 const RulesPage = ({ workspaceId }) => {
   const { t } = useI18n();
-  const [showModal,     setShowModal]     = useState(false);
-  const [editRule,      setEditRule]      = useState(null);
-  const [saving,        setSaving]        = useState(false);
-  const [form,          setForm]          = useState(EMPTY_RULE_FORM);
-  const [showSafety,    setShowSafety]    = useState(false);
-  const [historyRule,   setHistoryRule]   = useState(null);
-  const [historyData,   setHistoryData]   = useState(null);
-  const [expandedExec,  setExpandedExec]  = useState(null);
-  const [previewRule,   setPreviewRule]   = useState(null);
-  const [previewData,   setPreviewData]   = useState(null);
-  const [previewLoad,   setPreviewLoad]   = useState(false);
-  const [toast,         setToast]         = useState(null);
-  const [running,       setRunning]       = useState({});
+  const [showForm,   setShowForm]   = useState(false);
+  const [editRule,   setEditRule]   = useState(null);
+  const [form,       setForm]       = useState(EMPTY_RULE_FORM);
+  const [adGroups,   setAdGroups]   = useState([]);
+  const [runningId,  setRunningId]  = useState(null);
+  const [runResult,  setRunResult]  = useState({});
+  const [showResult, setShowResult] = useState(null);
+  const [toast,      setToast]      = useState(null);
 
-  const [rulesPage, setRulesPage] = useState(1);
-  const [rulesPageSize, setRulesPageSize] = useState(25);
+  const [page, setPage] = useState(1);
 
   const { data: rulesData, loading, reload } = useAsync(
-    () => workspaceId
-      ? get("/rules", { page: rulesPage, limit: rulesPageSize })
-      : Promise.resolve({ data: [], pagination: {} }),
-    [workspaceId, rulesPage, rulesPageSize]
+    () => workspaceId ? get("/rules", { page, limit: 25 }) : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, page]
   );
+  const { data: campaigns } = useAsync(
+    () => workspaceId ? get("/rules/campaigns") : Promise.resolve([]),
+    [workspaceId]
+  );
+  const rules      = rulesData?.data       || [];
+  const pagination = rulesData?.pagination || {};
 
-  const rules = rulesData?.data ?? [];
+  // Load ad groups when scope campaigns change
+  useEffect(() => {
+    if (!form.scope?.campaign_ids?.length) { setAdGroups([]); return; }
+    Promise.all(form.scope.campaign_ids.map(cid => get("/rules/ad-groups", { campaignId: cid })))
+      .then(results => setAdGroups(results.flat())).catch(() => {});
+  }, [JSON.stringify(form.scope?.campaign_ids)]);
 
-  function showToast(msg) {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  }
-
-  function openCreate() {
-    setEditRule(null); setForm(EMPTY_RULE_FORM); setShowSafety(false); setShowModal(true);
-  }
-
-  function openEdit(rule) {
-    setEditRule(rule);
-    const conds = parseRuleJSON(rule.conditions, EMPTY_RULE_FORM.conditions);
-    const acts  = parseRuleJSON(rule.actions,    EMPTY_RULE_FORM.actions);
-    const saf   = parseRuleJSON(rule.safety,     EMPTY_RULE_FORM.safety);
+  const openNew = () => { setForm(EMPTY_RULE_FORM); setEditRule(null); setShowForm(true); };
+  const openEdit = (rule) => {
+    const parse = (v, fb) => { if (!v) return fb; if (typeof v === "string") { try { return JSON.parse(v); } catch { return fb; } } return v; };
     setForm({
-      name: rule.name, schedule_type: rule.schedule_type || "daily", dry_run: !!rule.dry_run,
-      conditions: Array.isArray(conds) ? conds : [conds],
-      actions:    Array.isArray(acts)  ? acts  : [acts],
-      safety:     saf || EMPTY_RULE_FORM.safety,
+      name:        rule.name,
+      description: rule.description || "",
+      dry_run:     !!rule.dry_run,
+      is_active:   rule.is_active !== false,
+      conditions:  parse(rule.conditions, EMPTY_RULE_FORM.conditions),
+      actions:     parse(rule.actions,    EMPTY_RULE_FORM.actions),
+      scope:       parse(rule.scope,      EMPTY_RULE_FORM.scope),
+      safety:      parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
-    setShowSafety(false); setShowModal(true);
-  }
+    setEditRule(rule); setShowForm(true);
+  };
 
-  async function saveRule() {
+  const saveRule = async () => {
     if (!form.name) return alert(t("rules.alertName"));
-    setSaving(true);
     try {
-      if (editRule) {
-        await apiFetch(`/rules/${editRule.id}`, { method: "PUT", body: JSON.stringify(form) });
-      } else {
-        await post("/rules", form);
-      }
-      reload(); setShowModal(false);
+      editRule ? await patch(`/rules/${editRule.id}`, form) : await post("/rules", form);
+      setShowForm(false); reload();
     } catch (e) { alert(t("common.error") + e.message); }
-    setSaving(false);
-  }
+  };
 
-  async function deleteRule(id) {
+  const deleteRule = async (id) => {
     if (!confirm(t("rules.confirmDelete"))) return;
     await del(`/rules/${id}`); reload();
-  }
+  };
 
-  async function toggleRule(id) {
-    await patch(`/rules/${id}/toggle`); reload();
-  }
+  const toggleActive = async (rule) => {
+    await patch(`/rules/${rule.id}`, { is_active: !rule.is_active }); reload();
+  };
 
-  async function runNow(rule) {
-    setRunning(r => ({ ...r, [rule.id]: true }));
+  const runRule = async (id, dryRun) => {
+    setRunningId(id);
     try {
-      await post(`/rules/${rule.id}/run`, {});
-      showToast(t("rules.queued"));
-      setTimeout(() => { reload(); setRunning(r => ({ ...r, [rule.id]: false })); }, 3000);
-    } catch (e) {
-      alert(t("common.error") + e.message);
-      setRunning(r => ({ ...r, [rule.id]: false }));
-    }
-  }
+      const result = await post(`/rules/${id}/run`, { dry_run: dryRun });
+      setRunResult(r => ({ ...r, [id]: result }));
+      setShowResult(id);
+      reload();
+    } catch (e) { alert("Run error: " + e.message); }
+    finally { setRunningId(null); }
+  };
 
-  async function openHistory(rule) {
-    setHistoryRule(rule); setHistoryData(null); setExpandedExec(null);
-    try { setHistoryData(await get(`/rules/${rule.id}/executions`)); }
-    catch { setHistoryData([]); }
-  }
+  // Condition helpers
+  const updCond = (i, f, v) => setForm(fm => { const c = [...fm.conditions]; c[i] = { ...c[i], [f]: v }; return { ...fm, conditions: c }; });
+  const remCond = (i)       => setForm(f => ({ ...f, conditions: f.conditions.filter((_,idx) => idx !== i) }));
+  const addCond = ()        => setForm(f => ({ ...f, conditions: [...f.conditions, { metric:"clicks", op:"gte", value:"10" }] }));
 
-  async function openPreview(rule) {
-    setPreviewRule(rule); setPreviewData(null); setPreviewLoad(true);
-    try { setPreviewData(await get(`/rules/${rule.id}/preview`)); }
-    catch (e) { setPreviewData({ matched: 0, actions: [], error: e.message }); }
-    setPreviewLoad(false);
-  }
+  // Action helpers
+  const updAct = (i, f, v) => setForm(fm => { const a = [...fm.actions]; a[i] = { ...a[i], [f]: v }; return { ...fm, actions: a }; });
+  const remAct = (i)       => setForm(f => ({ ...f, actions: f.actions.filter((_,idx) => idx !== i) }));
+  const addAct = ()        => setForm(f => ({ ...f, actions: [...f.actions, { type:"pause_keyword", value:"" }] }));
 
-  function updCond(i, f, v) {
-    setForm(fm => { const c = [...fm.conditions]; c[i] = { ...c[i], [f]: v }; return { ...fm, conditions: c }; });
-  }
-  function updAct(i, f, v) {
-    setForm(fm => { const a = [...fm.actions]; a[i] = { ...a[i], [f]: v }; return { ...fm, actions: a }; });
-  }
-  function updSafety(k, v) {
-    setForm(fm => ({ ...fm, safety: { ...fm.safety, [k]: v } }));
-  }
+  // Scope toggle helpers
+  const toggleCampaign  = id => setForm(f => { const ids = f.scope.campaign_ids||[]; return { ...f, scope: { ...f.scope, campaign_ids: ids.includes(id) ? ids.filter(x=>x!==id) : [...ids,id] } }; });
+  const toggleAdGroup   = id => setForm(f => { const ids = f.scope.ad_group_ids||[]; return { ...f, scope: { ...f.scope, ad_group_ids: ids.includes(id) ? ids.filter(x=>x!==id) : [...ids,id] } }; });
+  const toggleMatchType = mt => setForm(f => { const mts = f.scope.match_types||[]; return { ...f, scope: { ...f.scope, match_types: mts.includes(mt) ? mts.filter(x=>x!==mt) : [...mts,mt] } }; });
 
-  const statusColor = s => ({ success: "var(--grn)", error: "var(--red)", running: "var(--amb)" }[s] || "var(--b3)");
-  const dot = s => <span style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor(s), display: "inline-block", marginRight: 5 }} />;
-
-  const MODAL_WRAP = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", boxSizing: "border-box" };
-  const LABEL_STYLE = { fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" };
+  const LABEL = { fontSize:11, color:"var(--tx3)", marginBottom:4, fontFamily:"var(--mono)", textTransform:"uppercase", letterSpacing:".05em" };
 
   return (
     <div className="fade">
+      {/* Toast */}
       {toast && (
-        <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999, background: "var(--grn)", color: "#fff", padding: "10px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 20px rgba(0,0,0,.3)" }}>
+        <div style={{ position:"fixed", top:20, right:20, zIndex:9999, background:"var(--grn)",
+          color:"#fff", padding:"10px 18px", borderRadius:8, fontSize:13, fontWeight:600 }}>
           {toast}
         </div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("rules.title")}</h1>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("rules.subtitle")}</div>
-        </div>
-        <button className="btn btn-primary" onClick={openCreate}>{t("rules.newRule")}</button>
+      {/* ── Header ── */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
+        <h1 style={{ fontFamily:"var(--disp)", fontSize:22, fontWeight:700 }}>{t("rules.title")}</h1>
+        <button onClick={openNew} className="btn btn-primary" style={{ fontSize:12, padding:"7px 16px" }}>
+          + {t("rules.new")}
+        </button>
       </div>
 
-      {loading
-        ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-        : !rules.length
-          ? <div className="card" style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("rules.noRules")}</div>
-          : <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {rules.map(rule => {
-                const conds = parseRuleJSON(rule.conditions, []);
-                const acts  = parseRuleJSON(rule.actions, []);
-                const isRunning = running[rule.id];
-                return (
-                  <div key={rule.id} className="card" style={{ padding: "16px 20px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <span style={{ fontWeight: 600, fontSize: 15 }}>{rule.name}</span>
-                        <span className={`badge ${rule.schedule_type === "hourly" ? "bg-bl" : "bg-grn"}`} style={{ fontSize: 10 }}>
-                          {t(rule.schedule_type === "hourly" ? "rules.hourly" : "rules.daily")}
-                        </span>
-                        {rule.dry_run && <span className="badge bg-amb" style={{ fontSize: 10 }}>{t("rules.dryRun")}</span>}
-                      </div>
-                      <button onClick={() => toggleRule(rule.id)} style={{ width: 36, height: 20, borderRadius: 10, border: "none", cursor: "pointer", flexShrink: 0, background: rule.is_active ? "var(--grn)" : "var(--b2)", position: "relative", transition: "background .2s" }}>
-                        <span style={{ position: "absolute", top: 3, left: rule.is_active ? 17 : 3, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left .2s" }} />
-                      </button>
-                    </div>
-                    <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 5 }}>
-                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", fontSize: 10, textTransform: "uppercase", marginRight: 4 }}>IF</span>
-                      {condSummary(conds) || "—"}
-                    </div>
-                    <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 12 }}>
-                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", fontSize: 10, textTransform: "uppercase", marginRight: 4 }}>THEN</span>
-                      {actSummary(acts) || "—"}
-                    </div>
-                    <div style={{ display: "flex", gap: 16, fontSize: 11, color: "var(--tx3)", marginBottom: 12, flexWrap: "wrap" }}>
-                      <span>{dot(rule.last_run_status)}{t("rules.lastRun")}: {relTime(rule.last_run_at) || t("rules.neverRun")}</span>
-                      {rule.run_count > 0 && <span>Runs: {rule.run_count}</span>}
-                    </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      <button className="btn btn-primary" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => runNow(rule)} disabled={isRunning}>
-                        {isRunning ? <span className="loader" /> : `▶ ${t("rules.runNow")}`}
-                      </button>
-                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => openPreview(rule)}>
-                        {t("rules.preview")}
-                      </button>
-                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => openEdit(rule)}>{t("common.edit")}</button>
-                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => openHistory(rule)}>{t("rules.history")}</button>
-                      <button className="btn btn-red"   style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => deleteRule(rule.id)}>✕</button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-      }
-
-      {(rulesData?.pagination?.total > 0) && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
-            Показывать по:
-            {[10, 25, 50, 100].map(size => (
-              <button key={size} onClick={() => { setRulesPageSize(size); setRulesPage(1); }}
-                className={`btn ${rulesPageSize === size ? "btn-primary" : "btn-ghost"}`}
-                style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
-            ))}
-          </div>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>
-            {((rulesPage - 1) * rulesPageSize) + 1}–{Math.min(rulesPage * rulesPageSize, rulesData.pagination.total)} из {rulesData.pagination.total.toLocaleString()}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-              onClick={() => setRulesPage(p => Math.max(1, p - 1))} disabled={rulesPage === 1}>← Назад</button>
-            {getPageRange(rulesPage, rulesData.pagination.pages ?? 1).map((p, i) =>
-              p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
-              : <button key={p} onClick={() => setRulesPage(p)} className={`btn ${rulesPage === p ? "btn-primary" : "btn-ghost"}`}
-                  style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
-            )}
-            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-              onClick={() => setRulesPage(p => Math.min(rulesData.pagination.pages ?? 1, p + 1))} disabled={rulesPage === (rulesData.pagination.pages ?? 1)}>Вперёд →</button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Rule Builder Modal ──────────────────────────────────────────────── */}
-      {showModal && createPortal(
-        <div style={MODAL_WRAP}>
-          <div style={{ background: "#1a1d2e", borderRadius: "12px", padding: "28px", width: "100%", maxWidth: "560px", position: "relative", margin: "0 auto" }}>
-            <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>
-              {editRule ? `✎ ${t("rules.editRule")}` : t("rules.newRule")}
-            </div>
-
-            {/* Name */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={LABEL_STYLE}>{t("rules.name")}</div>
-              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} style={{ width: "100%" }} placeholder={t("rules.namePlaceholder")} />
-            </div>
-
-            {/* Schedule */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={LABEL_STYLE}>{t("rules.schedule")}</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                {["hourly","daily"].map(s => (
-                  <button key={s} onClick={() => setForm(f => ({ ...f, schedule_type: s }))}
-                    className={`btn ${form.schedule_type === s ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 14px" }}>
-                    {t("rules.schedule_" + s)}
-                  </button>
-                ))}
+      {/* ── Rule Form Modal ── */}
+      {showForm && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div className="card" style={{ width:"100%", maxWidth:800, maxHeight:"90vh",
+            overflow:"auto", padding:"24px 28px" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:20 }}>
+              <div style={{ fontFamily:"var(--disp)", fontSize:18, fontWeight:700 }}>
+                {editRule ? "Редактировать правило" : "Новое правило"}
               </div>
+              <button onClick={() => setShowForm(false)} className="btn btn-ghost"
+                style={{ fontSize:12, padding:"4px 10px" }}>✕</button>
             </div>
 
-            {/* Dry Run */}
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer", fontSize: 13 }}>
-                <input type="checkbox" checked={form.dry_run} onChange={e => setForm(f => ({ ...f, dry_run: e.target.checked }))} />
-                {t("rules.dryRun")}
-              </label>
-              {form.dry_run && <div style={{ fontSize: 11, color: "var(--amb)", marginTop: 4, marginLeft: 22 }}>{t("rules.dryRunDesc")}</div>}
+            {/* Name + Description */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
+              <div>
+                <div style={LABEL}>Название *</div>
+                <input value={form.name} onChange={e => setForm(f => ({...f, name:e.target.value}))}
+                  placeholder="напр. Стоп убыточные ключи"
+                  style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
+                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
+                    outline:"none", boxSizing:"border-box" }} />
+              </div>
+              <div>
+                <div style={LABEL}>Описание</div>
+                <input value={form.description} onChange={e => setForm(f => ({...f, description:e.target.value}))}
+                  placeholder="опционально"
+                  style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
+                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
+                    outline:"none", boxSizing:"border-box" }} />
+              </div>
             </div>
 
             {/* Conditions */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={LABEL_STYLE}>{t("rules.conditions")}</div>
+            <div style={{ marginBottom:16 }}>
+              <div style={LABEL}>
+                {t("rules.conditionsTitle")} <span style={{color:"var(--ac2)"}}>(за последние 14 дней)</span>
+              </div>
               {form.conditions.map((cond, i) => (
-                <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
-                  <select value={cond.field || "acos"} onChange={e => updCond(i, "field", e.target.value)} style={{ flex: 1 }}>
-                    {COND_FIELDS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
+                  {i > 0
+                    ? <span style={{ fontSize:10, color:"var(--tx3)", width:32, textAlign:"right", fontFamily:"var(--mono)" }}>AND</span>
+                    : <span style={{ width:32 }} />}
+                  <select value={cond.metric} onChange={e => updCond(i,"metric",e.target.value)}
+                    style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                    {RULE_METRICS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                   </select>
-                  <select value={cond.operator || "gt"} onChange={e => updCond(i, "operator", e.target.value)} style={{ width: 60 }}>
-                    {COND_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  <select value={cond.op} onChange={e => updCond(i,"op",e.target.value)}
+                    style={{ width:52, fontSize:13, padding:"7px 4px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                    {RULE_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
-                  <input type="number" value={cond.value ?? ""} onChange={e => updCond(i, "value", parseFloat(e.target.value) || 0)} style={{ width: 80 }} />
-                  {form.conditions.length > 1 && (
-                    <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }}
-                      onClick={() => setForm(f => ({ ...f, conditions: f.conditions.filter((_, idx) => idx !== i) }))}>✕</button>
-                  )}
+                  <input type="number" value={cond.value} onChange={e => updCond(i,"value",e.target.value)}
+                    style={{ width:80, fontSize:13, padding:"7px 8px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
+                  <button onClick={() => remCond(i)} disabled={form.conditions.length === 1}
+                    style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
+                      cursor:"pointer", fontSize:14, opacity:form.conditions.length===1?0.3:1 }}>✕</button>
                 </div>
               ))}
-              {form.conditions.length < 5 && (
-                <button className="btn btn-ghost" style={{ fontSize: 11 }}
-                  onClick={() => setForm(f => ({ ...f, conditions: [...f.conditions, { field: "acos", operator: "gt", value: 30 }] }))}>
-                  {t("rules.addCondition")}
-                </button>
-              )}
+              <button onClick={addCond} className="btn btn-ghost"
+                style={{ fontSize:11, padding:"4px 10px", marginTop:4 }}>+ {t("rules.addCondition")}</button>
             </div>
 
             {/* Actions */}
-            <div style={{ marginBottom: 14 }}>
-              <div style={LABEL_STYLE}>{t("rules.actions")}</div>
-              {form.actions.map((action, i) => {
-                const def = ACT_TYPES.find(a => a.value === action.type);
-                return (
-                  <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
-                    <select value={action.type} onChange={e => updAct(i, "type", e.target.value)} style={{ flex: 1 }}>
-                      {ACT_TYPES.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
-                    </select>
-                    {def?.hasValue && (
-                      <>
-                        <input type="number" value={action.value ?? ""} onChange={e => updAct(i, "value", parseFloat(e.target.value) || 0)} style={{ width: 70 }} />
-                        <span style={{ fontSize: 12, color: "var(--tx3)", minWidth: 14 }}>{def.unit}</span>
-                      </>
-                    )}
-                    {form.actions.length > 1 && (
-                      <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }}
-                        onClick={() => setForm(f => ({ ...f, actions: f.actions.filter((_, idx) => idx !== i) }))}>✕</button>
-                    )}
-                  </div>
-                );
-              })}
-              {form.actions.length < 3 && (
-                <button className="btn btn-ghost" style={{ fontSize: 11 }}
-                  onClick={() => setForm(f => ({ ...f, actions: [...f.actions, { type: "pause_campaign" }] }))}>
-                  {t("rules.addAction")}
-                </button>
-              )}
+            <div style={{ marginBottom:16 }}>
+              <div style={LABEL}>{t("rules.actionsTitle")}</div>
+              {form.actions.map((act, i) => (
+                <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
+                  <select value={act.type} onChange={e => updAct(i,"type",e.target.value)}
+                    style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                    {RULE_ACTIONS_LIST.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                  </select>
+                  {(act.type === "adjust_bid_pct" || act.type === "set_bid") && (
+                    <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+                      <input type="number" value={act.value}
+                        onChange={e => updAct(i,"value",e.target.value)}
+                        placeholder={act.type === "adjust_bid_pct" ? "напр. -20" : "напр. 0.50"}
+                        style={{ width:90, fontSize:13, padding:"7px 8px", borderRadius:6,
+                          background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
+                      <span style={{ fontSize:11, color:"var(--tx3)" }}>
+                        {act.type === "adjust_bid_pct" ? "%" : "€"}
+                      </span>
+                    </div>
+                  )}
+                  <button onClick={() => remAct(i)} disabled={form.actions.length === 1}
+                    style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
+                      cursor:"pointer", fontSize:14, opacity:form.actions.length===1?0.3:1 }}>✕</button>
+                </div>
+              ))}
+              <button onClick={addAct} className="btn btn-ghost"
+                style={{ fontSize:11, padding:"4px 10px", marginTop:4 }}>+ {t("rules.addAction")}</button>
             </div>
 
-            {/* Safety Limits (collapsible) */}
-            <div style={{ marginBottom: 20 }}>
-              <button className="btn btn-ghost" style={{ fontSize: 11, marginBottom: showSafety ? 10 : 0 }}
-                onClick={() => setShowSafety(s => !s)}>
-                {showSafety ? "▾" : "▸"} {t("rules.safety")}
-              </button>
-              {showSafety && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-                  {[
-                    { key: "max_change_pct", label: "Max change", unit: "%" },
-                    { key: "min_bid",        label: "Min bid",    unit: "$" },
-                    { key: "max_bid",        label: "Max bid",    unit: "$" },
-                    { key: "min_budget",     label: "Min budget", unit: "$" },
-                    { key: "max_budget",     label: "Max budget", unit: "$" },
-                  ].map(({ key, label, unit }) => (
-                    <div key={key}>
-                      <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>{label} ({unit})</div>
-                      <input type="number" value={form.safety[key] ?? ""} style={{ width: "100%" }}
-                        onChange={e => updSafety(key, parseFloat(e.target.value) || 0)} />
-                    </div>
-                  ))}
+            {/* Scope */}
+            <div style={{ marginBottom:16 }}>
+              <div style={LABEL}>{t("rules.scopeTitle")}</div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:10 }}>
+                <div>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>Тип кампании</div>
+                  <select value={form.scope.campaign_type || ""}
+                    onChange={e => setForm(f => ({ ...f, scope:{ ...f.scope, campaign_type:e.target.value } }))}
+                    style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                    {RULE_CAMP_TYPES.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>Тип соответствия</div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    {RULE_MATCH_TYPES.map(mt => (
+                      <button key={mt.value} onClick={() => toggleMatchType(mt.value)}
+                        className={`btn ${(form.scope.match_types||[]).includes(mt.value)?"btn-primary":"btn-ghost"}`}
+                        style={{ fontSize:11, padding:"5px 10px" }}>{mt.label}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom:10 }}>
+                <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>
+                  Кампании ({(form.scope.campaign_ids||[]).length} выбрано, пусто = все)
+                </div>
+                <div style={{ maxHeight:120, overflowY:"auto", border:"1px solid var(--b2)",
+                  borderRadius:6, padding:6, background:"var(--s2)" }}>
+                  {!(campaigns||[]).length
+                    ? <div style={{ fontSize:12, color:"var(--tx3)", padding:4 }}>Загрузка кампаний…</div>
+                    : (campaigns||[]).map(c => (
+                      <label key={c.id} style={{ display:"flex", gap:8, alignItems:"center",
+                        padding:"3px 4px", cursor:"pointer", fontSize:12,
+                        color:(form.scope.campaign_ids||[]).includes(c.id)?"var(--ac2)":"var(--tx2)" }}>
+                        <input type="checkbox"
+                          checked={(form.scope.campaign_ids||[]).includes(c.id)}
+                          onChange={() => toggleCampaign(c.id)}
+                          style={{ accentColor:"var(--ac)" }} />
+                        <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</span>
+                        <span className="badge bg-bl" style={{ fontSize:9, flexShrink:0 }}>
+                          {c.campaign_type?.replace("sponsored","").toUpperCase().slice(0,2)}
+                        </span>
+                      </label>
+                    ))
+                  }
+                </div>
+              </div>
+
+              {adGroups.length > 0 && (
+                <div>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>
+                    Группы объявлений ({(form.scope.ad_group_ids||[]).length} выбрано, пусто = все)
+                  </div>
+                  <div style={{ maxHeight:100, overflowY:"auto", border:"1px solid var(--b2)",
+                    borderRadius:6, padding:6, background:"var(--s2)" }}>
+                    {adGroups.map(ag => (
+                      <label key={ag.id} style={{ display:"flex", gap:8, alignItems:"center",
+                        padding:"3px 4px", cursor:"pointer", fontSize:12,
+                        color:(form.scope.ad_group_ids||[]).includes(ag.id)?"var(--ac2)":"var(--tx2)" }}>
+                        <input type="checkbox"
+                          checked={(form.scope.ad_group_ids||[]).includes(ag.id)}
+                          onChange={() => toggleAdGroup(ag.id)}
+                          style={{ accentColor:"var(--ac)" }} />
+                        {ag.name}
+                        <span style={{ fontSize:10, color:"var(--tx3)" }}>• {ag.campaign_name}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
 
-            <div style={{ display: "flex", gap: 10 }}>
-              <button className="btn btn-primary" onClick={saveRule} disabled={saving}>
-                {saving ? <span className="loader" /> : t("rules.saveRule")}
+            {/* Safety + Options */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:10, marginBottom:20 }}>
+              <div>
+                <div style={LABEL}>Min ставка (€)</div>
+                <input type="number" value={form.safety.min_bid || "0.02"}
+                  onChange={e => setForm(f => ({...f, safety:{...f.safety, min_bid:e.target.value}}))}
+                  style={{ width:"100%", fontSize:12, padding:"6px 8px", borderRadius:6,
+                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
+                    outline:"none", boxSizing:"border-box" }} />
+              </div>
+              <div>
+                <div style={LABEL}>Max ставка (€)</div>
+                <input type="number" value={form.safety.max_bid || "50"}
+                  onChange={e => setForm(f => ({...f, safety:{...f.safety, max_bid:e.target.value}}))}
+                  style={{ width:"100%", fontSize:12, padding:"6px 8px", borderRadius:6,
+                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
+                    outline:"none", boxSizing:"border-box" }} />
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", justifyContent:"flex-end" }}>
+                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:12 }}>
+                  <input type="checkbox" checked={form.dry_run}
+                    onChange={e => setForm(f => ({...f, dry_run:e.target.checked}))}
+                    style={{ accentColor:"var(--ac)", width:14, height:14 }} />
+                  <span style={{ color:form.dry_run?"var(--amb)":"var(--tx2)" }}>
+                    {t("rules.dryRun")} (симуляция)
+                  </span>
+                </label>
+              </div>
+              <div style={{ display:"flex", flexDirection:"column", justifyContent:"flex-end" }}>
+                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:12 }}>
+                  <input type="checkbox" checked={form.is_active}
+                    onChange={e => setForm(f => ({...f, is_active:e.target.checked}))}
+                    style={{ accentColor:"var(--ac)", width:14, height:14 }} />
+                  <span>{t("rules.active")}</span>
+                </label>
+              </div>
+            </div>
+
+            <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+              <button onClick={() => setShowForm(false)} className="btn btn-ghost"
+                style={{ fontSize:12, padding:"7px 16px" }}>{t("common.cancel")}</button>
+              <button onClick={saveRule} className="btn btn-primary"
+                style={{ fontSize:12, padding:"7px 20px" }}
+                disabled={!form.name || !form.conditions.length || !form.actions.length}>
+                {t("rules.saveRule")}
               </button>
-              <button className="btn btn-ghost" onClick={() => setShowModal(false)}>{t("common.cancel")}</button>
             </div>
           </div>
-        </div>,
-        document.body
+        </div>
       )}
 
-      {/* ── Execution History Modal ─────────────────────────────────────────── */}
-      {historyRule && createPortal(
-        <div style={MODAL_WRAP}>
-          <div className="card fade" style={{ width: 700, padding: "24px 28px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
-                {t("rules.history")}: {historyRule.name}
-              </div>
-              <button className="btn btn-ghost" onClick={() => setHistoryRule(null)}>✕</button>
-            </div>
-            {!historyData
-              ? <div style={{ textAlign: "center", padding: 30 }}><span className="loader" /></div>
-              : !historyData.length
-                ? <div style={{ color: "var(--tx3)", fontSize: 13 }}>{t("rules.neverRun")}</div>
-                : historyData.map(exec => (
-                    <div key={exec.id} style={{ borderBottom: "1px solid var(--b1)", paddingBottom: 10, marginBottom: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          {dot(exec.status)}
-                          <span style={{ fontSize: 12 }}>{new Date(exec.started_at).toLocaleString()}</span>
-                          {exec.dry_run && <span className="badge bg-amb" style={{ fontSize: 9 }}>DRY</span>}
-                        </div>
-                        <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 11, color: "var(--tx3)" }}>
-                          <span>{t("rules.evaluated")}: {exec.entities_evaluated}</span>
-                          <span>{t("rules.matched")}: {exec.entities_matched}</span>
-                          <span>Actions: {exec.actions_taken}</span>
-                          <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 6px" }}
-                            onClick={() => setExpandedExec(expandedExec === exec.id ? null : exec.id)}>
-                            {expandedExec === exec.id ? "▴" : "▾"}
-                          </button>
-                        </div>
+      {/* ── Run Result Modal ── */}
+      {showResult && runResult[showResult] && (
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
+          display:"flex", alignItems:"center", justifyContent:"center", padding:20 }}>
+          <div className="card" style={{ width:"100%", maxWidth:700, maxHeight:"80vh",
+            overflow:"auto", padding:"24px 28px" }}>
+            {(() => {
+              const r = runResult[showResult];
+              return (
+                <>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:16 }}>
+                    <div>
+                      <div style={{ fontFamily:"var(--disp)", fontSize:16, fontWeight:700 }}>
+                        {r.dry_run ? "🔍 Симуляция" : "✅ Результат запуска"}
                       </div>
-                      {expandedExec === exec.id && Array.isArray(exec.summary) && exec.summary.length > 0 && (
-                        <table style={{ marginTop: 10, fontSize: 11 }}>
-                          <thead><tr><th>Entity</th><th>Action</th><th>Before → After</th><th>Applied</th></tr></thead>
-                          <tbody>
-                            {exec.summary.map((s, idx) => (
-                              <tr key={idx}>
-                                <td>{s.entityName}</td>
-                                <td>{s.action}</td>
-                                <td style={{ fontFamily: "var(--mono)" }}>{s.oldValue !== undefined ? `${s.oldValue} → ${s.newValue}` : s.error || "—"}</td>
-                                <td>{s.applied ? "✓" : "—"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div style={{ fontSize:12, color:"var(--tx3)", marginTop:4 }}>
+                        {r.period?.start} – {r.period?.end} · {r.total_evaluated} ключевых слов проверено
+                      </div>
+                    </div>
+                    <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}>✕</button>
+                  </div>
+
+                  <div style={{ display:"flex", gap:12, marginBottom:16 }}>
+                    {[
+                      { label:"Проверено",   val:r.total_evaluated, color:"var(--tx2)" },
+                      { label:"Совпало",     val:r.matched_count,   color:"var(--amb)" },
+                      { label:r.dry_run?"Изменилось бы":"Изменено", val:r.applied_count, color:"var(--grn)" },
+                    ].map(s => (
+                      <div key={s.label} className="card" style={{ flex:1, padding:"12px 14px",
+                        background:"var(--s2)", textAlign:"center" }}>
+                        <div style={{ fontSize:24, fontFamily:"var(--mono)", fontWeight:600, color:s.color }}>{s.val}</div>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginTop:2 }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {r.applied?.length > 0 ? (
+                    <div>
+                      <div style={LABEL}>{r.dry_run ? "Будет изменено" : "Изменено"}</div>
+                      <div style={{ maxHeight:280, overflowY:"auto" }}>
+                        {r.applied.map((a, i) => (
+                          <div key={i} style={{ padding:"8px 12px", borderBottom:"1px solid var(--b1)",
+                            display:"flex", gap:10, alignItems:"center", fontSize:12 }}>
+                            <span style={{ fontFamily:"var(--mono)", color:"var(--ac2)", minWidth:120,
+                              overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                              {a.keyword_text}
+                            </span>
+                            <span className={`badge ${a.action==="pause_keyword"?"bg-amb":a.action==="enable_keyword"?"bg-grn":"bg-bl"}`}
+                              style={{ fontSize:10 }}>
+                              {a.action === "pause_keyword"  ? "⏸ PAUSE"  :
+                               a.action === "enable_keyword" ? "▶ ENABLE" :
+                               a.action === "adjust_bid_pct" ? `⚡ BID ${a.change_pct}` :
+                               `🎯 BID →${a.new_bid}€`}
+                            </span>
+                            <span style={{ color:"var(--tx3)", fontSize:11, marginLeft:"auto" }}>
+                              {a.campaign_name}
+                            </span>
+                            {a.metrics && (
+                              <span style={{ fontSize:10, color:"var(--tx3)" }}>
+                                {a.metrics.clicks}cl · {a.metrics.orders}ord · {a.metrics.acos ? parseFloat(a.metrics.acos).toFixed(1)+"%" : "—"}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ padding:24, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
+                      {t("rules.noMatches")}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* ── Rules List ── */}
+      {loading ? (
+        <div style={{ color:"var(--tx3)", padding:20 }}>Загрузка…</div>
+      ) : rules.length === 0 ? (
+        <div className="card" style={{ padding:"48px 32px", textAlign:"center" }}>
+          <div style={{ fontSize:32, marginBottom:10 }}>⟁</div>
+          <div style={{ fontSize:14, color:"var(--tx3)" }}>{t("rules.noRules")}</div>
+          <button onClick={openNew} className="btn btn-primary"
+            style={{ marginTop:14, fontSize:12, padding:"8px 20px" }}>
+            + {t("rules.new")}
+          </button>
+        </div>
+      ) : (
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {rules.map(rule => {
+            const parse = v => { if (!v) return []; if (typeof v === "string") { try { return JSON.parse(v); } catch { return []; } } return v; };
+            const cond  = parse(rule.conditions);
+            const acts  = parse(rule.actions);
+            const scope = parse(rule.scope) || {};
+            const last  = rule.last_run_result
+              ? (typeof rule.last_run_result === "string" ? JSON.parse(rule.last_run_result) : rule.last_run_result)
+              : null;
+            const isRunning = runningId === rule.id;
+
+            return (
+              <div key={rule.id} className="card fade" style={{
+                padding:"16px 20px", opacity:rule.is_active?1:0.55,
+                borderLeft:`3px solid ${rule.is_active?"var(--ac)":"var(--b2)"}`,
+              }}>
+                <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    {/* Title row */}
+                    <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
+                      <span style={{ fontSize:14, fontWeight:600 }}>{rule.name}</span>
+                      {rule.dry_run && <span className="badge bg-amb" style={{ fontSize:10 }}>SIM</span>}
+                      <span className={`badge ${rule.is_active?"bg-grn":"bg-red"}`} style={{ fontSize:10 }}>
+                        {rule.is_active ? t("rules.active") : t("rules.inactive")}
+                      </span>
+                      {last && (
+                        <span style={{ fontSize:11, color:"var(--tx3)" }}>
+                          {t("rules.lastRun")}: {new Date(rule.last_run_at).toLocaleString(undefined,{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}
+                          · {last.matched_count} {t("rules.matched")}
+                          · {last.applied_count} {t("rules.applied")}
+                          {last.dry_run?" (sim)":""}
+                        </span>
                       )}
                     </div>
-                  ))
-            }
-          </div>
-        </div>,
-        document.body
+
+                    {/* Condition badges */}
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginBottom:6 }}>
+                      {cond.map((c, i) => (
+                        <span key={i} style={{ fontSize:11, padding:"3px 8px",
+                          background:"rgba(99,102,241,.12)", border:"1px solid rgba(99,102,241,.25)",
+                          borderRadius:20, color:"var(--ac2)", fontFamily:"var(--mono)" }}>
+                          {i > 0 && <span style={{ color:"var(--tx3)", marginRight:4 }}>AND</span>}
+                          {RULE_METRICS.find(m=>m.value===c.metric)?.label}
+                          {" "}{RULE_OPS.find(o=>o.value===c.op)?.label}
+                          {" "}{c.value}
+                        </span>
+                      ))}
+                      {acts.length > 0 && <span style={{ fontSize:11, color:"var(--tx3)", alignSelf:"center" }}>→</span>}
+                      {acts.map((a, i) => (
+                        <span key={i} style={{ fontSize:11, padding:"3px 8px",
+                          background:"rgba(34,197,94,.1)", border:"1px solid rgba(34,197,94,.25)",
+                          borderRadius:20, color:"var(--grn)" }}>
+                          {RULE_ACTIONS_LIST.find(al=>al.value===a.type)?.label}
+                          {a.value ? ` ${a.value}${a.type==="adjust_bid_pct"?"%":"€"}` : ""}
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Scope summary */}
+                    <div style={{ fontSize:11, color:"var(--tx3)" }}>
+                      {(scope.campaign_ids?.length) ? `${scope.campaign_ids.length} кампаний` : t("rules.allKeywords")}
+                      {scope.campaign_type ? ` · ${scope.campaign_type.replace("sponsored","").toUpperCase()}` : ""}
+                      {scope.match_types?.length ? ` · ${scope.match_types.join("/")}` : ""}
+                      {scope.ad_group_ids?.length ? ` · ${scope.ad_group_ids.length} групп` : ""}
+                    </div>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div style={{ display:"flex", gap:6, flexShrink:0, flexWrap:"wrap", justifyContent:"flex-end" }}>
+                    <button onClick={() => runRule(rule.id, true)} disabled={isRunning}
+                      className="btn btn-ghost" style={{ fontSize:11, padding:"5px 10px" }}>
+                      {isRunning ? "…" : "🔍 " + t("rules.preview")}
+                    </button>
+                    <button onClick={() => runRule(rule.id, false)} disabled={isRunning}
+                      className="btn btn-primary" style={{ fontSize:11, padding:"5px 10px" }}>
+                      {isRunning ? "…" : "▶ " + t("rules.runNow")}
+                    </button>
+                    <button onClick={() => toggleActive(rule)} className="btn btn-ghost"
+                      style={{ fontSize:11, padding:"5px 10px", color:rule.is_active?"var(--amb)":"var(--grn)" }}>
+                      {rule.is_active ? "⏸" : "▶"}
+                    </button>
+                    <button onClick={() => openEdit(rule)} className="btn btn-ghost"
+                      style={{ fontSize:11, padding:"5px 8px" }}>✎</button>
+                    <button onClick={() => deleteRule(rule.id)} className="btn btn-red"
+                      style={{ fontSize:11, padding:"5px 8px" }}>✕</button>
+                    {(last || runResult[rule.id]) && (
+                      <button onClick={() => {
+                        if (runResult[rule.id]) setRunResult(r => ({...r,[rule.id]:runResult[rule.id]}));
+                        else setRunResult(r => ({...r,[rule.id]:last}));
+                        setShowResult(rule.id);
+                      }} className="btn btn-ghost" style={{ fontSize:11, padding:"5px 8px" }}>📊</button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
 
-      {/* ── Preview Modal ───────────────────────────────────────────────────── */}
-      {previewRule && createPortal(
-        <div style={MODAL_WRAP}>
-          <div className="card fade" style={{ width: 700, padding: "24px 28px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
-                {t("rules.preview")}: {previewRule.name}
-              </div>
-              <button className="btn btn-ghost" onClick={() => setPreviewRule(null)}>✕</button>
-            </div>
-            {previewLoad
-              ? <div style={{ textAlign: "center", padding: 30 }}><span className="loader" /></div>
-              : !previewData?.actions?.length
-                ? <div style={{ color: "var(--tx3)", fontSize: 13 }}>{t("rules.noMatches")}</div>
-                : <>
-                    <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 12 }}>
-                      {t("rules.matched")}: {previewData.matched}
-                    </div>
-                    <table style={{ fontSize: 12 }}>
-                      <thead><tr><th>Entity</th><th>Action</th><th>Before → After</th></tr></thead>
-                      <tbody>
-                        {previewData.actions.map((s, i) => (
-                          <tr key={i}>
-                            <td>{s.entityName}</td>
-                            <td>{s.action}</td>
-                            <td style={{ fontFamily: "var(--mono)" }}>
-                              {s.oldValue !== undefined ? `${s.oldValue} → ${s.newValue}` : "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </>
-            }
-          </div>
-        </div>,
-        document.body
+      {/* Pagination */}
+      {pagination.pages > 1 && (
+        <div style={{ display:"flex", gap:6, justifyContent:"center", marginTop:16 }}>
+          {Array.from({length:pagination.pages},(_,i)=>i+1).map(p => (
+            <button key={p} onClick={() => setPage(p)}
+              className={`btn ${page===p?"btn-primary":"btn-ghost"}`}
+              style={{ fontSize:12, padding:"5px 10px", minWidth:34 }}>{p}</button>
+          ))}
+        </div>
       )}
     </div>
   );
