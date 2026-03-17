@@ -13,6 +13,7 @@ const express = require("express");
 const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
+const { writeAudit } = require("./audit");
 const logger  = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
@@ -35,7 +36,7 @@ function evaluate(conditions, metrics) {
 }
 
 // ── Execute rule synchronously ────────────────────────────────────────────────
-async function executeRule(rule, workspaceId, dryRun = false) {
+async function executeRule(rule, workspaceId, dryRun = false, actorId = null, actorName = "Rule Engine") {
   const conditions = typeof rule.conditions === "string" ? JSON.parse(rule.conditions) : rule.conditions;
   const actions    = typeof rule.actions    === "string" ? JSON.parse(rule.actions)    : rule.actions;
   const scope      = typeof rule.scope      === "string" ? JSON.parse(rule.scope)      : (rule.scope  || {});
@@ -72,7 +73,6 @@ async function executeRule(rule, workspaceId, dryRun = false) {
        k.id, k.keyword_text, k.match_type, k.state, k.bid,
        k.campaign_id, k.ad_group_id,
        c.name  AS campaign_name, c.campaign_type,
-       ag.name AS ad_group_name, ag.amazon_ag_id,
        COALESCE(SUM(m.clicks), 0)      AS clicks,
        COALESCE(SUM(m.cost),   0)      AS spend,
        COALESCE(SUM(m.sales_14d), 0)   AS sales,
@@ -110,6 +110,12 @@ async function executeRule(rule, workspaceId, dryRun = false) {
           if (kw.state === "paused") continue;
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'paused', updated_at = NOW() WHERE id = $1", [kw.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "keyword.pause_keyword", entityType: "keyword",
+              entityId: kw.id, entityName: kw.keyword_text,
+              beforeData: { state: kw.state }, afterData: { state: "paused" }, source: "rule",
+            });
           }
           applied.push({
             keyword_id: kw.id, keyword_text: kw.keyword_text,
@@ -121,6 +127,12 @@ async function executeRule(rule, workspaceId, dryRun = false) {
           if (kw.state === "enabled") continue;
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'enabled', updated_at = NOW() WHERE id = $1", [kw.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "keyword.enable_keyword", entityType: "keyword",
+              entityId: kw.id, entityName: kw.keyword_text,
+              beforeData: { state: kw.state }, afterData: { state: "enabled" }, source: "rule",
+            });
           }
           applied.push({
             keyword_id: kw.id, keyword_text: kw.keyword_text,
@@ -136,6 +148,12 @@ async function executeRule(rule, workspaceId, dryRun = false) {
           let newBid = Math.round(Math.max(minBid, Math.min(maxBid, currentBid * (1 + pct))) * 100) / 100;
           if (!dryRun) {
             await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, kw.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "keyword.adjust_bid_pct", entityType: "keyword",
+              entityId: kw.id, entityName: kw.keyword_text,
+              beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
+            });
           }
           applied.push({
             keyword_id: kw.id, keyword_text: kw.keyword_text,
@@ -147,6 +165,12 @@ async function executeRule(rule, workspaceId, dryRun = false) {
           const newBid = parseFloat(action.value || 0.10);
           if (!dryRun) {
             await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, kw.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "keyword.set_bid", entityType: "keyword",
+              entityId: kw.id, entityName: kw.keyword_text,
+              beforeData: { bid: parseFloat(kw.bid || 0) }, afterData: { bid: newBid }, source: "rule",
+            });
           }
           applied.push({
             keyword_id: kw.id, keyword_text: kw.keyword_text,
@@ -301,7 +325,7 @@ router.post("/:id/run", async (req, res, next) => {
     if (!rule) return res.status(404).json({ error: "Rule not found" });
 
     const effectiveDryRun = dry_run !== undefined ? dry_run : rule.dry_run;
-    const result = await executeRule(rule, req.workspaceId, effectiveDryRun);
+    const result = await executeRule(rule, req.workspaceId, effectiveDryRun, req.user.id, req.user.name);
 
     await query(
       "UPDATE rules SET last_run_at = NOW(), last_run_result = $1 WHERE id = $2",

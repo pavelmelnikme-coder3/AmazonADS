@@ -1899,92 +1899,285 @@ const ReportsPage = ({ workspaceId }) => {
 };
 
 // ─── Audit Page ───────────────────────────────────────────────────────────────
+const ACTION_BADGE = {
+  "campaign.update":           "bg-bl",
+  "keyword.bid_change":        "bg-pur",
+  "keyword.adjust_bid_pct":    "bg-pur",
+  "keyword.set_bid":           "bg-pur",
+  "keyword.pause_keyword":     "bg-amb",
+  "keyword.enable_keyword":    "bg-grn",
+  "keyword.state_change":      "bg-amb",
+  "ai.recommendation_applied": "bg-teal",
+  "connection.created":        "bg-grn",
+};
+const getActionBadge = (action) => action?.endsWith(".rollback") ? "bg-red" : (ACTION_BADGE[action] || "bg-bl");
+const SOURCE_ICONS   = { ui: "👤", rule: "⟁", ai: "✦", system: "⚙", api: "⬡" };
+
 const AuditPage = ({ workspaceId }) => {
   const { t } = useI18n();
-  const [sortBy, setSortBy] = useState("date");
-  const [sortDir, setSortDir] = useState("desc");
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
 
-  function handleAuditSort(field) {
-    if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
-    else { setSortBy(field); setSortDir("asc"); setPage(1); }
-  }
+  const [filterAction,   setFilterAction]   = useState("");
+  const [filterEntity,   setFilterEntity]   = useState("");
+  const [filterSource,   setFilterSource]   = useState("");
+  const [filterActor,    setFilterActor]    = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo,   setFilterDateTo]   = useState("");
+  const [onlyRollback,   setOnlyRollback]   = useState(false);
+  const [sortBy,   setSortBy]   = useState("date");
+  const [sortDir,  setSortDir]  = useState("desc");
+  const [page,     setPage]     = useState(1);
+  const [limit,    setLimit]    = useState(50);
+  const [rollingBack,  setRollingBack]  = useState(null);
+  const [rollbackMsg,  setRollbackMsg]  = useState({});
+
+  useEffect(() => { setPage(1); }, [filterAction, filterEntity, filterSource, filterActor, filterDateFrom, filterDateTo, onlyRollback, sortBy, sortDir]);
+
+  const buildQuery = () => ({
+    limit, page, sortBy, sortDir,
+    ...(filterAction   && { action: filterAction }),
+    ...(filterEntity   && { entityName: filterEntity }),
+    ...(filterSource   && { source: filterSource }),
+    ...(filterActor    && { actorId: filterActor }),
+    ...(filterDateFrom && { dateFrom: filterDateFrom }),
+    ...(filterDateTo   && { dateTo: filterDateTo }),
+    ...(onlyRollback   && { rollbackable: "true" }),
+  });
 
   const { data: auditData, loading, reload } = useAsync(
-    () => workspaceId
-      ? get("/audit", { limit: pageSize, page, sortBy, sortDir })
-      : Promise.resolve({ data: [], pagination: {} }),
-    [workspaceId, page, pageSize, sortBy, sortDir]
+    () => workspaceId ? get("/audit", buildQuery()) : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, page, limit, sortBy, sortDir, filterAction, filterEntity, filterSource, filterActor, filterDateFrom, filterDateTo, onlyRollback]
+  );
+  const { data: allAudit } = useAsync(
+    () => workspaceId ? get("/audit", { limit: 200, page: 1 }) : Promise.resolve({ data: [] }),
+    [workspaceId]
   );
 
-  const events = auditData?.data ?? [];
-  const auditTotal = auditData?.pagination?.total ?? 0;
-  const auditPages = auditData?.pagination?.pages ?? 1;
+  const events     = auditData?.data       || [];
+  const pagination = auditData?.pagination || {};
+  const uniqueActors = [...new Map((allAudit?.data || [])
+    .filter(e => e.actor_id && e.actor_name)
+    .map(e => [e.actor_id, { id: e.actor_id, name: e.actor_name }])
+  ).values()];
+
+  const handleSort = (field) => {
+    if (sortBy === field) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortBy(field); setSortDir("desc"); }
+  };
+  const SortIcon = ({ field }) => sortBy === field
+    ? <span style={{ fontSize: 10, marginLeft: 3 }}>{sortDir === "asc" ? "▲" : "▼"}</span>
+    : <span style={{ fontSize: 10, marginLeft: 3, opacity: 0.3 }}>▼</span>;
+
+  const handleRollback = async (event) => {
+    if (!confirm(`Откатить: ${event.action} для "${event.entity_name}"?`)) return;
+    setRollingBack(event.id);
+    try {
+      const result = await post(`/audit/${event.id}/rollback`);
+      setRollbackMsg(m => ({ ...m, [event.id]: { ok: true, msg: result.message } }));
+      setTimeout(() => { setRollbackMsg(m => { const n = { ...m }; delete n[event.id]; return n; }); reload(); }, 3000);
+    } catch (e) {
+      setRollbackMsg(m => ({ ...m, [event.id]: { ok: false, msg: e.message || "Error" } }));
+      setTimeout(() => setRollbackMsg(m => { const n = { ...m }; delete n[event.id]; return n; }), 3000);
+    } finally { setRollingBack(null); }
+  };
+
+  const canRollback = (event) =>
+    event.before_data &&
+    !event.action?.endsWith(".rollback") &&
+    ["keyword", "campaign"].includes(event.entity_type) &&
+    ["keyword.bid_change","keyword.pause_keyword","keyword.enable_keyword",
+     "keyword.adjust_bid_pct","keyword.set_bid","keyword.state_change","campaign.update"].includes(event.action);
+
+  const INP = { fontSize: 12, padding: "6px 10px", borderRadius: 6,
+    background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" };
+  const hasFilters = filterAction || filterEntity || filterSource || filterActor || filterDateFrom || filterDateTo || onlyRollback;
 
   return (
     <div className="fade">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("audit.title")}</h1>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("audit.subtitle")}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700 }}>{t("audit.title")}</h1>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 12, color: "var(--tx3)" }}>{pagination.total || 0} событий</span>
+          <button className="btn btn-ghost" onClick={reload} style={{ fontSize: 12, padding: "5px 10px" }}>↺</button>
         </div>
-        <button className="btn btn-ghost" onClick={reload}>↺</button>
       </div>
-      <div className="card" style={{ overflow: "hidden" }}>
-        {loading
-          ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
-          : !events.length
-            ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
-            : (
-              <table>
-                <thead>
-                  <tr>
-                    <SortHeader field="date"        label={t("audit.colTime")}   currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
-                    <SortHeader field="actor_name"  label={t("audit.colUser")}   currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
-                    <SortHeader field="action"      label={t("audit.colAction")} currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
-                    <SortHeader field="entity_type" label={t("audit.colEntity")} currentSort={sortBy} currentDir={sortDir} onSort={handleAuditSort} />
-                    <th>{t("audit.colSource")}</th>
+
+      {/* ── Filters ── */}
+      <div className="card" style={{ padding: "12px 16px", marginBottom: 12 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+          <div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterAction")}</div>
+            <input value={filterAction} onChange={e => setFilterAction(e.target.value)}
+              placeholder="keyword, campaign…" style={{ ...INP, width: 150 }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterEntity")}</div>
+            <input value={filterEntity} onChange={e => setFilterEntity(e.target.value)}
+              placeholder="название…" style={{ ...INP, width: 150 }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterSource")}</div>
+            <select value={filterSource} onChange={e => setFilterSource(e.target.value)} style={{ ...INP, width: 100 }}>
+              <option value="">Все</option>
+              <option value="ui">👤 UI</option>
+              <option value="rule">⟁ Правило</option>
+              <option value="ai">✦ ИИ</option>
+              <option value="system">⚙ Система</option>
+              <option value="api">⬡ API</option>
+            </select>
+          </div>
+          {uniqueActors.length > 1 && (
+            <div>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterActor")}</div>
+              <select value={filterActor} onChange={e => setFilterActor(e.target.value)} style={{ ...INP, width: 130 }}>
+                <option value="">Все</option>
+                {uniqueActors.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.dateFrom")}</div>
+            <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} style={{ ...INP, width: 128 }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.dateTo")}</div>
+            <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} style={{ ...INP, width: 128 }} />
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+            fontSize: 12, color: onlyRollback ? "var(--ac2)" : "var(--tx3)", paddingBottom: 2 }}>
+            <input type="checkbox" checked={onlyRollback} onChange={e => setOnlyRollback(e.target.checked)}
+              style={{ accentColor: "var(--ac)", width: 13, height: 13 }} />
+            {t("audit.onlyRollback")}
+          </label>
+          {hasFilters && (
+            <button onClick={() => { setFilterAction(""); setFilterEntity(""); setFilterSource("");
+              setFilterActor(""); setFilterDateFrom(""); setFilterDateTo(""); setOnlyRollback(false); }}
+              className="btn btn-ghost" style={{ fontSize: 11, padding: "5px 10px" }}>✕ Сбросить</button>
+          )}
+          <div style={{ marginLeft: "auto" }}>
+            <select value={limit} onChange={e => { setLimit(parseInt(e.target.value)); setPage(1); }}
+              style={{ ...INP, width: 75 }}>
+              {[25, 50, 100, 200].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Table ── */}
+      {loading ? (
+        <div style={{ color: "var(--tx3)", padding: "20px 0", fontSize: 13 }}>Загрузка…</div>
+      ) : events.length === 0 ? (
+        <div className="card" style={{ padding: "48px 32px", textAlign: "center" }}>
+          <div style={{ fontSize: 32, marginBottom: 10 }}>⊡</div>
+          <div style={{ fontSize: 14, color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
+        </div>
+      ) : (
+        <div className="card" style={{ overflow: "hidden" }}>
+          <table>
+            <thead>
+              <tr>
+                <th onClick={() => handleSort("date")} style={{ cursor: "pointer", userSelect: "none" }}>
+                  Время <SortIcon field="date" />
+                </th>
+                <th onClick={() => handleSort("actor_name")} style={{ cursor: "pointer", userSelect: "none" }}>
+                  Пользователь <SortIcon field="actor_name" />
+                </th>
+                <th onClick={() => handleSort("action")} style={{ cursor: "pointer", userSelect: "none" }}>
+                  Действие <SortIcon field="action" />
+                </th>
+                <th onClick={() => handleSort("entity_type")} style={{ cursor: "pointer", userSelect: "none" }}>
+                  Сущность <SortIcon field="entity_type" />
+                </th>
+                <th>{t("audit.diff")}</th>
+                <th style={{ textAlign: "right" }}>Откат</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map(event => {
+                const diff = event.diff
+                  ? (typeof event.diff === "string" ? JSON.parse(event.diff) : event.diff)
+                  : null;
+                const canRb = canRollback(event);
+                const rbState = rollbackMsg[event.id];
+                const isRollingBack = rollingBack === event.id;
+                return (
+                  <tr key={event.id}>
+                    <td style={{ whiteSpace: "nowrap", fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx3)" }}>
+                      {new Date(event.created_at).toLocaleString("ru", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                    </td>
+                    <td style={{ fontSize: 12 }}>
+                      <span style={{ marginRight: 4 }}>{SOURCE_ICONS[event.source] || "?"}</span>
+                      {event.actor_name || "—"}
+                    </td>
+                    <td>
+                      <span className={`badge ${getActionBadge(event.action)}`} style={{ fontSize: 10 }}>
+                        {event.action}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 12 }}>
+                      {event.entity_type && (
+                        <span className="badge bg-bl" style={{ fontSize: 9, marginRight: 4 }}>{event.entity_type}</span>
+                      )}
+                      <span style={{ color: "var(--tx2)", maxWidth: 180, overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}>
+                        {event.entity_name || event.entity_id || "—"}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 11, fontFamily: "var(--mono)" }}>
+                      {diff ? (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                          {Object.entries(diff).map(([field, { before, after }]) => (
+                            <span key={field} style={{ fontSize: 10, padding: "2px 6px",
+                              background: "var(--s3)", borderRadius: 4, color: "var(--tx2)" }}>
+                              {field}:&nbsp;
+                              <span style={{ color: "var(--red)" }}>{String(before ?? "—")}</span>
+                              <span style={{ color: "var(--tx3)", margin: "0 3px" }}>→</span>
+                              <span style={{ color: "var(--grn)" }}>{String(after ?? "—")}</span>
+                            </span>
+                          ))}
+                        </div>
+                      ) : <span style={{ color: "var(--tx3)" }}>—</span>}
+                    </td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      {rbState ? (
+                        <span style={{ fontSize: 11, color: rbState.ok ? "var(--grn)" : "var(--red)" }}>
+                          {rbState.ok ? "✓ " : "✗ "}{rbState.msg}
+                        </span>
+                      ) : canRb ? (
+                        <button onClick={() => handleRollback(event)} disabled={isRollingBack}
+                          className="btn btn-ghost"
+                          style={{ fontSize: 10, padding: "3px 8px", color: "var(--amb)", border: "1px solid rgba(245,158,11,.3)" }}>
+                          {isRollingBack ? "…" : `↺ ${t("audit.rollback")}`}
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 10, color: "var(--tx3)", opacity: 0.4 }}>—</span>
+                      )}
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {events.map(e => (
-                    <tr key={e.id}>
-                      <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(e.created_at).toLocaleString("ru")}</td>
-                      <td style={{ fontSize: 12 }}>{e.actor_name || e.actor_type}</td>
-                      <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{e.action}</span></td>
-                      <td style={{ fontSize: 11, color: "var(--tx2)" }}>{e.entity_type} {e.entity_name ? `· ${e.entity_name}` : ""}</td>
-                      <td><span className={`badge ${e.source === "ai" ? "bg-pur" : e.source === "system" ? "bg-amb" : "bg-grn"}`}>{e.source}</span></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )
-        }
-      </div>
-      {auditTotal > 0 && (
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
-            Показывать по:
-            {[25, 50, 100, 200].map(size => (
-              <button key={size} onClick={() => { setPageSize(size); setPage(1); }}
-                className={`btn ${pageSize === size ? "btn-primary" : "btn-ghost"}`}
-                style={{ fontSize: 11, padding: "4px 10px", minWidth: 36 }}>{size}</button>
-            ))}
-          </div>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>
-            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, auditTotal)} из {auditTotal.toLocaleString()}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-              onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← Назад</button>
-            {getPageRange(page, auditPages).map((p, i) =>
-              p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
-              : <button key={p} onClick={() => setPage(p)} className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
-                  style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Pagination ── */}
+      {pagination.pages > 1 && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12 }}>
+          <span style={{ color: "var(--tx3)" }}>
+            {(page - 1) * limit + 1}–{Math.min(page * limit, pagination.total)} из {pagination.total}
+          </span>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
+              className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}>←</button>
+            {getPageRange(page, pagination.pages).map((p, i) =>
+              p === "..."
+                ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
+                : <button key={p} onClick={() => setPage(p)}
+                    className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
+                    style={{ fontSize: 12, padding: "5px 10px", minWidth: 34 }}>{p}</button>
             )}
-            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-              onClick={() => setPage(p => Math.min(auditPages, p + 1))} disabled={page === auditPages}>Вперёд →</button>
+            <button onClick={() => setPage(p => Math.min(pagination.pages, p + 1))} disabled={page === pagination.pages}
+              className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}>→</button>
           </div>
         </div>
       )}

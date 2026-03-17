@@ -1,6 +1,7 @@
 const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
+const { writeAudit } = require("./audit");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -65,6 +66,12 @@ router.patch("/bulk", async (req, res, next) => {
     if (!updates?.length) return res.status(400).json({ error: "updates required" });
     let updated = 0;
     for (const { id, bid, state } of updates) {
+      const { rows: [kw] } = await query(
+        "SELECT id, keyword_text, bid, state FROM keywords WHERE id = $1 AND workspace_id = $2",
+        [id, req.workspaceId]
+      );
+      if (!kw) continue;
+
       const sets = [], vals = [];
       let pi = 1;
       if (bid   !== undefined) { sets.push(`bid = $${pi++}`);   vals.push(bid); }
@@ -75,6 +82,25 @@ router.patch("/bulk", async (req, res, next) => {
         `UPDATE keywords SET ${sets.join(", ")}, updated_at = NOW() WHERE id = $${pi++} AND workspace_id = $${pi}`,
         vals
       );
+
+      const beforeData = {};
+      const afterData  = {};
+      if (bid   !== undefined) { beforeData.bid   = parseFloat(kw.bid);   afterData.bid   = parseFloat(bid); }
+      if (state !== undefined) { beforeData.state = kw.state;             afterData.state = state; }
+
+      await writeAudit({
+        orgId:       req.orgId,
+        workspaceId: req.workspaceId,
+        actorId:     req.user.id,
+        actorName:   req.user.name,
+        action:      bid !== undefined ? "keyword.bid_change" : "keyword.state_change",
+        entityType:  "keyword",
+        entityId:    kw.id,
+        entityName:  kw.keyword_text,
+        beforeData,
+        afterData,
+        source: "ui",
+      });
       updated++;
     }
     res.json({ updated });
