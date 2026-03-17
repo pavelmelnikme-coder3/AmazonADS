@@ -3440,63 +3440,104 @@ const LoginPage = ({ onLogin }) => {
   );
 };
 
-// ─── Placeholder pages ────────────────────────────────────────────────────────
 // ─── AI Page ──────────────────────────────────────────────────────────────────
-const RISK_COLORS = { low: "var(--grn)", medium: "var(--amb)", high: "var(--red)" };
-const RISK_BG = { low: "rgba(34,197,94,.1)", medium: "rgba(245,158,11,.1)", high: "rgba(239,68,68,.1)" };
-const TYPE_LABELS = {
-  bid_increase: "↑ Bid", bid_decrease: "↓ Bid",
-  budget_increase: "↑ Budget", budget_decrease: "↓ Budget",
-  pause_campaign: "⏸ Pause", enable_campaign: "▶ Enable",
-  add_negative_keyword: "⊖ Neg. KW", change_bidding_strategy: "⟳ Strategy",
+const AI_RISK_COLOR = { low: "var(--grn)", medium: "var(--amb)", high: "var(--red)" };
+const AI_TYPE_ICON  = {
+  bid_adjustment: "⚡", budget_increase: "📈", budget_decrease: "📉",
+  campaign_pause: "⏸", keyword_add: "🔑", keyword_pause: "🔇",
+  targeting_optimization: "🎯", other: "💡",
 };
 
 function AIPage({ workspaceId }) {
   const { t } = useI18n();
-  const [filter, setFilter] = useState("pending");
-  const [running, setRunning] = useState(false);
-  const [runMsg, setRunMsg] = useState(null);
-  const [applying, setApplying] = useState(null);
-  const [confirmRec, setConfirmRec] = useState(null);
-  const [previewRec, setPreviewRec] = useState(null);
+
+  // Run state
+  const [prompt, setPrompt]       = useState("");
+  const [scope, setScope]         = useState("all");
+  const [rangeMode, setRangeMode] = useState("14");
+  const [running, setRunning]     = useState(false);
+  const [runError, setRunError]   = useState(null);
+
+  // Settings state
+  const [showSettings, setShowSettings]   = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsSaved, setSettingsSaved]   = useState(false);
+  const [settings, setSettings] = useState({
+    target_acos: "", max_acos: "", target_roas: "", min_roas: "",
+    target_margin: "", monthly_budget: "", business_notes: "", response_language: "ru",
+  });
+
+  // Preview/confirm modals
+  const [confirmRec, setConfirmRec]   = useState(null);
+  const [applying, setApplying]       = useState(null);
+  const [previewRec, setPreviewRec]   = useState(null);
   const [previewData, setPreviewData] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [toast, setToast] = useState(null);
 
-  const { data: recs, loading, reload } = useAsync(
-    () => get("/ai/recommendations", { status: filter === "all" ? undefined : filter }),
-    [filter]
+  const { data: recs, loading: recsLoading, reload: reloadRecs } = useAsync(
+    () => workspaceId ? get("/ai/recommendations") : Promise.resolve([]),
+    [workspaceId]
   );
+
+  // Load settings on mount
+  useEffect(() => {
+    if (!workspaceId) return;
+    get("/ai/settings").then(data => {
+      if (data) setSettings({
+        target_acos:       data.target_acos       || "",
+        max_acos:          data.max_acos          || "",
+        target_roas:       data.target_roas       || "",
+        min_roas:          data.min_roas          || "",
+        target_margin:     data.target_margin     || "",
+        monthly_budget:    data.monthly_budget    || "",
+        business_notes:    data.business_notes    || "",
+        response_language: data.response_language || "ru",
+      });
+    }).catch(() => {});
+  }, [workspaceId]);
 
   const showToast = (msg, ok = true) => {
     setToast({ msg, ok });
     setTimeout(() => setToast(null), 3500);
   };
 
-  async function handleRunAnalysis() {
-    setRunning(true); setRunMsg(null);
+  const endDate   = new Date().toISOString().split("T")[0];
+  const startDate = new Date(Date.now() - parseInt(rangeMode) * 86400000).toISOString().split("T")[0];
+
+  const handleAnalyze = async () => {
+    if (!workspaceId) return;
+    setRunning(true); setRunError(null);
     try {
-      const locale = localStorage.getItem("af_locale") || "en";
-      await apiFetch("/ai/run", {
-        method: "POST",
-        body: JSON.stringify({ locale }),
-        headers: { "x-locale": locale },
-      });
-      setRunMsg(t("ai.analysisQueued"));
-      setTimeout(() => { reload(); setRunMsg(null); }, 8000);
+      await post("/ai/analyze", { prompt, scope, startDate, endDate });
+      reloadRecs();
     } catch (e) {
-      setRunMsg(t("common.error") + e.message);
+      setRunError(e.message || "Analysis failed");
     } finally {
       setRunning(false);
     }
-  }
+  };
+
+  const handleSaveSettings = async () => {
+    setSettingsSaving(true);
+    try {
+      const saved = await patch("/ai/settings", settings);
+      setSettings(s => ({ ...s, ...saved }));
+      setSettingsSaved(true);
+      setTimeout(() => setSettingsSaved(false), 2000);
+    } catch (e) {
+      alert("Save error: " + e.message);
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
 
   async function handleApply(rec) {
     setApplying(rec.id);
     try {
       await post(`/ai/recommendations/${rec.id}/apply`, {});
       showToast(t("ai.applySuccess"));
-      reload();
+      reloadRecs();
     } catch (e) {
       showToast(t("ai.applyError") + ": " + e.message, false);
     } finally {
@@ -3505,63 +3546,47 @@ function AIPage({ workspaceId }) {
     }
   }
 
-  async function handleDismiss(rec) {
+  async function handleDismiss(id) {
     try {
-      await post(`/ai/recommendations/${rec.id}/dismiss`, {});
-      reload();
+      await post(`/ai/recommendations/${id}/dismiss`, {});
+      reloadRecs();
     } catch (e) {
       showToast(t("common.error") + e.message, false);
     }
   }
 
   async function handlePreview(rec) {
-    setPreviewRec(rec);
-    setPreviewLoading(true);
-    setPreviewData(null);
+    setPreviewRec(rec); setPreviewLoading(true); setPreviewData(null);
     try {
       const data = await post(`/ai/recommendations/${rec.id}/preview`, {});
       setPreviewData(data.changes || []);
-    } catch (e) {
-      setPreviewData([]);
-    } finally {
-      setPreviewLoading(false);
-    }
+    } catch { setPreviewData([]); }
+    finally { setPreviewLoading(false); }
   }
 
-  const pendingCount  = (recs || []).filter(r => r.status === "pending").length;
-  const appliedCount  = (recs || []).filter(r => r.status === "applied").length;
-  const dismissedCount = (recs || []).filter(r => r.status === "dismissed").length;
-
-  const FILTERS = [
-    { key: "all",       label: t("ai.filterAll") },
-    { key: "pending",   label: t("ai.filterPending") },
-    { key: "applied",   label: t("ai.filterApplied") },
-    { key: "dismissed", label: t("ai.filterDismissed") },
-  ];
+  const pendingRecs = (recs || []).filter(r => r.status === "pending");
 
   return (
     <div className="fade">
       {/* Toast */}
       {toast && (
-        <div style={{
-          position: "fixed", top: 24, right: 24, zIndex: 9999,
+        <div style={{ position:"fixed", top:24, right:24, zIndex:9999,
           background: toast.ok ? "var(--grn)" : "var(--red)",
-          color: "#fff", padding: "10px 18px", borderRadius: 8,
-          fontSize: 13, fontWeight: 500, animation: "slideDown .2s ease",
-        }}>{toast.msg}</div>
+          color:"#fff", padding:"10px 18px", borderRadius:8,
+          fontSize:13, fontWeight:500, animation:"slideDown .2s ease" }}>
+          {toast.msg}
+        </div>
       )}
 
       {/* Confirm Apply Modal */}
       {confirmRec && (
-        <div style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000,
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <div className="card" style={{ padding: 28, maxWidth: 440, width: "90%" }}>
-            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>{t("ai.confirmApply")}</div>
-            <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 6 }}><strong>{confirmRec.title}</strong></div>
-            <div style={{ fontSize: 12, color: "var(--tx3)", marginBottom: 20 }}>{confirmRec.rationale}</div>
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:1000,
+          display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <div className="card" style={{ padding:28, maxWidth:440, width:"90%" }}>
+            <div style={{ fontWeight:700, fontSize:16, marginBottom:10 }}>{t("ai.confirmApply")}</div>
+            <div style={{ fontSize:13, color:"var(--tx2)", marginBottom:6 }}><strong>{confirmRec.title}</strong></div>
+            <div style={{ fontSize:12, color:"var(--tx3)", marginBottom:20 }}>{confirmRec.rationale}</div>
+            <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
               <button className="btn btn-ghost" onClick={() => setConfirmRec(null)}>{t("common.cancel")}</button>
               <button className="btn btn-primary" disabled={applying === confirmRec.id} onClick={() => handleApply(confirmRec)}>
                 {applying === confirmRec.id ? <span className="loader" /> : t("ai.confirmApplyBtn")}
@@ -3573,177 +3598,264 @@ function AIPage({ workspaceId }) {
 
       {/* Preview Modal */}
       {previewRec && (
-        <div style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 1000,
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <div className="card" style={{ padding: 28, maxWidth: 600, width: "90%", maxHeight: "80vh", overflow: "auto" }}>
-            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 14 }}>{t("ai.previewTitle")}: {previewRec.title}</div>
+        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", zIndex:1000,
+          display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <div className="card" style={{ padding:28, maxWidth:600, width:"90%", maxHeight:"80vh", overflow:"auto" }}>
+            <div style={{ fontWeight:700, fontSize:16, marginBottom:14 }}>{t("ai.previewTitle")}: {previewRec.title}</div>
             {previewLoading ? (
-              <div style={{ textAlign: "center", padding: 30 }}><span className="loader" /></div>
+              <div style={{ textAlign:"center", padding:30 }}><span className="loader" /></div>
             ) : previewData?.length ? (
-              <table style={{ marginBottom: 16 }}>
+              <table style={{ marginBottom:16 }}>
                 <thead><tr>
-                  <th>{t("ai.entity")}</th>
-                  <th>{t("ai.field")}</th>
-                  <th>{t("ai.current")}</th>
-                  <th>{t("ai.new")}</th>
+                  <th>{t("ai.entity")}</th><th>{t("ai.field")}</th>
+                  <th>{t("ai.current")}</th><th>{t("ai.new")}</th>
                 </tr></thead>
                 <tbody>
                   {previewData.map((ch, i) => (
                     <tr key={i}>
-                      <td><span className="mono" style={{ fontSize: 11 }}>{ch.entity_name}</span></td>
-                      <td><span className="mono" style={{ fontSize: 11 }}>{ch.field}</span></td>
-                      <td style={{ color: "var(--red)" }}>{String(ch.current_value ?? "—")}</td>
-                      <td style={{ color: "var(--grn)" }}>{String(ch.new_value)}</td>
+                      <td><span className="mono" style={{ fontSize:11 }}>{ch.entity_name}</span></td>
+                      <td><span className="mono" style={{ fontSize:11 }}>{ch.field}</span></td>
+                      <td style={{ color:"var(--red)" }}>{String(ch.current_value ?? "—")}</td>
+                      <td style={{ color:"var(--grn)" }}>{String(ch.new_value)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             ) : (
-              <div style={{ color: "var(--tx3)", fontSize: 13, marginBottom: 16 }}>No entity details available.</div>
+              <div style={{ color:"var(--tx3)", fontSize:13, marginBottom:16 }}>No entity details available.</div>
             )}
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <div style={{ display:"flex", gap:10, justifyContent:"flex-end" }}>
               <button className="btn btn-ghost" onClick={() => { setPreviewRec(null); setPreviewData(null); }}>{t("common.cancel")}</button>
               {previewRec.status === "pending" && (
-                <button className="btn btn-primary" onClick={() => { setPreviewRec(null); setConfirmRec(previewRec); }}>
-                  {t("ai.apply")}
-                </button>
+                <button className="btn btn-primary" onClick={() => { setPreviewRec(null); setConfirmRec(previewRec); }}>{t("ai.apply")}</button>
               )}
             </div>
           </div>
         </div>
       )}
 
-      {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+      {/* ── Header ── */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:20 }}>
         <div>
-          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700 }}>{t("ai.title")}</h1>
-          <div style={{ fontSize: 12, color: "var(--tx3)", marginTop: 4 }}>Claude · Amazon Ads Optimizer</div>
+          <h1 style={{ fontFamily:"var(--disp)", fontSize:22, fontWeight:700, marginBottom:4 }}>{t("ai.title")}</h1>
+          <div style={{ fontSize:12, color:"var(--tx3)" }}>{startDate} – {endDate}</div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {runMsg && <span style={{ fontSize: 12, color: "var(--teal)" }}>{runMsg}</span>}
-          <button className="btn btn-primary" disabled={running} onClick={handleRunAnalysis} style={{ gap: 8 }}>
-            {running ? <><span className="loader" /> {t("ai.running")}</> : <>✦ {t("ai.runAnalysis")}</>}
+        <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+          {[["7","7d"],["14","14d"],["30","30d"]].map(([v,l]) => (
+            <button key={v} onClick={() => setRangeMode(v)}
+              className={`btn ${rangeMode===v?"btn-primary":"btn-ghost"}`}
+              style={{ fontSize:12, padding:"5px 10px" }}>{l}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Prompt + Run card ── */}
+      <div className="card" style={{ padding:"18px 20px", marginBottom:16 }}>
+        {/* Scope selector */}
+        <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap", alignItems:"center" }}>
+          <span style={{ fontSize:12, color:"var(--tx3)" }}>{t("ai.scope")}:</span>
+          {[
+            ["all",               t("ai.scopeAll")],
+            ["sponsoredProducts", t("ai.scopeSP")],
+            ["sponsoredBrands",   t("ai.scopeSB")],
+            ["sponsoredDisplay",  t("ai.scopeSD")],
+          ].map(([v,l]) => (
+            <button key={v} onClick={() => setScope(v)}
+              className={`btn ${scope===v?"btn-primary":"btn-ghost"}`}
+              style={{ fontSize:11, padding:"4px 10px" }}>{l}
+            </button>
+          ))}
+        </div>
+
+        {/* Prompt textarea */}
+        <textarea
+          value={prompt}
+          onChange={e => setPrompt(e.target.value)}
+          placeholder={t("ai.promptPlaceholder")}
+          rows={3}
+          style={{
+            width:"100%", fontSize:13, padding:"10px 12px",
+            borderRadius:8, resize:"vertical",
+            background:"var(--s2)", border:"1px solid var(--b2)",
+            color:"var(--tx)", outline:"none", lineHeight:1.5,
+            fontFamily:"var(--ui)", boxSizing:"border-box",
+          }}
+        />
+
+        {/* Error */}
+        {runError && (
+          <div style={{ marginTop:10, fontSize:12, color:"var(--red)",
+            background:"rgba(239,68,68,.1)", padding:"8px 12px", borderRadius:6 }}>
+            ⚠ {runError.includes("ANTHROPIC_API_KEY") ? t("ai.noKey") : runError}
+          </div>
+        )}
+
+        <div style={{ marginTop:12, display:"flex", justifyContent:"flex-end" }}>
+          <button onClick={handleAnalyze} disabled={running || !workspaceId}
+            className="btn btn-primary" style={{ fontSize:13, padding:"8px 24px" }}>
+            {running
+              ? <><span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span> {t("ai.running")}</>
+              : <>✦ {t("ai.run")}</>}
           </button>
         </div>
       </div>
 
-      {/* Stats bar */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-        {[
-          { label: t("ai.filterPending"), count: pendingCount, color: "var(--ac2)" },
-          { label: t("ai.filterApplied"), count: appliedCount, color: "var(--grn)" },
-          { label: t("ai.filterDismissed"), count: dismissedCount, color: "var(--tx3)" },
-        ].map(s => (
-          <div key={s.label} className="card" style={{ padding: "10px 18px", display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontFamily: "var(--mono)", fontSize: 20, fontWeight: 600, color: s.color }}>{s.count}</span>
-            <span style={{ fontSize: 12, color: "var(--tx2)" }}>{s.label}</span>
+      {/* ── Business Context Settings (collapsible) ── */}
+      <div className="card" style={{ marginBottom:16, overflow:"hidden" }}>
+        <div onClick={() => setShowSettings(s => !s)}
+          style={{ padding:"14px 20px", display:"flex", justifyContent:"space-between",
+            alignItems:"center", cursor:"pointer", userSelect:"none" }}>
+          <div>
+            <span style={{ fontFamily:"var(--disp)", fontSize:14, fontWeight:600 }}>
+              ⚙ {t("ai.settingsTitle")}
+            </span>
+            {settingsSaved && <span style={{ fontSize:12, color:"var(--grn)", marginLeft:10 }}>{t("ai.saved")}</span>}
+            <div style={{ fontSize:12, color:"var(--tx3)", marginTop:2 }}>{t("ai.settingsSubtitle")}</div>
           </div>
-        ))}
-      </div>
-
-      {/* Filter tabs */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 18, borderBottom: "1px solid var(--b1)", paddingBottom: 12 }}>
-        {FILTERS.map(f => (
-          <button key={f.key} onClick={() => setFilter(f.key)} style={{
-            padding: "5px 14px", borderRadius: 100, fontSize: 12, fontWeight: 500,
-            border: "1px solid " + (filter === f.key ? "var(--ac)" : "var(--b2)"),
-            background: filter === f.key ? "rgba(59,130,246,.15)" : "transparent",
-            color: filter === f.key ? "var(--ac2)" : "var(--tx2)",
-            cursor: "pointer",
-          }}>{f.label}</button>
-        ))}
-      </div>
-
-      {/* Recommendations list */}
-      {loading ? (
-        <div style={{ textAlign: "center", padding: 60, color: "var(--tx3)" }}>
-          <span className="loader" style={{ width: 24, height: 24, borderWidth: 3 }} />
+          <span style={{ color:"var(--tx3)", fontSize:16 }}>{showSettings ? "▲" : "▼"}</span>
         </div>
-      ) : !recs?.length ? (
-        <div className="card" style={{ padding: "60px 32px", textAlign: "center" }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}>✦</div>
-          <div style={{ color: "var(--tx2)", fontSize: 14 }}>{t("ai.noRecs")}</div>
+
+        {showSettings && (
+          <div style={{ padding:"0 20px 18px" }}>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(3, 1fr)", gap:12, marginBottom:14 }}>
+              {[
+                { key:"target_acos",    label:"Target ACOS (%)",    placeholder:"e.g. 15" },
+                { key:"max_acos",       label:"Max ACOS (%)",       placeholder:"e.g. 25" },
+                { key:"target_roas",    label:"Target ROAS (x)",    placeholder:"e.g. 5.0" },
+                { key:"min_roas",       label:"Min ROAS (x)",       placeholder:"e.g. 3.0" },
+                { key:"target_margin",  label:"Margin (%)",         placeholder:"e.g. 30" },
+                { key:"monthly_budget", label:"Monthly Budget (€)", placeholder:"e.g. 5000" },
+              ].map(({ key, label, placeholder }) => (
+                <div key={key}>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4, fontFamily:"var(--mono)",
+                    textTransform:"uppercase", letterSpacing:".05em" }}>{label}</div>
+                  <input type="number" value={settings[key]}
+                    onChange={e => setSettings(s => ({ ...s, [key]: e.target.value }))}
+                    placeholder={placeholder}
+                    style={{ width:"100%", fontSize:13, padding:"7px 10px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)",
+                      color:"var(--tx)", outline:"none", boxSizing:"border-box" }} />
+                </div>
+              ))}
+            </div>
+
+            <div style={{ marginBottom:12 }}>
+              <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4, fontFamily:"var(--mono)",
+                textTransform:"uppercase", letterSpacing:".05em" }}>Business notes</div>
+              <textarea value={settings.business_notes}
+                onChange={e => setSettings(s => ({ ...s, business_notes: e.target.value }))}
+                placeholder="Describe your business: product type, target market, seasonality, price segment..."
+                rows={3}
+                style={{ width:"100%", fontSize:12, padding:"9px 12px", borderRadius:6, resize:"vertical",
+                  background:"var(--s2)", border:"1px solid var(--b2)",
+                  color:"var(--tx)", outline:"none", lineHeight:1.5,
+                  fontFamily:"var(--ui)", boxSizing:"border-box" }} />
+            </div>
+
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
+              <span style={{ fontSize:11, color:"var(--tx3)", fontFamily:"var(--mono)",
+                textTransform:"uppercase", letterSpacing:".05em" }}>Response language:</span>
+              {[["ru","🇷🇺 RU"],["en","🇬🇧 EN"],["de","🇩🇪 DE"]].map(([v,l]) => (
+                <button key={v} onClick={() => setSettings(s => ({ ...s, response_language: v }))}
+                  className={`btn ${settings.response_language===v?"btn-primary":"btn-ghost"}`}
+                  style={{ fontSize:11, padding:"4px 10px" }}>{l}
+                </button>
+              ))}
+            </div>
+
+            <button onClick={handleSaveSettings} disabled={settingsSaving}
+              className="btn btn-primary" style={{ fontSize:12, padding:"6px 16px" }}>
+              {settingsSaving ? "…" : t("ai.save")}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Recommendations list ── */}
+      {recsLoading ? (
+        <div style={{ textAlign:"center", padding:60, color:"var(--tx3)" }}>
+          <span className="loader" style={{ width:24, height:24, borderWidth:3 }} />
+        </div>
+      ) : pendingRecs.length === 0 ? (
+        <div className="card" style={{ padding:"48px 32px", textAlign:"center" }}>
+          <div style={{ fontSize:36, marginBottom:12 }}>✦</div>
+          <div style={{ fontSize:14, color:"var(--tx3)" }}>{t("ai.noRecs")}</div>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {recs.map(rec => {
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {pendingRecs.map((rec, idx) => {
             const actions = typeof rec.actions === "string" ? JSON.parse(rec.actions) : (rec.actions || []);
-            const riskColor = RISK_COLORS[rec.risk_level] || "var(--tx2)";
-            const riskBg = RISK_BG[rec.risk_level] || "transparent";
-            const riskLabel = rec.risk_level === "low" ? t("ai.riskLow") : rec.risk_level === "high" ? t("ai.riskHigh") : t("ai.riskMedium");
-            const isPending = rec.status === "pending";
+            const ctx = typeof rec.context_snapshot === "string" ? JSON.parse(rec.context_snapshot) : (rec.context_snapshot || {});
+            const riskColor = AI_RISK_COLOR[rec.risk_level] || "var(--b2)";
 
             return (
-              <div key={rec.id} className="card fade" style={{
-                padding: "18px 22px",
-                opacity: rec.status !== "pending" ? 0.65 : 1,
-                borderColor: isPending ? "var(--b1)" : "var(--b2)",
-              }}>
-                <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
-                  {/* Left: type badge + content */}
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                      <span style={{
-                        padding: "2px 10px", borderRadius: 100, fontSize: 11, fontWeight: 600,
-                        background: "rgba(59,130,246,.12)", color: "var(--ac2)", fontFamily: "var(--mono)",
-                      }}>{TYPE_LABELS[rec.type] || rec.type}</span>
-                      <span style={{ padding: "2px 10px", borderRadius: 100, fontSize: 11, fontWeight: 500, background: riskBg, color: riskColor }}>
-                        {riskLabel}
+              <div key={rec.id} className="card" style={{ padding:"16px 20px", borderLeft:`3px solid ${riskColor}` }}>
+                <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+                  {/* Icon + priority */}
+                  <div style={{ flexShrink:0, display:"flex", flexDirection:"column", alignItems:"center", gap:4, paddingTop:2 }}>
+                    <span style={{ fontSize:20 }}>{AI_TYPE_ICON[rec.type] || "💡"}</span>
+                    <span style={{ fontSize:10, color:"var(--tx3)", fontFamily:"var(--mono)" }}>#{idx+1}</span>
+                  </div>
+
+                  {/* Content */}
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
+                      <span style={{ fontSize:14, fontWeight:600 }}>{rec.title}</span>
+                      <span className={`badge bg-${rec.risk_level === "low" ? "grn" : rec.risk_level === "high" ? "red" : "amb"}`} style={{ fontSize:10 }}>
+                        {rec.risk_level}
                       </span>
-                      {rec.status !== "pending" && (
-                        <span style={{ padding: "2px 10px", borderRadius: 100, fontSize: 11, fontWeight: 500, background: "var(--s3)", color: "var(--tx3)" }}>
-                          {rec.status === "applied" ? t("ai.applied") : t("ai.dismissed")}
-                        </span>
-                      )}
+                      <span className="badge bg-bl" style={{ fontSize:10 }}>{rec.type?.replace(/_/g," ")}</span>
                     </div>
 
-                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>{rec.title}</div>
-                    <div style={{ fontSize: 12, color: "var(--tx2)", lineHeight: 1.6, marginBottom: rec.expected_effect ? 8 : 0 }}>{rec.rationale}</div>
+                    <div style={{ fontSize:13, color:"var(--tx2)", marginBottom:8, lineHeight:1.6 }}>{rec.rationale}</div>
 
                     {rec.expected_effect && (
-                      <div style={{
-                        fontSize: 12, marginTop: 6, padding: "6px 12px", borderRadius: 6,
-                        background: "rgba(20,184,166,.08)", color: "var(--teal)", borderLeft: "2px solid var(--teal)",
-                      }}>
-                        <strong>{t("ai.expectedEffect")}:</strong> {rec.expected_effect}
+                      <div style={{ fontSize:12, color:"var(--grn)", marginBottom:8,
+                        padding:"5px 10px", background:"rgba(34,197,94,.08)",
+                        borderRadius:6, display:"inline-block" }}>
+                        → {rec.expected_effect}
                       </div>
                     )}
 
                     {actions.length > 0 && (
-                      <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {actions.map((a, i) => (
-                          <span key={i} style={{
-                            fontSize: 11, padding: "2px 8px", borderRadius: 4,
-                            background: "var(--s3)", color: "var(--tx3)", fontFamily: "var(--mono)",
-                          }}>
-                            {a.action_type} · {a.entity_type}
-                            {a.params && Object.entries(a.params).map(([k, v]) => ` · ${k}: ${v}`).join("")}
-                          </span>
+                      <div style={{ marginBottom:10 }}>
+                        {actions.map((a, ai) => (
+                          <div key={ai} style={{ fontSize:11, color:"var(--tx3)", padding:"2px 0",
+                            display:"flex", gap:6, alignItems:"center" }}>
+                            <span style={{ color:"var(--ac2)" }}>▸</span>
+                            <span style={{ fontFamily:"var(--mono)" }}>{a.entity_name || a.entity_id}</span>
+                            <span>—</span>
+                            <span>{a.action_type?.replace(/_/g," ")}</span>
+                            {a.params && Object.keys(a.params).length > 0 && (
+                              <span style={{ color:"var(--ac2)" }}>{JSON.stringify(a.params)}</span>
+                            )}
+                          </div>
                         ))}
                       </div>
                     )}
+
+                    <div style={{ fontSize:11, color:"var(--tx3)" }}>
+                      {new Date(rec.created_at).toLocaleString(undefined, { day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" })}
+                      {ctx.prompt && <span style={{ marginLeft:8, fontStyle:"italic" }}>• «{ctx.prompt.slice(0,60)}{ctx.prompt.length>60?"…":""}»</span>}
+                    </div>
                   </div>
 
-                  {/* Right: action buttons */}
-                  {isPending && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-                      <button className="btn btn-green" style={{ fontSize: 12, padding: "5px 12px" }}
-                        disabled={applying === rec.id}
-                        onClick={() => setConfirmRec(rec)}>
-                        {applying === rec.id ? <span className="loader" /> : <>✓ {t("ai.apply")}</>}
-                      </button>
-                      <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }}
-                        onClick={() => handlePreview(rec)}>
-                        👁 {t("ai.preview")}
-                      </button>
-                      <button className="btn btn-red" style={{ fontSize: 12, padding: "5px 12px" }}
-                        onClick={() => handleDismiss(rec)}>
-                        ✗ {t("ai.dismiss")}
-                      </button>
-                    </div>
-                  )}
+                  {/* Buttons */}
+                  <div style={{ display:"flex", flexDirection:"column", gap:6, flexShrink:0 }}>
+                    <button onClick={() => setConfirmRec(rec)} disabled={applying === rec.id}
+                      className="btn btn-green" style={{ fontSize:11, padding:"5px 12px" }}>
+                      {applying === rec.id ? <span className="loader" /> : <>✓ {t("ai.apply")}</>}
+                    </button>
+                    <button onClick={() => handlePreview(rec)}
+                      className="btn btn-ghost" style={{ fontSize:11, padding:"5px 12px" }}>
+                      👁 {t("ai.preview")}
+                    </button>
+                    <button onClick={() => handleDismiss(rec.id)}
+                      className="btn btn-red" style={{ fontSize:11, padding:"5px 12px" }}>
+                      ✗ {t("ai.dismiss")}
+                    </button>
+                  </div>
                 </div>
               </div>
             );
