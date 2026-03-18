@@ -936,17 +936,23 @@ const ProductsPage = ({ workspaceId }) => {
 };
 
 // ─── SyncButton ───────────────────────────────────────────────────────────────
+const SYNC_MODES = [
+  { mode: "quick", icon: "⚡", labelKey: "sync.quick", descKey: "sync.quickDesc" },
+  { mode: "full",  icon: "◎", labelKey: "sync.full",  descKey: "sync.fullDesc"  },
+];
+
 const SyncButton = ({ workspaceId, onSynced }) => {
   const { t } = useI18n();
-  const [open, setOpen]       = useState(false);
+  const [selectedMode, setSelectedMode] = useState("quick");
+  const [open, setOpen]     = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [done, setDone]       = useState(false);
-  const ref     = useRef(null); // button wrapper
-  const menuRef = useRef(null); // portal menu container
+  const [done, setDone]     = useState(false);
+  const ref     = useRef(null);
+  const menuRef = useRef(null);
 
   useEffect(() => {
     const handler = (e) => {
-      const outsideBtn  = !ref.current  || !ref.current.contains(e.target);
+      const outsideBtn  = !ref.current     || !ref.current.contains(e.target);
       const outsideMenu = !menuRef.current || !menuRef.current.contains(e.target);
       if (outsideBtn && outsideMenu) setOpen(false);
     };
@@ -954,12 +960,11 @@ const SyncButton = ({ workspaceId, onSynced }) => {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const handleSync = async (mode) => {
-    setOpen(false);
+  const handleSync = async () => {
     setSyncing(true);
     setDone(false);
     try {
-      await post("/connections/sync-all", { mode });
+      await post("/connections/sync-all", { mode: selectedMode });
       setDone(true);
       setTimeout(() => setDone(false), 3000);
       onSynced?.();
@@ -969,6 +974,13 @@ const SyncButton = ({ workspaceId, onSynced }) => {
       setSyncing(false);
     }
   };
+
+  const selectMode = (mode) => {
+    setSelectedMode(mode);
+    setOpen(false);
+  };
+
+  const currentMode = SYNC_MODES.find(m => m.mode === selectedMode) || SYNC_MODES[0];
 
   const getMenuStyle = () => {
     if (!ref.current) return { position: "fixed", top: 60, right: 20, zIndex: 2000 };
@@ -990,51 +1002,74 @@ const SyncButton = ({ workspaceId, onSynced }) => {
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <div style={{ display: "flex", gap: 0 }}>
+
+        {/* ── Main button — runs selectedMode ── */}
         <button
-          onClick={() => !syncing && handleSync("quick")}
+          onClick={handleSync}
           disabled={syncing}
           className="btn btn-primary"
           style={{ fontSize: 12, padding: "6px 12px", borderRadius: "6px 0 0 6px",
             display: "flex", alignItems: "center", gap: 5 }}
         >
-          {syncing
-            ? <><span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◌</span> {t("sync.syncing")}</>
-            : done
-            ? <>✓ {t("sync.done")}</>
-            : <>⟳ {t("sync.quick")}</>
-          }
+          {syncing ? (
+            <><span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◌</span> {t("sync.syncing")}</>
+          ) : done ? (
+            <>✓ {t("sync.done")}</>
+          ) : (
+            <>{currentMode.icon} {t(currentMode.labelKey)}</>
+          )}
         </button>
+
+        {/* ── Dropdown arrow — select mode only ── */}
         <button
           onClick={(e) => { e.stopPropagation(); if (!syncing) setOpen(o => !o); }}
           disabled={syncing}
           className="btn btn-primary"
           style={{ fontSize: 11, padding: "6px 8px", borderRadius: "0 6px 6px 0",
             borderLeft: "1px solid rgba(255,255,255,.15)" }}
+          title="Select sync mode"
         >
           {open ? "▲" : "▼"}
         </button>
       </div>
 
+      {/* ── Dropdown menu ── */}
       {open && createPortal(
         <div ref={menuRef} style={getMenuStyle()}>
-          {[
-            { mode: "quick", icon: "⚡", label: t("sync.quick"), desc: t("sync.quickDesc") },
-            { mode: "full",  icon: "◎", label: t("sync.full"),  desc: t("sync.fullDesc") },
-          ].map(({ mode, icon, label, desc }) => (
+          <div style={{ fontSize: 10, color: "var(--tx3)", padding: "6px 14px 4px",
+            fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".05em" }}>
+            Select sync mode
+          </div>
+          {SYNC_MODES.map(({ mode, icon, labelKey, descKey }) => (
             <button
               key={mode}
-              onMouseDown={(e) => { e.stopPropagation(); handleSync(mode); }}
+              onMouseDown={(e) => { e.stopPropagation(); selectMode(mode); }}
               style={{
-                display: "flex", flexDirection: "column", gap: 2,
+                display: "flex", alignItems: "center", gap: 10,
                 padding: "10px 14px", width: "100%", textAlign: "left",
-                background: "none", border: "none", cursor: "pointer",
-                borderRadius: 6, color: "var(--tx)",
+                background: mode === selectedMode ? "var(--s3)" : "none",
+                border: "none", cursor: "pointer", borderRadius: 6,
+                color: "var(--tx)",
               }}
               onMouseEnter={e => e.currentTarget.style.background = "var(--s3)"}
-              onMouseLeave={e => e.currentTarget.style.background = "none"}
+              onMouseLeave={e => e.currentTarget.style.background = mode === selectedMode ? "var(--s3)" : "none"}
             >
-              <span style={{ fontSize: 13, fontWeight: 500 }}>{icon} {label}</span>
-              <span style={{ fontSize: 11, color: "var(--tx3)" }}>{desc}</span>
+              <span style={{ fontSize: 18, flexShrink: 0 }}>{icon}</span>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
+                  {t(labelKey)}
+                  {mode === selectedMode && (
+                    <span style={{ fontSize: 9, color: "var(--ac2)",
+                      background: "rgba(59,130,246,.15)",
+                      padding: "1px 5px", borderRadius: 3 }}>
+                      selected
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2 }}>
+                  {t(descKey)}
+                </div>
+              </div>
             </button>
           ))}
         </div>,
