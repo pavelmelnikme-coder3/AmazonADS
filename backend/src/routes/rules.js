@@ -7,6 +7,7 @@
  * POST   /rules/:id/run           — execute rule synchronously (dry_run flag)
  * GET    /rules/campaigns         — campaigns list for scope selector
  * GET    /rules/ad-groups         — ad-groups list (optionally filtered by campaignId)
+ * GET    /rules/targets           — targets list for scope selector
  */
 
 const express = require("express");
@@ -42,154 +43,429 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   const scope      = typeof rule.scope      === "string" ? JSON.parse(rule.scope)      : (rule.scope  || {});
   const safety     = typeof rule.safety     === "string" ? JSON.parse(rule.safety)     : (rule.safety || {});
 
-  const endDate   = new Date().toISOString().split("T")[0];
-  const startDate = new Date(Date.now() - 14 * 86400000).toISOString().split("T")[0];
-
-  // Build keyword filter from scope
-  const kConds  = ["k.workspace_id = $1"];
-  const kParams = [workspaceId];
-  let pi = 2;
-
-  if (scope.campaign_ids?.length) {
-    kConds.push(`k.campaign_id = ANY($${pi++}::uuid[])`);
-    kParams.push(scope.campaign_ids);
+  // ── Period ──────────────────────────────────────────────────────────────────
+  const periodDays = parseInt(scope.period_days) || 14;
+  let startDate, endDate;
+  if (periodDays === 1) {
+    const yesterday = new Date(Date.now() - 86400000).toISOString().split("T")[0];
+    startDate = yesterday;
+    endDate   = yesterday;
+  } else {
+    endDate   = new Date().toISOString().split("T")[0];
+    startDate = new Date(Date.now() - periodDays * 86400000).toISOString().split("T")[0];
   }
-  if (scope.ad_group_ids?.length) {
-    kConds.push(`k.ad_group_id = ANY($${pi++}::uuid[])`);
-    kParams.push(scope.ad_group_ids);
-  }
-  if (scope.campaign_type) {
-    kConds.push(`c.campaign_type = $${pi++}`);
-    kParams.push(scope.campaign_type);
-  }
-  if (scope.match_types?.length) {
-    kConds.push(`k.match_type = ANY($${pi++}::text[])`);
-    kParams.push(scope.match_types);
-  }
-  kConds.push("k.state != 'archived'");
 
-  const { rows: keywords } = await query(
-    `SELECT
-       k.id, k.keyword_text, k.match_type, k.state, k.bid,
-       k.campaign_id, k.ad_group_id,
-       c.name  AS campaign_name, c.campaign_type,
-       COALESCE(SUM(m.clicks), 0)      AS clicks,
-       COALESCE(SUM(m.cost),   0)      AS spend,
-       COALESCE(SUM(m.sales_14d), 0)   AS sales,
-       COALESCE(SUM(m.orders_14d), 0)  AS orders,
-       COALESCE(SUM(m.impressions), 0) AS impressions,
-       CASE WHEN COALESCE(SUM(m.sales_14d),0) > 0
-            THEN SUM(m.cost)/SUM(m.sales_14d)*100 END  AS acos,
-       CASE WHEN COALESCE(SUM(m.cost),0) > 0
-            THEN SUM(m.sales_14d)/SUM(m.cost) END       AS roas,
-       CASE WHEN COALESCE(SUM(m.impressions),0) > 0
-            THEN SUM(m.clicks)::numeric/SUM(m.impressions)*100 END AS ctr,
-       CASE WHEN COALESCE(SUM(m.clicks),0) > 0
-            THEN SUM(m.cost)/SUM(m.clicks) END          AS cpc
-     FROM keywords k
-     JOIN campaigns  c  ON c.id  = k.campaign_id
-     JOIN ad_groups  ag ON ag.id = k.ad_group_id
-     LEFT JOIN fact_metrics_daily m
-       ON m.amazon_id = k.amazon_keyword_id
-       AND m.entity_type = 'keyword'
-       AND m.date BETWEEN $${pi++} AND $${pi++}
-     WHERE ${kConds.join(" AND ")}
-     GROUP BY k.id, k.keyword_text, k.match_type, k.state, k.bid,
-              k.campaign_id, k.ad_group_id, c.name, c.campaign_type, ag.name`,
-    [...kParams, startDate, endDate]
-  );
+  // Separate bid threshold conditions (applied in SQL WHERE) from metric conditions (post-fetch filter)
+  const bidConditions    = conditions.filter(c => c.metric === "bid");
+  const metricConditions = conditions.filter(c => c.metric !== "bid");
 
-  const matched = keywords.filter(kw => evaluate(conditions, kw));
-  const applied = [];
-  const errors  = [];
+  const entityType = scope.entity_type || "keyword";
+  const BID_OPS    = { gt: ">", gte: ">=", lt: "<", lte: "<=", eq: "=", neq: "!=" };
 
-  for (const kw of matched) {
+  // ── Helper: build campaign_name_contains clause ──────────────────────────────
+  function addCampaignNameFilter(conds, params, piRef, alias = "c") {
+    if (!scope.campaign_name_contains) return piRef;
+    const names = scope.campaign_name_contains.split(",").map(s => s.trim()).filter(Boolean);
+    if (!names.length) return piRef;
+    if (names.length === 1) {
+      conds.push(`${alias}.name ILIKE $${piRef++}`);
+      params.push(`%${names[0]}%`);
+    } else {
+      const orParts = names.map(() => `${alias}.name ILIKE $${piRef++}`).join(" OR ");
+      conds.push(`(${orParts})`);
+      params.push(...names.map(n => `%${n}%`));
+    }
+    return piRef;
+  }
+
+  // ── Fetch keywords ────────────────────────────────────────────────────────
+  let keywords = [];
+  if (entityType !== "product_target") {
+    const kConds  = ["k.workspace_id = $1"];
+    const kParams = [workspaceId];
+    let pi = 2;
+
+    if (scope.campaign_ids?.length) {
+      kConds.push(`k.campaign_id = ANY($${pi++}::uuid[])`);
+      kParams.push(scope.campaign_ids);
+    }
+    if (scope.ad_group_ids?.length) {
+      kConds.push(`k.ad_group_id = ANY($${pi++}::uuid[])`);
+      kParams.push(scope.ad_group_ids);
+    }
+    if (scope.campaign_type) {
+      kConds.push(`c.campaign_type = $${pi++}`);
+      kParams.push(scope.campaign_type);
+    }
+    if (scope.match_types?.length) {
+      kConds.push(`k.match_type = ANY($${pi++}::text[])`);
+      kParams.push(scope.match_types);
+    }
+    pi = addCampaignNameFilter(kConds, kParams, pi);
+    for (const bc of bidConditions) {
+      kConds.push(`k.bid ${BID_OPS[bc.op] || ">="} $${pi++}`);
+      kParams.push(parseFloat(bc.value));
+    }
+    kConds.push("k.state != 'archived'");
+
+    const { rows } = await query(
+      `SELECT
+         k.id, k.keyword_text, k.match_type, k.state, k.bid,
+         k.campaign_id, k.ad_group_id,
+         c.name  AS campaign_name, c.campaign_type,
+         ag.name AS ad_group_name,
+         COALESCE(SUM(m.clicks), 0)      AS clicks,
+         COALESCE(SUM(m.cost),   0)      AS spend,
+         COALESCE(SUM(m.sales_14d), 0)   AS sales,
+         COALESCE(SUM(m.orders_14d), 0)  AS orders,
+         COALESCE(SUM(m.impressions), 0) AS impressions,
+         CASE WHEN COALESCE(SUM(m.sales_14d),0) > 0
+              THEN SUM(m.cost)/SUM(m.sales_14d)*100 END  AS acos,
+         CASE WHEN COALESCE(SUM(m.cost),0) > 0
+              THEN SUM(m.sales_14d)/SUM(m.cost) END       AS roas,
+         CASE WHEN COALESCE(SUM(m.impressions),0) > 0
+              THEN SUM(m.clicks)::numeric/SUM(m.impressions)*100 END AS ctr,
+         CASE WHEN COALESCE(SUM(m.clicks),0) > 0
+              THEN SUM(m.cost)/SUM(m.clicks) END          AS cpc
+       FROM keywords k
+       JOIN campaigns  c  ON c.id  = k.campaign_id
+       JOIN ad_groups  ag ON ag.id = k.ad_group_id
+       LEFT JOIN fact_metrics_daily m
+         ON m.amazon_id = k.amazon_keyword_id
+         AND m.entity_type = 'keyword'
+         AND m.date BETWEEN $${pi++} AND $${pi++}
+       WHERE ${kConds.join(" AND ")}
+       GROUP BY k.id, k.keyword_text, k.match_type, k.state, k.bid,
+                k.campaign_id, k.ad_group_id, c.name, c.campaign_type, ag.name`,
+      [...kParams, startDate, endDate]
+    );
+    keywords = rows.map(r => ({ ...r, entity_type: "keyword" }));
+  }
+
+  // ── Fetch targets ─────────────────────────────────────────────────────────
+  let targets = [];
+  if (entityType !== "keyword") {
+    const tConds  = ["t.workspace_id = $1"];
+    const tParams = [workspaceId];
+    let tPi = 2;
+
+    if (scope.campaign_ids?.length) {
+      tConds.push(`t.campaign_id = ANY($${tPi++}::uuid[])`);
+      tParams.push(scope.campaign_ids);
+    }
+    if (scope.ad_group_ids?.length) {
+      tConds.push(`t.ad_group_id = ANY($${tPi++}::uuid[])`);
+      tParams.push(scope.ad_group_ids);
+    }
+    if (scope.campaign_type) {
+      tConds.push(`c.campaign_type = $${tPi++}`);
+      tParams.push(scope.campaign_type);
+    }
+    tPi = addCampaignNameFilter(tConds, tParams, tPi);
+    if (scope.targeting_type) {
+      const ttMap = { auto: "close-match", product: "asinSameAs", views: "views", audience: "audience" };
+      const ttVal = ttMap[scope.targeting_type];
+      if (ttVal) { tConds.push(`t.expression_type ILIKE $${tPi++}`); tParams.push(`%${ttVal}%`); }
+    }
+    if (scope.expression_type) {
+      tConds.push(`t.expression_type = $${tPi++}`);
+      tParams.push(scope.expression_type);
+    }
+    for (const bc of bidConditions) {
+      tConds.push(`t.bid ${BID_OPS[bc.op] || ">="} $${tPi++}`);
+      tParams.push(parseFloat(bc.value));
+    }
+    tConds.push("t.state != 'archived'");
+
+    const { rows } = await query(
+      `SELECT
+         t.id, t.amazon_target_id, t.expression, t.expression_type,
+         t.state, t.bid, t.campaign_id, t.ad_group_id, t.profile_id,
+         c.name  AS campaign_name, c.campaign_type,
+         ag.name AS ad_group_name,
+         COALESCE(SUM(m.clicks), 0)      AS clicks,
+         COALESCE(SUM(m.cost),   0)      AS spend,
+         COALESCE(SUM(m.sales_14d), 0)   AS sales,
+         COALESCE(SUM(m.orders_14d), 0)  AS orders,
+         COALESCE(SUM(m.impressions), 0) AS impressions,
+         CASE WHEN COALESCE(SUM(m.sales_14d),0) > 0
+              THEN SUM(m.cost)/SUM(m.sales_14d)*100 END  AS acos,
+         CASE WHEN COALESCE(SUM(m.cost),0) > 0
+              THEN SUM(m.sales_14d)/SUM(m.cost) END       AS roas,
+         CASE WHEN COALESCE(SUM(m.impressions),0) > 0
+              THEN SUM(m.clicks)::numeric/SUM(m.impressions)*100 END AS ctr,
+         CASE WHEN COALESCE(SUM(m.clicks),0) > 0
+              THEN SUM(m.cost)/SUM(m.clicks) END          AS cpc
+       FROM targets t
+       JOIN campaigns  c  ON c.id  = t.campaign_id
+       LEFT JOIN ad_groups ag ON ag.id = t.ad_group_id
+       LEFT JOIN fact_metrics_daily m
+         ON m.amazon_id = t.amazon_target_id
+         AND m.entity_type = 'target'
+         AND m.date BETWEEN $${tPi++} AND $${tPi++}
+       WHERE ${tConds.join(" AND ")}
+       GROUP BY t.id, t.amazon_target_id, t.expression, t.expression_type,
+                t.state, t.bid, t.campaign_id, t.ad_group_id, t.profile_id,
+                c.name, c.campaign_type, ag.name`,
+      [...tParams, startDate, endDate]
+    );
+    targets = rows.map(r => ({ ...r, entity_type: "target" }));
+  }
+
+  const entities = [...keywords, ...targets];
+  const matched  = entities.filter(e => evaluate(metricConditions, e));
+  const applied  = [];
+  const errors   = [];
+
+  for (const entity of matched) {
     for (const action of actions) {
       try {
+
+        // ── pause_keyword ───────────────────────────────────────────────────
         if (action.type === "pause_keyword") {
-          if (kw.state === "paused") continue;
+          if (entity.entity_type !== "keyword") continue;
+          if (entity.state === "paused") continue;
           if (!dryRun) {
-            await query("UPDATE keywords SET state = 'paused', updated_at = NOW() WHERE id = $1", [kw.id]);
+            await query("UPDATE keywords SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
               workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.pause_keyword", entityType: "keyword",
-              entityId: kw.id, entityName: kw.keyword_text,
-              beforeData: { state: kw.state }, afterData: { state: "paused" }, source: "rule",
+              entityId: entity.id, entityName: entity.keyword_text,
+              beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
             });
           }
           applied.push({
-            keyword_id: kw.id, keyword_text: kw.keyword_text,
-            campaign_name: kw.campaign_name, ad_group_name: kw.ad_group_name,
-            action: "pause_keyword", previous_state: kw.state, new_state: "paused",
-            metrics: { clicks: kw.clicks, spend: kw.spend, sales: kw.sales, orders: kw.orders, acos: kw.acos },
+            entity_id: entity.id, keyword_text: entity.keyword_text,
+            campaign_name: entity.campaign_name, action: "pause_keyword",
+            previous_state: entity.state, new_state: "paused",
+            metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders, acos: entity.acos },
           });
+
+        // ── enable_keyword ──────────────────────────────────────────────────
         } else if (action.type === "enable_keyword") {
-          if (kw.state === "enabled") continue;
+          if (entity.entity_type !== "keyword") continue;
+          if (entity.state === "enabled") continue;
           if (!dryRun) {
-            await query("UPDATE keywords SET state = 'enabled', updated_at = NOW() WHERE id = $1", [kw.id]);
+            await query("UPDATE keywords SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
               workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.enable_keyword", entityType: "keyword",
-              entityId: kw.id, entityName: kw.keyword_text,
-              beforeData: { state: kw.state }, afterData: { state: "enabled" }, source: "rule",
+              entityId: entity.id, entityName: entity.keyword_text,
+              beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
             });
           }
           applied.push({
-            keyword_id: kw.id, keyword_text: kw.keyword_text,
-            campaign_name: kw.campaign_name, ad_group_name: kw.ad_group_name,
-            action: "enable_keyword", previous_state: kw.state, new_state: "enabled",
-            metrics: { clicks: kw.clicks, spend: kw.spend, sales: kw.sales },
+            entity_id: entity.id, keyword_text: entity.keyword_text,
+            campaign_name: entity.campaign_name, action: "enable_keyword",
+            previous_state: entity.state, new_state: "enabled",
+            metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders },
           });
+
+        // ── adjust_bid_pct (keyword) ────────────────────────────────────────
         } else if (action.type === "adjust_bid_pct") {
+          if (entity.entity_type !== "keyword") continue;
           const pct        = parseFloat(action.value || 0) / 100;
-          const currentBid = parseFloat(kw.bid || 0.10);
+          const currentBid = parseFloat(entity.bid || 0.10);
           const minBid     = parseFloat(safety.min_bid || 0.02);
           const maxBid     = parseFloat(safety.max_bid || 50);
-          let newBid = Math.round(Math.max(minBid, Math.min(maxBid, currentBid * (1 + pct))) * 100) / 100;
+          const newBid     = Math.round(Math.max(minBid, Math.min(maxBid, currentBid * (1 + pct))) * 100) / 100;
           if (!dryRun) {
-            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, kw.id]);
+            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, entity.id]);
             await writeAudit({
               workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.adjust_bid_pct", entityType: "keyword",
-              entityId: kw.id, entityName: kw.keyword_text,
+              entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
             });
           }
           applied.push({
-            keyword_id: kw.id, keyword_text: kw.keyword_text,
-            campaign_name: kw.campaign_name, ad_group_name: kw.ad_group_name,
-            action: "adjust_bid_pct", previous_bid: currentBid, new_bid: newBid,
+            entity_id: entity.id, keyword_text: entity.keyword_text,
+            campaign_name: entity.campaign_name, action: "adjust_bid_pct",
+            previous_bid: currentBid, new_bid: newBid,
             change_pct: (pct * 100).toFixed(1) + "%",
           });
+
+        // ── set_bid (keyword) ───────────────────────────────────────────────
         } else if (action.type === "set_bid") {
+          if (entity.entity_type !== "keyword") continue;
           const newBid = parseFloat(action.value || 0.10);
           if (!dryRun) {
-            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, kw.id]);
+            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, entity.id]);
             await writeAudit({
               workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.set_bid", entityType: "keyword",
-              entityId: kw.id, entityName: kw.keyword_text,
-              beforeData: { bid: parseFloat(kw.bid || 0) }, afterData: { bid: newBid }, source: "rule",
+              entityId: entity.id, entityName: entity.keyword_text,
+              beforeData: { bid: parseFloat(entity.bid || 0) }, afterData: { bid: newBid }, source: "rule",
             });
           }
           applied.push({
-            keyword_id: kw.id, keyword_text: kw.keyword_text,
-            campaign_name: kw.campaign_name, action: "set_bid",
-            previous_bid: kw.bid, new_bid: newBid,
+            entity_id: entity.id, keyword_text: entity.keyword_text,
+            campaign_name: entity.campaign_name, action: "set_bid",
+            previous_bid: entity.bid, new_bid: newBid,
+          });
+
+        // ── pause_target ────────────────────────────────────────────────────
+        } else if (action.type === "pause_target") {
+          if (entity.entity_type !== "target") continue;
+          if (entity.state === "paused") continue;
+          if (!dryRun) {
+            await query("UPDATE targets SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "target.pause", entityType: "target",
+              entityId: entity.id, entityName: JSON.stringify(entity.expression),
+              beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
+            });
+          }
+          applied.push({
+            entity_id: entity.id, expression: entity.expression,
+            campaign_name: entity.campaign_name, action: "pause_target",
+            previous_state: entity.state, new_state: "paused",
+            metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders, acos: entity.acos },
+          });
+
+        // ── enable_target ───────────────────────────────────────────────────
+        } else if (action.type === "enable_target") {
+          if (entity.entity_type !== "target") continue;
+          if (entity.state === "enabled") continue;
+          if (!dryRun) {
+            await query("UPDATE targets SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "target.enable", entityType: "target",
+              entityId: entity.id, entityName: JSON.stringify(entity.expression),
+              beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
+            });
+          }
+          applied.push({
+            entity_id: entity.id, expression: entity.expression,
+            campaign_name: entity.campaign_name, action: "enable_target",
+            previous_state: entity.state, new_state: "enabled",
+            metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders },
+          });
+
+        // ── adjust_target_bid_pct ───────────────────────────────────────────
+        } else if (action.type === "adjust_target_bid_pct") {
+          if (entity.entity_type !== "target") continue;
+          const pct        = parseFloat(action.value || 0) / 100;
+          const currentBid = parseFloat(entity.bid || 0.10);
+          const minBid     = parseFloat(safety.min_bid || 0.02);
+          const maxBid     = parseFloat(safety.max_bid || 50);
+          const newBid     = Math.round(Math.max(minBid, Math.min(maxBid, currentBid * (1 + pct))) * 100) / 100;
+          if (!dryRun) {
+            await query("UPDATE targets SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, entity.id]);
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "target.adjust_bid_pct", entityType: "target",
+              entityId: entity.id, entityName: JSON.stringify(entity.expression),
+              beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
+            });
+          }
+          applied.push({
+            entity_id: entity.id, expression: entity.expression,
+            campaign_name: entity.campaign_name, action: "adjust_target_bid_pct",
+            previous_bid: currentBid, new_bid: newBid,
+            change_pct: (pct * 100).toFixed(1) + "%",
+          });
+
+        // ── add_negative_keyword ────────────────────────────────────────────
+        // action.value: "exact" | "phrase" | "both" (default: "exact")
+        } else if (action.type === "add_negative_keyword") {
+          if (entity.entity_type !== "keyword") continue;
+          const negMatchTypes = action.value === "phrase" ? ["phrase"]
+            : action.value === "both" ? ["exact", "phrase"] : ["exact"];
+
+          for (const matchType of negMatchTypes) {
+            const { rows: existing } = await query(
+              `SELECT id FROM negative_keywords
+               WHERE workspace_id=$1 AND campaign_id=$2
+               AND keyword_text=$3 AND match_type=$4 AND ad_group_id=$5`,
+              [workspaceId, entity.campaign_id, entity.keyword_text, matchType, entity.ad_group_id]
+            );
+            if (existing.length > 0) continue;
+
+            if (!dryRun) {
+              await query(
+                `INSERT INTO negative_keywords
+                   (workspace_id, profile_id, campaign_id, ad_group_id,
+                    amazon_neg_keyword_id, keyword_text, match_type, level, raw_data, synced_at)
+                 VALUES ($1,
+                   (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
+                   $2, $3, $4, $5, $6, $7, $8, NOW())
+                 ON CONFLICT DO NOTHING`,
+                [workspaceId, entity.campaign_id, entity.ad_group_id,
+                  `rule-${entity.id}-${matchType}`,
+                  entity.keyword_text, matchType, "ad_group",
+                  JSON.stringify({ source: "rule", ruleId: rule.id })]
+              );
+              await writeAudit({
+                workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+                action: "keyword.add_negative", entityType: "keyword",
+                entityId: entity.id, entityName: entity.keyword_text,
+                beforeData: {}, afterData: { match_type: matchType, level: "ad_group", added_as_negative: true },
+                source: "rule",
+              });
+            }
+            applied.push({
+              entity_id: entity.id, keyword_text: entity.keyword_text,
+              campaign_name: entity.campaign_name, action: "add_negative_keyword",
+              match_type: matchType, level: "ad_group",
+              metrics: { clicks: entity.clicks, orders: entity.orders, acos: entity.acos },
+            });
+          }
+
+        // ── add_negative_target ─────────────────────────────────────────────
+        } else if (action.type === "add_negative_target") {
+          if (entity.entity_type !== "target") continue;
+          const exprJson = typeof entity.expression === "string"
+            ? entity.expression : JSON.stringify(entity.expression);
+
+          const { rows: existing } = await query(
+            `SELECT id FROM negative_targets
+             WHERE workspace_id=$1 AND campaign_id=$2 AND ad_group_id=$3 AND expression=$4::jsonb`,
+            [workspaceId, entity.campaign_id, entity.ad_group_id, exprJson]
+          );
+          if (existing.length > 0) continue;
+
+          if (!dryRun) {
+            await query(
+              `INSERT INTO negative_targets
+                 (workspace_id, profile_id, campaign_id, ad_group_id,
+                  amazon_neg_target_id, expression, expression_type, level)
+               VALUES ($1,
+                 (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
+                 $2, $3, $4, $5::jsonb, $6, $7)
+               ON CONFLICT DO NOTHING`,
+              [workspaceId, entity.campaign_id, entity.ad_group_id,
+                `rule-neg-${entity.id}`,
+                exprJson, entity.expression_type || "asinSameAs", "ad_group"]
+            );
+            await writeAudit({
+              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              action: "target.add_negative", entityType: "target",
+              entityId: entity.id, entityName: JSON.stringify(entity.expression),
+              beforeData: {}, afterData: { added_as_negative: true }, source: "rule",
+            });
+          }
+          applied.push({
+            entity_id: entity.id, expression: entity.expression,
+            campaign_name: entity.campaign_name, action: "add_negative_target",
+            metrics: { clicks: entity.clicks, orders: entity.orders },
           });
         }
       } catch (e) {
-        errors.push({ keyword_id: kw.id, error: e.message });
+        errors.push({ entity_id: entity.id, error: e.message });
       }
     }
   }
 
   return {
-    matched_count:    matched.length,
-    total_evaluated:  keywords.length,
-    applied_count:    applied.length,
-    dry_run:          dryRun,
-    period:           { start: startDate, end: endDate },
+    matched_count:   matched.length,
+    total_evaluated: entities.length,
+    entity_counts:   { keywords: keywords.length, targets: targets.length },
+    applied_count:   applied.length,
+    dry_run:         dryRun,
+    period:          { start: startDate, end: endDate, days: periodDays },
     applied,
     errors,
   };
@@ -220,6 +496,25 @@ router.get("/ad-groups", async (req, res, next) => {
        FROM ad_groups ag JOIN campaigns c ON c.id = ag.campaign_id
        WHERE ${cond.join(" AND ")} AND ag.state != 'archived'
        ORDER BY c.name, ag.name LIMIT 500`,
+      params
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// ── GET /rules/targets — MUST be before /:id ──────────────────────────────────
+router.get("/targets", async (req, res, next) => {
+  try {
+    const { campaignId } = req.query;
+    const cond   = ["t.workspace_id = $1"];
+    const params = [req.workspaceId];
+    if (campaignId) { cond.push("t.campaign_id = $2"); params.push(campaignId); }
+    const { rows } = await query(
+      `SELECT t.id, t.expression, t.expression_type, t.state, t.bid,
+              t.campaign_id, c.name AS campaign_name
+       FROM targets t JOIN campaigns c ON c.id = t.campaign_id
+       WHERE ${cond.join(" AND ")} AND t.state != 'archived'
+       ORDER BY c.name, t.expression::text LIMIT 500`,
       params
     );
     res.json(rows);

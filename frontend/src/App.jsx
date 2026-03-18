@@ -3577,7 +3577,7 @@ const EMPTY_RULE_FORM = {
   name: "", description: "", dry_run: false, is_active: true,
   conditions: [{ metric: "clicks", op: "gte", value: "30" }],
   actions:    [{ type: "pause_keyword", value: "" }],
-  scope:  { campaign_type: "", campaign_ids: [], ad_group_ids: [], match_types: [] },
+  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "" },
   safety: { min_bid: "0.02", max_bid: "50" },
 };
 
@@ -3591,6 +3591,7 @@ const RULE_METRICS = [
   { value:"roas",        label:"ROAS (x)" },
   { value:"ctr",         label:"CTR (%)" },
   { value:"cpc",         label:"CPC (€)" },
+  { value:"bid",         label:"Ставка (€)" },
 ];
 const RULE_OPS = [
   { value:"gte", label:"≥" },
@@ -3601,10 +3602,15 @@ const RULE_OPS = [
   { value:"neq", label:"≠" },
 ];
 const RULE_ACTIONS_LIST = [
-  { value:"pause_keyword",  label:"⏸ Остановить ключевое слово" },
-  { value:"enable_keyword", label:"▶ Запустить ключевое слово" },
-  { value:"adjust_bid_pct", label:"⚡ Изменить ставку на %" },
-  { value:"set_bid",        label:"🎯 Установить ставку" },
+  { value:"pause_keyword",         label:"⏸ Остановить ключевое слово",  et:"keyword" },
+  { value:"enable_keyword",        label:"▶ Запустить ключевое слово",    et:"keyword" },
+  { value:"adjust_bid_pct",        label:"⚡ Изменить ставку на %",       et:"keyword" },
+  { value:"set_bid",               label:"🎯 Установить ставку",           et:"keyword" },
+  { value:"add_negative_keyword",  label:"🚫 Добавить в негативные",      et:"keyword" },
+  { value:"pause_target",          label:"⏸ Остановить таргет",           et:"target" },
+  { value:"enable_target",         label:"▶ Запустить таргет",            et:"target" },
+  { value:"adjust_target_bid_pct", label:"⚡ Изменить ставку таргета %",  et:"target" },
+  { value:"add_negative_target",   label:"🚫 Таргет в негативные",        et:"target" },
 ];
 const RULE_MATCH_TYPES = [
   { value:"exact",  label:"Exact" },
@@ -3702,7 +3708,7 @@ const RulesPage = ({ workspaceId }) => {
   // Action helpers
   const updAct = (i, f, v) => setForm(fm => { const a = [...fm.actions]; a[i] = { ...a[i], [f]: v }; return { ...fm, actions: a }; });
   const remAct = (i)       => setForm(f => ({ ...f, actions: f.actions.filter((_,idx) => idx !== i) }));
-  const addAct = ()        => setForm(f => ({ ...f, actions: [...f.actions, { type:"pause_keyword", value:"" }] }));
+  const addAct = ()        => setForm(f => ({ ...f, actions: [...f.actions, { type: (f.scope?.entity_type || "keyword") === "keyword" ? "pause_keyword" : "pause_target", value:"" }] }));
 
   // Scope toggle helpers
   const toggleCampaign  = id => setForm(f => { const ids = f.scope.campaign_ids||[]; return { ...f, scope: { ...f.scope, campaign_ids: ids.includes(id) ? ids.filter(x=>x!==id) : [...ids,id] } }; });
@@ -3737,24 +3743,24 @@ const RulesPage = ({ workspaceId }) => {
             padding:"24px 28px", margin:"0 auto", flexShrink:0 }}>
             <div style={{ display:"flex", justifyContent:"space-between", marginBottom:20 }}>
               <div style={{ fontFamily:"var(--disp)", fontSize:18, fontWeight:700 }}>
-                {editRule ? "Редактировать правило" : "Новое правило"}
+                {editRule ? t("rules.editRule") : t("rules.new")}
               </div>
               <button onClick={() => setShowForm(false)} className="btn btn-ghost"
                 style={{ fontSize:12, padding:"4px 10px" }}>✕</button>
             </div>
 
             {/* Name + Description */}
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12 }}>
               <div>
-                <div style={LABEL}>Название *</div>
+                <div style={LABEL}>{t("rules.name")} *</div>
                 <input value={form.name} onChange={e => setForm(f => ({...f, name:e.target.value}))}
-                  placeholder="напр. Стоп убыточные ключи"
+                  placeholder={t("rules.namePlaceholder")}
                   style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
                     background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
                     outline:"none", boxSizing:"border-box" }} />
               </div>
               <div>
-                <div style={LABEL}>Описание</div>
+                <div style={LABEL}>{t("rules.description") || "Описание"}</div>
                 <input value={form.description} onChange={e => setForm(f => ({...f, description:e.target.value}))}
                   placeholder="опционально"
                   style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
@@ -3763,10 +3769,45 @@ const RulesPage = ({ workspaceId }) => {
               </div>
             </div>
 
+            {/* Entity type + Period */}
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16,
+              padding:"10px 12px", background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
+              <div>
+                <div style={LABEL}>{t("rules.entityType")}</div>
+                <div style={{ display:"flex", gap:6 }}>
+                  {[
+                    { value:"keyword",        label:"⌨ " + t("rules.keyword") },
+                    { value:"product_target", label:"🎯 " + t("rules.productTarget") },
+                  ].map(et => (
+                    <button key={et.value}
+                      className={`btn ${(form.scope?.entity_type || "keyword") === et.value ? "btn-primary" : "btn-ghost"}`}
+                      style={{ fontSize:11, padding:"5px 10px", flex:1 }}
+                      onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, entity_type: et.value } }))}>
+                      {et.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div style={LABEL}>{t("rules.periodLabel")}</div>
+                <select value={form.scope?.period_days || 14}
+                  onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, period_days: parseInt(e.target.value) } }))}
+                  style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
+                    background:"var(--s1)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                  <option value={1}>{t("rules.yesterday")}</option>
+                  <option value={7}>7 дней</option>
+                  <option value={14}>14 дней</option>
+                  <option value={30}>30 дней</option>
+                  <option value={60}>60 дней</option>
+                  <option value={90}>90 дней</option>
+                </select>
+              </div>
+            </div>
+
             {/* Conditions */}
             <div style={{ marginBottom:16 }}>
               <div style={LABEL}>
-                {t("rules.conditionsTitle")} <span style={{color:"var(--ac2)"}}>(за последние 14 дней)</span>
+                {t("rules.conditionsTitle")} <span style={{color:"var(--ac2)"}}>({form.scope?.period_days === 1 ? t("rules.yesterday") : `${form.scope?.period_days || 14}d`})</span>
               </div>
               {form.conditions.map((cond, i) => (
                 <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
@@ -3798,30 +3839,47 @@ const RulesPage = ({ workspaceId }) => {
             {/* Actions */}
             <div style={{ marginBottom:16 }}>
               <div style={LABEL}>{t("rules.actionsTitle")}</div>
-              {form.actions.map((act, i) => (
-                <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
-                  <select value={act.type} onChange={e => updAct(i,"type",e.target.value)}
-                    style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
-                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                    {RULE_ACTIONS_LIST.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
-                  </select>
-                  {(act.type === "adjust_bid_pct" || act.type === "set_bid") && (
-                    <div style={{ display:"flex", alignItems:"center", gap:4 }}>
-                      <input type="number" value={act.value}
-                        onChange={e => updAct(i,"value",e.target.value)}
-                        placeholder={act.type === "adjust_bid_pct" ? "напр. -20" : "напр. 0.50"}
-                        style={{ width:90, fontSize:13, padding:"7px 8px", borderRadius:6,
-                          background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
-                      <span style={{ fontSize:11, color:"var(--tx3)" }}>
-                        {act.type === "adjust_bid_pct" ? "%" : "€"}
-                      </span>
-                    </div>
-                  )}
-                  <button onClick={() => remAct(i)} disabled={form.actions.length === 1}
-                    style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
-                      cursor:"pointer", fontSize:14, opacity:form.actions.length===1?0.3:1 }}>✕</button>
-                </div>
-              ))}
+              {form.actions.map((act, i) => {
+                const curEntityType = form.scope?.entity_type || "keyword";
+                const filteredActions = RULE_ACTIONS_LIST.filter(a =>
+                  a.et === curEntityType || (curEntityType === "keyword" && a.et === "keyword") || (curEntityType === "product_target" && a.et === "target")
+                );
+                const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid" || act.type === "adjust_target_bid_pct";
+                const isNegKw  = act.type === "add_negative_keyword";
+                return (
+                  <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
+                    <select value={act.type} onChange={e => updAct(i,"type",e.target.value)}
+                      style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
+                        background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                      {filteredActions.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                    </select>
+                    {isBidAct && (
+                      <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+                        <input type="number" value={act.value}
+                          onChange={e => updAct(i,"value",e.target.value)}
+                          placeholder={act.type === "set_bid" ? "напр. 0.50" : "напр. -20"}
+                          style={{ width:90, fontSize:13, padding:"7px 8px", borderRadius:6,
+                            background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
+                        <span style={{ fontSize:11, color:"var(--tx3)" }}>
+                          {act.type === "set_bid" ? "€" : "%"}
+                        </span>
+                      </div>
+                    )}
+                    {isNegKw && (
+                      <select value={act.value || "exact"} onChange={e => updAct(i,"value",e.target.value)}
+                        style={{ width:130, fontSize:12, padding:"7px 8px", borderRadius:6,
+                          background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                        <option value="exact">{t("rules.negExact")}</option>
+                        <option value="phrase">{t("rules.negPhrase")}</option>
+                        <option value="both">{t("rules.negBoth")}</option>
+                      </select>
+                    )}
+                    <button onClick={() => remAct(i)} disabled={form.actions.length === 1}
+                      style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
+                        cursor:"pointer", fontSize:14, opacity:form.actions.length===1?0.3:1 }}>✕</button>
+                  </div>
+                );
+              })}
               <button onClick={addAct} className="btn btn-ghost"
                 style={{ fontSize:11, padding:"4px 10px", marginTop:4 }}>+ {t("rules.addAction")}</button>
             </div>
@@ -3849,6 +3907,35 @@ const RulesPage = ({ workspaceId }) => {
                     ))}
                   </div>
                 </div>
+              </div>
+
+              {/* Campaign name filter + targeting type */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:10 }}>
+                <div>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.campaignNameFilter")}</div>
+                  <input
+                    value={form.scope?.campaign_name_contains || ""}
+                    onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, campaign_name_contains: e.target.value } }))}
+                    placeholder={t("rules.campaignNamePlaceholder")}
+                    style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
+                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
+                      outline:"none", boxSizing:"border-box" }} />
+                </div>
+                {(form.scope?.entity_type || "keyword") === "product_target" && (
+                  <div>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.targetingType")}</div>
+                    <select value={form.scope?.targeting_type || ""}
+                      onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, targeting_type: e.target.value } }))}
+                      style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
+                        background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
+                      <option value="">{t("rules.targetingAll")}</option>
+                      <option value="product">{t("rules.targetingProduct")}</option>
+                      <option value="views">{t("rules.targetingViews")}</option>
+                      <option value="audience">{t("rules.targetingAudience")}</option>
+                      <option value="auto">{t("rules.targetingAuto")}</option>
+                    </select>
+                  </div>
+                )}
               </div>
 
               <div style={{ marginBottom:10 }}>
@@ -3969,7 +4056,11 @@ const RulesPage = ({ workspaceId }) => {
                         {r.dry_run ? "🔍 Симуляция" : "✅ Результат запуска"}
                       </div>
                       <div style={{ fontSize:12, color:"var(--tx3)", marginTop:4 }}>
-                        {r.period?.start} – {r.period?.end} · {r.total_evaluated} ключевых слов проверено
+                        {r.period?.start} – {r.period?.end}
+                        {r.period?.days ? ` · ${r.period.days === 1 ? "вчера" : r.period.days + "д"}` : ""}
+                        {r.entity_counts
+                          ? ` · ${r.entity_counts.keywords || 0} ключей + ${r.entity_counts.targets || 0} таргетов`
+                          : ` · ${r.total_evaluated} объектов проверено`}
                       </div>
                     </div>
                     <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}>✕</button>
@@ -3993,30 +4084,44 @@ const RulesPage = ({ workspaceId }) => {
                     <div>
                       <div style={LABEL}>{r.dry_run ? "Будет изменено" : "Изменено"}</div>
                       <div style={{ maxHeight:280, overflowY:"auto" }}>
-                        {r.applied.map((a, i) => (
-                          <div key={i} style={{ padding:"8px 12px", borderBottom:"1px solid var(--b1)",
-                            display:"flex", gap:10, alignItems:"center", fontSize:12 }}>
-                            <span style={{ fontFamily:"var(--mono)", color:"var(--ac2)", minWidth:120,
-                              overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                              {a.keyword_text}
-                            </span>
-                            <span className={`badge ${a.action==="pause_keyword"?"bg-amb":a.action==="enable_keyword"?"bg-grn":"bg-bl"}`}
-                              style={{ fontSize:10 }}>
-                              {a.action === "pause_keyword"  ? "⏸ PAUSE"  :
-                               a.action === "enable_keyword" ? "▶ ENABLE" :
-                               a.action === "adjust_bid_pct" ? `⚡ BID ${a.change_pct}` :
-                               `🎯 BID →${a.new_bid}€`}
-                            </span>
-                            <span style={{ color:"var(--tx3)", fontSize:11, marginLeft:"auto" }}>
-                              {a.campaign_name}
-                            </span>
-                            {a.metrics && (
-                              <span style={{ fontSize:10, color:"var(--tx3)" }}>
-                                {a.metrics.clicks}cl · {a.metrics.orders}ord · {a.metrics.acos ? parseFloat(a.metrics.acos).toFixed(1)+"%" : "—"}
+                        {r.applied.map((a, i) => {
+                          const entityLabel = a.keyword_text || (a.expression
+                            ? (typeof a.expression === "object"
+                                ? (a.expression[0]?.value || JSON.stringify(a.expression))
+                                : a.expression)
+                            : a.entity_id);
+                          const isTarget = !a.keyword_text;
+                          const badgeCls = ["pause_keyword","pause_target"].includes(a.action) ? "bg-amb"
+                            : ["enable_keyword","enable_target"].includes(a.action) ? "bg-grn" : "bg-bl";
+                          const actionLabel =
+                            a.action === "pause_keyword"         ? "⏸ PAUSE"
+                            : a.action === "enable_keyword"      ? "▶ ENABLE"
+                            : a.action === "pause_target"        ? "⏸ PAUSE TGT"
+                            : a.action === "enable_target"       ? "▶ ENABLE TGT"
+                            : a.action === "adjust_bid_pct"      ? `⚡ BID ${a.change_pct}`
+                            : a.action === "adjust_target_bid_pct" ? `⚡ TGT ${a.change_pct}`
+                            : a.action === "add_negative_keyword"  ? `🚫 NEG-${(a.match_type||"exact").toUpperCase()}`
+                            : a.action === "add_negative_target"   ? "🚫 NEG TGT"
+                            : `🎯 BID→${a.new_bid}€`;
+                          return (
+                            <div key={i} style={{ padding:"8px 12px", borderBottom:"1px solid var(--b1)",
+                              display:"flex", gap:10, alignItems:"center", fontSize:12 }}>
+                              <span style={{ fontFamily:"var(--mono)", color: isTarget ? "var(--amb)" : "var(--ac2)",
+                                minWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                {entityLabel}
                               </span>
-                            )}
-                          </div>
-                        ))}
+                              <span className={`badge ${badgeCls}`} style={{ fontSize:10 }}>{actionLabel}</span>
+                              <span style={{ color:"var(--tx3)", fontSize:11, marginLeft:"auto" }}>
+                                {a.campaign_name}
+                              </span>
+                              {a.metrics && (
+                                <span style={{ fontSize:10, color:"var(--tx3)" }}>
+                                  {a.metrics.clicks}cl · {a.metrics.orders}ord · {a.metrics.acos ? parseFloat(a.metrics.acos).toFixed(1)+"%" : "—"}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   ) : (
@@ -4070,6 +4175,12 @@ const RulesPage = ({ workspaceId }) => {
                       <span className={`badge ${rule.is_active?"bg-grn":"bg-red"}`} style={{ fontSize:10 }}>
                         {rule.is_active ? t("rules.active") : t("rules.inactive")}
                       </span>
+                      <span className="badge bg-bl" style={{ fontSize:9 }}>
+                        {scope.entity_type === "product_target" ? "🎯 targets" : "⌨ keywords"}
+                      </span>
+                      <span className="badge" style={{ fontSize:9, background:"var(--s3)", color:"var(--tx2)" }}>
+                        {scope.period_days === 1 ? "вчера" : `${scope.period_days || 14}д`}
+                      </span>
                       {last && (
                         <span style={{ fontSize:11, color:"var(--tx3)" }}>
                           {t("rules.lastRun")}: {new Date(rule.last_run_at).toLocaleString(undefined,{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}
@@ -4105,10 +4216,12 @@ const RulesPage = ({ workspaceId }) => {
 
                     {/* Scope summary */}
                     <div style={{ fontSize:11, color:"var(--tx3)" }}>
-                      {(scope.campaign_ids?.length) ? `${scope.campaign_ids.length} кампаний` : t("rules.allKeywords")}
+                      {(scope.campaign_ids?.length) ? `${scope.campaign_ids.length} кампаний` : t("rules.allEntities")}
                       {scope.campaign_type ? ` · ${scope.campaign_type.replace("sponsored","").toUpperCase()}` : ""}
                       {scope.match_types?.length ? ` · ${scope.match_types.join("/")}` : ""}
                       {scope.ad_group_ids?.length ? ` · ${scope.ad_group_ids.length} групп` : ""}
+                      {scope.campaign_name_contains ? ` · "${scope.campaign_name_contains}"` : ""}
+                      {scope.targeting_type ? ` · ${scope.targeting_type}` : ""}
                     </div>
                   </div>
 
