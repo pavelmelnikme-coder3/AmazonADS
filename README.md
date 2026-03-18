@@ -1,6 +1,6 @@
 # AdsFlow — Amazon Ads Dashboard
 
-Full-featured Amazon Ads management dashboard: AI-powered recommendations, automated keyword rules, customizable analytics, BSR tracking, weekly P&L reporting, and complete change history with rollback. Supports SP/SB/SD campaign types across NA/EU/FE regions.
+Full-featured Amazon Ads management dashboard: AI-powered recommendations, automated rules engine (keywords + product targets + negative actions), advanced filters with saved presets, customizable analytics, BSR tracking, weekly P&L reporting, complete change history with rollback, and global sync progress bar. Supports SP/SB/SD campaign types across NA/EU/FE regions.
 
 ---
 
@@ -63,7 +63,7 @@ curl http://localhost:4000/health
 
 1. Register → Connections → Connect Amazon Ads Account
 2. Authorize on amazon.com
-3. Select profiles → wait for sync (~3–10 min)
+3. Select profiles → wait for sync (~1–3 min with optimized batch upserts)
 
 ---
 
@@ -91,7 +91,8 @@ curl http://localhost:4000/health
                               │
 ┌─────────────────────────────▼───────────────────────────────────┐
 │  PostgreSQL 16                                                   │
-│  campaigns · keywords · targets · fact_metrics_daily             │
+│  campaigns · keywords · targets · negative_keywords             │
+│  negative_targets · fact_metrics_daily (partitioned)            │
 │  products · bsr_snapshots · sku_mapping                         │
 │  rules · alert_configs · audit_events · ai_recommendations      │
 │  ai_workspace_settings · users (settings JSONB)                 │
@@ -101,46 +102,35 @@ curl http://localhost:4000/health
 
 ---
 
-## 📁 Project Structure
+## 📡 Metrics Pipeline
 
-```
-adsflow/
-├── docker-compose.yml
-├── .env.example
-├── backend/src/
-│   ├── app.js
-│   ├── config/           logger · redis · encryption
-│   ├── db/
-│   │   ├── pool.js
-│   │   └── migrations/   001_initial.sql · 002_add_region.sql
-│   ├── middleware/auth.js
-│   ├── services/amazon/
-│   │   ├── lwa.js                 OAuth + token refresh
-│   │   ├── adsClient.js           Ads API HTTP client
-│   │   ├── spClient.js            SP-API client (BSR)
-│   │   ├── entities.js            SP v3 + SB v4 + SD entity sync
-│   │   └── reporting.js           Reporting API v3 async pipeline
-│   ├── jobs/
-│   │   ├── workers.js             BullMQ workers
-│   │   └── scheduler.js           Cron jobs
-│   └── routes/
-│       ├── auth.js                Login · profile · settings
-│       ├── connections.js         OAuth · schedule · sync
-│       ├── campaigns.js           List · update · bulk · audit
-│       ├── keywords.js            List · bulk bid/state · audit
-│       ├── metrics.js             Summary · top-campaigns · by-type
-│       ├── reports.js             Report requests
-│       ├── rules.js               Rule Engine CRUD + execute + audit
-│       ├── alerts.js              Alert configs + instances
-│       ├── audit.js               Change history + rollback
-│       ├── products.js            BSR tracking (SP-API)
-│       ├── analyticsReport.js     XLSX download + SKU cost config
-│       ├── ai.js                  Claude Sonnet analysis + settings
-│       └── jobs.js                Queue status + manual backfill
-└── frontend/src/
-    ├── App.jsx                    Full SPA — all pages
-    └── i18n.js                    EN / RU / DE strings
-```
+Reports fetched asynchronously from Amazon Reporting API v3:
+
+| Type | Level | DB entity_type |
+|------|-------|----------------|
+| SP | campaign | campaign |
+| SP | keyword | keyword |
+| SP | target | target |
+| SP | advertised_product | advertised_product |
+| SD | campaign | campaign |
+
+**Schedule:** daily at 06:00 UTC + 2-day rolling backfill at 06:30 UTC  
+**Manual trigger:** `POST /jobs/backfill-metrics { dateFrom, dateTo }`
+
+> Keyword-level and target-level reports are required for the Rules Engine. The JOIN uses `amazon_id = k.amazon_keyword_id` or `amazon_id = t.amazon_target_id`.
+
+---
+
+## ⚡ Sync Performance
+
+Entity sync is optimized with:
+- **Batch DB upserts** in chunks of 500 rows (replaces per-row sequential queries)
+- **Parallel SP/SB/SD fetch** via `Promise.allSettled`
+- **Pre-loaded ID maps** (1 query per entity type instead of N lookups)
+- **maxResults 500** for SP v3 pagination (was 100 → 5× fewer API pages)
+- **Worker concurrency 5** (was 3)
+
+Result: sync of 33,000+ keywords reduced from 3–5 min → ~30 seconds.
 
 ---
 
@@ -154,12 +144,22 @@ adsflow/
 | GET  | `/auth/me` | Current user + settings |
 | PATCH | `/auth/me` | Update user settings |
 
+### Connections & Sync
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET  | `/connections` | List connections |
+| GET  | `/connections/amazon/init` | Get OAuth URL |
+| POST | `/connections/amazon/callback` | OAuth callback |
+| PATCH | `/connections/:id/schedule` | Set sync schedule |
+| POST | `/connections/:id/sync` | Manual sync (`{ mode: "quick" | "full" }`) |
+| POST | `/connections/sync-all` | Sync all profiles (`{ mode: "quick" | "full" }`) |
+
 ### Campaigns & Keywords
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET  | `/campaigns` | List with sort, filters, pagination |
-| PATCH | `/campaigns/:id` | Update state / budget (+ audit event) |
-| GET  | `/keywords` | List with sort, filters, pagination |
+| GET  | `/campaigns` | List — filters: status, type, strategy, budgetMin/Max, spendMin/Max, acosMin/Max, roasMin/Max, ordersMin, clicksMin, noSales, hasMetrics, metricsDays |
+| PATCH | `/campaigns/:id` | Update state/budget (+ audit event) |
+| GET  | `/keywords` | List — filters: state, matchType, campaignType, bidMin/Max, spendMin/Max, acosMin/Max, clicksMin, ordersMin, noSales, hasClicks, metricsDays |
 | PATCH | `/keywords/bulk` | Bulk bid/state update (+ audit events) |
 
 ### Metrics
@@ -179,6 +179,7 @@ adsflow/
 | POST | `/rules/:id/run` | Execute (`{ dry_run: true/false }`) |
 | GET  | `/rules/campaigns` | Campaigns for scope selector |
 | GET  | `/rules/ad-groups` | Ad groups for scope selector |
+| GET  | `/rules/targets` | Product targets for scope selector |
 
 ### Analytics Report
 | Method | Endpoint | Description |
@@ -191,91 +192,164 @@ adsflow/
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET  | `/ai/settings` | Get business context |
-| PATCH | `/ai/settings` | Save target ACOS/ROAS/margin/budget/notes |
-| POST | `/ai/analyze` | Run analysis (custom prompt + scope + date range) |
-| GET  | `/ai/recommendations` | List pending recommendations |
-| POST | `/ai/recommendations/:id/apply` | Apply recommendation |
-| POST | `/ai/recommendations/:id/dismiss` | Dismiss recommendation |
+| PATCH | `/ai/settings` | Save settings |
+| POST | `/ai/analyze` | Run analysis |
+| GET  | `/ai/recommendations` | List pending |
+| POST | `/ai/recommendations/:id/apply` | Apply |
+| POST | `/ai/recommendations/:id/dismiss` | Dismiss |
 
 ### Change History
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET  | `/audit` | List events — filters: action, entityName, source, actorId, dateFrom, dateTo, rollbackable |
-| POST | `/audit/:id/rollback` | Rollback a change (keyword bid/state or campaign update) |
-
-### Products & BSR
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET  | `/products` | List with latest BSR |
-| POST | `/products` | Add ASIN |
-| POST | `/products/:id/refresh` | Manual BSR refresh |
-| GET  | `/products/:id/history` | BSR history |
-| DELETE | `/products/:id` | Remove |
+| GET  | `/audit` | List — filters: action, entityName, source, actorId, dateFrom, dateTo, rollbackable |
+| POST | `/audit/:id/rollback` | Rollback a change |
 
 ### Jobs
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET  | `/jobs` | Queue status |
-| POST | `/jobs/backfill-metrics` | Trigger backfill (`{ dateFrom, dateTo }`) |
+| GET  | `/jobs/progress` | Active job progress (for progress bar) |
+| POST | `/jobs/backfill-metrics` | Trigger backfill |
 
 ---
 
 ## 📊 Pages
 
 ### Overview — Customizable Dashboard
-**16 widgets** (9 KPI + 2 charts + 2 tables + 3 misc), default 8.
+- **16 widgets** — 9 KPI + 2 charts + 2 tables + misc
+- **Sparklines** on all 9 KPI cards (per-day trend, each metric its own color)
+- **Edit mode** — add/remove/reorder/resize widgets, saved to DB via PATCH /auth/me
+- **Date range** — 7d / 14d / 30d / 90d + custom date picker
+- **Sync button** — split button: select Quick or Full mode first, then run; shows active mode label
+- **Global progress bar** — bottom-right corner, polls `/jobs/progress` every 3s, visible on all pages, disappears when done, fires "Синхронизация закончена ✓" toast on completion
 
-- **Sparklines on all KPI cards** — mini trend chart per metric using 9 per-day fields
-- **Edit mode (⊞ Customize):** add/remove, reorder, resize, reset — saved to DB via PATCH /auth/me
-- **Date range:** 7d / 14d / 30d / 90d + custom date picker
+### Campaigns & Keywords — Advanced Filters
 
-### Products & BSR
-- Add ASIN → instant SP-API fetch, rank badges linking to Amazon, BSR history chart
-- Auto-sync every 6h, graceful degradation without SP-API credentials
-- Note: SP-API does not return root category BSR (Amazon bug #2533)
+Both pages feature a slide-in filter panel with saved presets:
 
-### Analytics — Weekly P&L Report
-XLSX with 3 sheets: per-SKU detail (32 cols with Excel formulas), summary by group, ASIN reference.
-Cost config per ASIN: COGS, shipping, fees, VAT, Google/FB spend.
+**Campaigns filters:**
+- Status (Enabled/Paused/Archived), Type (SP/SB/SD)
+- Budget range (€), Metrics period (yesterday/7/14/30/60/90d)
+- Spend range, ACOS range, ROAS range
+- Min orders, Min clicks
+- Toggles: "No orders", "Has activity"
 
-### AI Assistant
-- Claude Sonnet called directly with metrics data (campaigns + keywords)
-- Business context (target ACOS/ROAS/margin/budget/notes) factored into every analysis
-- Custom prompt + scope filter + 7d/14d/30d date range
-- Recommendations saved with type, rationale, risk level, actions
+**Keywords filters:**
+- State, Match type (Exact/Phrase/Broad), Campaign type
+- Bid range (€), Spend range, ACOS range
+- Min clicks, Min orders
+- Toggles: "No orders", "Has clicks"
+
+**Saved presets:** name any filter combination and restore it with one click. Persisted to localStorage.  
+**Active count badge** shown on the ⊞ Filters button.
 
 ### Rules Engine
-- Condition builder: any metric × operator × value, multiple AND conditions
-- Actions: pause / enable / adjust bid% / set bid
-- Scope: campaign type + match type + campaign/ad-group multi-select
-- Safety limits (min/max bid), dry-run preview, result modal with per-keyword detail
-- Each execution writes audit events
+
+Full automation covering all patterns used in production (Intentwise-compatible logic):
+
+**Entity types:**
+- `keyword` — SP/SB/SD keywords
+- `product_target` — Product/Audience targeting
+
+**Actions:**
+| Action | Description |
+|--------|-------------|
+| `pause_keyword` | Pause keyword |
+| `enable_keyword` | Enable keyword |
+| `adjust_bid_pct` | Change bid ±% (positive=increase, negative=decrease) |
+| `set_bid` | Set fixed bid |
+| `pause_target` | Pause product/audience target |
+| `enable_target` | Enable product/audience target |
+| `adjust_target_bid_pct` | Change target bid ±% |
+| `add_negative_keyword` | Add as negative keyword (Exact / Phrase / Both) |
+| `add_negative_target` | Add as negative product target |
+
+**Conditions (metric):** clicks · spend · orders · acos · roas · impressions · ctr · cpc · **bid** (threshold)
+
+**Scope filters:**
+- Entity type (keyword / product_target)
+- Period: yesterday / 7 / 14 / 30 / 60 / 90 days
+- Campaign type, Match type, Campaign multi-select, Ad group multi-select
+- **Campaign name contains** — comma-separated substring filter (e.g. "CAT, DEF, PTC")
+- **Targeting type** — product / views / audience / auto
+
+**Safety limits:** min bid / max bid  
+**Dry-run preview** — see what would change without applying  
+**Audit events** written for every entity changed
+
+**Production rules logic (analyst patterns):**
+```
+# Bid down -10% — yesterday, clicks ≥ 6, orders = 0
+scope: { entity_type: "keyword", period_days: 1 }
+conditions: [{ metric: "clicks", op: "gte", value: 6 }, { metric: "orders", op: "eq", value: 0 }]
+actions: [{ type: "adjust_bid_pct", value: "-10" }]
+
+# Add as negative exact — 30d, clicks ≥ 11, orders = 0
+scope: { entity_type: "keyword", period_days: 30 }
+conditions: [{ metric: "clicks", op: "gte", value: 11 }, { metric: "orders", op: "eq", value: 0 }]
+actions: [{ type: "add_negative_keyword", value: "exact" }]
+
+# Pause product target — 30d, clicks ≥ 9, orders = 0, CAT campaigns only
+scope: { entity_type: "product_target", period_days: 30, campaign_name_contains: "CAT" }
+conditions: [{ metric: "clicks", op: "gte", value: 9 }, { metric: "orders", op: "eq", value: 0 }]
+actions: [{ type: "pause_target" }]
+
+# Bid down -10% — bid > 1€ AND clicks > 3 AND orders = 0 / 60d
+scope: { entity_type: "keyword", period_days: 60 }
+conditions: [{ metric: "bid", op: "gt", value: 1 }, { metric: "clicks", op: "gt", value: 3 }, { metric: "orders", op: "eq", value: 0 }]
+actions: [{ type: "adjust_bid_pct", value: "-10" }]
+```
+
+### AI Assistant
+- Claude Sonnet via Anthropic API
+- Custom prompt + scope filter + business context (target ACOS/ROAS/margin/budget/notes)
+- Recommendations with risk levels and structured actions
+
+### Analytics Report
+- XLSX via `exceljs` (streaming), 3 sheets with Excel P&L formulas
+- Per-ASIN cost config (COGS, shipping, fees, VAT, Google/FB)
 
 ### Change History (Audit Log)
-- Full change log: keyword bids/state, campaign updates, AI recommendations, rule executions
+- Append-only log: keyword bids/state, campaign updates, AI recommendations, rule executions
 - **Filters:** action · entity name · source · user · date range · rollbackable-only
 - **Sort** by any column with direction indicator
 - **Diff column:** `field: before → after` with color coding
-- **Rollback:** one click restores previous value, writes rollback audit event
+- **Rollback:** restore previous value + writes rollback audit event
 
 ---
 
-## 📡 Metrics Pipeline
+## ⚙ Rules Engine DSL
 
-Reports fetched asynchronously from Amazon Reporting API v3:
+**Rule object:**
+```json
+{
+  "name": "SP-Key / Down bid 10% / Click >3, bid>1, Or 0 / 60d",
+  "conditions": [
+    { "metric": "bid",    "op": "gt",  "value": 1 },
+    { "metric": "clicks", "op": "gt",  "value": 3 },
+    { "metric": "orders", "op": "eq",  "value": 0 }
+  ],
+  "actions": [
+    { "type": "adjust_bid_pct", "value": "-10" }
+  ],
+  "scope": {
+    "entity_type": "keyword",
+    "period_days": 60,
+    "campaign_type": "sponsoredProducts",
+    "match_types": ["exact", "phrase", "broad"],
+    "campaign_name_contains": "SP",
+    "campaign_ids": [],
+    "ad_group_ids": []
+  },
+  "safety": { "min_bid": 0.02, "max_bid": 50 },
+  "dry_run": false,
+  "is_active": true
+}
+```
 
-| Type | Level | DB entity_type |
-|------|-------|----------------|
-| SP | campaign | campaign |
-| SP | keyword | keyword |
-| SP | target | target |
-| SP | advertised_product | advertised_product |
-| SD | campaign | campaign |
-
-**Schedule:** daily at 06:00 UTC + 2-day rolling backfill at 06:30 UTC
-**Manual trigger:** `POST /jobs/backfill-metrics { dateFrom, dateTo }`
-
-> Keyword-level reports are required for the Rules Engine — conditions (clicks, orders, ACOS) are evaluated against `fact_metrics_daily WHERE entity_type = 'keyword'`.
+**Operators:** `gt` `gte` `lt` `lte` `eq` `neq`  
+**Bid condition:** metric `"bid"` → applied as SQL WHERE on `k.bid` / `t.bid` directly  
+**Period:** `period_days: 1` = yesterday only; otherwise last N days
 
 ---
 
@@ -291,15 +365,24 @@ POST /sp/keywords/list     Content-Type: application/vnd.spKeyword.v3+json
 
 - `state` in API responses is UPPERCASE → `.toLowerCase()` before storing
 - `budget` → `c.dailyBudget ?? c.budget?.budget`
-- Pagination via `nextToken`
+- Pagination via `nextToken`, maxResults=500
 
 ---
 
 ## ⚠️ Write-Back to Amazon (Important)
 
-**Current limitation:** Bid updates, keyword pauses, and campaign changes apply to the **local database only** — they are NOT sent to Amazon Ads API. Changes will be overwritten on the next entity sync.
+**Current limitation:** All changes (bid updates, pauses, negative keyword inserts) apply to the **local database only** — they are NOT sent to Amazon Ads API. Changes will be overwritten on the next entity sync.
 
-Implementing write-back (`PUT /sp/keywords`, `PUT /sp/campaigns`) is a planned feature.
+Planned: write-back via `PUT /sp/keywords`, `PUT /sp/campaigns`, `POST /sp/negativeKeywords`
+
+---
+
+## 🔒 Security
+
+- LwA tokens encrypted with AES-256-GCM in DB
+- JWT with 7-day TTL
+- Audit log is append-only (PostgreSQL trigger)
+- All modals via `ReactDOM.createPortal` — always full-viewport, never clipped
 
 ---
 
@@ -309,36 +392,27 @@ Implementing write-back (`PUT /sp/keywords`, `PUT /sp/campaigns`) is a planned f
 
 ---
 
-## 🔒 Security
-
-- LwA tokens encrypted with AES-256-GCM in DB
-- JWT with 7-day TTL
-- Audit log is append-only (PostgreSQL trigger)
-- All modals use `ReactDOM.createPortal` — render at `document.body` level
-
----
-
 ## 🔧 Debugging
 
 ```bash
 # Rebuild backend after code changes
 docker compose build --no-cache backend && docker compose up -d backend
 
-# Env-only changes (no rebuild needed)
-docker compose up -d backend
-
-# Check metrics entity types
+# Check entity_type distribution in metrics
 docker exec adsflow_postgres psql -U adsflow -d adsflow -c \
   "SELECT entity_type, COUNT(*), MAX(date) FROM fact_metrics_daily GROUP BY entity_type;"
 
-# Monitor report pipeline
+# Monitor pipeline
 docker compose logs backend -f | grep -i "report\|keyword\|backfill"
 
-# Direct API call (use port 3000, not 4000 — always through Vite proxy)
-curl -H "Authorization: Bearer <token>" \
-     -H "x-workspace-id: <wid>" \
-     "http://localhost:3000/api/v1/metrics/summary?startDate=2026-03-01&endDate=2026-03-17"
+# Manual backfill
+curl -X POST http://localhost:3000/api/v1/jobs/backfill-metrics \
+  -H "Authorization: Bearer TOKEN" -H "x-workspace-id: WID" \
+  -H "Content-Type: application/json" \
+  -d '{"dateFrom":"2026-01-01","dateTo":"2026-03-17"}'
 ```
+
+> Always use port 3000 (Vite proxy), not 4000 directly.
 
 ---
 
@@ -348,45 +422,51 @@ curl -H "Authorization: Bearer <token>" \
 - [x] Auth — JWT, 6-role RBAC
 - [x] Amazon OAuth LwA, auto-refresh, multi-region (NA/EU/FE)
 - [x] Entity sync — SP v3 POST /list, SB v4, SD
+- [x] **10× faster entity sync** — batch upserts, parallel fetch, maxResults 500
 - [x] Reporting API v3 — campaign + keyword + target + advertised_product levels
-- [x] BullMQ job queues (Redis)
-- [x] i18n — EN / RU / DE · Dark theme
-- [x] All modals via `ReactDOM.createPortal` — always full-viewport, never clipped
+- [x] BullMQ job queues · i18n EN/RU/DE · Dark theme
+- [x] All modals via `ReactDOM.createPortal`
 
 ### Overview
-- [x] Sparklines on all 9 KPI cards (per-day trend data)
-- [x] Custom date range picker (7d/14d/30d/90d + inline inputs)
+- [x] Sparklines on all 9 KPI cards
+- [x] Custom date range picker
 - [x] 16-widget customizable dashboard with persistence
+- [x] **Sync button** — select Quick/Full mode, label updates, 2s "Synced" flash
+- [x] **Global progress bar** — bottom-right, all pages, completion toast
 
-### Products & BSR
-- [x] SP-API Catalog Items client, `products` + `bsr_snapshots` tables
-- [x] Products page: ASIN input, rank badges, BSR history bar chart
-- [x] Auto BSR sync every 6h
-
-### Analytics Report
-- [x] XLSX via `exceljs` (streaming), 3 sheets with Excel P&L formulas
-- [x] Per-ASIN cost config (COGS, shipping, fees, VAT, Google/FB)
-
-### AI Assistant
-- [x] Claude Sonnet via Anthropic API
-- [x] Custom prompt + scope filter + business context settings
-- [x] Recommendations with risk levels and structured actions
+### Campaigns & Keywords — Advanced Filters
+- [x] **Filter panel** (slide-in drawer) — range, select, toggle, multiselect fields
+- [x] **Saved presets** — named filter sets, localStorage persistence
+- [x] **Active count badge** on filter button
+- [x] **Metrics period selector** — yesterday/7/14/30/60/90d
+- [x] Filter persistence across page reloads
 
 ### Rules Engine
-- [x] Full CRUD, condition/action/scope builder, safety limits
-- [x] Dry-run preview and real execution with per-keyword result modal
-- [x] Keyword-level metrics via `amazon_id = k.amazon_keyword_id` JOIN
-- [x] Audit events written for every keyword changed
+- [x] **Entity type selector** — keyword / product_target
+- [x] **Configurable period** — yesterday / 7 / 14 / 30 / 60 / 90 days
+- [x] **Bid threshold condition** — `metric: "bid"` applied as SQL WHERE
+- [x] **Campaign name filter** — comma-separated ILIKE
+- [x] **Targeting type scope** — product / views / audience / auto
+- [x] **5 new actions:** pause_target, enable_target, adjust_target_bid_pct, add_negative_keyword, add_negative_target
+- [x] Negative keyword deduplication guard
+- [x] Negative target deduplication guard
+- [x] Entity counts in result (keywords + targets evaluated)
+- [x] Rule cards show entity type + period badges
+
+### Analytics Report
+- [x] XLSX via `exceljs`, 3 sheets, Excel P&L formulas, streaming response
+
+### AI Assistant
+- [x] Claude Sonnet integration, business context, custom prompt
 
 ### Change History
-- [x] Append-only audit log with `before_data`, `after_data`, `diff` JSONB
-- [x] writeAudit integrated: keywords bulk, campaigns, rules, AI recommendations
-- [x] Rollback for keyword bid/state and campaign updates
-- [x] Filters, sort, diff display, rollback UI
+- [x] Append-only audit with rollback, filters, sort, diff display
 
 ## 🚧 Known Issues / TODO
 
-- `negativeKeywords` — needs migration to `POST /sp/negativeKeywords/list`
-- SP-API root category BSR not returned by API (Amazon bug #2533)
-- **Write-back to Amazon not implemented** — changes apply to local DB only
-- SB keyword-level reports excluded (v3 reporting in preview)
+- `negativeKeywords` entity sync — needs migration to `POST /sp/negativeKeywords/list`
+- SP-API root category BSR not returned (Amazon bug #2533)
+- **Write-back to Amazon not implemented** — all changes apply to local DB only
+- SB keyword-level reports excluded (Reporting API v3 in preview for SB)
+- Rules engine "yesterday" period: both startDate and endDate = yesterday
+- Two bid-increase rules (PT-Asins/SP-Key) are in Paused state in production — raise_bid_pct not yet scheduled automatically
