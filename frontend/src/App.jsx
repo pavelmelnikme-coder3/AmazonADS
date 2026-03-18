@@ -966,7 +966,6 @@ const SyncButton = ({ workspaceId, onSynced }) => {
     try {
       await post("/connections/sync-all", { mode: selectedMode });
       setDone(true);
-      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: "Синхронизация закончена ✓", ok: true } }));
       setTimeout(() => setDone(false), 2000);
       onSynced?.();
     } catch (e) {
@@ -1109,6 +1108,14 @@ const GlobalProgressBar = ({ workspaceId }) => {
   const queued = data.queued || {};
   const totalQueued = Object.values(queued).reduce((s, v) => s + (v || 0), 0);
   const hasActivity = activeJobs.length > 0 || totalQueued > 0;
+
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    if (wasActiveRef.current && !hasActivity) {
+      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: "Синхронизация закончена ✓", ok: true } }));
+    }
+    wasActiveRef.current = hasActivity;
+  }, [hasActivity]);
 
   if (!hasActivity) return null;
 
