@@ -1084,6 +1084,7 @@ const GlobalProgressBar = ({ workspaceId }) => {
   const { t } = useI18n();
   const [data, setData] = useState(null);
   const intervalRef = useRef(null);
+  const wasActiveRef = useRef(false);
 
   const poll = useCallback(async () => {
     if (!workspaceId) return;
@@ -1102,20 +1103,22 @@ const GlobalProgressBar = ({ workspaceId }) => {
     return () => clearInterval(intervalRef.current);
   }, [workspaceId, poll]);
 
+  // Completion toast — must be before early returns (Rules of Hooks)
+  useEffect(() => {
+    if (!data) return;
+    const hasAct = (data.active?.length > 0) || Object.values(data.queued || {}).some(v => v > 0);
+    if (wasActiveRef.current && !hasAct) {
+      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: "Синхронизация закончена ✓", ok: true } }));
+    }
+    wasActiveRef.current = hasAct;
+  }, [data]);
+
   if (!data) return null;
 
   const activeJobs = data.active || [];
   const queued = data.queued || {};
   const totalQueued = Object.values(queued).reduce((s, v) => s + (v || 0), 0);
   const hasActivity = activeJobs.length > 0 || totalQueued > 0;
-
-  const wasActiveRef = useRef(false);
-  useEffect(() => {
-    if (wasActiveRef.current && !hasActivity) {
-      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: "Синхронизация закончена ✓", ok: true } }));
-    }
-    wasActiveRef.current = hasActivity;
-  }, [hasActivity]);
 
   if (!hasActivity) return null;
 
