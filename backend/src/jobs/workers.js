@@ -161,14 +161,12 @@ async function startWorkers() {
       // ── Ad Groups ─────────────────────────────────────────────────────────
       if (entityTypes.includes("ad_groups")) {
         await job.updateProgress(progress); progress += 10;
-        for (const type of ["SP", "SB", "SD"]) {
-          try {
-            const adGroups = await fetchAdGroups(profile, type);
-            await syncAdGroups(profile, adGroups, type);
-            results.ad_groups = (results.ad_groups || 0) + adGroups.length;
-          } catch (e) {
-            logger.warn(`Failed to sync ${type} ad groups`, { error: e.message });
-          }
+        try {
+          const adGroups = await fetchAdGroups(profile);
+          await syncAdGroups(profile, adGroups);
+          results.ad_groups = adGroups.length;
+        } catch (e) {
+          logger.warn("Failed to sync ad groups", { error: e.message });
         }
       }
 
@@ -238,7 +236,7 @@ async function startWorkers() {
       logger.info("Entity sync completed", { profileId, results });
       return results;
     },
-    { connection: createRedisConnection(), concurrency: 3 }
+    { connection: createRedisConnection(), concurrency: 5 }
   );
 
   syncWorker.on("failed", async (job, err) => {

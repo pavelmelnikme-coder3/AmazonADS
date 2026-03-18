@@ -283,53 +283,64 @@ router.post("/:id/reconnect", async (req, res, next) => {
   }
 });
 
-// POST /connections/:id/sync
-// Re-queue sync for all attached profiles of a connection
-router.post("/:id/sync", async (req, res, next) => {
+// POST /connections/sync-all — sync all active connections (quick or full)
+router.post("/sync-all", requireAuth, requireWorkspace, async (req, res, next) => {
   try {
+    const { mode = "quick" } = req.body;
+    const QUICK_ENTITIES = ["campaigns", "ad_groups", "keywords"];
+    const FULL_ENTITIES  = ["campaigns", "ad_groups", "keywords", "product_ads", "targets",
+                             "negative_keywords", "negative_targets", "portfolios"];
+    const entityTypes = mode === "full" ? FULL_ENTITIES : QUICK_ENTITIES;
+
+    const { rows: profiles } = await query(
+      `SELECT p.id FROM amazon_profiles p
+       JOIN amazon_connections c ON c.id = p.connection_id
+       WHERE p.workspace_id = $1 AND p.is_attached = TRUE AND c.status = 'active'`,
+      [req.workspaceId]
+    );
+    if (!profiles.length) return res.status(404).json({ error: "No active profiles" });
+
+    const jobs = [];
+    for (const { id: profileId } of profiles) {
+      const job = await queueEntitySync(profileId, entityTypes, 1);
+      jobs.push(job.id);
+    }
+    res.json({ ok: true, mode, profiles: profiles.length, jobIds: jobs });
+  } catch (err) { next(err); }
+});
+
+// POST /connections/:id/sync — manual sync trigger (quick or full)
+router.post("/:id/sync", requireAuth, requireWorkspace, async (req, res, next) => {
+  try {
+    const { mode = "quick" } = req.body;
+
+    const QUICK_ENTITIES = ["campaigns", "ad_groups", "keywords"];
+    const FULL_ENTITIES  = ["campaigns", "ad_groups", "keywords", "product_ads", "targets",
+                             "negative_keywords", "negative_targets", "portfolios"];
+    const entityTypes = mode === "full" ? FULL_ENTITIES : QUICK_ENTITIES;
+
     const { rows: [conn] } = await query(
       "SELECT id FROM amazon_connections WHERE id = $1 AND org_id = $2 AND status != 'revoked'",
       [req.params.id, req.orgId]
     );
     if (!conn) return res.status(404).json({ error: "Connection not found" });
 
-    // Clean up duplicate profile rows: keep only the newest row per (profile_id, connection_id) pair.
-    // This handles stale rows created by re-connecting the same Amazon account.
-    const { rowCount: cleaned } = await query(`
-      DELETE FROM amazon_profiles
-      WHERE id NOT IN (
-        SELECT DISTINCT ON (profile_id, connection_id) id
-        FROM amazon_profiles
-        ORDER BY profile_id, connection_id, created_at DESC
-      )
-    `);
-    if (cleaned > 0) {
-      logger.info("Cleaned up duplicate profile rows", { connectionId: req.params.id, removed: cleaned });
-    }
-
-    // Fetch profiles strictly scoped to this connection (never bleed into another connection's profiles)
     const { rows: profiles } = await query(
-      "SELECT id, profile_id FROM amazon_profiles WHERE connection_id = $1 AND is_attached = TRUE",
-      [req.params.id]
+      `SELECT p.id FROM amazon_profiles p
+       WHERE p.connection_id = $1 AND p.workspace_id = $2 AND p.is_attached = TRUE`,
+      [req.params.id, req.workspaceId]
     );
+    if (!profiles.length) return res.status(404).json({ error: "No attached profiles found" });
 
-    logger.info("Sync requested", {
-      connectionId: req.params.id,
-      profileCount: profiles.length,
-      profileDbIds: profiles.map(p => p.id),
-      amazonProfileIds: profiles.map(p => p.profile_id),
-    });
-
-    for (const p of profiles) {
-      await queueEntitySync(p.id, ["campaigns", "ad_groups", "keywords", "product_ads", "targets", "negative_keywords", "negative_targets", "portfolios"], 1);
-      await query(
-        "UPDATE amazon_profiles SET sync_status = 'pending', updated_at = NOW() WHERE id = $1",
-        [p.id]
-      );
+    const jobs = [];
+    for (const { id: profileId } of profiles) {
+      const job = await queueEntitySync(profileId, entityTypes, 1);
+      jobs.push(job.id);
     }
 
     await writeAudit({
       orgId: req.orgId,
+      workspaceId: req.workspaceId,
       actorId: req.user.id,
       actorName: req.user.name,
       action: "connection.sync_requested",
@@ -338,8 +349,17 @@ router.post("/:id/sync", async (req, res, next) => {
       source: "ui",
     });
 
-    logger.info("Sync re-queued", { connectionId: req.params.id, profileCount: profiles.length });
-    res.json({ queued: profiles.length, profileIds: profiles.map(p => p.id) });
+    logger.info("Sync re-queued", { connectionId: req.params.id, mode, profileCount: profiles.length });
+    res.json({
+      ok: true,
+      mode,
+      profiles: profiles.length,
+      entityTypes,
+      jobIds: jobs,
+      message: `${mode === "full" ? "Full" : "Quick"} sync queued for ${profiles.length} profile(s)`,
+      queued: profiles.length,
+      profileIds: profiles.map(p => p.id),
+    });
   } catch (err) {
     next(err);
   }

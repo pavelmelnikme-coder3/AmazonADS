@@ -17,6 +17,18 @@ const REGION_URLS = {
   FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
 };
 
+const COUNTRY_REGION = {
+  US: "NA", CA: "NA", MX: "NA",
+  GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
+  NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
+  JP: "FE", AU: "FE", SG: "FE", IN: "FE",
+};
+
+function resolveBaseUrl(profile) {
+  const region = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
+  return (REGION_URLS[region] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
+}
+
 // ─── PROFILES ─────────────────────────────────────────────────────────────────
 
 async function fetchProfiles(connectionId) {
@@ -126,88 +138,63 @@ async function fetchCampaigns(profile) {
   const { getValidAccessToken } = require("./lwa");
   const axios = require("axios");
 
-  const COUNTRY_REGION = {
-    US: "NA", CA: "NA", MX: "NA",
-    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
-    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
-    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
-  };
-  const API_URLS = {
-    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
-    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
-    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
-  };
-  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
-  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
-
+  const baseUrl = resolveBaseUrl(profile);
   const base = baseOpts(profile);
 
-  // --- SP Campaigns via POST /sp/campaigns/list ---
-  const spCampaigns = [];
-  try {
-    const accessToken = await getValidAccessToken(profile.connection_id);
-    const mediaType = "application/vnd.spCampaign.v3+json";
-    let nextToken = null;
-    let page = 0;
-    do {
-      const body = {
-        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
-        maxResults: 100,
-      };
-      if (nextToken) body.nextToken = nextToken;
+  const [spResult, sbResult, sdResult] = await Promise.allSettled([
+    // SP Campaigns via POST /sp/campaigns/list (parallel)
+    (async () => {
+      const accessToken = await getValidAccessToken(profile.connection_id);
+      const mediaType = "application/vnd.spCampaign.v3+json";
+      const campaigns = [];
+      let nextToken = null;
+      let page = 0;
+      do {
+        const body = {
+          stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+          maxResults: 500,
+        };
+        if (nextToken) body.nextToken = nextToken;
+        const response = await axios.post(`${baseUrl}/sp/campaigns/list`, body, {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+            "Amazon-Advertising-API-Scope": String(profile.profile_id),
+            "Content-Type": mediaType,
+            "Accept": mediaType,
+          },
+          timeout: 30000,
+        });
+        const data = response.data;
+        const batch = Array.isArray(data.campaigns) ? data.campaigns : [];
+        batch.forEach(c => { c.campaignType = "sponsoredProducts"; });
+        campaigns.push(...batch);
+        nextToken = data.nextToken || null;
+        page++;
+        logger.info("SP campaigns list page", { profileId: profile.profile_id, page, count: batch.length, hasMore: !!nextToken });
+      } while (nextToken && page < 400);
+      logger.info("SP campaigns fetch complete", { profileId: profile.profile_id, total: campaigns.length });
+      return campaigns;
+    })(),
+    // SB Campaigns (GET-based, v4)
+    getAll({ ...base, path: "/sb/v4/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
+      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredBrands" })))
+      .catch(err => {
+        logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message });
+        return [];
+      }),
+    // SD Campaigns (GET-based)
+    getAll({ ...base, path: "/sd/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
+      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredDisplay" })))
+      .catch(err => {
+        logger.warn("SD campaigns failed", { profileId: profile.profile_id, error: err.message });
+        return [];
+      }),
+  ]);
 
-      const response = await axios.post(`${baseUrl}/sp/campaigns/list`, body, {
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
-          "Amazon-Advertising-API-Scope": String(profile.profile_id),
-          "Content-Type": mediaType,
-          "Accept": mediaType,
-        },
-        timeout: 30000,
-      });
-
-      const data = response.data;
-      const batch = Array.isArray(data.campaigns) ? data.campaigns : [];
-      batch.forEach(c => { c.campaignType = "sponsoredProducts"; });
-      spCampaigns.push(...batch);
-      nextToken = data.nextToken || null;
-      page++;
-      logger.info("SP campaigns list page", { profileId: profile.profile_id, page, count: batch.length, total: data.totalResults, hasMore: !!nextToken });
-    } while (nextToken && page < 400);
-
-    logger.info("SP campaigns fetch complete", { profileId: profile.profile_id, total: spCampaigns.length });
-  } catch (err) {
-    logger.error("SP campaigns list failed", {
-      profileId: profile.profile_id,
-      status: err.response?.status,
-      error: JSON.stringify(err.response?.data) || err.message,
-    });
-  }
-
-  // --- SB Campaigns (still GET-based, v4) ---
-  let sbCampaigns = [];
-  try {
-    sbCampaigns = (await getAll({ ...base, path: "/sb/v4/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" }))
-      .map(c => ({ ...c, campaignType: "sponsoredBrands" }));
-    logger.info("SB campaigns fetch complete", { profileId: profile.profile_id, total: sbCampaigns.length });
-  } catch (err) {
-    const status = err.status || err.response?.status;
-    if ([401, 403, 404].includes(status)) logger.info("SB campaigns skipped", { profileId: profile.profile_id, status });
-    else logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message });
-  }
-
-  // --- SD Campaigns (still GET-based) ---
-  let sdCampaigns = [];
-  try {
-    sdCampaigns = (await getAll({ ...base, path: "/sd/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" }))
-      .map(c => ({ ...c, campaignType: "sponsoredDisplay" }));
-    logger.info("SD campaigns fetch complete", { profileId: profile.profile_id, total: sdCampaigns.length });
-  } catch (err) {
-    const status = err.status || err.response?.status;
-    if ([401, 403, 404].includes(status)) logger.info("SD campaigns skipped", { profileId: profile.profile_id, status });
-    else logger.warn("SD campaigns failed", { profileId: profile.profile_id, error: err.message });
-  }
+  const spCampaigns = spResult.status === "fulfilled" ? spResult.value : [];
+  const sbCampaigns = sbResult.status === "fulfilled" ? sbResult.value : [];
+  const sdCampaigns = sdResult.status === "fulfilled" ? sdResult.value : [];
 
   const all = [...spCampaigns, ...sbCampaigns, ...sdCampaigns];
   logger.info("fetchCampaigns complete", { profileId: profile.profile_id, sp: spCampaigns.length, sb: sbCampaigns.length, sd: sdCampaigns.length, total: all.length });
@@ -215,34 +202,44 @@ async function fetchCampaigns(profile) {
 }
 
 async function syncCampaigns(profileDbRecord, amazonCampaigns) {
+  if (!amazonCampaigns.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+  const CHUNK = 500;
   let upserted = 0;
 
-  for (const c of amazonCampaigns) {
+  for (let i = 0; i < amazonCampaigns.length; i += CHUNK) {
+    const chunk = amazonCampaigns.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const c of chunk) {
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
+        workspaceId, profileDbId,
+        String(c.campaignId), c.name, c.campaignType,
+        c.targetingType || null,
+        (c.state || "ENABLED").toLowerCase(),
+        c.dailyBudget ?? c.budget?.budget ?? null,
+        c.startDate || null, c.endDate || null,
+        c.bidding?.strategy || null,
+        JSON.stringify(c)
+      );
+    }
     await query(
       `INSERT INTO campaigns
          (workspace_id, profile_id, amazon_campaign_id, name, campaign_type,
           targeting_type, state, daily_budget, start_date, end_date,
           bidding_strategy, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-       ON CONFLICT (profile_id, amazon_campaign_id)
-       DO UPDATE SET
-         name = EXCLUDED.name,
-         state = EXCLUDED.state,
-         daily_budget = EXCLUDED.daily_budget,
-         bidding_strategy = EXCLUDED.bidding_strategy,
-         raw_data = EXCLUDED.raw_data,
-         synced_at = NOW(),
-         updated_at = NOW()`,
-      [
-        workspaceId, profileDbId,
-        String(c.campaignId), c.name, c.campaignType,
-        c.targetingType || null, (c.state || "ENABLED").toLowerCase(),
-        c.dailyBudget ?? c.budget?.budget ?? null, c.startDate || null, c.endDate || null,
-        c.bidding?.strategy || null, JSON.stringify(c),
-      ]
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_campaign_id) DO UPDATE SET
+         name=EXCLUDED.name, state=EXCLUDED.state,
+         daily_budget=EXCLUDED.daily_budget,
+         bidding_strategy=EXCLUDED.bidding_strategy,
+         raw_data=EXCLUDED.raw_data,
+         synced_at=NOW(), updated_at=NOW()`,
+      params
     );
-    upserted++;
+    upserted += chunk.length;
   }
 
   await query(
@@ -253,45 +250,33 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
     [profileDbId]
   );
 
-  logger.info("Campaigns synced", { profileDbId, count: upserted });
+  logger.info("Campaigns synced (batch)", { profileDbId, upserted });
   return upserted;
 }
 
 // ─── AD GROUPS ────────────────────────────────────────────────────────────────
 
-async function fetchAdGroups(profile, campaignType = "SP") {
+async function fetchAdGroups(profile) {
   const { getValidAccessToken } = require("./lwa");
   const axios = require("axios");
 
-  const COUNTRY_REGION = {
-    US: "NA", CA: "NA", MX: "NA",
-    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
-    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
-    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
-  };
-  const API_URLS = {
-    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
-    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
-    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
-  };
-  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
-  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
+  const baseUrl = resolveBaseUrl(profile);
   const base = baseOpts(profile);
 
-  if (campaignType === "SP") {
-    const spAdGroups = [];
-    try {
+  const [spResult, sbResult, sdResult] = await Promise.allSettled([
+    // SP Ad Groups via POST /sp/adGroups/list
+    (async () => {
       const accessToken = await getValidAccessToken(profile.connection_id);
       const mediaType = "application/vnd.spAdGroup.v3+json";
+      const adGroups = [];
       let nextToken = null;
       let page = 0;
       do {
         const body = {
           stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
-          maxResults: 100,
+          maxResults: 500,
         };
         if (nextToken) body.nextToken = nextToken;
-
         const response = await axios.post(`${baseUrl}/sp/adGroups/list`, body, {
           headers: {
             "Authorization": `Bearer ${accessToken}`,
@@ -302,68 +287,90 @@ async function fetchAdGroups(profile, campaignType = "SP") {
           },
           timeout: 30000,
         });
-
         const data = response.data;
         const batch = Array.isArray(data.adGroups) ? data.adGroups : [];
-        spAdGroups.push(...batch);
+        adGroups.push(...batch);
         nextToken = data.nextToken || null;
         page++;
         logger.info("SP adGroups list page", { profileId: profile.profile_id, page, count: batch.length, hasMore: !!nextToken });
       } while (nextToken && page < 400);
+      logger.info("SP adGroups fetch complete", { profileId: profile.profile_id, total: adGroups.length });
+      return adGroups;
+    })(),
+    // SB Ad Groups
+    getAll({ ...base, path: "/sb/v4/adGroups", params: { stateFilter: "enabled,paused,archived" }, group: "ad_groups", responseKey: "adGroups" })
+      .catch(err => {
+        const status = err.status || err.response?.status;
+        if ([401, 403, 404].includes(status)) logger.info("SB adGroups skipped", { profileId: profile.profile_id, status });
+        else logger.warn("SB adGroups failed", { profileId: profile.profile_id, error: err.message });
+        return [];
+      }),
+    // SD Ad Groups
+    getAll({ ...base, path: "/sd/adGroups", params: { stateFilter: "enabled,paused,archived" }, group: "ad_groups", responseKey: "adGroups" })
+      .catch(err => {
+        const status = err.status || err.response?.status;
+        if ([401, 403, 404].includes(status)) logger.info("SD adGroups skipped", { profileId: profile.profile_id, status });
+        else logger.warn("SD adGroups failed", { profileId: profile.profile_id, error: err.message });
+        return [];
+      }),
+  ]);
 
-      logger.info("SP adGroups fetch complete", { profileId: profile.profile_id, total: spAdGroups.length });
-    } catch (err) {
-      logger.error("SP adGroups list failed", {
-        profileId: profile.profile_id,
-        status: err.response?.status,
-        error: JSON.stringify(err.response?.data) || err.message,
-      });
-    }
-    return spAdGroups;
-  }
+  const spAdGroups = spResult.status === "fulfilled" ? spResult.value : [];
+  const sbAdGroups = sbResult.status === "fulfilled" ? sbResult.value : [];
+  const sdAdGroups = sdResult.status === "fulfilled" ? sdResult.value : [];
 
-  // SB and SD — still GET-based
-  const AD_GROUP_ENDPOINTS = { SB: "/sb/v4/adGroups", SD: "/sd/adGroups" };
-  return getAll({
-    ...base,
-    path: AD_GROUP_ENDPOINTS[campaignType],
-    params: { stateFilter: "enabled,paused,archived" },
-    group: "ad_groups",
-    responseKey: "adGroups",
-  }).catch(err => {
-    const status = err.status || err.response?.status;
-    if ([401, 403, 404].includes(status)) {
-      logger.info(`${campaignType} adGroups skipped`, { profileId: profile.profile_id, status });
-      return [];
-    }
-    throw err;
-  });
+  const all = [...spAdGroups, ...sbAdGroups, ...sdAdGroups];
+  logger.info("fetchAdGroups complete", { profileId: profile.profile_id, sp: spAdGroups.length, sb: sbAdGroups.length, sd: sdAdGroups.length, total: all.length });
+  return all;
 }
 
-async function syncAdGroups(profileDbRecord, amazonAdGroups, campaignType) {
+async function syncAdGroups(profileDbRecord, amazonAdGroups) {
+  if (!amazonAdGroups.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
 
-  for (const ag of amazonAdGroups) {
-    const { rows: [camp] } = await query(
-      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
-      [profileDbId, String(ag.campaignId)]
-    );
-    if (!camp) continue;
+  // Pre-load campaign id map once
+  const { rows: campRows } = await query(
+    "SELECT id, amazon_campaign_id FROM campaigns WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const campMap = new Map(campRows.map(r => [r.amazon_campaign_id, r.id]));
 
+  const CHUNK = 500;
+  let upserted = 0;
+
+  for (let i = 0; i < amazonAdGroups.length; i += CHUNK) {
+    const chunk = amazonAdGroups.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const ag of chunk) {
+      const campaignDbId = campMap.get(String(ag.campaignId));
+      if (!campaignDbId) continue;
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
+        workspaceId, profileDbId, campaignDbId,
+        String(ag.adGroupId), ag.name,
+        (ag.state || "ENABLED").toLowerCase(),
+        ag.defaultBid || null,
+        JSON.stringify(ag)
+      );
+    }
+    if (!values.length) continue;
     await query(
       `INSERT INTO ad_groups
          (workspace_id, profile_id, campaign_id, amazon_ag_id, name, state, default_bid, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-       ON CONFLICT (profile_id, amazon_ag_id)
-       DO UPDATE SET
-         name = EXCLUDED.name, state = EXCLUDED.state,
-         default_bid = EXCLUDED.default_bid, raw_data = EXCLUDED.raw_data,
-         synced_at = NOW(), updated_at = NOW()`,
-      [workspaceId, profileDbId, camp.id, String(ag.adGroupId), ag.name, (ag.state || "ENABLED").toLowerCase(), ag.defaultBid || null, JSON.stringify(ag)]
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_ag_id) DO UPDATE SET
+         name=EXCLUDED.name, state=EXCLUDED.state,
+         default_bid=EXCLUDED.default_bid, raw_data=EXCLUDED.raw_data,
+         synced_at=NOW(), updated_at=NOW()`,
+      params
     );
+    upserted += values.length;
   }
 
-  logger.info("Ad groups synced", { profileDbId, count: amazonAdGroups.length });
+  logger.info("AdGroups synced (batch)", { profileDbId, upserted });
+  return upserted;
 }
 
 // ─── KEYWORDS ────────────────────────────────────────────────────────────────
@@ -372,46 +379,30 @@ async function fetchKeywords(profile) {
   const { getValidAccessToken } = require("./lwa");
   const axios = require("axios");
 
-  const COUNTRY_REGION = {
-    US: "NA", CA: "NA", MX: "NA",
-    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
-    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
-    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
-  };
-  const API_URLS = {
-    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
-    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
-    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
-  };
-  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
-  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
-
+  const baseUrl = resolveBaseUrl(profile);
+  const base = baseOpts(profile);
   const mediaType = "application/vnd.spKeyword.v3+json";
 
-  // --- SP Keywords via POST /sp/keywords/list ---
-  const spKeywords = [];
-  try {
-    const accessToken = await getValidAccessToken(profile.connection_id);
-    let nextToken = null;
-    let page = 0;
-    do {
-      const body = {
-        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
-        maxResults: 100,
-      };
-      if (nextToken) body.nextToken = nextToken;
-
-      logger.info("SP keywords list request", {
-        profileId: profile.profile_id,
-        page,
-        hasNextToken: !!nextToken,
-        url: `${baseUrl}/sp/keywords/list`,
-      });
-
-      const response = await axios.post(
-        `${baseUrl}/sp/keywords/list`,
-        body,
-        {
+  const [spResult, sbResult] = await Promise.allSettled([
+    // SP Keywords via POST /sp/keywords/list
+    (async () => {
+      const accessToken = await getValidAccessToken(profile.connection_id);
+      const keywords = [];
+      let nextToken = null;
+      let page = 0;
+      do {
+        const body = {
+          stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+          maxResults: 500,
+        };
+        if (nextToken) body.nextToken = nextToken;
+        logger.info("SP keywords list request", {
+          profileId: profile.profile_id,
+          page,
+          hasNextToken: !!nextToken,
+          url: `${baseUrl}/sp/keywords/list`,
+        });
+        const response = await axios.post(`${baseUrl}/sp/keywords/list`, body, {
           headers: {
             "Authorization": `Bearer ${accessToken}`,
             "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
@@ -420,98 +411,92 @@ async function fetchKeywords(profile) {
             "Accept": mediaType,
           },
           timeout: 30000,
+        });
+        const data = response.data;
+        const batch = Array.isArray(data.keywords) ? data.keywords : [];
+        keywords.push(...batch);
+        nextToken = data.nextToken || null;
+        page++;
+        logger.info("SP keywords list page done", {
+          profileId: profile.profile_id,
+          page,
+          batchCount: batch.length,
+          totalSoFar: keywords.length,
+          hasMore: !!nextToken,
+          totalResults: data.totalResults,
+        });
+      } while (nextToken && page < 400);
+      logger.info("SP keywords fetch complete", { profileId: profile.profile_id, total: keywords.length });
+      return keywords;
+    })(),
+    // SB Keywords via getAll (SB v4 still uses GET + startIndex)
+    getAll({ ...base, path: "/sb/v4/keywords", params: { stateFilter: "enabled,paused,archived" }, group: "keywords", responseKey: "keywords" })
+      .catch(err => {
+        const status = err.status || err.response?.status;
+        if ([401, 403, 404].includes(status)) {
+          logger.info("SB keywords skipped (no access)", { profileId: profile.profile_id, status });
+        } else {
+          logger.warn("SB keywords failed", { profileId: profile.profile_id, error: err.message });
         }
-      );
+        return [];
+      }),
+  ]);
 
-      const data = response.data;
-      const batch = Array.isArray(data.keywords) ? data.keywords : [];
-      spKeywords.push(...batch);
-      nextToken = data.nextToken || null;
-      page++;
+  const spKeywords = spResult.status === "fulfilled" ? spResult.value : [];
+  const sbKeywords = sbResult.status === "fulfilled" ? sbResult.value : [];
 
-      logger.info("SP keywords list page done", {
-        profileId: profile.profile_id,
-        page,
-        batchCount: batch.length,
-        totalSoFar: spKeywords.length,
-        hasMore: !!nextToken,
-        totalResults: data.totalResults,
-      });
-    } while (nextToken && page < 400); // safety cap: 10,000 keywords max
-
-    logger.info("SP keywords fetch complete", {
-      profileId: profile.profile_id,
-      total: spKeywords.length,
-    });
-  } catch (err) {
-    const status = err.response?.status;
-    const errData = err.response?.data;
-    logger.error("SP keywords list failed", {
-      profileId: profile.profile_id,
-      status,
-      error: JSON.stringify(errData) || err.message,
-    });
-    // Don't throw — continue with 0 SP keywords, still try SB
-  }
-
-  // --- SB Keywords via getAll (SB v4 still uses GET + startIndex) ---
-  const base = baseOpts(profile);
-  let sbKeywords = [];
-  try {
-    sbKeywords = await getAll({
-      ...base,
-      path: "/sb/v4/keywords",
-      params: { stateFilter: "enabled,paused,archived" },
-      group: "keywords",
-      responseKey: "keywords",
-    });
-    logger.info("SB keywords fetch complete", {
-      profileId: profile.profile_id,
-      total: sbKeywords.length,
-    });
-  } catch (err) {
-    const status = err.status || err.response?.status;
-    if ([401, 403, 404].includes(status)) {
-      logger.info("SB keywords skipped (no access)", { profileId: profile.profile_id, status });
-    } else {
-      logger.warn("SB keywords failed", { profileId: profile.profile_id, error: err.message });
-    }
-  }
-
+  logger.info("fetchKeywords complete", { profileId: profile.profile_id, sp: spKeywords.length, sb: sbKeywords.length });
   return [...spKeywords, ...sbKeywords];
 }
 
 async function syncKeywords(profileDbRecord, amazonKeywords) {
+  if (!amazonKeywords.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
+
+  // Pre-load ad_group map once (1 query instead of N roundtrips)
+  const { rows: agRows } = await query(
+    "SELECT id, campaign_id, amazon_ag_id FROM ad_groups WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const agMap = new Map(agRows.map(r => [r.amazon_ag_id, { id: r.id, campaign_id: r.campaign_id }]));
+
+  const CHUNK = 500;
   let inserted = 0;
 
-  for (const kw of amazonKeywords) {
-    const { rows: [ag] } = await query(
-      "SELECT id, campaign_id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
-      [profileDbId, String(kw.adGroupId)]
-    );
-    if (!ag) continue;
-
+  for (let i = 0; i < amazonKeywords.length; i += CHUNK) {
+    const chunk = amazonKeywords.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const kw of chunk) {
+      const ag = agMap.get(String(kw.adGroupId));
+      if (!ag) continue;
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
+        workspaceId, profileDbId, ag.id, ag.campaign_id,
+        String(kw.keywordId), kw.keywordText,
+        (kw.matchType || "EXACT").toLowerCase(),
+        (kw.state || "ENABLED").toLowerCase(),
+        kw.bid || null,
+        JSON.stringify(kw)
+      );
+    }
+    if (!values.length) continue;
     await query(
       `INSERT INTO keywords
          (workspace_id, profile_id, ad_group_id, campaign_id, amazon_keyword_id,
           keyword_text, match_type, state, bid, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-       ON CONFLICT (profile_id, amazon_keyword_id)
-       DO UPDATE SET
-         keyword_text = EXCLUDED.keyword_text, match_type = EXCLUDED.match_type,
-         state = EXCLUDED.state, bid = EXCLUDED.bid, raw_data = EXCLUDED.raw_data,
-         synced_at = NOW(), updated_at = NOW()`,
-      [
-        workspaceId, profileDbId, ag.id, ag.campaign_id,
-        String(kw.keywordId), kw.keywordText, kw.matchType || "exact",
-        (kw.state || "ENABLED").toLowerCase(), kw.bid || null, JSON.stringify(kw),
-      ]
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_keyword_id) DO UPDATE SET
+         keyword_text=EXCLUDED.keyword_text, match_type=EXCLUDED.match_type,
+         state=EXCLUDED.state, bid=EXCLUDED.bid, raw_data=EXCLUDED.raw_data,
+         synced_at=NOW(), updated_at=NOW()`,
+      params
     );
-    inserted++;
+    inserted += values.length;
   }
 
-  logger.info("Keywords synced", { profileDbId, count: inserted, fetched: amazonKeywords.length });
+  logger.info("Keywords synced (batch)", { profileDbId, inserted, fetched: amazonKeywords.length });
   return inserted;
 }
 
@@ -577,38 +562,54 @@ async function fetchProductAds(profile) {
 }
 
 async function syncProductAds(profileDbRecord, amazonProductAds) {
+  if (!amazonProductAds.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
 
-  for (const ad of amazonProductAds) {
-    // Resolve internal campaign/ad_group IDs
-    const { rows: [camp] } = await query(
-      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
-      [profileDbId, String(ad.campaignId)]
-    );
-    const { rows: [ag] } = await query(
-      "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
-      [profileDbId, String(ad.adGroupId)]
-    );
+  // Pre-load campaign and ad_group maps
+  const { rows: campRows } = await query(
+    "SELECT id, amazon_campaign_id FROM campaigns WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const campMap = new Map(campRows.map(r => [r.amazon_campaign_id, r.id]));
 
+  const { rows: agRows } = await query(
+    "SELECT id, amazon_ag_id FROM ad_groups WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const agMap = new Map(agRows.map(r => [r.amazon_ag_id, r.id]));
+
+  const CHUNK = 500;
+  let upserted = 0;
+
+  for (let i = 0; i < amazonProductAds.length; i += CHUNK) {
+    const chunk = amazonProductAds.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const ad of chunk) {
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
+        workspaceId, profileDbId,
+        campMap.get(String(ad.campaignId)) || null,
+        agMap.get(String(ad.adGroupId)) || null,
+        String(ad.adId), ad.asin || null, ad.sku || null,
+        ad.state || "enabled", JSON.stringify(ad),
+      );
+    }
     await query(
       `INSERT INTO product_ads
          (workspace_id, profile_id, campaign_id, ad_group_id, amazon_ad_id, asin, sku, state, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-       ON CONFLICT (profile_id, amazon_ad_id)
-       DO UPDATE SET
-         asin = EXCLUDED.asin, sku = EXCLUDED.sku, state = EXCLUDED.state,
-         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
-      [
-        workspaceId, profileDbId,
-        camp?.id || null, ag?.id || null,
-        String(ad.adId), ad.asin || null, ad.sku || null,
-        ad.state || "enabled", JSON.stringify(ad),
-      ]
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_ad_id) DO UPDATE SET
+         asin=EXCLUDED.asin, sku=EXCLUDED.sku, state=EXCLUDED.state,
+         raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
+      params
     );
+    upserted += chunk.length;
   }
 
-  logger.info("Product ads synced", { profileDbId, count: amazonProductAds.length });
-  return amazonProductAds.length;
+  logger.info("Product ads synced (batch)", { profileDbId, upserted });
+  return upserted;
 }
 
 // ─── TARGETS ─────────────────────────────────────────────────────────────────
@@ -637,44 +638,62 @@ async function fetchTargets(profile, adType = "SP") {
 }
 
 async function syncTargets(profileDbRecord, amazonTargets, adType = "SP") {
+  if (!amazonTargets.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
 
-  for (const t of amazonTargets) {
-    const { rows: [camp] } = await query(
-      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
-      [profileDbId, String(t.campaignId)]
-    );
-    const { rows: [ag] } = t.adGroupId ? await query(
-      "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
-      [profileDbId, String(t.adGroupId)]
-    ) : { rows: [null] };
+  // Pre-load campaign and ad_group maps
+  const { rows: campRows } = await query(
+    "SELECT id, amazon_campaign_id FROM campaigns WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const campMap = new Map(campRows.map(r => [r.amazon_campaign_id, r.id]));
 
-    await query(
-      `INSERT INTO targets
-         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_target_id, ad_type,
-          expression_type, expression, resolved_expression, state, bid, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
-       ON CONFLICT (profile_id, amazon_target_id)
-       DO UPDATE SET
-         state = EXCLUDED.state, bid = EXCLUDED.bid,
-         expression = EXCLUDED.expression,
-         resolved_expression = EXCLUDED.resolved_expression,
-         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
-      [
+  const { rows: agRows } = await query(
+    "SELECT id, amazon_ag_id FROM ad_groups WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const agMap = new Map(agRows.map(r => [r.amazon_ag_id, r.id]));
+
+  const CHUNK = 500;
+  let upserted = 0;
+
+  for (let i = 0; i < amazonTargets.length; i += CHUNK) {
+    const chunk = amazonTargets.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const t of chunk) {
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
         workspaceId, profileDbId,
-        camp?.id || null, ag?.id || null,
+        campMap.get(String(t.campaignId)) || null,
+        t.adGroupId ? (agMap.get(String(t.adGroupId)) || null) : null,
         String(t.targetId), adType,
         t.expressionType || null,
         t.expression ? JSON.stringify(t.expression) : null,
         t.resolvedExpression ? JSON.stringify(t.resolvedExpression) : null,
         t.state || "enabled", t.bid || null,
         JSON.stringify(t),
-      ]
+      );
+    }
+    if (!values.length) continue;
+    await query(
+      `INSERT INTO targets
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_target_id, ad_type,
+          expression_type, expression, resolved_expression, state, bid, raw_data, synced_at)
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_target_id) DO UPDATE SET
+         state=EXCLUDED.state, bid=EXCLUDED.bid,
+         expression=EXCLUDED.expression,
+         resolved_expression=EXCLUDED.resolved_expression,
+         raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
+      params
     );
+    upserted += values.length;
   }
 
-  logger.info("Targets synced", { profileDbId, adType, count: amazonTargets.length });
-  return amazonTargets.length;
+  logger.info("Targets synced (batch)", { profileDbId, adType, upserted });
+  return upserted;
 }
 
 // ─── NEGATIVE KEYWORDS ───────────────────────────────────────────────────────
@@ -683,19 +702,7 @@ async function fetchNegativeKeywords(profile) {
   const { getValidAccessToken } = require("./lwa");
   const axios = require("axios");
 
-  const COUNTRY_REGION = {
-    US: "NA", CA: "NA", MX: "NA",
-    GB: "EU", UK: "EU", DE: "EU", FR: "EU", IT: "EU", ES: "EU",
-    NL: "EU", SE: "EU", PL: "EU", TR: "EU", SA: "EU", AE: "EU", BE: "EU",
-    JP: "FE", AU: "FE", SG: "FE", IN: "FE",
-  };
-  const API_URLS = {
-    NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
-    EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
-    FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
-  };
-  const resolvedRegion = COUNTRY_REGION[(profile.country_code || "").toUpperCase()] || "EU";
-  const baseUrl = (API_URLS[resolvedRegion] || "https://advertising-api-eu.amazon.com").replace(/^http:\/\//i, "https://");
+  const baseUrl = resolveBaseUrl(profile);
 
   const spNegKws = [];
   try {
@@ -706,7 +713,7 @@ async function fetchNegativeKeywords(profile) {
     do {
       const body = {
         stateFilter: { include: ["ENABLED", "ARCHIVED"] },
-        maxResults: 100,
+        maxResults: 500,
       };
       if (nextToken) body.nextToken = nextToken;
 
@@ -740,53 +747,67 @@ async function fetchNegativeKeywords(profile) {
 }
 
 async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
+  if (!amazonNegKeywords.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
-  let inserted = 0;
 
-  for (const kw of amazonNegKeywords) {
-    // SP v3 negativeKeywords are ad-group level — resolve ad_group and campaign
-    let campId = null;
-    let agId = null;
+  // Pre-load ad_group and campaign maps
+  const { rows: agRows } = await query(
+    "SELECT id, campaign_id, amazon_ag_id FROM ad_groups WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const agMap = new Map(agRows.map(r => [r.amazon_ag_id, { id: r.id, campaign_id: r.campaign_id }]));
 
-    if (kw.adGroupId) {
-      const { rows: [ag] } = await query(
-        "SELECT id, campaign_id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
-        [profileDbId, String(kw.adGroupId)]
-      );
-      if (ag) { agId = ag.id; campId = ag.campaign_id; }
-    }
+  const { rows: campRows } = await query(
+    "SELECT id, amazon_campaign_id FROM campaigns WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const campMap = new Map(campRows.map(r => [r.amazon_campaign_id, r.id]));
 
-    if (!campId && kw.campaignId) {
-      const { rows: [camp] } = await query(
-        "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
-        [profileDbId, String(kw.campaignId)]
-      );
-      campId = camp?.id || null;
-    }
+  const CHUNK = 500;
+  let upserted = 0;
 
-    await query(
-      `INSERT INTO negative_keywords
-         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_keyword_id,
-          keyword_text, match_type, level, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-       ON CONFLICT (profile_id, amazon_neg_keyword_id)
-       DO UPDATE SET
-         keyword_text = EXCLUDED.keyword_text, match_type = EXCLUDED.match_type,
-         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
-      [
-        workspaceId, profileDbId,
-        campId, agId,
+  for (let i = 0; i < amazonNegKeywords.length; i += CHUNK) {
+    const chunk = amazonNegKeywords.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const kw of chunk) {
+      let campId = null;
+      let agId = null;
+
+      if (kw.adGroupId) {
+        const ag = agMap.get(String(kw.adGroupId));
+        if (ag) { agId = ag.id; campId = ag.campaign_id; }
+      }
+      if (!campId && kw.campaignId) {
+        campId = campMap.get(String(kw.campaignId)) || null;
+      }
+
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
+        workspaceId, profileDbId, campId, agId,
         String(kw.keywordId), kw.keywordText,
         (kw.matchType || "NEGATIVE_EXACT").toLowerCase(),
         agId ? "ad_group" : "campaign",
         JSON.stringify(kw),
-      ]
+      );
+    }
+    if (!values.length) continue;
+    await query(
+      `INSERT INTO negative_keywords
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_keyword_id,
+          keyword_text, match_type, level, raw_data, synced_at)
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_neg_keyword_id) DO UPDATE SET
+         keyword_text=EXCLUDED.keyword_text, match_type=EXCLUDED.match_type,
+         raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
+      params
     );
-    inserted++;
+    upserted += values.length;
   }
 
-  logger.info("Negative keywords synced", { profileDbId, inserted });
-  return inserted;
+  logger.info("Negative keywords synced (batch)", { profileDbId, upserted });
+  return upserted;
 }
 
 // ─── NEGATIVE TARGETS ────────────────────────────────────────────────────────
@@ -815,46 +836,60 @@ async function fetchNegativeTargets(profile, adType = "SP") {
 }
 
 async function syncNegativeTargets(profileDbRecord, amazonNegTargets, adType = "SP") {
+  if (!amazonNegTargets.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
 
-  for (const t of amazonNegTargets) {
-    const { rows: [camp] } = await query(
-      "SELECT id FROM campaigns WHERE profile_id = $1 AND amazon_campaign_id = $2",
-      [profileDbId, String(t.campaignId)]
-    );
-    let agId = null;
-    if (t.adGroupId) {
-      const { rows: [ag] } = await query(
-        "SELECT id FROM ad_groups WHERE profile_id = $1 AND amazon_ag_id = $2",
-        [profileDbId, String(t.adGroupId)]
-      );
-      agId = ag?.id || null;
-    }
+  // Pre-load campaign and ad_group maps
+  const { rows: campRows } = await query(
+    "SELECT id, amazon_campaign_id FROM campaigns WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const campMap = new Map(campRows.map(r => [r.amazon_campaign_id, r.id]));
 
-    await query(
-      `INSERT INTO negative_targets
-         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_target_id, ad_type,
-          expression, expression_type, level, raw_data, synced_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-       ON CONFLICT (profile_id, amazon_neg_target_id)
-       DO UPDATE SET
-         expression = EXCLUDED.expression,
-         expression_type = EXCLUDED.expression_type,
-         raw_data = EXCLUDED.raw_data, synced_at = NOW(), updated_at = NOW()`,
-      [
+  const { rows: agRows } = await query(
+    "SELECT id, amazon_ag_id FROM ad_groups WHERE profile_id = $1",
+    [profileDbId]
+  );
+  const agMap = new Map(agRows.map(r => [r.amazon_ag_id, r.id]));
+
+  const CHUNK = 500;
+  let upserted = 0;
+
+  for (let i = 0; i < amazonNegTargets.length; i += CHUNK) {
+    const chunk = amazonNegTargets.slice(i, i + CHUNK);
+    const values = [];
+    const params = [];
+    let pi = 1;
+    for (const t of chunk) {
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      params.push(
         workspaceId, profileDbId,
-        camp?.id || null, agId,
+        campMap.get(String(t.campaignId)) || null,
+        t.adGroupId ? (agMap.get(String(t.adGroupId)) || null) : null,
         String(t.targetId), adType,
         t.expression ? JSON.stringify(t.expression) : null,
         t.expressionType || null,
         t.adGroupId ? "ad_group" : "campaign",
         JSON.stringify(t),
-      ]
+      );
+    }
+    if (!values.length) continue;
+    await query(
+      `INSERT INTO negative_targets
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_target_id, ad_type,
+          expression, expression_type, level, raw_data, synced_at)
+       VALUES ${values.join(",")}
+       ON CONFLICT (profile_id, amazon_neg_target_id) DO UPDATE SET
+         expression=EXCLUDED.expression,
+         expression_type=EXCLUDED.expression_type,
+         raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
+      params
     );
+    upserted += values.length;
   }
 
-  logger.info("Negative targets synced", { profileDbId, adType, count: amazonNegTargets.length });
-  return amazonNegTargets.length;
+  logger.info("Negative targets synced (batch)", { profileDbId, adType, upserted });
+  return upserted;
 }
 
 module.exports = {

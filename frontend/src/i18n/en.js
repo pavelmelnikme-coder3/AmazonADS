@@ -288,6 +288,16 @@ export default {
     keywords: "keywords",
     lastSync: "Last sync",
     loading: "Loading campaigns, keywords...",
+    quick: "Quick Sync",
+    full: "Full Sync",
+    quickDesc: "Campaigns · Ad groups · Keywords",
+    fullDesc: "All entities including products, targets, negatives",
+    done: "Synced",
+  },
+  progress: {
+    sync: "Syncing data",
+    report: "Fetching reports",
+    queued: "queued",
   },
   ai: {
     title: "AI Assistant",

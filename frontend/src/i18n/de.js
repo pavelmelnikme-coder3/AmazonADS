@@ -286,6 +286,16 @@ export default {
     keywords: "Keywords",
     lastSync: "Letzte Synchronisierung",
     loading: "Kampagnen und Keywords werden geladen...",
+    quick: "Schnell-Sync",
+    full: "Vollständig",
+    quickDesc: "Kampagnen · Gruppen · Keywords",
+    fullDesc: "Alle Entitäten inkl. Produkte, Ziele, Negatives",
+    done: "Synchronisiert",
+  },
+  progress: {
+    sync: "Daten synchronisieren",
+    report: "Berichte laden",
+    queued: "in Warteschlange",
   },
   ai: {
     title: "KI-Assistent",

@@ -22,6 +22,7 @@ const Styles = () => (
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
     @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
     @keyframes syncProgress{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
+    @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
     .fade{animation:fadeIn .3s ease both}
     .card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;transition:border-color .2s}
     .card:hover{border-color:var(--b2)}
@@ -934,6 +935,199 @@ const ProductsPage = ({ workspaceId }) => {
   );
 };
 
+// ─── SyncButton ───────────────────────────────────────────────────────────────
+const SyncButton = ({ workspaceId, onSynced }) => {
+  const { t } = useI18n();
+  const [open, setOpen]       = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [done, setDone]       = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const handleSync = async (mode) => {
+    setOpen(false);
+    setSyncing(true);
+    setDone(false);
+    try {
+      await post("/connections/sync-all", { mode });
+      setDone(true);
+      setTimeout(() => setDone(false), 3000);
+      onSynced?.();
+    } catch (e) {
+      alert("Sync error: " + e.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <div style={{ display: "flex", gap: 0 }}>
+        <button
+          onClick={() => !syncing && handleSync("quick")}
+          disabled={syncing}
+          className="btn btn-primary"
+          style={{ fontSize: 12, padding: "6px 12px", borderRadius: "6px 0 0 6px",
+            display: "flex", alignItems: "center", gap: 5 }}
+        >
+          {syncing
+            ? <><span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◌</span> {t("sync.syncing")}</>
+            : done
+            ? <>✓ {t("sync.done")}</>
+            : <>⟳ {t("sync.quick")}</>
+          }
+        </button>
+        <button
+          onClick={() => !syncing && setOpen(o => !o)}
+          disabled={syncing}
+          className="btn btn-primary"
+          style={{ fontSize: 11, padding: "6px 8px", borderRadius: "0 6px 6px 0",
+            borderLeft: "1px solid rgba(255,255,255,.15)" }}
+        >
+          {open ? "▲" : "▼"}
+        </button>
+      </div>
+
+      {open && createPortal(
+        <div style={{
+          position: "fixed",
+          top: ref.current?.getBoundingClientRect().bottom + 6,
+          right: window.innerWidth - (ref.current?.getBoundingClientRect().right || 0),
+          zIndex: 2000,
+          background: "var(--s2)", border: "1px solid var(--b2)",
+          borderRadius: 8, padding: 6, minWidth: 240,
+          boxShadow: "0 8px 24px rgba(0,0,0,.4)"
+        }}>
+          {[
+            { mode: "quick", icon: "⚡", label: t("sync.quick"), desc: t("sync.quickDesc") },
+            { mode: "full",  icon: "◎", label: t("sync.full"),  desc: t("sync.fullDesc") },
+          ].map(({ mode, icon, label, desc }) => (
+            <button
+              key={mode}
+              onClick={() => handleSync(mode)}
+              style={{
+                display: "flex", flexDirection: "column", gap: 2,
+                padding: "10px 14px", width: "100%", textAlign: "left",
+                background: "none", border: "none", cursor: "pointer",
+                borderRadius: 6, color: "var(--tx)",
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = "var(--s3)"}
+              onMouseLeave={e => e.currentTarget.style.background = "none"}
+            >
+              <span style={{ fontSize: 13, fontWeight: 500 }}>{icon} {label}</span>
+              <span style={{ fontSize: 11, color: "var(--tx3)" }}>{desc}</span>
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+};
+
+// ─── GlobalProgressBar ────────────────────────────────────────────────────────
+const GlobalProgressBar = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [jobs, setJobs] = useState({ active: [], queued: {} });
+  const [visible, setVisible] = useState(false);
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+
+    const poll = async () => {
+      try {
+        const data = await get("/jobs/progress");
+        const hasActivity = data.active?.length > 0 ||
+          Object.values(data.queued || {}).some(v => v > 0);
+        setJobs(data);
+        setVisible(hasActivity);
+      } catch (e) {
+        // ignore polling errors
+      }
+    };
+
+    poll();
+    intervalRef.current = setInterval(poll, 3000);
+    return () => clearInterval(intervalRef.current);
+  }, [workspaceId]);
+
+  if (!visible) return null;
+
+  const activeJobs = jobs.active || [];
+  const queued = jobs.queued || {};
+  const totalQueued = Object.values(queued).reduce((s, v) => s + v, 0);
+  const primaryJob = activeJobs[0];
+  const progress = primaryJob?.progress || 0;
+  const label = primaryJob
+    ? (primaryJob.type === "entity_sync" ? t("progress.sync") : t("progress.report"))
+    : t("progress.sync");
+
+  return createPortal(
+    <div style={{
+      position: "fixed", bottom: 20, right: 20, zIndex: 1500,
+      background: "var(--s2)", border: "1px solid var(--b2)",
+      borderRadius: 10, padding: "10px 14px",
+      boxShadow: "0 4px 20px rgba(0,0,0,.4)",
+      minWidth: 220, maxWidth: 280,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: "50%",
+            background: "var(--ac)", display: "inline-block",
+            animation: "pulse 1.5s ease-in-out infinite"
+          }} />
+          <span style={{ fontSize: 12, fontWeight: 600, color: "var(--tx)" }}>{label}</span>
+        </div>
+        {totalQueued > 0 && (
+          <span style={{ fontSize: 10, color: "var(--tx3)" }}>
+            +{totalQueued} {t("progress.queued")}
+          </span>
+        )}
+      </div>
+
+      <div style={{
+        height: 4, background: "var(--b2)", borderRadius: 4, overflow: "hidden", marginBottom: 6
+      }}>
+        <div style={{
+          height: "100%", borderRadius: 4,
+          background: "linear-gradient(90deg, var(--ac), var(--ac2))",
+          width: progress > 0 ? `${progress}%` : "30%",
+          transition: "width .5s ease",
+          animation: progress === 0 ? "shimmer 1.5s infinite" : "none",
+        }} />
+      </div>
+
+      {activeJobs.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {activeJobs.slice(0, 3).map(job => (
+            <div key={job.id} style={{ display: "flex", justifyContent: "space-between",
+              fontSize: 11, color: "var(--tx3)" }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                maxWidth: 170 }}>{job.label}</span>
+              <span style={{ color: "var(--ac2)", flexShrink: 0, marginLeft: 6 }}>
+                {job.progress}%
+              </span>
+            </div>
+          ))}
+          {activeJobs.length > 3 && (
+            <div style={{ fontSize: 10, color: "var(--tx3)" }}>
+              +{activeJobs.length - 3} more
+            </div>
+          )}
+        </div>
+      )}
+    </div>,
+    document.body
+  );
+};
+
 const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const { t } = useI18n();
   const [rangeMode, setRangeMode] = useState("7");
@@ -1309,15 +1503,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
           >
             ↺ {t("overview.refreshData")}
           </button>
-          <button
-            className="btn btn-primary"
-            style={{ fontSize: 12, padding: "5px 14px" }}
-            onClick={handleSync}
-            disabled={syncing}
-          >
-            {syncing ? <span className="loader" style={{ width: 12, height: 12, borderWidth: 2 }} /> : "⟳"}
-            {syncing ? "…" : t("overview.syncAll")}
-          </button>
+          <SyncButton workspaceId={workspaceId} onSynced={() => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); }} />
           {[["7","7d"],["14","14d"],["30","30d"],["90","90d"]].map(([val,label]) => (
             <button
               key={val}
@@ -4776,6 +4962,7 @@ export default function App() {
         </main>
       </div>
       <SyncStatusToast triggerShow={syncTrigger} />
+      <GlobalProgressBar workspaceId={wid} />
     </>
   );
 }
