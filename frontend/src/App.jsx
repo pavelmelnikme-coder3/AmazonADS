@@ -966,7 +966,8 @@ const SyncButton = ({ workspaceId, onSynced }) => {
     try {
       await post("/connections/sync-all", { mode: selectedMode });
       setDone(true);
-      setTimeout(() => setDone(false), 3000);
+      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: "Синхронизация закончена ✓", ok: true } }));
+      setTimeout(() => setDone(false), 2000);
       onSynced?.();
     } catch (e) {
       alert("Sync error: " + e.message);
@@ -4943,6 +4944,13 @@ export default function App() {
   const [workspace, setWorkspace] = useState(null);
   const [active, setActive] = useState("overview");
   const [syncTrigger, setSyncTrigger] = useState(0);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    const handler = (e) => { setToast(e.detail); setTimeout(() => setToast(null), 2000); };
+    window.addEventListener("af:toast", handler);
+    return () => window.removeEventListener("af:toast", handler);
+  }, []);
 
   // Handle OAuth callback on page load
   useEffect(() => {
@@ -5009,6 +5017,19 @@ export default function App() {
       </div>
       <SyncStatusToast triggerShow={syncTrigger} />
       <GlobalProgressBar workspaceId={wid} />
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)",
+          zIndex: 3000, background: toast.ok ? "rgba(34,197,94,.15)" : "rgba(239,68,68,.15)",
+          border: `1px solid ${toast.ok ? "rgba(34,197,94,.35)" : "rgba(239,68,68,.35)"}`,
+          color: toast.ok ? "var(--grn)" : "var(--red)",
+          borderRadius: 8, padding: "8px 20px", fontSize: 13, fontWeight: 500,
+          boxShadow: "0 4px 16px rgba(0,0,0,.4)", animation: "fadeIn .2s ease both",
+          whiteSpace: "nowrap",
+        }}>
+          {toast.msg}
+        </div>
+      )}
     </>
   );
 }
