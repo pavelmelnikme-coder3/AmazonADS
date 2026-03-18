@@ -13,39 +13,55 @@ router.get("/", async (req, res, next) => {
   try {
     const VALID_LIMITS = [25, 50, 100, 200];
     const rawLimit = parseInt(req.query.limit);
-    const {
-      sortBy = "spend", sortDir = "desc",
-      page = 1,
-    } = req.query;
+    const { sortBy = "spend", sortDir = "desc", page = 1 } = req.query;
     const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 100;
 
-    // Guard: treat the literal string "undefined" or "all" as no filter
     const status = req.query.status && req.query.status !== "undefined" && req.query.status !== "all"
       ? req.query.status : null;
     const type   = req.query.type   && req.query.type   !== "undefined" && req.query.type   !== "all"
       ? req.query.type : null;
     const search = req.query.search && req.query.search !== "undefined"
       ? req.query.search.trim() : null;
+    const strategy = req.query.strategy && req.query.strategy !== "all" ? req.query.strategy : null;
+
+    const metricsInterval = Math.min(Math.max(parseInt(req.query.metricsDays) || 30, 1), 365);
 
     const offset = (parseInt(page) - 1) * limit;
     const conditions = ["c.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
 
-    if (status) {
-      conditions.push(`c.state = $${pi++}`);
-      params.push(status);
-    }
-    if (type) {
-      conditions.push(`c.campaign_type = $${pi++}`);
-      params.push(type === "SP" ? "sponsoredProducts" : type === "SB" ? "sponsoredBrands" : "sponsoredDisplay");
-    }
-    if (search) {
-      conditions.push(`c.name ILIKE $${pi++}`);
-      params.push(`%${search}%`);
-    }
+    if (status)   { conditions.push(`c.state = $${pi++}`);          params.push(status); }
+    if (type)     { conditions.push(`c.campaign_type = $${pi++}`);   params.push(type === "SP" ? "sponsoredProducts" : type === "SB" ? "sponsoredBrands" : "sponsoredDisplay"); }
+    if (search)   { conditions.push(`c.name ILIKE $${pi++}`);        params.push(`%${search}%`); }
+    if (strategy) { conditions.push(`c.bidding_strategy = $${pi++}`); params.push(strategy); }
+
+    const budgetMin = parseFloat(req.query.budgetMin);
+    const budgetMax = parseFloat(req.query.budgetMax);
+    if (!isNaN(budgetMin)) { conditions.push(`c.daily_budget >= $${pi++}`); params.push(budgetMin); }
+    if (!isNaN(budgetMax)) { conditions.push(`c.daily_budget <= $${pi++}`); params.push(budgetMax); }
+
+    const spendMin  = parseFloat(req.query.spendMin);
+    const spendMax  = parseFloat(req.query.spendMax);
+    const acosMin   = parseFloat(req.query.acosMin);
+    const acosMax   = parseFloat(req.query.acosMax);
+    const roasMin   = parseFloat(req.query.roasMin);
+    const roasMax   = parseFloat(req.query.roasMax);
+    const ordersMin = parseInt(req.query.ordersMin);
+    const clicksMin = parseInt(req.query.clicksMin);
+    if (!isNaN(spendMin))  { conditions.push(`COALESCE(m.cost,0) >= $${pi++}`);      params.push(spendMin); }
+    if (!isNaN(spendMax))  { conditions.push(`COALESCE(m.cost,0) <= $${pi++}`);      params.push(spendMax); }
+    if (!isNaN(acosMin))   { conditions.push(`m.acos_14d >= $${pi++}`);              params.push(acosMin); }
+    if (!isNaN(acosMax))   { conditions.push(`m.acos_14d <= $${pi++}`);              params.push(acosMax); }
+    if (!isNaN(roasMin))   { conditions.push(`m.roas_14d >= $${pi++}`);              params.push(roasMin); }
+    if (!isNaN(roasMax))   { conditions.push(`m.roas_14d <= $${pi++}`);              params.push(roasMax); }
+    if (!isNaN(ordersMin)) { conditions.push(`COALESCE(m.orders_14d,0) >= $${pi++}`); params.push(ordersMin); }
+    if (!isNaN(clicksMin)) { conditions.push(`COALESCE(m.clicks,0) >= $${pi++}`);    params.push(clicksMin); }
+    if (req.query.noSales === "true")    { conditions.push(`COALESCE(m.orders_14d,0) = 0`); }
+    if (req.query.hasMetrics === "true") { conditions.push(`COALESCE(m.clicks,0) > 0`); }
 
     const where = "WHERE " + conditions.join(" AND ");
+
     const allowedSort = {
       spend:       "COALESCE(m.cost,0)",
       sales:       "COALESCE(m.sales_14d,0)",
@@ -56,17 +72,34 @@ router.get("/", async (req, res, next) => {
       state:       "c.state",
       clicks:      "COALESCE(m.clicks,0)",
       impressions: "COALESCE(m.impressions,0)",
+      orders:      "COALESCE(m.orders_14d,0)",
+      cpc:         "m.cpc",
+      ctr:         "m.ctr",
     };
     const orderField = allowedSort[sortBy] || "COALESCE(m.cost,0)";
-    const orderDir = sortDir === "asc" ? "ASC" : "DESC";
+    const orderDir   = sortDir === "asc" ? "ASC" : "DESC";
+
+    const metricsJoin = `LEFT JOIN (
+        SELECT amazon_id,
+          SUM(impressions) as impressions,
+          SUM(clicks) as clicks,
+          SUM(cost) as cost,
+          SUM(sales_14d) as sales_14d,
+          SUM(orders_14d) as orders_14d,
+          CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::numeric/SUM(impressions) END as ctr,
+          CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) END as cpc,
+          CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 END as acos_14d,
+          CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas_14d
+        FROM fact_metrics_daily
+        WHERE workspace_id = $1 AND date >= NOW() - INTERVAL '${metricsInterval} days' AND entity_type = 'campaign'
+        GROUP BY amazon_id
+      ) m ON m.amazon_id = c.amazon_campaign_id`;
 
     const { rows } = await query(
       `SELECT
          c.id, c.amazon_campaign_id, c.name, c.campaign_type, c.state,
-         c.daily_budget, c.start_date, c.end_date, c.bidding_strategy,
-         c.synced_at,
+         c.daily_budget, c.start_date, c.end_date, c.bidding_strategy, c.synced_at,
          p.marketplace, p.country_code, p.currency_code,
-         -- Aggregated metrics (last 30 days)
          COALESCE(m.impressions,0) as impressions,
          COALESCE(m.clicks,0) as clicks,
          COALESCE(m.cost,0) as spend,
@@ -75,34 +108,23 @@ router.get("/", async (req, res, next) => {
          m.ctr, m.cpc, m.acos_14d as acos, m.roas_14d as roas
        FROM campaigns c
        JOIN amazon_profiles p ON p.id = c.profile_id
-       LEFT JOIN (
-         SELECT
-           amazon_id,
-           SUM(impressions) as impressions,
-           SUM(clicks) as clicks,
-           SUM(cost) as cost,
-           SUM(sales_14d) as sales_14d,
-           SUM(orders_14d) as orders_14d,
-           CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::numeric/SUM(impressions) END as ctr,
-           CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) END as cpc,
-           CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 END as acos_14d,
-           CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas_14d
-         FROM fact_metrics_daily
-         WHERE workspace_id = $1 AND date >= NOW() - INTERVAL '30 days' AND entity_type = 'campaign'
-         GROUP BY amazon_id
-       ) m ON m.amazon_id = c.amazon_campaign_id
+       ${metricsJoin}
        ${where}
        ORDER BY ${orderField} ${orderDir} NULLS LAST
        LIMIT $${pi++} OFFSET $${pi++}`,
       [...params, limit, offset]
     );
 
-    const countResult = await query(
-      `SELECT count(*) as total FROM campaigns c ${where}`,
-      params.slice(0, pi - 2) // without limit/offset
+    const { rows: countRows } = await query(
+      `SELECT count(*) as total
+       FROM campaigns c
+       JOIN amazon_profiles p ON p.id = c.profile_id
+       ${metricsJoin}
+       ${where}`,
+      params
     );
 
-    const total = parseInt(countResult.rows[0].total);
+    const total = parseInt(countRows[0].total);
     res.json({
       data: rows,
       pagination: { total, page: parseInt(page), limit, pages: Math.ceil(total / limit) },

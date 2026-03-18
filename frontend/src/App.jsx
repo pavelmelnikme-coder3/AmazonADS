@@ -23,6 +23,7 @@ const Styles = () => (
     @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
     @keyframes syncProgress{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
     @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
+    @keyframes slideInRight{from{transform:translateX(100%);opacity:0}to{transform:none;opacity:1}}
     .fade{animation:fadeIn .3s ease both}
     .card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;transition:border-color .2s}
     .card:hover{border-color:var(--b2)}
@@ -43,7 +44,12 @@ const Styles = () => (
     input:focus,select:focus{border-color:var(--ac)}
     table{border-collapse:collapse;width:100%}
     th{text-align:left;padding:10px 12px;font-size:11px;font-weight:600;letter-spacing:.06em;
-      text-transform:uppercase;color:var(--tx3);border-bottom:1px solid var(--b1);font-family:var(--mono)}
+      text-transform:uppercase;color:var(--tx3);border-bottom:1px solid var(--b1);font-family:var(--mono);position:relative;}
+    table.resizable{table-layout:fixed}
+    .col-resize-handle{position:absolute;right:-1px;top:0;height:100%;width:8px;cursor:col-resize;
+      display:flex;align-items:center;justify-content:center;z-index:2;user-select:none;}
+    .col-resize-handle::after{content:'';width:2px;height:55%;background:var(--b2);border-radius:1px;transition:background .15s}
+    .col-resize-handle:hover::after,.col-resize-handle:active::after{background:var(--ac)}
     td{padding:10px 12px;font-size:13px;border-bottom:1px solid var(--b1)}
     tr:last-child td{border-bottom:none}
     tr:hover td{background:rgba(255,255,255,.02)}
@@ -226,6 +232,80 @@ const Sidebar = ({ active, setActive, user, workspace }) => {
     </aside>
   );
 };
+
+// ─── useResizableColumns ──────────────────────────────────────────────────────
+function useResizableColumns(tableId, defaultWidths) {
+  const defaultsRef = useRef(defaultWidths);
+  const storageKey = `af:cols:${tableId}`;
+  const colRefs = useRef([]);
+
+  const [widths, setWidths] = useState(() => {
+    try {
+      const saved = localStorage.getItem(storageKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length === defaultWidths.length) return parsed;
+      }
+    } catch {}
+    return defaultsRef.current;
+  });
+
+  const onMouseDown = useCallback((colIdx, e) => {
+    e.preventDefault();
+    const col = colRefs.current[colIdx];
+    const startX = e.clientX;
+    const startW = col ? col.offsetWidth : (defaultsRef.current[colIdx] || 100);
+
+    const onMove = (ev) => {
+      const newW = Math.max(40, startW + ev.clientX - startX);
+      if (col) col.style.width = newW + "px";
+    };
+    const onUp = (ev) => {
+      const newW = Math.max(40, startW + ev.clientX - startX);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      setWidths(prev => {
+        const next = [...prev];
+        next[colIdx] = newW;
+        try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+        return next;
+      });
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [storageKey]);
+
+  const resetCols = useCallback(() => {
+    setWidths(defaultsRef.current);
+    try { localStorage.removeItem(storageKey); } catch {}
+  }, [storageKey]);
+
+  const colgroup = (
+    <colgroup>
+      {widths.map((w, i) => (
+        <col key={i} ref={el => { colRefs.current[i] = el; }} style={{ width: w }} />
+      ))}
+    </colgroup>
+  );
+
+  const resizeHandle = (colIdx) => (
+    <span
+      className="col-resize-handle"
+      onMouseDown={e => onMouseDown(colIdx, e)}
+      onDoubleClick={() => {
+        const def = defaultsRef.current[colIdx] || 100;
+        setWidths(prev => {
+          const next = [...prev];
+          next[colIdx] = def;
+          try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+          return next;
+        });
+      }}
+    />
+  );
+
+  return { widths, colgroup, resizeHandle, resetCols };
+}
 
 // ─── Connect / OAuth Page ─────────────────────────────────────────────────────
 const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
@@ -1739,7 +1819,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
 };
 
 // ─── SortHeader — reusable sortable column header ─────────────────────────────
-const SortHeader = ({ field, label, currentSort, currentDir, onSort, align = "left" }) => {
+const SortHeader = ({ field, label, currentSort, currentDir, onSort, align = "left", rh }) => {
   const active = currentSort === field;
   return (
     <th
@@ -1756,15 +1836,263 @@ const SortHeader = ({ field, label, currentSort, currentDir, onSort, align = "le
       <span style={{ fontSize: 10, opacity: active ? 1 : 0.3 }}>
         {active ? (currentDir === "asc" ? "↑" : "↓") : "↕"}
       </span>
+      {rh}
     </th>
   );
 };
 
+// ─── useSavedFilters ──────────────────────────────────────────────────────────
+const useSavedFilters = (storageKey, defaultFilters) => {
+  const PRESETS_KEY = `${storageKey}:presets`;
+  const ACTIVE_KEY  = `${storageKey}:active`;
+
+  const [filters, setFilters] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(ACTIVE_KEY) || "null");
+      return saved ? { ...defaultFilters, ...saved } : { ...defaultFilters };
+    } catch { return { ...defaultFilters }; }
+  });
+
+  const [presets, setPresets] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(PRESETS_KEY) || "[]"); }
+    catch { return []; }
+  });
+
+  const updateFilter = useCallback((key, value) => {
+    setFilters(prev => {
+      const next = { ...prev, [key]: value };
+      try { localStorage.setItem(ACTIVE_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [ACTIVE_KEY]);
+
+  const updateFilters = useCallback((updates) => {
+    setFilters(prev => {
+      const next = { ...prev, ...updates };
+      try { localStorage.setItem(ACTIVE_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [ACTIVE_KEY]);
+
+  const resetFilters = useCallback(() => {
+    setFilters({ ...defaultFilters });
+    try { localStorage.removeItem(ACTIVE_KEY); } catch {}
+  }, [ACTIVE_KEY]);
+
+  const savePreset = useCallback((name) => {
+    setFilters(cur => {
+      const preset = { id: Date.now(), name, filters: { ...cur } };
+      setPresets(prev => {
+        const next = [...prev.filter(p => p.name !== name), preset];
+        try { localStorage.setItem(PRESETS_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      return cur;
+    });
+  }, [PRESETS_KEY]);
+
+  const loadPreset = useCallback((preset) => {
+    const next = { ...defaultFilters, ...preset.filters };
+    setFilters(next);
+    try { localStorage.setItem(ACTIVE_KEY, JSON.stringify(next)); } catch {}
+  }, [ACTIVE_KEY]);
+
+  const deletePreset = useCallback((id) => {
+    setPresets(prev => {
+      const next = prev.filter(p => p.id !== id);
+      try { localStorage.setItem(PRESETS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [PRESETS_KEY]);
+
+  const activeCount = Object.entries(filters).filter(([k, v]) => {
+    const def = defaultFilters[k];
+    return v !== def && v !== "" && v !== null && v !== undefined &&
+      !(Array.isArray(v) && v.length === 0);
+  }).length;
+
+  return { filters, updateFilter, updateFilters, resetFilters, presets, savePreset, loadPreset, deletePreset, activeCount };
+};
+
+// ─── FilterPanel ──────────────────────────────────────────────────────────────
+const FilterPanel = ({ isOpen, onClose, filters, onUpdate, onReset, presets, onSavePreset, onLoadPreset, onDeletePreset, fields }) => {
+  const { t } = useI18n();
+  const [newPresetName, setNewPresetName] = useState("");
+  const [showPresetInput, setShowPresetInput] = useState(false);
+
+  if (!isOpen) return null;
+
+  const inp = {
+    fontSize: 12, padding: "5px 8px", borderRadius: 5,
+    background: "var(--s3)", border: "1px solid var(--b2)",
+    color: "var(--tx)", outline: "none", width: "100%",
+  };
+
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, zIndex: 1400, background: "rgba(0,0,0,.4)",
+      display: "flex", alignItems: "flex-start", justifyContent: "flex-end" }}
+      onClick={onClose}>
+      <div style={{ width: 320, height: "100vh", overflowY: "auto",
+        background: "var(--s1)", borderLeft: "1px solid var(--b2)",
+        padding: "0 0 40px", display: "flex", flexDirection: "column",
+        animation: "slideInRight .2s ease" }}
+        onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--b2)",
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          position: "sticky", top: 0, background: "var(--s1)", zIndex: 1 }}>
+          <span style={{ fontFamily: "var(--disp)", fontSize: 15, fontWeight: 600 }}>{t("filter.title")}</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={onReset} className="btn btn-ghost"
+              style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}>{t("filter.reset")}</button>
+            <button onClick={onClose} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 8px" }}>✕</button>
+          </div>
+        </div>
+
+        {/* Saved Presets */}
+        <div style={{ padding: "12px 18px", borderBottom: "1px solid var(--b2)" }}>
+          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
+            textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>{t("filter.presets")}</div>
+          {presets.length === 0
+            ? <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t("filter.noPresets")}</div>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {presets.map(p => (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
+                    <button onClick={() => onLoadPreset(p)}
+                      style={{ fontSize: 12, color: "var(--ac)", background: "none",
+                        border: "none", cursor: "pointer", textAlign: "left", flex: 1, padding: "3px 0" }}>
+                      ◈ {p.name}
+                    </button>
+                    <button onClick={() => onDeletePreset(p.id)}
+                      style={{ fontSize: 10, color: "var(--tx3)", background: "none", border: "none", cursor: "pointer", padding: "0 4px" }}>✕</button>
+                  </div>
+                ))}
+              </div>
+          }
+          {showPresetInput
+            ? <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <input value={newPresetName} onChange={e => setNewPresetName(e.target.value)}
+                  placeholder={t("filter.presetName")} style={{ ...inp, flex: 1 }}
+                  onKeyDown={e => { if (e.key === "Enter" && newPresetName.trim()) {
+                    onSavePreset(newPresetName.trim()); setNewPresetName(""); setShowPresetInput(false);
+                  }}}
+                  autoFocus />
+                <button onClick={() => { if (newPresetName.trim()) {
+                  onSavePreset(newPresetName.trim()); setNewPresetName(""); setShowPresetInput(false);
+                }}} className="btn btn-primary" style={{ fontSize: 11, padding: "4px 10px" }}>{t("filter.save")}</button>
+              </div>
+            : <button onClick={() => setShowPresetInput(true)}
+                className="btn btn-ghost" style={{ fontSize: 11, marginTop: 8, padding: "4px 10px" }}>
+                + {t("filter.savePreset")}
+              </button>
+          }
+        </div>
+
+        {/* Filter Fields */}
+        <div style={{ padding: "12px 18px", display: "flex", flexDirection: "column", gap: 16 }}>
+          {fields.map(field => (
+            <div key={field.key}>
+              {field.type !== "toggle" && (
+                <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
+                  textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 }}>
+                  {field.label}{field.unit && <span style={{ color: "var(--tx3)", marginLeft: 4, textTransform: "none" }}>{field.unit}</span>}
+                </div>
+              )}
+
+              {field.type === "select" && (
+                <select value={filters[field.key] ?? "all"} style={inp}
+                  onChange={e => onUpdate(field.key, e.target.value === "all" ? "" : e.target.value)}>
+                  <option value="all">{t("filter.all")}</option>
+                  {field.options?.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                </select>
+              )}
+
+              {field.type === "range" && (
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <input type="number" placeholder={t("filter.from")}
+                    value={filters[`${field.key}Min`] ?? ""}
+                    min={field.min} max={field.max} step={field.step || 1}
+                    style={{ ...inp, width: "50%" }}
+                    onChange={e => onUpdate(`${field.key}Min`, e.target.value)} />
+                  <span style={{ color: "var(--tx3)", fontSize: 12 }}>—</span>
+                  <input type="number" placeholder={t("filter.to")}
+                    value={filters[`${field.key}Max`] ?? ""}
+                    min={field.min} max={field.max} step={field.step || 1}
+                    style={{ ...inp, width: "50%" }}
+                    onChange={e => onUpdate(`${field.key}Max`, e.target.value)} />
+                </div>
+              )}
+
+              {field.type === "number" && (
+                <input type="number" placeholder={`≥ ${field.placeholder ?? 0}`}
+                  value={filters[field.key] ?? ""}
+                  min={field.min ?? 0} step={field.step || 1}
+                  style={inp}
+                  onChange={e => onUpdate(field.key, e.target.value)} />
+              )}
+
+              {field.type === "toggle" && (
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                  fontSize: 12, color: filters[field.key] ? "var(--ac2)" : "var(--tx3)" }}>
+                  <input type="checkbox" checked={!!filters[field.key]}
+                    onChange={e => onUpdate(field.key, e.target.checked)}
+                    style={{ accentColor: "var(--ac)", width: 13, height: 13 }} />
+                  {field.label}
+                </label>
+              )}
+
+              {field.type === "multiselect" && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {field.options?.map(opt => {
+                    const active = (filters[field.key] || []).includes(opt.value);
+                    return (
+                      <button key={opt.value}
+                        onClick={() => {
+                          const cur = filters[field.key] || [];
+                          onUpdate(field.key, active ? cur.filter(v => v !== opt.value) : [...cur, opt.value]);
+                        }}
+                        style={{ fontSize: 11, padding: "3px 8px", borderRadius: 4, cursor: "pointer",
+                          background: active ? "rgba(59,130,246,.2)" : "var(--s3)",
+                          border: `1px solid ${active ? "var(--ac)" : "var(--b2)"}`,
+                          color: active ? "var(--ac2)" : "var(--tx2)" }}>
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 // ─── Campaigns Page (real data) ───────────────────────────────────────────────
+const CAMPAIGN_DEFAULT_FILTERS = {
+  search: "", status: "", type: "", strategy: "",
+  budgetMin: "", budgetMax: "",
+  spendMin: "", spendMax: "",
+  acosMin: "", acosMax: "",
+  roasMin: "", roasMax: "",
+  ordersMin: "", clicksMin: "",
+  noSales: false, hasMetrics: false,
+  metricsDays: 30,
+};
+
 const CampaignsPage = ({ workspaceId }) => {
   const { t } = useI18n();
-  const [filter, setFilter] = useState("all");
-  const [search, setSearch] = useState("");
+  const {
+    filters: campFilters, updateFilter: setCampFilter,
+    resetFilters: resetCampFilters,
+    presets: campPresets, savePreset: saveCampPreset,
+    loadPreset: loadCampPreset, deletePreset: deleteCampPreset,
+    activeCount: campActiveCount,
+  } = useSavedFilters("af:campaigns", CAMPAIGN_DEFAULT_FILTERS);
+  const [showCampFilters, setShowCampFilters] = useState(false);
   const [sortBy, setSortBy] = useState("spend");
   const [sortDir, setSortDir] = useState("desc");
   const [page, setPage] = useState(1);
@@ -1775,6 +2103,9 @@ const CampaignsPage = ({ workspaceId }) => {
   const [selected, setSelected] = useState(new Set());
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [budgetPct, setBudgetPct] = useState("");
+  const { colgroup: campColgroup, resizeHandle: campRH, resetCols: campResetCols } = useResizableColumns(
+    "campaigns", [36, 200, 80, 90, 95, 85, 85, 75, 75, 60]
+  );
 
   function handleCampSort(field) {
     const isText = ["name", "state"].includes(field);
@@ -1782,17 +2113,30 @@ const CampaignsPage = ({ workspaceId }) => {
     else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
   }
 
-  useEffect(() => { setPage(1); }, [filter, search, sortBy, sortDir]);
+  useEffect(() => { setPage(1); }, [campFilters, sortBy, sortDir]);
 
   const { data, loading, reload } = useAsync(
-    () => {
-      if (!workspaceId) return Promise.resolve({ data: [], pagination: {} });
-      const params = { limit: pageSize, page, sortBy, sortDir };
-      if (filter && filter !== "all") params.status = filter;
-      if (search && search.trim()) params.search = search.trim();
-      return get("/campaigns", params);
-    },
-    [workspaceId, filter, search, sortBy, sortDir, page, pageSize]
+    () => workspaceId ? get("/campaigns", {
+      page, limit: pageSize, sortBy, sortDir,
+      search:      campFilters.search      || undefined,
+      status:      campFilters.status      || undefined,
+      type:        campFilters.type        || undefined,
+      strategy:    campFilters.strategy    || undefined,
+      budgetMin:   campFilters.budgetMin   || undefined,
+      budgetMax:   campFilters.budgetMax   || undefined,
+      spendMin:    campFilters.spendMin    || undefined,
+      spendMax:    campFilters.spendMax    || undefined,
+      acosMin:     campFilters.acosMin     || undefined,
+      acosMax:     campFilters.acosMax     || undefined,
+      roasMin:     campFilters.roasMin     || undefined,
+      roasMax:     campFilters.roasMax     || undefined,
+      ordersMin:   campFilters.ordersMin   || undefined,
+      clicksMin:   campFilters.clicksMin   || undefined,
+      noSales:     campFilters.noSales     || undefined,
+      hasMetrics:  campFilters.hasMetrics  || undefined,
+      metricsDays: campFilters.metricsDays !== 30 ? campFilters.metricsDays : undefined,
+    }) : Promise.resolve({ data: [], pagination: {} }),
+    [workspaceId, page, pageSize, sortBy, sortDir, campFilters]
   );
 
   const campaigns = data?.data || [];
@@ -1854,14 +2198,52 @@ const CampaignsPage = ({ workspaceId }) => {
         <button className="btn btn-primary">{t("campaigns.newCampaign")}</button>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        <input placeholder={t("campaigns.searchPlaceholder")} value={search} onChange={e => setSearch(e.target.value)} style={{ width: 200 }} />
-        {["all", "enabled", "paused", "archived"].map(f => (
-          <button key={f} onClick={() => setFilter(f)} className={`btn ${filter === f ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12, padding: "5px 12px" }}>
-            {f === "all" ? t("common.all") : f.charAt(0).toUpperCase() + f.slice(1)}
-          </button>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <input placeholder={t("campaigns.searchPlaceholder")} value={campFilters.search}
+          onChange={e => { setCampFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
+        {[
+          { value: "", label: t("filter.all") },
+          { value: "enabled", label: "Enabled" },
+          { value: "paused", label: "Paused" },
+          { value: "archived", label: "Archived" },
+        ].map(s => (
+          <button key={s.value} onClick={() => { setCampFilter("status", s.value); setPage(1); }}
+            className={`btn ${campFilters.status === s.value ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize: 12, padding: "5px 12px" }}>{s.label}</button>
         ))}
-        <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ {t("common.refresh")}</button>
+        {[
+          { value: "", label: "All" },
+          { value: "SP", label: "SP" },
+          { value: "SB", label: "SB" },
+          { value: "SD", label: "SD" },
+        ].map(tp => (
+          <button key={tp.value} onClick={() => { setCampFilter("type", tp.value); setPage(1); }}
+            className={`btn ${campFilters.type === tp.value ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize: 11, padding: "4px 8px" }}>{tp.label}</button>
+        ))}
+        <select value={campFilters.metricsDays}
+          onChange={e => { setCampFilter("metricsDays", parseInt(e.target.value)); setPage(1); }}
+          style={{ fontSize: 12, padding: "5px 8px", borderRadius: 5,
+            background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)" }}>
+          {[7,14,30,60,90].map(d => <option key={d} value={d}>{d}d</option>)}
+        </select>
+        <button onClick={() => setShowCampFilters(true)}
+          className={`btn ${campActiveCount > 0 ? "btn-primary" : "btn-ghost"}`}
+          style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
+          ⊞ {t("filter.filters")}
+          {campActiveCount > 0 && (
+            <span style={{ background: "var(--red)", color: "#fff", borderRadius: 8,
+              fontSize: 9, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>{campActiveCount}</span>
+          )}
+        </button>
+        {campActiveCount > 0 && (
+          <button onClick={() => { resetCampFilters(); setPage(1); }} className="btn btn-ghost"
+            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}>✕ {t("filter.reset")}</button>
+        )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}>↺ {t("common.refresh")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={campResetCols} title="Reset column widths">⊟</button>
+        </div>
       </div>
 
       {selected.size > 0 && (
@@ -1882,20 +2264,21 @@ const CampaignsPage = ({ workspaceId }) => {
             ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("campaigns.noCampaigns")}</div>
             : (
               <div style={{ overflowX: "auto" }}>
-                <table>
+                <table className="resizable">
+                  {campColgroup}
                   <thead>
                     <tr>
                       <th style={{ width: 36 }}>
                         <input type="checkbox" checked={selected.size === campaigns.length && campaigns.length > 0} onChange={toggleAll} />
                       </th>
-                      <SortHeader field="name"    label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} />
-                      <th>{t("campaigns.colType")}</th>
-                      <SortHeader field="state"   label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} />
-                      <SortHeader field="budget"  label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
-                      <SortHeader field="spend"   label="Spend"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
-                      <SortHeader field="sales"   label="Sales"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
-                      <SortHeader field="acos"    label="ACOS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
-                      <SortHeader field="roas"    label="ROAS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" />
+                      <SortHeader field="name"    label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(1)} />
+                      <th>{t("campaigns.colType")}{campRH(2)}</th>
+                      <SortHeader field="state"   label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(3)} />
+                      <SortHeader field="budget"  label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(4)} />
+                      <SortHeader field="spend"   label="Spend"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />
+                      <SortHeader field="sales"   label="Sales"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />
+                      <SortHeader field="acos"    label="ACOS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />
+                      <SortHeader field="roas"    label="ROAS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />
                       <th></th>
                     </tr>
                   </thead>
@@ -2005,6 +2388,38 @@ const CampaignsPage = ({ workspaceId }) => {
         </div>,
       document.body
       )}
+
+      <FilterPanel
+        isOpen={showCampFilters}
+        onClose={() => setShowCampFilters(false)}
+        filters={campFilters}
+        onUpdate={(k, v) => { setCampFilter(k, v); setPage(1); }}
+        onReset={() => { resetCampFilters(); setPage(1); }}
+        presets={campPresets}
+        onSavePreset={saveCampPreset}
+        onLoadPreset={p => { loadCampPreset(p); setPage(1); }}
+        onDeletePreset={deleteCampPreset}
+        fields={[
+          { key: "status", label: t("campaigns.colStatus"), type: "select", options: [
+            { value: "enabled", label: "Enabled" }, { value: "paused", label: "Paused" }, { value: "archived", label: "Archived" },
+          ]},
+          { key: "type", label: t("campaigns.colType"), type: "select", options: [
+            { value: "SP", label: "Sponsored Products" }, { value: "SB", label: "Sponsored Brands" }, { value: "SD", label: "Sponsored Display" },
+          ]},
+          { key: "budget", label: t("campaigns.colBudget"), type: "range", min: 0, max: 10000, step: 1, unit: "€" },
+          { key: "metricsDays", label: t("filter.metricsPeriod"), type: "select", options: [
+            { value: 7, label: "7 days" }, { value: 14, label: "14 days" }, { value: 30, label: "30 days" },
+            { value: 60, label: "60 days" }, { value: 90, label: "90 days" },
+          ]},
+          { key: "spend", label: "Spend", type: "range", min: 0, max: 10000, step: 1, unit: "€" },
+          { key: "acos", label: "ACOS", type: "range", min: 0, max: 200, step: 0.1, unit: "%" },
+          { key: "roas", label: "ROAS", type: "range", min: 0, max: 100, step: 0.1, unit: "×" },
+          { key: "ordersMin", label: t("filter.minOrders"), type: "number", min: 0 },
+          { key: "clicksMin", label: t("filter.minClicks"), type: "number", min: 0 },
+          { key: "noSales", label: t("filter.noSales"), type: "toggle" },
+          { key: "hasMetrics", label: t("filter.hasActivity"), type: "toggle" },
+        ]}
+      />
     </div>
   );
 };
@@ -2017,6 +2432,9 @@ const ReportsPage = ({ workspaceId }) => {
   const [submitted, setSubmitted] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const { colgroup: repColgroup, resizeHandle: repRH } = useResizableColumns(
+    "reports", [110, 170, 110, 90, 150]
+  );
 
   const { data: reportsData, loading, reload } = useAsync(
     () => workspaceId ? get("/reports", { page, limit: pageSize }) : Promise.resolve({ data: [], pagination: {} }),
@@ -2090,8 +2508,15 @@ const ReportsPage = ({ workspaceId }) => {
             : !reportsData?.data?.length
               ? <div style={{ padding: "30px 20px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("reports.noReports")}</div>
               : (
-                <table>
-                  <thead><tr><th>{t("reports.colType")}</th><th>{t("reports.colPeriod")}</th><th>{t("reports.colStatus")}</th><th>{t("reports.colRows")}</th><th>{t("reports.colCreated")}</th></tr></thead>
+                <table className="resizable">
+                  {repColgroup}
+                  <thead><tr>
+                    <th>{t("reports.colType")}{repRH(0)}</th>
+                    <th>{t("reports.colPeriod")}{repRH(1)}</th>
+                    <th>{t("reports.colStatus")}{repRH(2)}</th>
+                    <th>{t("reports.colRows")}{repRH(3)}</th>
+                    <th>{t("reports.colCreated")}{repRH(4)}</th>
+                  </tr></thead>
                   <tbody>
                     {reportsData.data.map(r => (
                       <tr key={r.id}>
@@ -2172,6 +2597,9 @@ const AuditPage = ({ workspaceId }) => {
   const [limit,    setLimit]    = useState(50);
   const [rollingBack,  setRollingBack]  = useState(null);
   const [rollbackMsg,  setRollbackMsg]  = useState({});
+  const { colgroup: auditColgroup, resizeHandle: auditRH, resetCols: auditResetCols } = useResizableColumns(
+    "audit", [130, 130, 160, 190, 220, 110]
+  );
 
   useEffect(() => { setPage(1); }, [filterAction, filterEntity, filterSource, filterActor, filterDateFrom, filterDateTo, onlyRollback, sortBy, sortDir]);
 
@@ -2241,6 +2669,7 @@ const AuditPage = ({ workspaceId }) => {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "var(--tx3)" }}>{pagination.total || 0} событий</span>
           <button className="btn btn-ghost" onClick={reload} style={{ fontSize: 12, padding: "5px 10px" }}>↺</button>
+          <button className="btn btn-ghost" onClick={auditResetCols} style={{ fontSize: 12, padding: "5px 10px" }} title="Reset column widths">⊟</button>
         </div>
       </div>
 
@@ -2314,24 +2743,25 @@ const AuditPage = ({ workspaceId }) => {
           <div style={{ fontSize: 14, color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
         </div>
       ) : (
-        <div className="card" style={{ overflow: "hidden" }}>
-          <table>
+        <div className="card" style={{ overflow: "auto" }}>
+          <table className="resizable">
+            {auditColgroup}
             <thead>
               <tr>
                 <th onClick={() => handleSort("date")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Время <SortIcon field="date" />
+                  Время <SortIcon field="date" />{auditRH(0)}
                 </th>
                 <th onClick={() => handleSort("actor_name")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Пользователь <SortIcon field="actor_name" />
+                  Пользователь <SortIcon field="actor_name" />{auditRH(1)}
                 </th>
                 <th onClick={() => handleSort("action")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Действие <SortIcon field="action" />
+                  Действие <SortIcon field="action" />{auditRH(2)}
                 </th>
                 <th onClick={() => handleSort("entity_type")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Сущность <SortIcon field="entity_type" />
+                  Сущность <SortIcon field="entity_type" />{auditRH(3)}
                 </th>
-                <th>{t("audit.diff")}</th>
-                <th style={{ textAlign: "right" }}>Откат</th>
+                <th>{t("audit.diff")}{auditRH(4)}</th>
+                <th style={{ textAlign: "right" }}>Откат{auditRH(5)}</th>
               </tr>
             </thead>
             <tbody>
@@ -2446,10 +2876,26 @@ function getPageRange(current, total) {
 }
 
 // ─── Keywords Page ────────────────────────────────────────────────────────────
+const KEYWORD_DEFAULT_FILTERS = {
+  search: "", state: "", matchType: "", campaignType: "",
+  bidMin: "", bidMax: "",
+  spendMin: "", spendMax: "",
+  acosMin: "", acosMax: "",
+  clicksMin: "", ordersMin: "",
+  noSales: false, hasClicks: false,
+  metricsDays: 30,
+};
+
 const KeywordsPage = ({ workspaceId }) => {
   const { t } = useI18n();
-  const [search, setSearch] = useState("");
-  const [stateFilter, setStateFilter] = useState("");
+  const {
+    filters: kwFilters, updateFilter: setKwFilter,
+    resetFilters: resetKwFilters,
+    presets: kwPresets, savePreset: saveKwPreset,
+    loadPreset: loadKwPreset, deletePreset: deleteKwPreset,
+    activeCount: kwActiveCount,
+  } = useSavedFilters("af:keywords", KEYWORD_DEFAULT_FILTERS);
+  const [showKwFilters, setShowKwFilters] = useState(false);
   const [sortBy, setSortBy] = useState("keyword_text");
   const [sortDir, setSortDir] = useState("asc");
   const [selected, setSelected] = useState(new Set());
@@ -2460,6 +2906,9 @@ const KeywordsPage = ({ workspaceId }) => {
   const [kwToast, setKwToast] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
+  const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
+    "keywords", [36, 220, 90, 100, 90, 170, 90]
+  );
 
   function handleKwSort(field) {
     const isText = ["keyword_text", "match_type", "state", "campaign"].includes(field);
@@ -2467,17 +2916,32 @@ const KeywordsPage = ({ workspaceId }) => {
     else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
   }
 
-  useEffect(() => { setPage(1); }, [search, stateFilter, sortBy, sortDir]);
+  useEffect(() => { setPage(1); }, [kwFilters, sortBy, sortDir]);
 
   useEffect(() => {
     document.querySelector(".fade")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [page]);
 
   const { data: kwResponse, loading, reload } = useAsync(
-    () => workspaceId
-      ? get("/keywords", { search: search || undefined, state: stateFilter || undefined, limit: pageSize, page, sortBy, sortDir })
-      : Promise.resolve({ data: [], pagination: { total: 0, page: 1, limit: 100, pages: 0 } }),
-    [workspaceId, search, stateFilter, sortBy, sortDir, page, pageSize]
+    () => workspaceId ? get("/keywords", {
+      page, limit: pageSize, sortBy, sortDir,
+      search:       kwFilters.search       || undefined,
+      state:        kwFilters.state        || undefined,
+      matchType:    kwFilters.matchType    || undefined,
+      campaignType: kwFilters.campaignType || undefined,
+      bidMin:       kwFilters.bidMin       || undefined,
+      bidMax:       kwFilters.bidMax       || undefined,
+      spendMin:     kwFilters.spendMin     || undefined,
+      spendMax:     kwFilters.spendMax     || undefined,
+      acosMin:      kwFilters.acosMin      || undefined,
+      acosMax:      kwFilters.acosMax      || undefined,
+      clicksMin:    kwFilters.clicksMin    || undefined,
+      ordersMin:    kwFilters.ordersMin    || undefined,
+      noSales:      kwFilters.noSales      || undefined,
+      hasClicks:    kwFilters.hasClicks    || undefined,
+      metricsDays:  kwFilters.metricsDays !== 30 ? kwFilters.metricsDays : undefined,
+    }) : Promise.resolve({ data: [], pagination: { total: 0, page: 1, limit: 100, pages: 0 } }),
+    [workspaceId, page, pageSize, sortBy, sortDir, kwFilters]
   );
 
   const keywords = kwResponse?.data ?? [];
@@ -2543,15 +3007,52 @@ const KeywordsPage = ({ workspaceId }) => {
         document.body
       )}
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center" }}>
-        <input placeholder={t("keywords.searchPlaceholder")} value={search} onChange={e => setSearch(e.target.value)} style={{ width: 220 }} />
-        <select value={stateFilter} onChange={e => setStateFilter(e.target.value)} style={{ width: 130 }}>
-          <option value="">All States</option>
-          <option value="enabled">Enabled</option>
-          <option value="paused">Paused</option>
-          <option value="archived">Archived</option>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <input placeholder={t("keywords.searchPlaceholder")} value={kwFilters.search}
+          onChange={e => { setKwFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
+        {[
+          { value: "", label: t("filter.all") },
+          { value: "enabled", label: "Enabled" },
+          { value: "paused", label: "Paused" },
+          { value: "archived", label: "Archived" },
+        ].map(s => (
+          <button key={s.value} onClick={() => { setKwFilter("state", s.value); setPage(1); }}
+            className={`btn ${kwFilters.state === s.value ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize: 11, padding: "4px 8px" }}>{s.label}</button>
+        ))}
+        {[
+          { value: "", label: "All" },
+          { value: "exact", label: "Exact" },
+          { value: "phrase", label: "Phrase" },
+          { value: "broad", label: "Broad" },
+        ].map(m => (
+          <button key={m.value} onClick={() => { setKwFilter("matchType", m.value); setPage(1); }}
+            className={`btn ${kwFilters.matchType === m.value ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize: 11, padding: "4px 8px" }}>{m.label}</button>
+        ))}
+        <select value={kwFilters.metricsDays}
+          onChange={e => { setKwFilter("metricsDays", parseInt(e.target.value)); setPage(1); }}
+          style={{ fontSize: 12, padding: "5px 8px", borderRadius: 5,
+            background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)" }}>
+          {[7,14,30,60,90].map(d => <option key={d} value={d}>{d}d</option>)}
         </select>
-        <button className="btn btn-ghost" style={{ fontSize: 12, marginLeft: "auto" }} onClick={reload}>↺ {t("common.refresh")}</button>
+        <button onClick={() => setShowKwFilters(true)}
+          className={`btn ${kwActiveCount > 0 ? "btn-primary" : "btn-ghost"}`}
+          style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
+          ⊞ {t("filter.filters")}
+          {kwActiveCount > 0 && (
+            <span style={{ background: "var(--red)", color: "#fff", borderRadius: 8,
+              fontSize: 9, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>{kwActiveCount}</span>
+          )}
+        </button>
+        {kwActiveCount > 0 && (
+          <button onClick={() => { resetKwFilters(); setPage(1); }} className="btn btn-ghost"
+            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}>✕ {t("filter.reset")}</button>
+        )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}>↺ {t("common.refresh")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={kwResetCols} title="Reset column widths">⊟</button>
+        </div>
       </div>
 
       {selected.size > 0 && (
@@ -2583,18 +3084,19 @@ const KeywordsPage = ({ workspaceId }) => {
             ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("keywords.noKeywords")}</div>
             : (
               <div style={{ overflowX: "auto" }}>
-                <table>
+                <table className="resizable">
+                  {kwColgroup}
                   <thead>
                     <tr>
                       <th style={{ width: 36 }}>
                         <input type="checkbox" checked={selected.size === keywords.length && keywords.length > 0} onChange={toggleAll} />
                       </th>
-                      <SortHeader field="keyword_text" label={t("keywords.colKeyword")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
-                      <SortHeader field="match_type"   label={t("keywords.colMatch")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
-                      <SortHeader field="state"        label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
-                      <SortHeader field="bid"          label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" />
-                      <SortHeader field="campaign"     label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} />
-                      <th></th>
+                      <SortHeader field="keyword_text" label={t("keywords.colKeyword")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(1)} />
+                      <SortHeader field="match_type"   label={t("keywords.colMatch")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(2)} />
+                      <SortHeader field="state"        label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(3)} />
+                      <SortHeader field="bid"          label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(4)} />
+                      <SortHeader field="campaign"     label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(5)} />
+                      <th>{kwRH(6)}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2688,6 +3190,39 @@ const KeywordsPage = ({ workspaceId }) => {
         </div>
       )}
 
+      <FilterPanel
+        isOpen={showKwFilters}
+        onClose={() => setShowKwFilters(false)}
+        filters={kwFilters}
+        onUpdate={(k, v) => { setKwFilter(k, v); setPage(1); }}
+        onReset={() => { resetKwFilters(); setPage(1); }}
+        presets={kwPresets}
+        onSavePreset={saveKwPreset}
+        onLoadPreset={p => { loadKwPreset(p); setPage(1); }}
+        onDeletePreset={deleteKwPreset}
+        fields={[
+          { key: "state", label: t("keywords.colStatus"), type: "select", options: [
+            { value: "enabled", label: "Enabled" }, { value: "paused", label: "Paused" }, { value: "archived", label: "Archived" },
+          ]},
+          { key: "matchType", label: t("keywords.colMatch"), type: "multiselect", options: [
+            { value: "exact", label: "Exact" }, { value: "phrase", label: "Phrase" }, { value: "broad", label: "Broad" },
+          ]},
+          { key: "campaignType", label: t("campaigns.colType"), type: "select", options: [
+            { value: "SP", label: "Sponsored Products" }, { value: "SB", label: "Sponsored Brands" }, { value: "SD", label: "Sponsored Display" },
+          ]},
+          { key: "bid", label: t("keywords.colBid"), type: "range", min: 0, max: 100, step: 0.01, unit: "€" },
+          { key: "metricsDays", label: t("filter.metricsPeriod"), type: "select", options: [
+            { value: 7, label: "7 days" }, { value: 14, label: "14 days" }, { value: 30, label: "30 days" },
+            { value: 60, label: "60 days" }, { value: 90, label: "90 days" },
+          ]},
+          { key: "spend", label: "Spend", type: "range", min: 0, max: 1000, step: 0.1, unit: "€" },
+          { key: "acos", label: "ACOS", type: "range", min: 0, max: 500, step: 0.1, unit: "%" },
+          { key: "clicksMin", label: t("filter.minClicks"), type: "number", min: 0 },
+          { key: "ordersMin", label: t("filter.minOrders"), type: "number", min: 0 },
+          { key: "noSales", label: t("filter.noSales"), type: "toggle" },
+          { key: "hasClicks", label: t("filter.hasActivity"), type: "toggle" },
+        ]}
+      />
     </div>
   );
 };
