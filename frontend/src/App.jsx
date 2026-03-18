@@ -941,10 +941,15 @@ const SyncButton = ({ workspaceId, onSynced }) => {
   const [open, setOpen]       = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [done, setDone]       = useState(false);
-  const ref = useRef(null);
+  const ref     = useRef(null); // button wrapper
+  const menuRef = useRef(null); // portal menu container
 
   useEffect(() => {
-    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => {
+      const outsideBtn  = !ref.current  || !ref.current.contains(e.target);
+      const outsideMenu = !menuRef.current || !menuRef.current.contains(e.target);
+      if (outsideBtn && outsideMenu) setOpen(false);
+    };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
@@ -965,6 +970,23 @@ const SyncButton = ({ workspaceId, onSynced }) => {
     }
   };
 
+  const getMenuStyle = () => {
+    if (!ref.current) return { position: "fixed", top: 60, right: 20, zIndex: 2000 };
+    const rect = ref.current.getBoundingClientRect();
+    return {
+      position: "fixed",
+      top: rect.bottom + 6,
+      right: window.innerWidth - rect.right,
+      zIndex: 2000,
+      background: "var(--s2)",
+      border: "1px solid var(--b2)",
+      borderRadius: 8,
+      padding: 6,
+      minWidth: 240,
+      boxShadow: "0 8px 24px rgba(0,0,0,.4)",
+    };
+  };
+
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <div style={{ display: "flex", gap: 0 }}>
@@ -983,7 +1005,7 @@ const SyncButton = ({ workspaceId, onSynced }) => {
           }
         </button>
         <button
-          onClick={() => !syncing && setOpen(o => !o)}
+          onClick={(e) => { e.stopPropagation(); if (!syncing) setOpen(o => !o); }}
           disabled={syncing}
           className="btn btn-primary"
           style={{ fontSize: 11, padding: "6px 8px", borderRadius: "0 6px 6px 0",
@@ -994,22 +1016,14 @@ const SyncButton = ({ workspaceId, onSynced }) => {
       </div>
 
       {open && createPortal(
-        <div style={{
-          position: "fixed",
-          top: ref.current?.getBoundingClientRect().bottom + 6,
-          right: window.innerWidth - (ref.current?.getBoundingClientRect().right || 0),
-          zIndex: 2000,
-          background: "var(--s2)", border: "1px solid var(--b2)",
-          borderRadius: 8, padding: 6, minWidth: 240,
-          boxShadow: "0 8px 24px rgba(0,0,0,.4)"
-        }}>
+        <div ref={menuRef} style={getMenuStyle()}>
           {[
             { mode: "quick", icon: "⚡", label: t("sync.quick"), desc: t("sync.quickDesc") },
             { mode: "full",  icon: "◎", label: t("sync.full"),  desc: t("sync.fullDesc") },
           ].map(({ mode, icon, label, desc }) => (
             <button
               key={mode}
-              onClick={() => handleSync(mode)}
+              onMouseDown={(e) => { e.stopPropagation(); handleSync(mode); }}
               style={{
                 display: "flex", flexDirection: "column", gap: 2,
                 padding: "10px 14px", width: "100%", textAlign: "left",
@@ -1033,37 +1047,37 @@ const SyncButton = ({ workspaceId, onSynced }) => {
 // ─── GlobalProgressBar ────────────────────────────────────────────────────────
 const GlobalProgressBar = ({ workspaceId }) => {
   const { t } = useI18n();
-  const [jobs, setJobs] = useState({ active: [], queued: {} });
-  const [visible, setVisible] = useState(false);
+  const [data, setData] = useState(null);
   const intervalRef = useRef(null);
+
+  const poll = useCallback(async () => {
+    if (!workspaceId) return;
+    try {
+      const result = await get("/jobs/progress");
+      setData(result);
+    } catch (e) {
+      // silently ignore poll errors
+    }
+  }, [workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) return;
-
-    const poll = async () => {
-      try {
-        const data = await get("/jobs/progress");
-        const hasActivity = data.active?.length > 0 ||
-          Object.values(data.queued || {}).some(v => v > 0);
-        setJobs(data);
-        setVisible(hasActivity);
-      } catch (e) {
-        // ignore polling errors
-      }
-    };
-
     poll();
     intervalRef.current = setInterval(poll, 3000);
     return () => clearInterval(intervalRef.current);
-  }, [workspaceId]);
+  }, [workspaceId, poll]);
 
-  if (!visible) return null;
+  if (!data) return null;
 
-  const activeJobs = jobs.active || [];
-  const queued = jobs.queued || {};
-  const totalQueued = Object.values(queued).reduce((s, v) => s + v, 0);
+  const activeJobs = data.active || [];
+  const queued = data.queued || {};
+  const totalQueued = Object.values(queued).reduce((s, v) => s + (v || 0), 0);
+  const hasActivity = activeJobs.length > 0 || totalQueued > 0;
+
+  if (!hasActivity) return null;
+
   const primaryJob = activeJobs[0];
-  const progress = primaryJob?.progress || 0;
+  const progress = Number(primaryJob?.progress) || 0;
   const label = primaryJob
     ? (primaryJob.type === "entity_sync" ? t("progress.sync") : t("progress.report"))
     : t("progress.sync");
@@ -1081,7 +1095,7 @@ const GlobalProgressBar = ({ workspaceId }) => {
           <span style={{
             width: 7, height: 7, borderRadius: "50%",
             background: "var(--ac)", display: "inline-block",
-            animation: "pulse 1.5s ease-in-out infinite"
+            animation: "pulse 1.5s ease-in-out infinite",
           }} />
           <span style={{ fontSize: 12, fontWeight: 600, color: "var(--tx)" }}>{label}</span>
         </div>
@@ -1093,34 +1107,31 @@ const GlobalProgressBar = ({ workspaceId }) => {
       </div>
 
       <div style={{
-        height: 4, background: "var(--b2)", borderRadius: 4, overflow: "hidden", marginBottom: 6
+        height: 4, background: "var(--b2)", borderRadius: 4, overflow: "hidden",
+        marginBottom: activeJobs.length > 0 ? 6 : 0,
       }}>
         <div style={{
           height: "100%", borderRadius: 4,
           background: "linear-gradient(90deg, var(--ac), var(--ac2))",
-          width: progress > 0 ? `${progress}%` : "30%",
+          width: progress > 0 ? `${progress}%` : "40%",
           transition: "width .5s ease",
           animation: progress === 0 ? "shimmer 1.5s infinite" : "none",
         }} />
       </div>
 
-      {activeJobs.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          {activeJobs.slice(0, 3).map(job => (
-            <div key={job.id} style={{ display: "flex", justifyContent: "space-between",
-              fontSize: 11, color: "var(--tx3)" }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                maxWidth: 170 }}>{job.label}</span>
-              <span style={{ color: "var(--ac2)", flexShrink: 0, marginLeft: 6 }}>
-                {job.progress}%
-              </span>
-            </div>
-          ))}
-          {activeJobs.length > 3 && (
-            <div style={{ fontSize: 10, color: "var(--tx3)" }}>
-              +{activeJobs.length - 3} more
-            </div>
-          )}
+      {activeJobs.slice(0, 3).map(job => (
+        <div key={job.id} style={{ display: "flex", justifyContent: "space-between",
+          fontSize: 11, color: "var(--tx3)", marginTop: 3 }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            maxWidth: 170 }}>{job.label}</span>
+          <span style={{ color: "var(--ac2)", flexShrink: 0, marginLeft: 6 }}>
+            {job.progress}%
+          </span>
+        </div>
+      ))}
+      {activeJobs.length > 3 && (
+        <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 3 }}>
+          +{activeJobs.length - 3} more
         </div>
       )}
     </div>,
