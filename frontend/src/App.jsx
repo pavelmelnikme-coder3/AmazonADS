@@ -3691,7 +3691,8 @@ const RuleWizardModal = ({
     outline:"none", boxSizing:"border-box", width:"100%" };
   const INP_SM = { ...INP, fontSize:12, padding:"7px 9px" };
   // Selects need explicit WebkitTextFillColor on macOS Chrome/Safari
-  const SEL_SM = { ...INP_SM, WebkitTextFillColor:"var(--tx)", appearance:"none",
+  // Note: no width here — set width/flex explicitly per usage site
+  const SEL_SM = { ...INP_SM, width:undefined, WebkitTextFillColor:"var(--tx)", appearance:"none",
     WebkitAppearance:"none", backgroundImage:"url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%234A5568'/%3E%3C/svg%3E\")",
     backgroundRepeat:"no-repeat", backgroundPosition:"right 8px center", paddingRight:26 };
 
@@ -3867,7 +3868,7 @@ const RuleWizardModal = ({
                   <div style={LABEL}>{t("rules.periodLabel")}</div>
                   <select value={form.scope?.period_days || 14}
                     onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, period_days: parseInt(e.target.value) } }))}
-                    style={{ ...SEL_SM }}>
+                    style={{ width:"100%", ...SEL_SM }}>
                     <option value={1}>{t("rules.yesterday")}</option>
                     <option value={7}>{t("rules.periodDays", { days: 7 })}</option>
                     <option value={14}>{t("rules.periodDays", { days: 14 })}</option>
@@ -3920,25 +3921,25 @@ const RuleWizardModal = ({
                   )}
                   <div style={{ display:"flex", gap:8, marginBottom:6, alignItems:"center" }}>
                     <select value={cond.metric} onChange={e => updCond(i,"metric",e.target.value)}
-                      style={{ flex:1, ...SEL_SM }}>
+                      style={{ flex:"1 1 0%", minWidth:0, ...SEL_SM }}>
                       {ruleMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                     </select>
                     <select value={cond.op} onChange={e => updCond(i,"op",e.target.value)}
-                      style={{ width:66, ...SEL_SM, textAlign:"center" }}>
+                      style={{ width:76, flexShrink:0, ...SEL_SM, textAlign:"center" }}>
                       {RULE_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
-                    <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:4, flex:"0 0 130px" }}>
                       <input type="number" value={cond.value} onChange={e => updCond(i,"value",e.target.value)}
-                        style={{ width:80, ...INP_SM }} />
+                        style={{ width:"100%", ...INP_SM, boxSizing:"border-box" }} />
                       {METRIC_UNIT[cond.metric] && (
-                        <span style={{ color:"var(--tx3)", fontSize:11, flexShrink:0 }}>
+                        <span style={{ color:"var(--tx3)", fontSize:11, flexShrink:0, whiteSpace:"nowrap" }}>
                           {METRIC_UNIT[cond.metric]}
                         </span>
                       )}
                     </div>
                     <button onClick={() => remCond(i)} disabled={form.conditions.length === 1}
-                      style={{ width:28, height:28, background:"none", border:"none", color:"var(--red)",
-                        cursor:"pointer", opacity:form.conditions.length===1?0.3:1,
+                      style={{ width:28, height:28, flexShrink:0, background:"none", border:"none",
+                        color:"var(--red)", cursor:"pointer", opacity:form.conditions.length===1?0.3:1,
                         display:"flex", alignItems:"center", justifyContent:"center" }}>
                       <X size={13} strokeWidth={1.75} />
                     </button>
@@ -4046,7 +4047,7 @@ const RuleWizardModal = ({
                     <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignType")}</div>
                     <select value={form.scope.campaign_type || ""}
                       onChange={e => setForm(f => ({ ...f, scope:{ ...f.scope, campaign_type:e.target.value } }))}
-                      style={{ ...SEL_SM }}>
+                      style={{ width:"100%", ...SEL_SM }}>
                       {ruleCampTypes.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
                     </select>
                   </div>
@@ -4076,7 +4077,7 @@ const RuleWizardModal = ({
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.targetingType")}</div>
                       <select value={form.scope?.targeting_type || ""}
                         onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, targeting_type: e.target.value } }))}
-                        style={{ ...SEL_SM }}>
+                        style={{ width:"100%", ...SEL_SM }}>
                         <option value="">{t("rules.targetingAll")}</option>
                         <option value="product">{t("rules.targetingProduct")}</option>
                         <option value="views">{t("rules.targetingViews")}</option>
