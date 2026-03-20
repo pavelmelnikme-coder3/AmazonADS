@@ -3,6 +3,37 @@ import { createPortal } from "react-dom";
 import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
+import {
+  Activity, Megaphone, Tag, Package, Newspaper,
+  Layers, Workflow, Bell, Sparkles, History, Cable, Cog,
+  Repeat, Edit2, Trash2, Play, Eye,
+  Pause, Power, Percent, Target,
+  Ban, Undo2, Download, Filter, ArrowUpDown,
+  ChevronUp, ChevronDown, Search, X, Check, AlertCircle,
+  Lock, Archive,
+  CircleCheck, Hourglass, Frown,
+  ArrowUp, ArrowDown, Link, Zap,
+  BrainCircuit, Bot,
+  FileText, Settings2,
+  ChevronRight, ChevronLeft, ChevronsUpDown,
+  Minus, MoreVertical, Calendar,
+  DollarSign, Hash, LayoutGrid,
+  TrendingUp, TrendingDown,
+  RotateCcw, RefreshCw, PenLine,
+  SlidersHorizontal, Pencil, MoreHorizontal,
+  BarChart2, FileBarChart, Settings, Orbit, Plug2
+} from 'lucide-react';
+
+// Unified icon size helper
+const Ic = ({ icon: Icon, size = 14, color, style, className }) => (
+  <Icon
+    size={size}
+    strokeWidth={1.75}
+    color={color}
+    style={style}
+    className={className}
+  />
+);
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const Styles = () => (
@@ -24,6 +55,7 @@ const Styles = () => (
     @keyframes syncProgress{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
     @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
     @keyframes slideInRight{from{transform:translateX(100%);opacity:0}to{transform:none;opacity:1}}
+    svg[class*="lucide"]{display:inline-block;vertical-align:middle;flex-shrink:0;}
     .fade{animation:fadeIn .3s ease both}
     .card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;transition:border-color .2s}
     .card:hover{border-color:var(--b2)}
@@ -148,7 +180,10 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
       <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", fontFamily: "var(--mono)" }}>{label}</span>
       {delta != null && (
         <span className={`badge ${parseFloat(delta) >= 0 ? "bg-grn" : "bg-red"}`}>
-          {parseFloat(delta) >= 0 ? "▲" : "▼"} {Math.abs(delta)}%
+          {parseFloat(delta) >= 0
+            ? <TrendingUp size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />
+            : <TrendingDown size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />
+          } {Math.abs(delta)}%
         </span>
       )}
     </div>
@@ -164,18 +199,18 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 const NAV = [
-  { id: "overview", icon: "⬡" },
-  { id: "campaigns", icon: "◈" },
-  { id: "products", icon: "◉" },
-  { id: "keywords", icon: "◇" },
-  { id: "reports", icon: "≋" },
-  { id: "analytics", icon: "⊞" },
-  { id: "rules", icon: "⟁" },
-  { id: "alerts", icon: "◎" },
-  { id: "ai", icon: "✦" },
-  { id: "audit", icon: "⊡" },
-  { id: "connect", icon: "⊕" },
-  { id: "settings", icon: "⊛" },
+  { id: "overview",  icon: Activity  },
+  { id: "campaigns", icon: Megaphone },
+  { id: "products",  icon: Package   },
+  { id: "keywords",  icon: Tag       },
+  { id: "reports",   icon: Newspaper },
+  { id: "analytics", icon: Layers    },
+  { id: "rules",     icon: Workflow  },
+  { id: "alerts",    icon: Bell      },
+  { id: "ai",        icon: Sparkles  },
+  { id: "audit",     icon: History   },
+  { id: "connect",   icon: Cable     },
+  { id: "settings",  icon: Cog       },
 ];
 
 const Sidebar = ({ active, setActive, user, workspace }) => {
@@ -187,7 +222,7 @@ const Sidebar = ({ active, setActive, user, workspace }) => {
     }}>
       <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid var(--b1)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>⬡</div>
+          <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}><Activity size={16} strokeWidth={1.75} color="#fff" /></div>
           <div>
             <div style={{ fontFamily: "var(--disp)", fontWeight: 700, fontSize: 15 }}>AdsFlow</div>
             <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>Amazon Ads</div>
@@ -212,7 +247,7 @@ const Sidebar = ({ active, setActive, user, workspace }) => {
             cursor: "pointer", fontSize: 13, fontFamily: "var(--ui)", width: "100%", textAlign: "left",
             transition: "all .15s", position: "relative"
           }}>
-            <span style={{ fontSize: 14, width: 18, textAlign: "center", color: active === id ? "var(--ac2)" : "var(--tx3)" }}>{icon}</span>
+            <Ic icon={icon} size={15} color={active === id ? 'var(--ac2)' : 'var(--tx3)'} />
             {t("nav." + id)}
             {active === id && <span style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)", width: 3, height: 18, background: "var(--ac)", borderRadius: "2px 0 0 2px" }} />}
           </button>
@@ -479,7 +514,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                 : t("metrics.backfill")}
             </button>
             {backfillState.success && (
-              <div style={{ fontSize: 12, color: "var(--teal)" }}>✓ {t("metrics.backfillStarted")}</div>
+              <div style={{ fontSize: 12, color: "var(--teal)", display:"flex", alignItems:"center", gap:4 }}><Check size={12} strokeWidth={1.75} color="var(--teal)" /> {t("metrics.backfillStarted")}</div>
             )}
             {backfillState.error && (
               <div style={{ fontSize: 12, color: "var(--red)" }}>{t("metrics.backfillError")}{backfillState.error}</div>
@@ -490,7 +525,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
 
       {error && (
         <div style={{ marginBottom: 16, padding: "12px 16px", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, color: "var(--red)", fontSize: 13 }}>
-          ⚠ {error}
+          <AlertCircle size={13} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle',marginRight:6}} /> {error}
         </div>
       )}
 
@@ -515,7 +550,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                       <tr key={c.id} style={{ background: rowBg, transition: "background .4s" }}>
                         <td><span className="mono" style={{ fontSize: 11, color: "var(--tx2)" }}>{c.id.slice(0, 8)}…</span> {c.amazon_email || ""}</td>
                         <td className="num">{c.profile_count}</td>
-                        <td><span className={`badge ${c.status === "active" ? "bg-grn" : "bg-red"}`}>● {c.status}</span></td>
+                        <td><span className={`badge ${c.status === "active" ? "bg-grn" : "bg-red"}`}><Power size={9} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {c.status}</span></td>
                         <td>
                           <select
                             value={c.sync_schedule || "daily"}
@@ -548,7 +583,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                             >
                               {isReconnecting
                                 ? <span style={{ width: 10, height: 10, border: "2px solid rgba(96,165,250,.3)", borderTopColor: "var(--ac2)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
-                                : "↻"}
+                                : <RefreshCw size={14} strokeWidth={1.75} />}
                             </button>
                             {/* Force sync button */}
                             <button
@@ -566,7 +601,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                             >
                               {isSyncing
                                 ? <span style={{ width: 10, height: 10, border: "2px solid rgba(20,184,166,.3)", borderTopColor: "var(--teal)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
-                                : "⬇"}
+                                : <Download size={13} strokeWidth={1.75} />}
                             </button>
                             {/* Disconnect button */}
                             <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => revokeConnection(c.id)}>{t("connect.disconnect")}</button>
@@ -591,7 +626,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
           )}
 
           <div className="card" style={{ padding: "40px 32px", textAlign: "center", border: "1px dashed var(--b2)" }}>
-            <div style={{ fontSize: 40, marginBottom: 16 }}>⬡</div>
+            <div style={{ marginBottom: 16 }}><Activity size={40} strokeWidth={1.5} color="var(--ac)" /></div>
             <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{t("connect.connectTitle")}</div>
             <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 24, maxWidth: 400, margin: "0 auto 24px" }}>
               {t("connect.connectDesc")}
@@ -621,7 +656,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
 
               <button className="btn btn-amazon" style={{ width: "100%", justifyContent: "center", padding: "12px 20px", fontSize: 14 }}
                 onClick={startConnect} disabled={loading}>
-                {loading ? <span className="loader" style={{ borderTopColor: "#111" }} /> : "🛍"} {t("connect.connectBtn")}
+                {loading ? <span className="loader" style={{ borderTopColor: "#111" }} /> : <Plug2 size={16} strokeWidth={1.75} />} {t("connect.connectBtn")}
               </button>
 
               <div style={{ fontSize: 11, color: "var(--tx3)", textAlign: "center", lineHeight: 1.5 }}>
@@ -631,12 +666,12 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
 
             <div style={{ marginTop: 28, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, maxWidth: 500, margin: "28px auto 0" }}>
               {[
-                { icon: "🔒", labelKey: "connect.secure", descKey: "connect.secureDesc" },
-                { icon: "⚡", labelKey: "connect.fast", descKey: "connect.fastDesc" },
-                { icon: "♻", labelKey: "connect.autoSync", descKey: "connect.autoSyncDesc" },
-              ].map(({ icon, labelKey, descKey }) => (
+                { icon: Lock,   color: "var(--teal)", labelKey: "connect.secure", descKey: "connect.secureDesc" },
+                { icon: Zap,    color: "var(--ac)",   labelKey: "connect.fast", descKey: "connect.fastDesc" },
+                { icon: Repeat, color: "var(--pur)",  labelKey: "connect.autoSync", descKey: "connect.autoSyncDesc" },
+              ].map(({ icon, color, labelKey, descKey }) => (
                 <div key={labelKey} style={{ padding: "14px", background: "var(--s2)", borderRadius: 8, border: "1px solid var(--b1)" }}>
-                  <div style={{ fontSize: 20, marginBottom: 6 }}>{icon}</div>
+                  <div style={{ marginBottom: 6 }}><Ic icon={icon} size={20} color={color} /></div>
                   <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 3 }}>{t(labelKey)}</div>
                   <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t(descKey)}</div>
                 </div>
@@ -660,7 +695,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
         <div className="fade">
           <div className="card" style={{ marginBottom: 16, padding: "16px 20px", borderColor: "rgba(34,197,94,.2)" }}>
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <span style={{ fontSize: 20 }}>✓</span>
+              <CircleCheck size={20} strokeWidth={1.75} color="var(--grn)" />
               <div>
                 <div style={{ fontWeight: 600, marginBottom: 2 }}>{t("connect.accountConnected")}</div>
                 <div style={{ fontSize: 12, color: "var(--tx2)" }}>{t("connect.profilesFound", { count: profiles.length })}</div>
@@ -705,7 +740,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
       {/* Step: Done */}
       {step === "done" && (
         <div className="card fade" style={{ padding: "40px 32px", textAlign: "center" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🎉</div>
+          <div style={{ marginBottom: 12 }}><CircleCheck size={48} strokeWidth={1.5} color="var(--grn)" /></div>
           <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{t("connect.done")}</div>
           <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 20 }}>{msg}</div>
           <button className="btn btn-primary" onClick={() => setStep("list")}>{t("connect.toConnections")}</button>
@@ -851,7 +886,7 @@ const ProductsPage = ({ workspaceId }) => {
         <div style={{ color: "var(--tx3)", fontSize: 13 }}>Loading…</div>
       ) : (!products?.length) ? (
         <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--tx3)" }}>
-          <div style={{ fontSize: 32, marginBottom: 8 }}>📦</div>
+          <div style={{ marginBottom: 8 }}><Package size={32} strokeWidth={1.5} color="var(--tx3)" /></div>
           <div>{tr("products.noProducts")}</div>
           <div style={{ fontSize: 12, marginTop: 6, color: "var(--tx3)" }}>
             Enter a 10-character ASIN above to start tracking
@@ -946,7 +981,7 @@ const ProductsPage = ({ workspaceId }) => {
                       className="btn btn-ghost"
                       style={{ fontSize: 11, padding: "4px 10px" }}
                     >
-                      {isExpanded ? "▲" : "▼"} {tr("products.history")}
+                      {isExpanded ? <ChevronUp size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> : <ChevronDown size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />} {tr("products.history")}
                     </button>
                     <button
                       onClick={() => handleRefresh(p.id)}
@@ -954,14 +989,14 @@ const ProductsPage = ({ workspaceId }) => {
                       className="btn btn-ghost"
                       style={{ fontSize: 11, padding: "4px 10px" }}
                     >
-                      {isRefreshing ? "…" : "↻"}
+                      {isRefreshing ? "…" : <RefreshCw size={13} strokeWidth={1.75} />}
                     </button>
                     <button
                       onClick={() => handleDelete(p.id)}
                       className="btn btn-red"
                       style={{ fontSize: 11, padding: "4px 8px" }}
                     >
-                      ✕
+                      <X size={12} strokeWidth={1.75} />
                     </button>
                   </div>
                 </div>
@@ -1017,8 +1052,8 @@ const ProductsPage = ({ workspaceId }) => {
 
 // ─── SyncButton ───────────────────────────────────────────────────────────────
 const SYNC_MODES = [
-  { mode: "quick", icon: "⚡", labelKey: "sync.quick", descKey: "sync.quickDesc" },
-  { mode: "full",  icon: "◎", labelKey: "sync.full",  descKey: "sync.fullDesc"  },
+  { mode: "quick", icon: Zap,    labelKey: "sync.quick", descKey: "sync.quickDesc" },
+  { mode: "full",  icon: Repeat, labelKey: "sync.full",  descKey: "sync.fullDesc"  },
 ];
 
 const SyncButton = ({ workspaceId, onSynced }) => {
@@ -1092,11 +1127,11 @@ const SyncButton = ({ workspaceId, onSynced }) => {
             display: "flex", alignItems: "center", gap: 5 }}
         >
           {syncing ? (
-            <><span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>◌</span> {t("sync.syncing")}</>
+            <><span style={{ animation: "spin 1s linear infinite", display: "inline-block", width: 12, height: 12, border: "2px solid rgba(255,255,255,.3)", borderTopColor: "#fff", borderRadius: "50%" }} /> {t("sync.syncing")}</>
           ) : done ? (
-            <>✓ {t("sync.done")}</>
+            <><Check size={12} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("sync.done")}</>
           ) : (
-            <>{currentMode.icon} {t(currentMode.labelKey)}</>
+            <><Ic icon={currentMode.icon} size={12} /> {t(currentMode.labelKey)}</>
           )}
         </button>
 
@@ -1109,7 +1144,7 @@ const SyncButton = ({ workspaceId, onSynced }) => {
             borderLeft: "1px solid rgba(255,255,255,.15)" }}
           title="Select sync mode"
         >
-          {open ? "▲" : "▼"}
+          {open ? <ChevronUp size={12} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> : <ChevronDown size={12} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />}
         </button>
       </div>
 
@@ -1134,7 +1169,7 @@ const SyncButton = ({ workspaceId, onSynced }) => {
               onMouseEnter={e => e.currentTarget.style.background = "var(--s3)"}
               onMouseLeave={e => e.currentTarget.style.background = mode === selectedMode ? "var(--s3)" : "none"}
             >
-              <span style={{ fontSize: 18, flexShrink: 0 }}>{icon}</span>
+              <Ic icon={icon} size={18} style={{ flexShrink: 0 }} />
               <div>
                 <div style={{ fontSize: 13, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
                   {t(labelKey)}
@@ -1275,6 +1310,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().split("T")[0]);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState(null);
+  const [syncOk, setSyncOk] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [layout, setLayout] = useState(() => user?.settings?.dashboardLayout || DEFAULT_LAYOUT);
   const [saveStatus, setSaveStatus] = useState(null);
@@ -1332,10 +1368,10 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
       for (const connId of toSync) {
         try { const r = await post(`/connections/${connId}/sync`, {}); synced += r.queued || r.profiles || 1; } catch {}
       }
-      setSyncMsg(t("overview.syncStarted", { count: synced }));
+      setSyncOk(true); setSyncMsg(t("overview.syncStarted", { count: synced }));
       setTimeout(() => setSyncMsg(null), 4000);
     } catch {
-      setSyncMsg(t("overview.syncError"));
+      setSyncOk(false); setSyncMsg(t("overview.syncError"));
       setTimeout(() => setSyncMsg(null), 4000);
     }
     setSyncing(false);
@@ -1632,13 +1668,13 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          {!editMode && saveStatus === "saved" && <span style={{ fontSize: 12, color: "var(--grn)" }}>✓</span>}
+          {!editMode && saveStatus === "saved" && <Check size={14} strokeWidth={1.75} color="var(--grn)" />}
           <button
             className="btn btn-ghost"
             style={{ fontSize: 12, padding: "5px 12px" }}
             onClick={() => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); }}
           >
-            ↺ {t("overview.refreshData")}
+            <Ic icon={Repeat} size={13} /> {t("overview.refreshData")}
           </button>
           <SyncButton workspaceId={workspaceId} onSynced={() => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); }} />
           {[["7","7d"],["14","14d"],["30","30d"],["90","90d"]].map(([val,label]) => (
@@ -1656,7 +1692,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
             className={`btn ${rangeMode==="custom" ? "btn-primary" : "btn-ghost"}`}
             style={{ fontSize: 12, padding: "5px 12px" }}
           >
-            📅 {rangeMode==="custom"
+            <Ic icon={Calendar} size={13} /> {rangeMode==="custom"
               ? `${customStart.slice(5)} – ${customEnd.slice(5)}`
               : t("overview.custom") || "Custom"}
           </button>
@@ -1693,7 +1729,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
             className={editMode ? "btn btn-primary" : "btn btn-ghost"}
             style={{ fontSize: 12, padding: "5px 12px" }}
           >
-            {editMode ? `✓ ${t("overview.done")}` : `⊞ ${t("overview.customize")}`}
+            {editMode ? <><Check size={13} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("overview.done")}</> : <><Ic icon={LayoutGrid} size={13} /> {t("overview.customize")}</>}
           </button>
         </div>
       </div>
@@ -1701,9 +1737,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
       {syncMsg && (
         <div style={{
           marginBottom: 12, padding: "8px 14px", borderRadius: 8, fontSize: 13,
-          background: syncMsg.startsWith("✓") ? "rgba(34,197,94,.1)" : "rgba(239,68,68,.1)",
-          color: syncMsg.startsWith("✓") ? "var(--grn)" : "var(--red)",
-          border: `1px solid ${syncMsg.startsWith("✓") ? "rgba(34,197,94,.2)" : "rgba(239,68,68,.2)"}`,
+          background: syncOk ? "rgba(34,197,94,.1)" : "rgba(239,68,68,.1)",
+          color: syncOk ? "var(--grn)" : "var(--red)",
+          border: `1px solid ${syncOk ? "rgba(34,197,94,.2)" : "rgba(239,68,68,.2)"}`,
         }}>
           {syncMsg}
         </div>
@@ -1722,9 +1758,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)" }}>{t("overview.widgetPalette")}</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              {saveStatus === "saved" && <span style={{ fontSize: 12, color: "var(--grn)" }}>✓ {t("overview.saved")}</span>}
+              {saveStatus === "saved" && <span style={{ fontSize: 12, color: "var(--grn)", display:"flex", alignItems:"center", gap:4 }}><Check size={12} strokeWidth={1.75} color="var(--grn)" /> {t("overview.saved")}</span>}
               {saveStatus === "saving" && <span style={{ fontSize: 12, color: "var(--tx3)" }}>{t("overview.saving")}</span>}
-              <button onClick={resetLayout} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }}>↺ {t("overview.resetLayout")}</button>
+              <button onClick={resetLayout} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px" }}><Ic icon={RotateCcw} size={11} /> {t("overview.resetLayout")}</button>
             </div>
           </div>
           {[
@@ -1753,7 +1789,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
                           transition: "all .15s", fontFamily: "var(--ui)",
                         }}
                       >
-                        {active ? "✓ " : "+ "}{def.label}
+                        {active ? <><Check size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />{" "}</> : "+ "}{def.label}
                       </button>
                     );
                   })}
@@ -1784,23 +1820,23 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
                     onClick={() => moveWidget(idx, -1)}
                     disabled={idx === 0}
                     style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: idx === 0 ? "not-allowed" : "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center", opacity: idx === 0 ? .4 : 1 }}
-                  >↑</button>
+                  ><ArrowUp size={10} strokeWidth={1.75} /></button>
                   <button
                     onClick={() => moveWidget(idx, 1)}
                     disabled={idx === layout.length - 1}
                     style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: idx === layout.length - 1 ? "not-allowed" : "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center", opacity: idx === layout.length - 1 ? .4 : 1 }}
-                  >↓</button>
+                  ><ArrowDown size={10} strokeWidth={1.75} /></button>
                   {!item.id.startsWith("kpi_") && (
                     <button
                       onClick={() => toggleSize(idx)}
                       title={item.size === "full" ? "Make narrow" : "Make wide"}
                       style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center" }}
-                    >⇔</button>
+                    ><ArrowUpDown size={10} strokeWidth={1.75} /></button>
                   )}
                   <button
                     onClick={() => toggleWidget(item.id)}
                     style={{ width: 24, height: 24, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--red)", display: "flex", alignItems: "center", justifyContent: "center" }}
-                  >✕</button>
+                  ><X size={10} strokeWidth={1.75} /></button>
                 </div>
               )}
               {renderWidget(item)}
@@ -1809,7 +1845,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
         })}
         {layout.length === 0 && (
           <div style={{ gridColumn: "1/-1", padding: 60, textAlign: "center", color: "var(--tx3)", border: "2px dashed var(--b2)", borderRadius: 12 }}>
-            <div style={{ fontSize: 32, marginBottom: 8 }}>⊞</div>
+            <div style={{ marginBottom: 8 }}><LayoutGrid size={32} strokeWidth={1.5} color="var(--tx3)" /></div>
             <div>No widgets — click «{t("overview.customize")}» to add</div>
           </div>
         )}
@@ -1833,9 +1869,12 @@ const SortHeader = ({ field, label, currentSort, currentDir, onSort, align = "le
       }}
     >
       {label}{" "}
-      <span style={{ fontSize: 10, opacity: active ? 1 : 0.3 }}>
-        {active ? (currentDir === "asc" ? "↑" : "↓") : "↕"}
-      </span>
+      {active
+        ? (currentDir === "asc"
+            ? <ChevronUp size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle',color:'var(--ac)'}} />
+            : <ChevronDown size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle',color:'var(--ac)'}} />)
+        : <ChevronsUpDown size={11} strokeWidth={1.75} style={{opacity:0.3,display:'inline-block',verticalAlign:'middle'}} />
+      }
       {rh}
     </th>
   );
@@ -1946,7 +1985,7 @@ const FilterPanel = ({ isOpen, onClose, filters, onUpdate, onReset, presets, onS
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={onReset} className="btn btn-ghost"
               style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}>{t("filter.reset")}</button>
-            <button onClick={onClose} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 8px" }}>✕</button>
+            <button onClick={onClose} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 8px" }}><X size={14} strokeWidth={1.75} /></button>
           </div>
         </div>
 
@@ -1961,11 +2000,11 @@ const FilterPanel = ({ isOpen, onClose, filters, onUpdate, onReset, presets, onS
                   <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
                     <button onClick={() => onLoadPreset(p)}
                       style={{ fontSize: 12, color: "var(--ac)", background: "none",
-                        border: "none", cursor: "pointer", textAlign: "left", flex: 1, padding: "3px 0" }}>
-                      ◈ {p.name}
+                        border: "none", cursor: "pointer", textAlign: "left", flex: 1, padding: "3px 0", display: "flex", alignItems: "center", gap: 4 }}>
+                      <SlidersHorizontal size={11} strokeWidth={1.75} /> {p.name}
                     </button>
                     <button onClick={() => onDeletePreset(p.id)}
-                      style={{ fontSize: 10, color: "var(--tx3)", background: "none", border: "none", cursor: "pointer", padding: "0 4px" }}>✕</button>
+                      style={{ fontSize: 10, color: "var(--tx3)", background: "none", border: "none", cursor: "pointer", padding: "0 4px" }}><X size={10} strokeWidth={1.75} /></button>
                   </div>
                 ))}
               </div>
@@ -2230,7 +2269,7 @@ const CampaignsPage = ({ workspaceId }) => {
         <button onClick={() => setShowCampFilters(true)}
           className={`btn ${campActiveCount > 0 ? "btn-primary" : "btn-ghost"}`}
           style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
-          ⊞ {t("filter.filters")}
+          <Ic icon={Filter} size={13} /> {t("filter.filters")}
           {campActiveCount > 0 && (
             <span style={{ background: "var(--red)", color: "#fff", borderRadius: 8,
               fontSize: 9, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>{campActiveCount}</span>
@@ -2238,11 +2277,11 @@ const CampaignsPage = ({ workspaceId }) => {
         </button>
         {campActiveCount > 0 && (
           <button onClick={() => { resetCampFilters(); setPage(1); }} className="btn btn-ghost"
-            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}>✕ {t("filter.reset")}</button>
+            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}><X size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("filter.reset")}</button>
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}>↺ {t("common.refresh")}</button>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={campResetCols} title="Reset column widths">⊟</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={campResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
 
@@ -2320,9 +2359,9 @@ const CampaignsPage = ({ workspaceId }) => {
                               <div style={{ display: "flex", gap: 4 }}>
                                 <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }}
                                   onClick={() => updateCampaign(c.id, { state: editState })} disabled={saving}>
-                                  {saving ? "…" : "✓"}
+                                  {saving ? "…" : <Check size={11} strokeWidth={1.75} />}
                                 </button>
-                                <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditId(null)}>✕</button>
+                                <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditId(null)}><X size={11} strokeWidth={1.75} /></button>
                               </div>
                             )
                             : (
@@ -2501,7 +2540,7 @@ const ReportsPage = ({ workspaceId }) => {
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ padding: "12px 16px 8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("reports.history")}</div>
-            <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={reload}>↺</button>
+            <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={reload}><Ic icon={RefreshCw} size={13} /></button>
           </div>
           {loading
             ? <div style={{ padding: 30, textAlign: "center" }}><span className="loader" /></div>
@@ -2579,7 +2618,13 @@ const ACTION_BADGE = {
   "connection.created":        "bg-grn",
 };
 const getActionBadge = (action) => action?.endsWith(".rollback") ? "bg-red" : (ACTION_BADGE[action] || "bg-bl");
-const SOURCE_ICONS   = { ui: "👤", rule: "⟁", ai: "✦", system: "⚙", api: "⬡" };
+const SOURCE_ICONS   = {
+  ui:     <Pencil size={11} strokeWidth={1.75} color="var(--ac2)" />,
+  rule:   <Workflow size={11} strokeWidth={1.75} color="var(--pur)" />,
+  ai:     <Sparkles size={11} strokeWidth={1.75} color="var(--teal)" />,
+  system: <Cog size={11} strokeWidth={1.75} color="var(--tx3)" />,
+  api:    <Plug2 size={11} strokeWidth={1.75} color="var(--amb)" />,
+};
 
 const AuditPage = ({ workspaceId }) => {
   const { t } = useI18n();
@@ -2635,8 +2680,8 @@ const AuditPage = ({ workspaceId }) => {
     else { setSortBy(field); setSortDir("desc"); }
   };
   const SortIcon = ({ field }) => sortBy === field
-    ? <span style={{ fontSize: 10, marginLeft: 3 }}>{sortDir === "asc" ? "▲" : "▼"}</span>
-    : <span style={{ fontSize: 10, marginLeft: 3, opacity: 0.3 }}>▼</span>;
+    ? <span style={{ marginLeft: 3, display:"inline-block", verticalAlign:"middle" }}>{sortDir === "asc" ? <ChevronUp size={10} strokeWidth={1.75} /> : <ChevronDown size={10} strokeWidth={1.75} />}</span>
+    : <span style={{ marginLeft: 3, opacity: 0.3, display:"inline-block", verticalAlign:"middle" }}><ChevronDown size={10} strokeWidth={1.75} /></span>;
 
   const handleRollback = async (event) => {
     if (!confirm(t("audit.rollbackConfirm", { action: event.action, entity: event.entity_name }))) return;
@@ -2668,8 +2713,8 @@ const AuditPage = ({ workspaceId }) => {
         <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700 }}>{t("audit.title")}</h1>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span style={{ fontSize: 12, color: "var(--tx3)" }}>{t("audit.events", { count: pagination.total || 0 })}</span>
-          <button className="btn btn-ghost" onClick={reload} style={{ fontSize: 12, padding: "5px 10px" }}>↺</button>
-          <button className="btn btn-ghost" onClick={auditResetCols} style={{ fontSize: 12, padding: "5px 10px" }} title="Reset column widths">⊟</button>
+          <button className="btn btn-ghost" onClick={reload} style={{ fontSize: 12, padding: "5px 10px" }}><Ic icon={RefreshCw} size={13} /></button>
+          <button className="btn btn-ghost" onClick={auditResetCols} style={{ fontSize: 12, padding: "5px 10px" }} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
 
@@ -2739,7 +2784,7 @@ const AuditPage = ({ workspaceId }) => {
         <div style={{ color: "var(--tx3)", padding: "20px 0", fontSize: 13 }}>{t("common.loading")}</div>
       ) : events.length === 0 ? (
         <div className="card" style={{ padding: "48px 32px", textAlign: "center" }}>
-          <div style={{ fontSize: 32, marginBottom: 10 }}>⊡</div>
+          <div style={{ marginBottom: 10 }}><History size={32} strokeWidth={1.5} color="var(--tx3)" /></div>
           <div style={{ fontSize: 14, color: "var(--tx3)" }}>{t("audit.noEvents")}</div>
         </div>
       ) : (
@@ -2778,7 +2823,7 @@ const AuditPage = ({ workspaceId }) => {
                       {new Date(event.created_at).toLocaleString("ru", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                     </td>
                     <td style={{ fontSize: 12 }}>
-                      <span style={{ marginRight: 4 }}>{SOURCE_ICONS[event.source] || "?"}</span>
+                      <span style={{ marginRight: 4, display:"inline-block", verticalAlign:"middle" }}>{SOURCE_ICONS[event.source] || <MoreHorizontal size={11} strokeWidth={1.75} color="var(--tx3)" />}</span>
                       {event.actor_name || "—"}
                     </td>
                     <td>
@@ -2813,13 +2858,13 @@ const AuditPage = ({ workspaceId }) => {
                     <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       {rbState ? (
                         <span style={{ fontSize: 11, color: rbState.ok ? "var(--grn)" : "var(--red)" }}>
-                          {rbState.ok ? "✓ " : "✗ "}{rbState.msg}
+                          {rbState.ok ? <><Check size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />{" "}</> : <><X size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />{" "}</>}{rbState.msg}
                         </span>
                       ) : canRb ? (
                         <button onClick={() => handleRollback(event)} disabled={isRollingBack}
                           className="btn btn-ghost"
                           style={{ fontSize: 10, padding: "3px 8px", color: "var(--amb)", border: "1px solid rgba(245,158,11,.3)" }}>
-                          {isRollingBack ? "…" : `↺ ${t("audit.rollback")}`}
+                          {isRollingBack ? "…" : <><Ic icon={RotateCcw} size={11} />{" "}{t("audit.rollback")}</>}
                         </button>
                       ) : (
                         <span style={{ fontSize: 10, color: "var(--tx3)", opacity: 0.4 }}>—</span>
@@ -3039,7 +3084,7 @@ const KeywordsPage = ({ workspaceId }) => {
         <button onClick={() => setShowKwFilters(true)}
           className={`btn ${kwActiveCount > 0 ? "btn-primary" : "btn-ghost"}`}
           style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
-          ⊞ {t("filter.filters")}
+          <Ic icon={Filter} size={13} /> {t("filter.filters")}
           {kwActiveCount > 0 && (
             <span style={{ background: "var(--red)", color: "#fff", borderRadius: 8,
               fontSize: 9, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>{kwActiveCount}</span>
@@ -3047,11 +3092,11 @@ const KeywordsPage = ({ workspaceId }) => {
         </button>
         {kwActiveCount > 0 && (
           <button onClick={() => { resetKwFilters(); setPage(1); }} className="btn btn-ghost"
-            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}>✕ {t("filter.reset")}</button>
+            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}><X size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("filter.reset")}</button>
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}>↺ {t("common.refresh")}</button>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={kwResetCols} title="Reset column widths">⊟</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={kwResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
 
@@ -3116,8 +3161,8 @@ const KeywordsPage = ({ workspaceId }) => {
                             ? (
                               <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                                 <input type="number" step="0.01" value={editBid} onChange={e => setEditBid(e.target.value)} style={{ width: 70, fontSize: 11, padding: "3px 6px" }} autoFocus />
-                                <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => saveBid(kw.id)} disabled={saving}>✓</button>
-                                <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditId(null)}>✕</button>
+                                <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => saveBid(kw.id)} disabled={saving}><Check size={11} strokeWidth={1.75} /></button>
+                                <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditId(null)}><X size={11} strokeWidth={1.75} /></button>
                               </div>
                             )
                             : (
@@ -3354,7 +3399,7 @@ const AnalyticsPage = ({ workspaceId }) => {
         sellable_quota:     parseInt(row.sellable_quota)       || 0,
         label:              row.label ? parseInt(row.label) : null,
       });
-      setSaveMsg("✓");
+      setSaveMsg("saved");
       setTimeout(() => setSaveMsg(null), 2000);
       reloadConfig();
       setEditRow(null);
@@ -3396,7 +3441,7 @@ const AnalyticsPage = ({ workspaceId }) => {
             className={`btn ${rangeMode==="custom"?"btn-primary":"btn-ghost"}`}
             style={{ fontSize:12, padding:"5px 10px" }}
           >
-            📅 {rangeMode==="custom" ? `${customStart.slice(5)} – ${customEnd.slice(5)}` : "Custom"}
+            <Ic icon={Calendar} size={13} /> {rangeMode==="custom" ? `${customStart.slice(5)} – ${customEnd.slice(5)}` : "Custom"}
           </button>
           {rangeMode === "custom" && (
             <>
@@ -3420,7 +3465,7 @@ const AnalyticsPage = ({ workspaceId }) => {
             className="btn btn-primary"
             style={{ fontSize:12, padding:"6px 16px", display:"flex", alignItems:"center", gap:6 }}
           >
-            {generating ? tr("analytics.generating") : <>📥 {tr("analytics.download")}</>}
+            {generating ? tr("analytics.generating") : <><Ic icon={Download} size={13} /> {tr("analytics.download")}</>}
           </button>
         </div>
       </div>
@@ -3450,13 +3495,13 @@ const AnalyticsPage = ({ workspaceId }) => {
           <div>
             <div style={{ fontFamily:"var(--disp)", fontSize:14, fontWeight:600 }}>
               {tr("analytics.configTitle")}
-              {saveMsg && <span style={{ fontSize:12, color:"var(--grn)", marginLeft:10 }}>{saveMsg}</span>}
+              {saveMsg && <Check size={14} strokeWidth={1.75} color="var(--grn)" style={{ marginLeft:10, display:"inline-block", verticalAlign:"middle" }} />}
             </div>
             <div style={{ fontSize:12, color:"var(--tx3)", marginTop:2 }}>
               {tr("analytics.configSubtitle")}
             </div>
           </div>
-          <span style={{ fontSize:18, color:"var(--tx3)" }}>{showConfig ? "▲" : "▼"}</span>
+          <span style={{ color:"var(--tx3)" }}>{showConfig ? <ChevronUp size={16} strokeWidth={1.75} /> : <ChevronDown size={16} strokeWidth={1.75} />}</span>
         </div>
 
         {showConfig && (
@@ -3499,7 +3544,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                             {tr("analytics.save")}
                           </button>
                           <button onClick={() => setEditRow(null)}
-                            className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}>✕</button>
+                            className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}><X size={11} strokeWidth={1.75} /></button>
                         </td>
                       </tr>
                     ) : (
@@ -3516,7 +3561,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{(parseFloat(row.vat_pct)*100).toFixed(0)}%</td>
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.google_ads_weekly).toFixed(2)}</td>
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.facebook_ads_weekly).toFixed(2)}</td>
-                        <td style={{ color:"var(--tx3)", fontSize:11 }}>✎</td>
+                        <td style={{ color:"var(--tx3)" }}><Pencil size={11} strokeWidth={1.75} /></td>
                       </tr>
                     )
                   ))}
@@ -3542,7 +3587,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                           {tr("analytics.save")}
                         </button>
                         <button onClick={() => setEditRow(null)}
-                          className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}>✕</button>
+                          className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}><X size={11} strokeWidth={1.75} /></button>
                       </td>
                     </tr>
                   ) : (
@@ -3749,7 +3794,7 @@ const RulesPage = ({ workspaceId }) => {
                 {editRule ? t("rules.editRule") : t("rules.new")}
               </div>
               <button onClick={() => setShowForm(false)} className="btn btn-ghost"
-                style={{ fontSize:12, padding:"4px 10px" }}>✕</button>
+                style={{ fontSize:12, padding:"4px 10px" }}><X size={13} strokeWidth={1.75} /></button>
             </div>
 
             {/* Name + Description */}
@@ -3779,8 +3824,8 @@ const RulesPage = ({ workspaceId }) => {
                 <div style={LABEL}>{t("rules.entityType")}</div>
                 <div style={{ display:"flex", gap:6 }}>
                   {[
-                    { value:"keyword",        label:"⌨ " + t("rules.keyword") },
-                    { value:"product_target", label:"🎯 " + t("rules.productTarget") },
+                    { value:"keyword",        label: t("rules.keyword") },
+                    { value:"product_target", label: t("rules.productTarget") },
                   ].map(et => (
                     <button key={et.value}
                       className={`btn ${(form.scope?.entity_type || "keyword") === et.value ? "btn-primary" : "btn-ghost"}`}
@@ -3832,7 +3877,7 @@ const RulesPage = ({ workspaceId }) => {
                       background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
                   <button onClick={() => remCond(i)} disabled={form.conditions.length === 1}
                     style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
-                      cursor:"pointer", fontSize:14, opacity:form.conditions.length===1?0.3:1 }}>✕</button>
+                      cursor:"pointer", fontSize:14, opacity:form.conditions.length===1?0.3:1 }}><X size={13} strokeWidth={1.75} /></button>
                 </div>
               ))}
               <button onClick={addCond} className="btn btn-ghost"
@@ -3879,7 +3924,7 @@ const RulesPage = ({ workspaceId }) => {
                     )}
                     <button onClick={() => remAct(i)} disabled={form.actions.length === 1}
                       style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
-                        cursor:"pointer", fontSize:14, opacity:form.actions.length===1?0.3:1 }}>✕</button>
+                        cursor:"pointer", fontSize:14, opacity:form.actions.length===1?0.3:1 }}><X size={13} strokeWidth={1.75} /></button>
                   </div>
                 );
               })}
@@ -4066,7 +4111,7 @@ const RulesPage = ({ workspaceId }) => {
                           : ` · ${r.total_evaluated} ${t("rules.evaluated").toLowerCase()}`}
                       </div>
                     </div>
-                    <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}>✕</button>
+                    <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}><X size={13} strokeWidth={1.75} /></button>
                   </div>
 
                   <div style={{ display:"flex", gap:12, marginBottom:16 }}>
@@ -4097,15 +4142,15 @@ const RulesPage = ({ workspaceId }) => {
                           const badgeCls = ["pause_keyword","pause_target"].includes(a.action) ? "bg-amb"
                             : ["enable_keyword","enable_target"].includes(a.action) ? "bg-grn" : "bg-bl";
                           const actionLabel =
-                            a.action === "pause_keyword"         ? "⏸ PAUSE"
-                            : a.action === "enable_keyword"      ? "▶ ENABLE"
-                            : a.action === "pause_target"        ? "⏸ PAUSE TGT"
-                            : a.action === "enable_target"       ? "▶ ENABLE TGT"
-                            : a.action === "adjust_bid_pct"      ? `⚡ BID ${a.change_pct}`
-                            : a.action === "adjust_target_bid_pct" ? `⚡ TGT ${a.change_pct}`
-                            : a.action === "add_negative_keyword"  ? `🚫 NEG-${(a.match_type||"exact").toUpperCase()}`
-                            : a.action === "add_negative_target"   ? "🚫 NEG TGT"
-                            : `🎯 BID→${a.new_bid}€`;
+                            a.action === "pause_keyword"         ? "PAUSE"
+                            : a.action === "enable_keyword"      ? "ENABLE"
+                            : a.action === "pause_target"        ? "PAUSE TGT"
+                            : a.action === "enable_target"       ? "ENABLE TGT"
+                            : a.action === "adjust_bid_pct"      ? `BID ${a.change_pct}`
+                            : a.action === "adjust_target_bid_pct" ? `TGT ${a.change_pct}`
+                            : a.action === "add_negative_keyword"  ? `NEG-${(a.match_type||"exact").toUpperCase()}`
+                            : a.action === "add_negative_target"   ? "NEG TGT"
+                            : `BID→${a.new_bid}€`;
                           return (
                             <div key={i} style={{ padding:"8px 12px", borderBottom:"1px solid var(--b1)",
                               display:"flex", gap:10, alignItems:"center", fontSize:12 }}>
@@ -4145,7 +4190,7 @@ const RulesPage = ({ workspaceId }) => {
         <div style={{ color:"var(--tx3)", padding:20 }}>{t("common.loading")}</div>
       ) : rules.length === 0 ? (
         <div className="card" style={{ padding:"48px 32px", textAlign:"center" }}>
-          <div style={{ fontSize:32, marginBottom:10 }}>⟁</div>
+          <div style={{ marginBottom:10 }}><Workflow size={32} strokeWidth={1.5} color="var(--tx3)" /></div>
           <div style={{ fontSize:14, color:"var(--tx3)" }}>{t("rules.noRules")}</div>
           <button onClick={openNew} className="btn btn-primary"
             style={{ marginTop:14, fontSize:12, padding:"8px 20px" }}>
@@ -4179,7 +4224,7 @@ const RulesPage = ({ workspaceId }) => {
                         {rule.is_active ? t("rules.active") : t("rules.inactive")}
                       </span>
                       <span className="badge bg-bl" style={{ fontSize:9 }}>
-                        {scope.entity_type === "product_target" ? "🎯 targets" : "⌨ keywords"}
+                        {scope.entity_type === "product_target" ? t("rules.productTarget") : t("rules.keyword")}
                       </span>
                       <span className="badge" style={{ fontSize:9, background:"var(--s3)", color:"var(--tx2)" }}>
                         {scope.period_days === 1 ? t("rules.yesterday") : t("rules.periodDays", { days: scope.period_days || 14 })}
@@ -4232,26 +4277,26 @@ const RulesPage = ({ workspaceId }) => {
                   <div style={{ display:"flex", gap:6, flexShrink:0, flexWrap:"wrap", justifyContent:"flex-end" }}>
                     <button onClick={() => runRule(rule.id, true)} disabled={isRunning}
                       className="btn btn-ghost" style={{ fontSize:11, padding:"5px 10px" }}>
-                      {isRunning ? "…" : "🔍 " + t("rules.preview")}
+                      {isRunning ? "…" : <><Ic icon={Eye} size={12} /> {t("rules.preview")}</>}
                     </button>
                     <button onClick={() => runRule(rule.id, false)} disabled={isRunning}
                       className="btn btn-primary" style={{ fontSize:11, padding:"5px 10px" }}>
-                      {isRunning ? "…" : "▶ " + t("rules.runNow")}
+                      {isRunning ? "…" : <><Ic icon={Play} size={12} /> {t("rules.runNow")}</>}
                     </button>
                     <button onClick={() => toggleActive(rule)} className="btn btn-ghost"
                       style={{ fontSize:11, padding:"5px 10px", color:rule.is_active?"var(--amb)":"var(--grn)" }}>
-                      {rule.is_active ? "⏸" : "▶"}
+                      {rule.is_active ? <Ic icon={Pause} size={13} /> : <Ic icon={Play} size={13} />}
                     </button>
                     <button onClick={() => openEdit(rule)} className="btn btn-ghost"
-                      style={{ fontSize:11, padding:"5px 8px" }}>✎</button>
+                      style={{ fontSize:11, padding:"5px 8px" }}><Ic icon={Edit2} size={13} /></button>
                     <button onClick={() => deleteRule(rule.id)} className="btn btn-red"
-                      style={{ fontSize:11, padding:"5px 8px" }}>✕</button>
+                      style={{ fontSize:11, padding:"5px 8px" }}><X size={13} strokeWidth={1.75} /></button>
                     {(last || runResult[rule.id]) && (
                       <button onClick={() => {
                         if (runResult[rule.id]) setRunResult(r => ({...r,[rule.id]:runResult[rule.id]}));
                         else setRunResult(r => ({...r,[rule.id]:last}));
                         setShowResult(rule.id);
-                      }} className="btn btn-ghost" style={{ fontSize:11, padding:"5px 8px" }}>📊</button>
+                      }} className="btn btn-ghost" style={{ fontSize:11, padding:"5px 8px" }}><Ic icon={BarChart2} size={13} /></button>
                     )}
                   </div>
                 </div>
@@ -4422,7 +4467,7 @@ const AlertsPage = ({ workspaceId }) => {
                             <td>
                               <div style={{ display: "flex", gap: 4 }}>
                                 <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openEdit(config)}>{t("common.edit")}</button>
-                                <button className="btn btn-red"   style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteConfig(config.id)}>✕</button>
+                                <button className="btn btn-red"   style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => deleteConfig(config.id)}><X size={11} strokeWidth={1.75} /></button>
                               </div>
                             </td>
                           </tr>
@@ -4626,7 +4671,7 @@ const LoginPage = ({ onLogin }) => {
       <Styles />
       <div style={{ width: 380, padding: "36px 32px", background: "var(--s1)", borderRadius: 14, border: "1px solid var(--b1)" }}>
         <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, margin: "0 auto 12px" }}>⬡</div>
+          <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}><Activity size={22} strokeWidth={1.75} color="#fff" /></div>
           <div style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 800 }}>AdsFlow</div>
           <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("login.subtitle")}</div>
         </div>
@@ -4674,9 +4719,14 @@ const LoginPage = ({ onLogin }) => {
 // ─── AI Page ──────────────────────────────────────────────────────────────────
 const AI_RISK_COLOR = { low: "var(--grn)", medium: "var(--amb)", high: "var(--red)" };
 const AI_TYPE_ICON  = {
-  bid_adjustment: "⚡", budget_increase: "📈", budget_decrease: "📉",
-  campaign_pause: "⏸", keyword_add: "🔑", keyword_pause: "🔇",
-  targeting_optimization: "🎯", other: "💡",
+  bid_adjustment:          <Zap size={20} strokeWidth={1.75} color="var(--amb)" />,
+  budget_increase:         <TrendingUp size={20} strokeWidth={1.75} color="var(--grn)" />,
+  budget_decrease:         <TrendingDown size={20} strokeWidth={1.75} color="var(--red)" />,
+  campaign_pause:          <Pause size={20} strokeWidth={1.75} color="var(--tx2)" />,
+  keyword_add:             <Tag size={20} strokeWidth={1.75} color="var(--ac2)" />,
+  keyword_pause:           <Tag size={20} strokeWidth={1.75} color="var(--tx3)" />,
+  targeting_optimization:  <Target size={20} strokeWidth={1.75} color="var(--pur)" />,
+  other:                   <Sparkles size={20} strokeWidth={1.75} color="var(--teal)" />,
 };
 
 function AIPage({ workspaceId }) {
@@ -4920,7 +4970,7 @@ function AIPage({ workspaceId }) {
         {runError && (
           <div style={{ marginTop:10, fontSize:12, color:"var(--red)",
             background:"rgba(239,68,68,.1)", padding:"8px 12px", borderRadius:6 }}>
-            ⚠ {runError.includes("ANTHROPIC_API_KEY") ? t("ai.noKey") : runError}
+            <AlertCircle size={12} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle',marginRight:5}} /> {runError.includes("ANTHROPIC_API_KEY") ? t("ai.noKey") : runError}
           </div>
         )}
 
@@ -4928,8 +4978,8 @@ function AIPage({ workspaceId }) {
           <button onClick={handleAnalyze} disabled={running || !workspaceId}
             className="btn btn-primary" style={{ fontSize:13, padding:"8px 24px" }}>
             {running
-              ? <><span style={{ animation:"spin 1s linear infinite", display:"inline-block" }}>◌</span> {t("ai.running")}</>
-              : <>✦ {t("ai.run")}</>}
+              ? <><RefreshCw size={14} strokeWidth={1.75} style={{ animation:"spin 1s linear infinite", display:"inline-block" }} /> {t("ai.running")}</>
+              : <><Ic icon={Sparkles} size={14} /> {t("ai.run")}</>}
           </button>
         </div>
       </div>
@@ -4940,13 +4990,13 @@ function AIPage({ workspaceId }) {
           style={{ padding:"14px 20px", display:"flex", justifyContent:"space-between",
             alignItems:"center", cursor:"pointer", userSelect:"none" }}>
           <div>
-            <span style={{ fontFamily:"var(--disp)", fontSize:14, fontWeight:600 }}>
-              ⚙ {t("ai.settingsTitle")}
+            <span style={{ fontFamily:"var(--disp)", fontSize:14, fontWeight:600, display:"flex", alignItems:"center", gap:6 }}>
+              <Cog size={14} strokeWidth={1.75} /> {t("ai.settingsTitle")}
             </span>
             {settingsSaved && <span style={{ fontSize:12, color:"var(--grn)", marginLeft:10 }}>{t("ai.saved")}</span>}
             <div style={{ fontSize:12, color:"var(--tx3)", marginTop:2 }}>{t("ai.settingsSubtitle")}</div>
           </div>
-          <span style={{ color:"var(--tx3)", fontSize:16 }}>{showSettings ? "▲" : "▼"}</span>
+          <span style={{ color:"var(--tx3)" }}>{showSettings ? <ChevronUp size={16} strokeWidth={1.75} /> : <ChevronDown size={16} strokeWidth={1.75} />}</span>
         </div>
 
         {showSettings && (
@@ -5012,7 +5062,7 @@ function AIPage({ workspaceId }) {
         </div>
       ) : pendingRecs.length === 0 ? (
         <div className="card" style={{ padding:"48px 32px", textAlign:"center" }}>
-          <div style={{ fontSize:36, marginBottom:12 }}>✦</div>
+          <div style={{ marginBottom:12 }}><Sparkles size={36} strokeWidth={1.5} color="var(--tx3)" /></div>
           <div style={{ fontSize:14, color:"var(--tx3)" }}>{t("ai.noRecs")}</div>
         </div>
       ) : (
@@ -5027,7 +5077,7 @@ function AIPage({ workspaceId }) {
                 <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
                   {/* Icon + priority */}
                   <div style={{ flexShrink:0, display:"flex", flexDirection:"column", alignItems:"center", gap:4, paddingTop:2 }}>
-                    <span style={{ fontSize:20 }}>{AI_TYPE_ICON[rec.type] || "💡"}</span>
+                    <span style={{ display:"flex", alignItems:"center", justifyContent:"center" }}>{AI_TYPE_ICON[rec.type] || <Sparkles size={20} strokeWidth={1.75} color="var(--teal)" />}</span>
                     <span style={{ fontSize:10, color:"var(--tx3)", fontFamily:"var(--mono)" }}>#{idx+1}</span>
                   </div>
 
@@ -5056,7 +5106,7 @@ function AIPage({ workspaceId }) {
                         {actions.map((a, ai) => (
                           <div key={ai} style={{ fontSize:11, color:"var(--tx3)", padding:"2px 0",
                             display:"flex", gap:6, alignItems:"center" }}>
-                            <span style={{ color:"var(--ac2)" }}>▸</span>
+                            <ChevronRight size={11} strokeWidth={1.75} color="var(--ac2)" />
                             <span style={{ fontFamily:"var(--mono)" }}>{a.entity_name || a.entity_id}</span>
                             <span>—</span>
                             <span>{a.action_type?.replace(/_/g," ")}</span>
@@ -5078,15 +5128,15 @@ function AIPage({ workspaceId }) {
                   <div style={{ display:"flex", flexDirection:"column", gap:6, flexShrink:0 }}>
                     <button onClick={() => setConfirmRec(rec)} disabled={applying === rec.id}
                       className="btn btn-green" style={{ fontSize:11, padding:"5px 12px" }}>
-                      {applying === rec.id ? <span className="loader" /> : <>✓ {t("ai.apply")}</>}
+                      {applying === rec.id ? <span className="loader" /> : <><Check size={12} strokeWidth={1.75} /> {t("ai.apply")}</>}
                     </button>
                     <button onClick={() => handlePreview(rec)}
                       className="btn btn-ghost" style={{ fontSize:11, padding:"5px 12px" }}>
-                      👁 {t("ai.preview")}
+                      <Ic icon={Eye} size={12} /> {t("ai.preview")}
                     </button>
                     <button onClick={() => handleDismiss(rec.id)}
                       className="btn btn-red" style={{ fontSize:11, padding:"5px 12px" }}>
-                      ✗ {t("ai.dismiss")}
+                      <X size={12} strokeWidth={1.75} /> {t("ai.dismiss")}
                     </button>
                   </div>
                 </div>
@@ -5198,7 +5248,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     setSaving(true);
     try {
       const d = await apiFetch("/settings/profile", { method: "PATCH", body: JSON.stringify(profileForm) });
-      setProfile(d); showToast(t("settings.saveChanges") + " ✓");
+      setProfile(d); showToast(t("settings.saveChanges"));
     } catch (e) { showToast(e.message, true); }
     setSaving(false);
   }
@@ -5211,7 +5261,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     try {
       await apiFetch("/settings/profile/password", { method: "PATCH", body: JSON.stringify(pwForm) });
       setPwForm({ current_password: "", new_password: "", confirm: "" });
-      showToast(t("settings.changePassword") + " ✓");
+      showToast(t("settings.changePassword"));
     } catch (e) { setPwErr(e.message); }
     setSaving(false);
   }
@@ -5220,7 +5270,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     setSaving(true);
     try {
       const d = await apiFetch("/settings/workspace", { method: "PATCH", body: JSON.stringify(wsForm) });
-      setWsData(d); showToast(t("settings.saveChanges") + " ✓");
+      setWsData(d); showToast(t("settings.saveChanges"));
     } catch (e) { showToast(e.message, true); }
     setSaving(false);
   }
@@ -5284,12 +5334,12 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
   const isOwner = myRole === "owner";
 
   const TABS = [
-    { id: "profile",       icon: "👤", label: t("settings.profile") },
-    { id: "workspace",     icon: "🏢", label: t("settings.workspace") },
-    { id: "team",          icon: "👥", label: t("settings.team") },
-    { id: "notifications", icon: "🔔", label: t("settings.notifications") },
-    { id: "security",      icon: "🔒", label: t("settings.security") },
-    { id: "danger",        icon: "⚠️", label: t("settings.dangerZone") },
+    { id: "profile",       icon: <Pencil size={13} strokeWidth={1.75} />,       label: t("settings.profile") },
+    { id: "workspace",     icon: <Settings size={13} strokeWidth={1.75} />,     label: t("settings.workspace") },
+    { id: "team",          icon: <Activity size={13} strokeWidth={1.75} />,     label: t("settings.team") },
+    { id: "notifications", icon: <Bell size={13} strokeWidth={1.75} />,         label: t("settings.notifications") },
+    { id: "security",      icon: <Lock size={13} strokeWidth={1.75} />,         label: t("settings.security") },
+    { id: "danger",        icon: <AlertCircle size={13} strokeWidth={1.75} />,  label: t("settings.dangerZone") },
   ];
 
   const SL = { fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" };
@@ -5590,7 +5640,7 @@ const PlaceholderPage = ({ title, desc }) => {
       <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 8 }}>{title}</h1>
       <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 20 }}>{desc}</div>
       <div className="card" style={{ padding: "60px 32px", textAlign: "center", borderStyle: "dashed" }}>
-        <div style={{ fontSize: 36, marginBottom: 12, color: "var(--tx3)" }}>⚙</div>
+        <div style={{ marginBottom: 12, color: "var(--tx3)" }}><Cog size={36} strokeWidth={1.5} /></div>
         <div style={{ fontSize: 14, color: "var(--tx3)" }}>{t("placeholder.inDev")}</div>
       </div>
     </div>
