@@ -3669,6 +3669,512 @@ const RULE_CAMP_TYPES = (t) => [
   { value:"sponsoredDisplay",   label:"Sponsored Display" },
 ];
 
+// ─── Rule Wizard Modal ────────────────────────────────────────────────────────
+const RuleWizardModal = ({
+  form, setForm, editRule, campaigns, adGroups,
+  ruleMetrics, ruleActionsList, ruleCampTypes,
+  updCond, remCond, addCond,
+  updAct,  remAct,  addAct,
+  toggleCampaign, toggleAdGroup, toggleMatchType,
+  onSave, onClose,
+}) => {
+  const { t } = useI18n();
+  const [step, setStep] = useState(1);
+  const [nameErr, setNameErr] = useState(false);
+  const [condErr, setCondErr] = useState(false);
+  const [campSearch, setCampSearch] = useState("");
+
+  const LABEL = { fontSize:11, color:"var(--tx3)", marginBottom:4,
+    fontFamily:"var(--mono)", textTransform:"uppercase", letterSpacing:".05em" };
+  const INP = { fontSize:13, padding:"8px 10px", borderRadius:6,
+    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
+    outline:"none", boxSizing:"border-box", width:"100%" };
+  const INP_SM = { ...INP, fontSize:12, padding:"7px 9px" };
+
+  const periodLabel = form.scope?.period_days === 1
+    ? t("rules.yesterday")
+    : t("rules.periodDays", { days: form.scope?.period_days || 14 });
+
+  // Live sentence preview
+  const RuleSummary = ({ showScope }) => {
+    const entityType = form.scope?.entity_type || "keyword";
+    const condStr = form.conditions.map((c, i) => {
+      const mLabel = ruleMetrics.find(m => m.value === c.metric)?.label || c.metric;
+      const opLabel = RULE_OPS.find(o => o.value === c.op)?.label || c.op;
+      return (
+        <span key={i}>
+          {i > 0 && <span style={{ color:"var(--tx3)", margin:"0 6px", fontFamily:"var(--mono)" }}>AND</span>}
+          <span style={{ color:"var(--ac)", fontWeight:600 }}>{mLabel}</span>
+          {" "}<span style={{ color:"var(--pur)", fontFamily:"var(--mono)" }}>{opLabel}</span>{" "}
+          <span style={{ color:"var(--ac)", fontWeight:600 }}>{c.value}</span>
+        </span>
+      );
+    });
+    const actStr = form.actions.map((a, i) => {
+      const aLabel = ruleActionsList.find(x => x.value === a.type)?.label || a.type;
+      return (
+        <span key={i}>
+          {i > 0 && <span style={{ color:"var(--tx3)", margin:"0 6px", fontFamily:"var(--mono)" }}>+</span>}
+          <span style={{ color:"var(--teal)", fontWeight:600 }}>{aLabel}</span>
+          {a.value ? <span style={{ color:"var(--tx2)" }}> ({a.value})</span> : null}
+        </span>
+      );
+    });
+    const campCount = (form.scope.campaign_ids || []).length;
+    return (
+      <div style={{ background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:8,
+        padding:"10px 14px", fontSize:12, color:"var(--tx2)", marginBottom:20, lineHeight:1.7 }}>
+        <div><span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", marginRight:6 }}>IF</span>{condStr}
+          <span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", margin:"0 6px" }}>over</span>
+          <span style={{ color:"var(--ac2)", fontWeight:600 }}>{periodLabel}</span>
+        </div>
+        <div><span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", marginRight:6 }}>THEN</span>{actStr}</div>
+        {showScope && (
+          <div style={{ marginTop:2, fontSize:11, color:"var(--tx3)" }}>
+            <span style={{ fontFamily:"var(--mono)", marginRight:6 }}>SCOPE</span>
+            {entityType === "keyword" ? t("rules.keyword") : t("rules.productTarget")}
+            {" · "}{form.scope.campaign_type ? ruleCampTypes.find(c=>c.value===form.scope.campaign_type)?.label : t("rules.allTypes")}
+            {" · "}{campCount > 0 ? t("rules.campaignsSelected", { count: campCount }) : t("rules.allEntities")}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const goNext = () => {
+    if (step === 1) {
+      if (!form.name.trim()) { setNameErr(true); return; }
+      setNameErr(false);
+      setStep(2);
+    } else if (step === 2) {
+      if (!form.conditions.length) { setCondErr(true); return; }
+      setCondErr(false);
+      setStep(3);
+    }
+  };
+  const goBack  = () => setStep(s => s - 1);
+  const goClose = () => { onClose(); setStep(1); };
+
+  // Stepper header
+  const steps = [
+    { n:1, label: t("rules.wizardStep1") || "Основное" },
+    { n:2, label: t("rules.wizardStep2") || "Условия" },
+    { n:3, label: t("rules.wizardStep3") || "Действия" },
+  ];
+
+  const filteredCamps = (campaigns || []).filter(c =>
+    !campSearch || c.name.toLowerCase().includes(campSearch.toLowerCase())
+  );
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
+      display:"flex", alignItems:"center", justifyContent:"center", padding:"16px" }}>
+      <div className="card" style={{ width:"100%", maxWidth:880, minHeight:520,
+        maxHeight:"90vh", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+        {/* ── Modal header ── */}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          padding:"18px 28px 0", flexShrink:0 }}>
+          <div style={{ fontFamily:"var(--disp)", fontSize:18, fontWeight:700 }}>
+            {editRule ? t("rules.editRule") : t("rules.new")}
+          </div>
+          <button onClick={goClose} style={{ background:"none", border:"none", cursor:"pointer",
+            color:"var(--tx3)", display:"flex", alignItems:"center", padding:4 }}>
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        {/* ── Step indicator ── */}
+        <div style={{ display:"flex", alignItems:"center", padding:"14px 28px 0", flexShrink:0 }}>
+          {steps.map((s, idx) => {
+            const done    = step > s.n;
+            const active  = step === s.n;
+            return (
+              <div key={s.n} style={{ display:"flex", alignItems:"center", flex: idx < steps.length-1 ? 1 : "none" }}>
+                <div onClick={() => done && setStep(s.n)}
+                  style={{ display:"flex", alignItems:"center", gap:7, cursor: done ? "pointer" : "default",
+                    paddingBottom:12 }}>
+                  <div style={{ width:22, height:22, borderRadius:"50%", display:"flex",
+                    alignItems:"center", justifyContent:"center", fontSize:10, fontWeight:700,
+                    background: (active||done) ? "var(--ac)" : "var(--s3)",
+                    color: (active||done) ? "#fff" : "var(--tx3)",
+                    flexShrink:0 }}>
+                    {done ? <Check size={11} strokeWidth={2.5} /> : s.n}
+                  </div>
+                  <span style={{ fontSize:12, fontWeight: active ? 600 : 400,
+                    color: active ? "var(--tx)" : done ? "var(--ac)" : "var(--tx3)",
+                    whiteSpace:"nowrap" }}>
+                    {s.label}
+                  </span>
+                </div>
+                {idx < steps.length-1 && (
+                  <div style={{ flex:1, height:1, background:"var(--b2)", margin:"0 12px", marginBottom:12 }} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ height:1, background:"var(--b1)", flexShrink:0 }} />
+
+        {/* ── Step content ── */}
+        <div style={{ flex:1, overflowY:"auto", padding:"24px 28px" }}>
+
+          {/* ════ STEP 1: Basics ════ */}
+          {step === 1 && (
+            <div>
+              <div style={{ marginBottom:14 }}>
+                <div style={LABEL}>{t("rules.name")} *</div>
+                <input value={form.name} onChange={e => { setForm(f => ({...f, name:e.target.value})); setNameErr(false); }}
+                  placeholder={t("rules.namePlaceholder")} style={{ ...INP,
+                    border: nameErr ? "1px solid var(--red)" : "1px solid var(--b2)" }} />
+                {nameErr && <div style={{ fontSize:11, color:"var(--red)", marginTop:4 }}>{t("rules.alertName")}</div>}
+              </div>
+
+              <div style={{ marginBottom:16 }}>
+                <div style={LABEL}>{t("rules.description")} <span style={{ textTransform:"none", fontFamily:"var(--ui)", letterSpacing:0 }}>({t("common.optional")})</span></div>
+                <input value={form.description} onChange={e => setForm(f => ({...f, description:e.target.value}))}
+                  placeholder={t("common.optional")} style={INP} />
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:16 }}>
+                <div>
+                  <div style={LABEL}>{t("rules.entityType")}</div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    {[
+                      { value:"keyword",        label: t("rules.keyword") },
+                      { value:"product_target", label: t("rules.productTarget") },
+                    ].map(et => (
+                      <button key={et.value}
+                        className={`btn ${(form.scope?.entity_type || "keyword") === et.value ? "btn-primary" : "btn-ghost"}`}
+                        style={{ fontSize:12, padding:"7px 12px", flex:1 }}
+                        onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, entity_type: et.value } }))}>
+                        {et.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div style={LABEL}>{t("rules.periodLabel")}</div>
+                  <select value={form.scope?.period_days || 14}
+                    onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, period_days: parseInt(e.target.value) } }))}
+                    style={{ ...INP_SM }}>
+                    <option value={1}>{t("rules.yesterday")}</option>
+                    <option value={7}>{t("rules.periodDays", { days: 7 })}</option>
+                    <option value={14}>{t("rules.periodDays", { days: 14 })}</option>
+                    <option value={30}>{t("rules.periodDays", { days: 30 })}</option>
+                    <option value={60}>{t("rules.periodDays", { days: 60 })}</option>
+                    <option value={90}>{t("rules.periodDays", { days: 90 })}</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ display:"flex", gap:24, padding:"14px 16px",
+                background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
+                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:13 }}>
+                  <input type="checkbox" checked={form.dry_run}
+                    onChange={e => setForm(f => ({...f, dry_run:e.target.checked}))}
+                    style={{ accentColor:"var(--ac)", width:14, height:14 }} />
+                  <span style={{ color:form.dry_run ? "var(--amb)" : "var(--tx2)" }}>{t("rules.dryRun")}</span>
+                </label>
+                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:13 }}>
+                  <input type="checkbox" checked={form.is_active}
+                    onChange={e => setForm(f => ({...f, is_active:e.target.checked}))}
+                    style={{ accentColor:"var(--ac)", width:14, height:14 }} />
+                  <span>{t("rules.active")}</span>
+                </label>
+              </div>
+            </div>
+          )}
+
+          {/* ════ STEP 2: Conditions ════ */}
+          {step === 2 && (
+            <div>
+              <RuleSummary showScope={false} />
+
+              {condErr && (
+                <div style={{ fontSize:12, color:"var(--red)", marginBottom:10 }}>
+                  {t("rules.addAtLeastOne") || "Add at least one condition"}
+                </div>
+              )}
+
+              {form.conditions.map((cond, i) => (
+                <div key={i}>
+                  {i > 0 && (
+                    <div style={{ display:"flex", alignItems:"center", gap:8, margin:"4px 0" }}>
+                      <div style={{ flex:1, height:1, background:"var(--b1)" }} />
+                      <span style={{ fontSize:10, color:"var(--tx3)", fontFamily:"var(--mono)",
+                        background:"var(--s2)", border:"1px solid var(--b2)", padding:"2px 8px",
+                        borderRadius:100 }}>AND</span>
+                      <div style={{ flex:1, height:1, background:"var(--b1)" }} />
+                    </div>
+                  )}
+                  <div style={{ display:"flex", gap:8, marginBottom:6, alignItems:"center" }}>
+                    <select value={cond.metric} onChange={e => updCond(i,"metric",e.target.value)}
+                      style={{ flex:1, ...INP_SM }}>
+                      {ruleMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                    <select value={cond.op} onChange={e => updCond(i,"op",e.target.value)}
+                      style={{ width:56, ...INP_SM, textAlign:"center" }}>
+                      {RULE_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <input type="number" value={cond.value} onChange={e => updCond(i,"value",e.target.value)}
+                      style={{ width:88, ...INP_SM }} />
+                    <button onClick={() => remCond(i)} disabled={form.conditions.length === 1}
+                      style={{ width:28, height:28, background:"none", border:"none", color:"var(--red)",
+                        cursor:"pointer", opacity:form.conditions.length===1?0.3:1,
+                        display:"flex", alignItems:"center", justifyContent:"center" }}>
+                      <X size={13} strokeWidth={1.75} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button onClick={() => { addCond(); setCondErr(false); }} className="btn btn-ghost"
+                style={{ fontSize:12, padding:"5px 12px", marginTop:6 }}>
+                + {t("rules.addCondition")}
+              </button>
+            </div>
+          )}
+
+          {/* ════ STEP 3: Actions + Scope ════ */}
+          {step === 3 && (
+            <div>
+              <RuleSummary showScope={true} />
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+
+                {/* LEFT — Actions + Guardrails */}
+                <div>
+                  <div style={{ background:"var(--s2)", border:"1px solid var(--b2)",
+                    borderRadius:10, padding:"14px 16px", marginBottom:12 }}>
+                    <div style={{ ...LABEL, marginBottom:10 }}>{t("rules.actionsTitle")}</div>
+                    {form.actions.map((act, i) => {
+                      const curEntityType = form.scope?.entity_type || "keyword";
+                      const filteredActions = ruleActionsList.filter(a =>
+                        curEntityType === "product_target" ? a.et === "target" : a.et === "keyword"
+                      );
+                      const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid" || act.type === "adjust_target_bid_pct";
+                      const isNegKw  = act.type === "add_negative_keyword";
+                      return (
+                        <div key={i} style={{ marginBottom:8 }}>
+                          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                            <select value={act.type} onChange={e => updAct(i,"type",e.target.value)}
+                              style={{ flex:1, ...INP_SM }}>
+                              {filteredActions.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
+                            </select>
+                            <button onClick={() => remAct(i)} disabled={form.actions.length === 1}
+                              style={{ width:28, height:28, background:"none", border:"none", color:"var(--red)",
+                                cursor:"pointer", opacity:form.actions.length===1?0.3:1,
+                                display:"flex", alignItems:"center", justifyContent:"center" }}>
+                              <X size={13} strokeWidth={1.75} />
+                            </button>
+                          </div>
+                          {isBidAct && (
+                            <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:6 }}>
+                              <input type="number" value={act.value}
+                                onChange={e => updAct(i,"value",e.target.value)}
+                                placeholder={act.type === "set_bid" ? "e.g. 0.50" : "e.g. -20"}
+                                style={{ flex:1, ...INP_SM }} />
+                              <span style={{ fontSize:12, color:"var(--tx3)", width:20 }}>
+                                {act.type === "set_bid" ? "€" : "%"}
+                              </span>
+                            </div>
+                          )}
+                          {isNegKw && (
+                            <select value={act.value || "exact"} onChange={e => updAct(i,"value",e.target.value)}
+                              style={{ width:"100%", marginTop:6, ...INP_SM }}>
+                              <option value="exact">{t("rules.negExact")}</option>
+                              <option value="phrase">{t("rules.negPhrase")}</option>
+                              <option value="both">{t("rules.negBoth")}</option>
+                            </select>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <button onClick={addAct} className="btn btn-ghost"
+                      style={{ fontSize:12, padding:"5px 12px", marginTop:2 }}>
+                      + {t("rules.addAction")}
+                    </button>
+                  </div>
+
+                  {/* Bid guardrails */}
+                  <div style={{ background:"var(--s2)", border:"1px solid var(--b2)",
+                    borderRadius:10, padding:"14px 16px" }}>
+                    <div style={{ ...LABEL, marginBottom:4 }}>{t("rules.safetyTitle") || t("rules.safety")}</div>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:8 }}>
+                      {t("rules.safetyHint") || "leave empty — no limits"}
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                      <div>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.minBid")}</div>
+                        <input type="number" value={form.safety.min_bid || ""}
+                          onChange={e => setForm(f => ({...f, safety:{...f.safety, min_bid:e.target.value}}))}
+                          placeholder="0.02" style={{ ...INP_SM }} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.maxBid")}</div>
+                        <input type="number" value={form.safety.max_bid || ""}
+                          onChange={e => setForm(f => ({...f, safety:{...f.safety, max_bid:e.target.value}}))}
+                          placeholder="50" style={{ ...INP_SM }} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* RIGHT — Scope */}
+                <div style={{ background:"var(--s2)", border:"1px solid var(--b2)",
+                  borderRadius:10, padding:"14px 16px" }}>
+                  <div style={{ ...LABEL, marginBottom:10 }}>{t("rules.scopeTitle")}</div>
+
+                  <div style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignType")}</div>
+                    <select value={form.scope.campaign_type || ""}
+                      onChange={e => setForm(f => ({ ...f, scope:{ ...f.scope, campaign_type:e.target.value } }))}
+                      style={{ ...INP_SM }}>
+                      {ruleCampTypes.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
+                    </select>
+                  </div>
+
+                  <div style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.matchTypes")}</div>
+                    <div style={{ display:"flex", gap:5 }}>
+                      {RULE_MATCH_TYPES.map(mt => (
+                        <button key={mt.value} onClick={() => toggleMatchType(mt.value)}
+                          className={`btn ${(form.scope.match_types||[]).includes(mt.value)?"btn-primary":"btn-ghost"}`}
+                          style={{ fontSize:11, padding:"5px 10px", flex:1 }}>{mt.label}</button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom:10 }}>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignNameFilter")}</div>
+                    <input
+                      value={form.scope?.campaign_name_contains || ""}
+                      onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, campaign_name_contains: e.target.value } }))}
+                      placeholder={t("rules.campaignNamePlaceholder")}
+                      style={{ ...INP_SM }} />
+                  </div>
+
+                  {(form.scope?.entity_type || "keyword") === "product_target" && (
+                    <div style={{ marginBottom:10 }}>
+                      <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.targetingType")}</div>
+                      <select value={form.scope?.targeting_type || ""}
+                        onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, targeting_type: e.target.value } }))}
+                        style={{ ...INP_SM }}>
+                        <option value="">{t("rules.targetingAll")}</option>
+                        <option value="product">{t("rules.targetingProduct")}</option>
+                        <option value="views">{t("rules.targetingViews")}</option>
+                        <option value="audience">{t("rules.targetingAudience")}</option>
+                        <option value="auto">{t("rules.targetingAuto")}</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Searchable campaign picker */}
+                  <div>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>
+                      {t("rules.campaigns")}
+                      {(form.scope.campaign_ids||[]).length > 0 && (
+                        <span style={{ marginLeft:6, color:"var(--ac2)" }}>
+                          ({t("rules.campaignsSelected", { count: (form.scope.campaign_ids||[]).length })})
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ position:"relative", marginBottom:6 }}>
+                      <Search size={12} strokeWidth={1.75} style={{ position:"absolute", left:8,
+                        top:"50%", transform:"translateY(-50%)", color:"var(--tx3)", pointerEvents:"none" }} />
+                      <input
+                        value={campSearch}
+                        onChange={e => setCampSearch(e.target.value)}
+                        placeholder={t("campaigns.search")}
+                        style={{ ...INP_SM, paddingLeft:26 }} />
+                    </div>
+                    <div style={{ maxHeight:160, overflowY:"auto", border:"1px solid var(--b2)",
+                      borderRadius:6, padding:4, background:"var(--s1)" }}>
+                      {!campaigns.length
+                        ? <div style={{ fontSize:12, color:"var(--tx3)", padding:"6px 4px" }}>{t("common.loading")}</div>
+                        : filteredCamps.map(c => (
+                          <label key={c.id} style={{ display:"flex", gap:7, alignItems:"center",
+                            padding:"4px 6px", cursor:"pointer", borderRadius:4,
+                            fontSize:12, color:(form.scope.campaign_ids||[]).includes(c.id)?"var(--ac2)":"var(--tx2)" }}>
+                            <input type="checkbox"
+                              checked={(form.scope.campaign_ids||[]).includes(c.id)}
+                              onChange={() => toggleCampaign(c.id)}
+                              style={{ accentColor:"var(--ac)", flexShrink:0 }} />
+                            <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1 }}>{c.name}</span>
+                            <span className="badge bg-bl" style={{ fontSize:9, flexShrink:0 }}>
+                              {c.campaign_type?.replace("sponsored","").toUpperCase().slice(0,2)}
+                            </span>
+                          </label>
+                        ))
+                      }
+                      {campaigns.length > 0 && filteredCamps.length === 0 && (
+                        <div style={{ fontSize:12, color:"var(--tx3)", padding:"6px 4px" }}>{t("common.noData")}</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {adGroups.length > 0 && (
+                    <div style={{ marginTop:10 }}>
+                      <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>
+                        {t("rules.adGroups")} ({t("rules.adGroupsSelected", { count: (form.scope.ad_group_ids||[]).length })})
+                      </div>
+                      <div style={{ maxHeight:100, overflowY:"auto", border:"1px solid var(--b2)",
+                        borderRadius:6, padding:4, background:"var(--s1)" }}>
+                        {adGroups.map(ag => (
+                          <label key={ag.id} style={{ display:"flex", gap:7, alignItems:"center",
+                            padding:"4px 6px", cursor:"pointer", fontSize:12,
+                            color:(form.scope.ad_group_ids||[]).includes(ag.id)?"var(--ac2)":"var(--tx2)" }}>
+                            <input type="checkbox"
+                              checked={(form.scope.ad_group_ids||[]).includes(ag.id)}
+                              onChange={() => toggleAdGroup(ag.id)}
+                              style={{ accentColor:"var(--ac)", flexShrink:0 }} />
+                            {ag.name}
+                            <span style={{ fontSize:10, color:"var(--tx3)" }}>• {ag.campaign_name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Footer ── */}
+        <div style={{ display:"flex", alignItems:"center", padding:"14px 28px",
+          borderTop:"1px solid var(--b1)", flexShrink:0, background:"var(--s1)", gap:8 }}>
+          {step > 1
+            ? <button onClick={goBack} className="btn btn-ghost" style={{ fontSize:12, padding:"7px 16px" }}>
+                <ChevronLeft size={13} strokeWidth={1.75} /> {t("common.back")}
+              </button>
+            : <button onClick={goClose} className="btn btn-ghost" style={{ fontSize:12, padding:"7px 16px" }}>
+                {t("common.cancel")}
+              </button>
+          }
+          <div style={{ flex:1 }} />
+          {step < 3 ? (
+            <button onClick={goNext} className="btn btn-primary" style={{ fontSize:12, padding:"7px 20px" }}>
+              {t("common.next")} <ChevronRight size={13} strokeWidth={1.75} />
+            </button>
+          ) : (
+            <>
+              <button onClick={goClose} className="btn btn-ghost" style={{ fontSize:12, padding:"7px 16px" }}>
+                {t("common.cancel")}
+              </button>
+              <button onClick={onSave} className="btn btn-primary"
+                style={{ fontSize:12, padding:"7px 20px" }}
+                disabled={!form.name || !form.conditions.length || !form.actions.length}>
+                {t("rules.saveRule")}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Rules Page ───────────────────────────────────────────────────────────────
 const RulesPage = ({ workspaceId }) => {
   const { t } = useI18n();
@@ -3783,308 +4289,24 @@ const RulesPage = ({ workspaceId }) => {
         </button>
       </div>
 
-      {/* ── Rule Form Modal ── */}
+      {/* ── Rule Form Modal (3-step wizard) ── */}
       {showForm && createPortal(
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
-          display:"flex", alignItems:"flex-start", justifyContent:"center", overflowY:"auto", padding:"24px 16px" }}>
-          <div className="card" style={{ width:"100%", maxWidth:800,
-            padding:"24px 28px", margin:"0 auto", flexShrink:0 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:20 }}>
-              <div style={{ fontFamily:"var(--disp)", fontSize:18, fontWeight:700 }}>
-                {editRule ? t("rules.editRule") : t("rules.new")}
-              </div>
-              <button onClick={() => setShowForm(false)} className="btn btn-ghost"
-                style={{ fontSize:12, padding:"4px 10px" }}><X size={13} strokeWidth={1.75} /></button>
-            </div>
-
-            {/* Name + Description */}
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12 }}>
-              <div>
-                <div style={LABEL}>{t("rules.name")} *</div>
-                <input value={form.name} onChange={e => setForm(f => ({...f, name:e.target.value}))}
-                  placeholder={t("rules.namePlaceholder")}
-                  style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
-                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
-                    outline:"none", boxSizing:"border-box" }} />
-              </div>
-              <div>
-                <div style={LABEL}>{t("rules.description")}</div>
-                <input value={form.description} onChange={e => setForm(f => ({...f, description:e.target.value}))}
-                  placeholder={t("common.optional")}
-                  style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
-                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
-                    outline:"none", boxSizing:"border-box" }} />
-              </div>
-            </div>
-
-            {/* Entity type + Period */}
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16,
-              padding:"10px 12px", background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
-              <div>
-                <div style={LABEL}>{t("rules.entityType")}</div>
-                <div style={{ display:"flex", gap:6 }}>
-                  {[
-                    { value:"keyword",        label: t("rules.keyword") },
-                    { value:"product_target", label: t("rules.productTarget") },
-                  ].map(et => (
-                    <button key={et.value}
-                      className={`btn ${(form.scope?.entity_type || "keyword") === et.value ? "btn-primary" : "btn-ghost"}`}
-                      style={{ fontSize:11, padding:"5px 10px", flex:1 }}
-                      onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, entity_type: et.value } }))}>
-                      {et.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <div style={LABEL}>{t("rules.periodLabel")}</div>
-                <select value={form.scope?.period_days || 14}
-                  onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, period_days: parseInt(e.target.value) } }))}
-                  style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
-                    background:"var(--s1)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                  <option value={1}>{t("rules.yesterday")}</option>
-                  <option value={7}>{t("rules.periodDays", { days: 7 })}</option>
-                  <option value={14}>{t("rules.periodDays", { days: 14 })}</option>
-                  <option value={30}>{t("rules.periodDays", { days: 30 })}</option>
-                  <option value={60}>{t("rules.periodDays", { days: 60 })}</option>
-                  <option value={90}>{t("rules.periodDays", { days: 90 })}</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Conditions */}
-            <div style={{ marginBottom:16 }}>
-              <div style={LABEL}>
-                {t("rules.conditionsTitle")} <span style={{color:"var(--ac2)"}}>({form.scope?.period_days === 1 ? t("rules.yesterday") : `${form.scope?.period_days || 14}d`})</span>
-              </div>
-              {form.conditions.map((cond, i) => (
-                <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
-                  {i > 0
-                    ? <span style={{ fontSize:10, color:"var(--tx3)", width:32, textAlign:"right", fontFamily:"var(--mono)" }}>AND</span>
-                    : <span style={{ width:32 }} />}
-                  <select value={cond.metric} onChange={e => updCond(i,"metric",e.target.value)}
-                    style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
-                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                    {ruleMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-                  </select>
-                  <select value={cond.op} onChange={e => updCond(i,"op",e.target.value)}
-                    style={{ width:52, fontSize:13, padding:"7px 4px", borderRadius:6,
-                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                    {RULE_OPS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                  <input type="number" value={cond.value} onChange={e => updCond(i,"value",e.target.value)}
-                    style={{ width:80, fontSize:13, padding:"7px 8px", borderRadius:6,
-                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
-                  <button onClick={() => remCond(i)} disabled={form.conditions.length === 1}
-                    style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
-                      cursor:"pointer", fontSize:14, opacity:form.conditions.length===1?0.3:1 }}><X size={13} strokeWidth={1.75} /></button>
-                </div>
-              ))}
-              <button onClick={addCond} className="btn btn-ghost"
-                style={{ fontSize:11, padding:"4px 10px", marginTop:4 }}>+ {t("rules.addCondition")}</button>
-            </div>
-
-            {/* Actions */}
-            <div style={{ marginBottom:16 }}>
-              <div style={LABEL}>{t("rules.actionsTitle")}</div>
-              {form.actions.map((act, i) => {
-                const curEntityType = form.scope?.entity_type || "keyword";
-                const filteredActions = ruleActionsList.filter(a =>
-                  a.et === curEntityType || (curEntityType === "keyword" && a.et === "keyword") || (curEntityType === "product_target" && a.et === "target")
-                );
-                const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid" || act.type === "adjust_target_bid_pct";
-                const isNegKw  = act.type === "add_negative_keyword";
-                return (
-                  <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
-                    <select value={act.type} onChange={e => updAct(i,"type",e.target.value)}
-                      style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
-                        background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                      {filteredActions.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
-                    </select>
-                    {isBidAct && (
-                      <div style={{ display:"flex", alignItems:"center", gap:4 }}>
-                        <input type="number" value={act.value}
-                          onChange={e => updAct(i,"value",e.target.value)}
-                          placeholder={act.type === "set_bid" ? "e.g. 0.50" : "e.g. -20"}
-                          style={{ width:90, fontSize:13, padding:"7px 8px", borderRadius:6,
-                            background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
-                        <span style={{ fontSize:11, color:"var(--tx3)" }}>
-                          {act.type === "set_bid" ? "€" : "%"}
-                        </span>
-                      </div>
-                    )}
-                    {isNegKw && (
-                      <select value={act.value || "exact"} onChange={e => updAct(i,"value",e.target.value)}
-                        style={{ width:130, fontSize:12, padding:"7px 8px", borderRadius:6,
-                          background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                        <option value="exact">{t("rules.negExact")}</option>
-                        <option value="phrase">{t("rules.negPhrase")}</option>
-                        <option value="both">{t("rules.negBoth")}</option>
-                      </select>
-                    )}
-                    <button onClick={() => remAct(i)} disabled={form.actions.length === 1}
-                      style={{ width:24, height:24, background:"none", border:"none", color:"var(--red)",
-                        cursor:"pointer", fontSize:14, opacity:form.actions.length===1?0.3:1 }}><X size={13} strokeWidth={1.75} /></button>
-                  </div>
-                );
-              })}
-              <button onClick={addAct} className="btn btn-ghost"
-                style={{ fontSize:11, padding:"4px 10px", marginTop:4 }}>+ {t("rules.addAction")}</button>
-            </div>
-
-            {/* Scope */}
-            <div style={{ marginBottom:16 }}>
-              <div style={LABEL}>{t("rules.scopeTitle")}</div>
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:10 }}>
-                <div>
-                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.campaignType")}</div>
-                  <select value={form.scope.campaign_type || ""}
-                    onChange={e => setForm(f => ({ ...f, scope:{ ...f.scope, campaign_type:e.target.value } }))}
-                    style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
-                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                    {ruleCampTypes.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.matchTypes")}</div>
-                  <div style={{ display:"flex", gap:6 }}>
-                    {RULE_MATCH_TYPES.map(mt => (
-                      <button key={mt.value} onClick={() => toggleMatchType(mt.value)}
-                        className={`btn ${(form.scope.match_types||[]).includes(mt.value)?"btn-primary":"btn-ghost"}`}
-                        style={{ fontSize:11, padding:"5px 10px" }}>{mt.label}</button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Campaign name filter + targeting type */}
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:10 }}>
-                <div>
-                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.campaignNameFilter")}</div>
-                  <input
-                    value={form.scope?.campaign_name_contains || ""}
-                    onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, campaign_name_contains: e.target.value } }))}
-                    placeholder={t("rules.campaignNamePlaceholder")}
-                    style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
-                      background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
-                      outline:"none", boxSizing:"border-box" }} />
-                </div>
-                {(form.scope?.entity_type || "keyword") === "product_target" && (
-                  <div>
-                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.targetingType")}</div>
-                    <select value={form.scope?.targeting_type || ""}
-                      onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, targeting_type: e.target.value } }))}
-                      style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
-                        background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                      <option value="">{t("rules.targetingAll")}</option>
-                      <option value="product">{t("rules.targetingProduct")}</option>
-                      <option value="views">{t("rules.targetingViews")}</option>
-                      <option value="audience">{t("rules.targetingAudience")}</option>
-                      <option value="auto">{t("rules.targetingAuto")}</option>
-                    </select>
-                  </div>
-                )}
-              </div>
-
-              <div style={{ marginBottom:10 }}>
-                <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>
-                  {t("rules.campaigns")} ({t("rules.campaignsSelected", { count: (form.scope.campaign_ids||[]).length })})
-                </div>
-                <div style={{ maxHeight:120, overflowY:"auto", border:"1px solid var(--b2)",
-                  borderRadius:6, padding:6, background:"var(--s2)" }}>
-                  {!(campaigns||[]).length
-                    ? <div style={{ fontSize:12, color:"var(--tx3)", padding:4 }}>{t("common.loading")}</div>
-                    : (campaigns||[]).map(c => (
-                      <label key={c.id} style={{ display:"flex", gap:8, alignItems:"center",
-                        padding:"3px 4px", cursor:"pointer", fontSize:12,
-                        color:(form.scope.campaign_ids||[]).includes(c.id)?"var(--ac2)":"var(--tx2)" }}>
-                        <input type="checkbox"
-                          checked={(form.scope.campaign_ids||[]).includes(c.id)}
-                          onChange={() => toggleCampaign(c.id)}
-                          style={{ accentColor:"var(--ac)" }} />
-                        <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{c.name}</span>
-                        <span className="badge bg-bl" style={{ fontSize:9, flexShrink:0 }}>
-                          {c.campaign_type?.replace("sponsored","").toUpperCase().slice(0,2)}
-                        </span>
-                      </label>
-                    ))
-                  }
-                </div>
-              </div>
-
-              {adGroups.length > 0 && (
-                <div>
-                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>
-                    {t("rules.adGroups")} ({t("rules.adGroupsSelected", { count: (form.scope.ad_group_ids||[]).length })})
-                  </div>
-                  <div style={{ maxHeight:100, overflowY:"auto", border:"1px solid var(--b2)",
-                    borderRadius:6, padding:6, background:"var(--s2)" }}>
-                    {adGroups.map(ag => (
-                      <label key={ag.id} style={{ display:"flex", gap:8, alignItems:"center",
-                        padding:"3px 4px", cursor:"pointer", fontSize:12,
-                        color:(form.scope.ad_group_ids||[]).includes(ag.id)?"var(--ac2)":"var(--tx2)" }}>
-                        <input type="checkbox"
-                          checked={(form.scope.ad_group_ids||[]).includes(ag.id)}
-                          onChange={() => toggleAdGroup(ag.id)}
-                          style={{ accentColor:"var(--ac)" }} />
-                        {ag.name}
-                        <span style={{ fontSize:10, color:"var(--tx3)" }}>• {ag.campaign_name}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Safety + Options */}
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:10, marginBottom:20 }}>
-              <div>
-                <div style={LABEL}>{t("rules.minBid")}</div>
-                <input type="number" value={form.safety.min_bid || "0.02"}
-                  onChange={e => setForm(f => ({...f, safety:{...f.safety, min_bid:e.target.value}}))}
-                  style={{ width:"100%", fontSize:12, padding:"6px 8px", borderRadius:6,
-                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
-                    outline:"none", boxSizing:"border-box" }} />
-              </div>
-              <div>
-                <div style={LABEL}>{t("rules.maxBid")}</div>
-                <input type="number" value={form.safety.max_bid || "50"}
-                  onChange={e => setForm(f => ({...f, safety:{...f.safety, max_bid:e.target.value}}))}
-                  style={{ width:"100%", fontSize:12, padding:"6px 8px", borderRadius:6,
-                    background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
-                    outline:"none", boxSizing:"border-box" }} />
-              </div>
-              <div style={{ display:"flex", flexDirection:"column", justifyContent:"flex-end" }}>
-                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:12 }}>
-                  <input type="checkbox" checked={form.dry_run}
-                    onChange={e => setForm(f => ({...f, dry_run:e.target.checked}))}
-                    style={{ accentColor:"var(--ac)", width:14, height:14 }} />
-                  <span style={{ color:form.dry_run?"var(--amb)":"var(--tx2)" }}>
-                    {t("rules.dryRun")}
-                  </span>
-                </label>
-              </div>
-              <div style={{ display:"flex", flexDirection:"column", justifyContent:"flex-end" }}>
-                <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", fontSize:12 }}>
-                  <input type="checkbox" checked={form.is_active}
-                    onChange={e => setForm(f => ({...f, is_active:e.target.checked}))}
-                    style={{ accentColor:"var(--ac)", width:14, height:14 }} />
-                  <span>{t("rules.active")}</span>
-                </label>
-              </div>
-            </div>
-
-            <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
-              <button onClick={() => setShowForm(false)} className="btn btn-ghost"
-                style={{ fontSize:12, padding:"7px 16px" }}>{t("common.cancel")}</button>
-              <button onClick={saveRule} className="btn btn-primary"
-                style={{ fontSize:12, padding:"7px 20px" }}
-                disabled={!form.name || !form.conditions.length || !form.actions.length}>
-                {t("rules.saveRule")}
-              </button>
-            </div>
-          </div>
-        </div>,
+        <RuleWizardModal
+          form={form} setForm={setForm}
+          editRule={editRule}
+          campaigns={campaigns || []}
+          adGroups={adGroups}
+          ruleMetrics={ruleMetrics}
+          ruleActionsList={ruleActionsList}
+          ruleCampTypes={ruleCampTypes}
+          updCond={updCond} remCond={remCond} addCond={addCond}
+          updAct={updAct}   remAct={remAct}   addAct={addAct}
+          toggleCampaign={toggleCampaign}
+          toggleAdGroup={toggleAdGroup}
+          toggleMatchType={toggleMatchType}
+          onSave={saveRule}
+          onClose={() => setShowForm(false)}
+        />,
       document.body
       )}
 
