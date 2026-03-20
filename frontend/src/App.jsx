@@ -438,7 +438,7 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
     try {
       await patch(`/connections/${connId}/schedule`, { schedule });
       setConnections(cs => cs.map(c => c.id === connId ? { ...c, sync_schedule: schedule } : c));
-    } catch (e) { alert("Ошибка: " + e.message); }
+    } catch (e) { alert(t("common.error") + e.message); }
     setScheduleUpdating(null);
   }
 
@@ -523,9 +523,9 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                             disabled={scheduleUpdating === c.id}
                             style={{ fontSize: 11, padding: "3px 6px", background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)", cursor: "pointer" }}
                           >
-                            <option value="hourly">⏰ Каждый час</option>
-                            <option value="daily">📅 Каждый день</option>
-                            <option value="weekly">📆 Каждую неделю</option>
+                            <option value="hourly">{t("connect.scheduleHourly")}</option>
+                            <option value="daily">{t("connect.scheduleDaily")}</option>
+                            <option value="weekly">{t("connect.scheduleWeekly")}</option>
                           </select>
                           {scheduleUpdating === c.id && <span className="loader" style={{ width: 10, height: 10, borderWidth: 2, marginLeft: 6, display: "inline-block" }} />}
                         </td>
@@ -1188,7 +1188,7 @@ const GlobalProgressBar = ({ workspaceId }) => {
     if (!data) return;
     const hasAct = (data.active?.length > 0) || Object.values(data.queued || {}).some(v => v > 0);
     if (wasActiveRef.current && !hasAct) {
-      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: "Синхронизация закончена ✓", ok: true } }));
+      window.dispatchEvent(new CustomEvent("af:toast", { detail: { msg: t("overview.syncComplete"), ok: true } }));
     }
     wasActiveRef.current = hasAct;
   }, [data]);
@@ -1332,10 +1332,10 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
       for (const connId of toSync) {
         try { const r = await post(`/connections/${connId}/sync`, {}); synced += r.queued || r.profiles || 1; } catch {}
       }
-      setSyncMsg(`✓ Синхронизация запущена для ${synced} профилей`);
+      setSyncMsg(t("overview.syncStarted", { count: synced }));
       setTimeout(() => setSyncMsg(null), 4000);
     } catch {
-      setSyncMsg("⚠ Ошибка синхронизации");
+      setSyncMsg(t("overview.syncError"));
       setTimeout(() => setSyncMsg(null), 4000);
     }
     setSyncing(false);
@@ -2345,7 +2345,7 @@ const CampaignsPage = ({ workspaceId }) => {
       {(data?.pagination?.total > 0) && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
-            Показывать по:
+            {t("common.perPage")}
             {[25, 50, 100, 200].map(size => (
               <button key={size} onClick={() => { setPageSize(size); setPage(1); }}
                 className={`btn ${pageSize === size ? "btn-primary" : "btn-ghost"}`}
@@ -2353,18 +2353,18 @@ const CampaignsPage = ({ workspaceId }) => {
             ))}
           </div>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>
-            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, data.pagination.total)} из {data.pagination.total.toLocaleString()}
+            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, data.pagination.total)} {t("common.of")} {data.pagination.total.toLocaleString()}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-              onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← Назад</button>
+              onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>{t("common.back")}</button>
             {getPageRange(page, data.pagination.pages ?? 1).map((p, i) =>
               p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
               : <button key={p} onClick={() => setPage(p)} className={`btn ${page === p ? "btn-primary" : "btn-ghost"}`}
                   style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
             )}
             <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-              onClick={() => setPage(p => Math.min(data.pagination.pages ?? 1, p + 1))} disabled={page === (data.pagination.pages ?? 1)}>Вперёд →</button>
+              onClick={() => setPage(p => Math.min(data.pagination.pages ?? 1, p + 1))} disabled={page === (data.pagination.pages ?? 1)}>{t("common.next")}</button>
           </div>
         </div>
       )}
@@ -2545,7 +2545,7 @@ const ReportsPage = ({ workspaceId }) => {
                 ))}
               </div>
               <div style={{ fontSize: 12, color: "var(--tx2)" }}>
-                {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, reportsData.pagination.total)} из {reportsData.pagination.total}
+                {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, reportsData.pagination.total)} {t("common.of")} {reportsData.pagination.total}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }}
@@ -2639,7 +2639,7 @@ const AuditPage = ({ workspaceId }) => {
     : <span style={{ fontSize: 10, marginLeft: 3, opacity: 0.3 }}>▼</span>;
 
   const handleRollback = async (event) => {
-    if (!confirm(`Откатить: ${event.action} для "${event.entity_name}"?`)) return;
+    if (!confirm(t("audit.rollbackConfirm", { action: event.action, entity: event.entity_name }))) return;
     setRollingBack(event.id);
     try {
       const result = await post(`/audit/${event.id}/rollback`);
@@ -2667,7 +2667,7 @@ const AuditPage = ({ workspaceId }) => {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
         <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700 }}>{t("audit.title")}</h1>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: "var(--tx3)" }}>{pagination.total || 0} событий</span>
+          <span style={{ fontSize: 12, color: "var(--tx3)" }}>{t("audit.events", { count: pagination.total || 0 })}</span>
           <button className="btn btn-ghost" onClick={reload} style={{ fontSize: 12, padding: "5px 10px" }}>↺</button>
           <button className="btn btn-ghost" onClick={auditResetCols} style={{ fontSize: 12, padding: "5px 10px" }} title="Reset column widths">⊟</button>
         </div>
@@ -2684,24 +2684,24 @@ const AuditPage = ({ workspaceId }) => {
           <div>
             <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterEntity")}</div>
             <input value={filterEntity} onChange={e => setFilterEntity(e.target.value)}
-              placeholder="название…" style={{ ...INP, width: 150 }} />
+              placeholder={t("audit.filterEntity").toLowerCase() + "…"} style={{ ...INP, width: 150 }} />
           </div>
           <div>
             <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterSource")}</div>
             <select value={filterSource} onChange={e => setFilterSource(e.target.value)} style={{ ...INP, width: 100 }}>
-              <option value="">Все</option>
-              <option value="ui">👤 UI</option>
-              <option value="rule">⟁ Правило</option>
-              <option value="ai">✦ ИИ</option>
-              <option value="system">⚙ Система</option>
-              <option value="api">⬡ API</option>
+              <option value="">{t("audit.filterSourceAll")}</option>
+              <option value="ui">{t("audit.sourceUi")}</option>
+              <option value="rule">{t("audit.sourceRule")}</option>
+              <option value="ai">{t("audit.sourceAi")}</option>
+              <option value="system">{t("audit.sourceSystem")}</option>
+              <option value="api">{t("audit.sourceApi")}</option>
             </select>
           </div>
           {uniqueActors.length > 1 && (
             <div>
               <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3, fontFamily: "var(--mono)", textTransform: "uppercase" }}>{t("audit.filterActor")}</div>
               <select value={filterActor} onChange={e => setFilterActor(e.target.value)} style={{ ...INP, width: 130 }}>
-                <option value="">Все</option>
+                <option value="">{t("audit.filterSourceAll")}</option>
                 {uniqueActors.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
               </select>
             </div>
@@ -2723,7 +2723,7 @@ const AuditPage = ({ workspaceId }) => {
           {hasFilters && (
             <button onClick={() => { setFilterAction(""); setFilterEntity(""); setFilterSource("");
               setFilterActor(""); setFilterDateFrom(""); setFilterDateTo(""); setOnlyRollback(false); }}
-              className="btn btn-ghost" style={{ fontSize: 11, padding: "5px 10px" }}>✕ Сбросить</button>
+              className="btn btn-ghost" style={{ fontSize: 11, padding: "5px 10px" }}>{t("common.reset")}</button>
           )}
           <div style={{ marginLeft: "auto" }}>
             <select value={limit} onChange={e => { setLimit(parseInt(e.target.value)); setPage(1); }}
@@ -2736,7 +2736,7 @@ const AuditPage = ({ workspaceId }) => {
 
       {/* ── Table ── */}
       {loading ? (
-        <div style={{ color: "var(--tx3)", padding: "20px 0", fontSize: 13 }}>Загрузка…</div>
+        <div style={{ color: "var(--tx3)", padding: "20px 0", fontSize: 13 }}>{t("common.loading")}</div>
       ) : events.length === 0 ? (
         <div className="card" style={{ padding: "48px 32px", textAlign: "center" }}>
           <div style={{ fontSize: 32, marginBottom: 10 }}>⊡</div>
@@ -2749,19 +2749,19 @@ const AuditPage = ({ workspaceId }) => {
             <thead>
               <tr>
                 <th onClick={() => handleSort("date")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Время <SortIcon field="date" />{auditRH(0)}
+                  {t("audit.colTime")} <SortIcon field="date" />{auditRH(0)}
                 </th>
                 <th onClick={() => handleSort("actor_name")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Пользователь <SortIcon field="actor_name" />{auditRH(1)}
+                  {t("audit.colUser")} <SortIcon field="actor_name" />{auditRH(1)}
                 </th>
                 <th onClick={() => handleSort("action")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Действие <SortIcon field="action" />{auditRH(2)}
+                  {t("audit.colAction")} <SortIcon field="action" />{auditRH(2)}
                 </th>
                 <th onClick={() => handleSort("entity_type")} style={{ cursor: "pointer", userSelect: "none" }}>
-                  Сущность <SortIcon field="entity_type" />{auditRH(3)}
+                  {t("audit.colEntity")} <SortIcon field="entity_type" />{auditRH(3)}
                 </th>
                 <th>{t("audit.diff")}{auditRH(4)}</th>
-                <th style={{ textAlign: "right" }}>Откат{auditRH(5)}</th>
+                <th style={{ textAlign: "right" }}>{t("audit.rollback")}{auditRH(5)}</th>
               </tr>
             </thead>
             <tbody>
@@ -2837,7 +2837,7 @@ const AuditPage = ({ workspaceId }) => {
       {pagination.pages > 1 && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, fontSize: 12 }}>
           <span style={{ color: "var(--tx3)" }}>
-            {(page - 1) * limit + 1}–{Math.min(page * limit, pagination.total)} из {pagination.total}
+            {(page - 1) * limit + 1}–{Math.min(page * limit, pagination.total)} {t("common.of")} {pagination.total}
           </span>
           <div style={{ display: "flex", gap: 4 }}>
             <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}
@@ -2983,7 +2983,7 @@ const KeywordsPage = ({ workspaceId }) => {
       reload();
       setSelected(new Set());
       setBulkPct("");
-      setKwToast(`Обновлено ${updates.length} ставок`);
+      setKwToast(t("keywords.updateBids", { count: updates.length }));
       setTimeout(() => setKwToast(null), 3000);
     } catch (e) { alert(t("common.error") + e.message); }
     setSaving(false);
@@ -2996,7 +2996,7 @@ const KeywordsPage = ({ workspaceId }) => {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
         <div>
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("keywords.title")}</h1>
-          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{kwTotal.toLocaleString()} ключевых слов</div>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("keywords.count", { count: kwTotal.toLocaleString() })}</div>
         </div>
       </div>
 
@@ -3057,8 +3057,8 @@ const KeywordsPage = ({ workspaceId }) => {
 
       {selected.size > 0 && (
         <div className="card fade" style={{ padding: "10px 16px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderColor: "rgba(59,130,246,.4)", background: "rgba(59,130,246,.05)" }}>
-          <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{selected.size} выбрано</span>
-          <span style={{ fontSize: 12, color: "var(--tx2)" }}>Изм. ставку на:</span>
+          <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{t("keywords.selected", { count: selected.size })}</span>
+          <span style={{ fontSize: 12, color: "var(--tx2)" }}>{t("keywords.bulkBidAdjustLabel")}</span>
           <input
             type="number"
             value={bulkPct}
@@ -3071,7 +3071,7 @@ const KeywordsPage = ({ workspaceId }) => {
           <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => setBulkPct("10")}>+10%</button>
           <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }} onClick={() => setBulkPct("-10")}>-10%</button>
           <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={bulkBidUpdate} disabled={saving || !bulkPct}>
-            {saving ? <span className="loader" /> : "Применить"}
+            {saving ? <span className="loader" /> : t("keywords.applyBid")}
           </button>
           <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setSelected(new Set())}>{t("common.cancel")}</button>
         </div>
@@ -3149,7 +3149,7 @@ const KeywordsPage = ({ workspaceId }) => {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, flexWrap: "wrap", gap: 10 }}>
           {/* Left: page size selector */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--tx2)" }}>
-            Показывать по:
+            {t("common.perPage")}
             {[25, 50, 100, 200, 500].map(size => (
               <button
                 key={size}
@@ -3164,14 +3164,14 @@ const KeywordsPage = ({ workspaceId }) => {
 
           {/* Center: range info */}
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>
-            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, kwTotal)} из {kwTotal.toLocaleString()}
+            {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, kwTotal)} {t("common.of")} {kwTotal.toLocaleString()}
           </div>
 
           {/* Right: prev/next + page numbers */}
           <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
               onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>
-              ← Назад
+              {t("common.back")}
             </button>
             {getPageRange(page, totalPages).map((p, i) =>
               p === "..."
@@ -3184,7 +3184,7 @@ const KeywordsPage = ({ workspaceId }) => {
             )}
             <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
               onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>
-              Вперёд →
+              {t("common.next")}
             </button>
           </div>
         </div>
@@ -3431,8 +3431,8 @@ const AnalyticsPage = ({ workspaceId }) => {
         <div style={{ fontSize:13, fontWeight:600, marginBottom:6, color:"var(--tx)" }}>Report contents</div>
         <div style={{ fontSize:12, color:"var(--tx2)", lineHeight:1.8 }}>
           <b>Sheet_1</b>: All SKUs — SP/SD/SB spend, sales, units, Real ACOS, BSR, P&amp;L formulas ·{" "}
-          <b>Лист1</b>: Summary by product group ·{" "}
-          <b>Лист2</b>: ASIN→SKU→Label reference
+          <b>Sheet_2</b>: Summary by product group ·{" "}
+          <b>Sheet_3</b>: ASIN→SKU→Label reference
         </div>
         <div style={{ fontSize:11, color:"var(--tx3)", marginTop:6 }}>
           Amazon fees, VAT, COGS, Shipping are calculated from cost config below.
@@ -3581,17 +3581,17 @@ const EMPTY_RULE_FORM = {
   safety: { min_bid: "0.02", max_bid: "50" },
 };
 
-const RULE_METRICS = [
-  { value:"clicks",      label:"Клики" },
-  { value:"spend",       label:"Расход (€)" },
-  { value:"sales",       label:"Продажи (€)" },
-  { value:"orders",      label:"Заказы" },
-  { value:"impressions", label:"Показы" },
-  { value:"acos",        label:"ACOS (%)" },
-  { value:"roas",        label:"ROAS (x)" },
-  { value:"ctr",         label:"CTR (%)" },
-  { value:"cpc",         label:"CPC (€)" },
-  { value:"bid",         label:"Ставка (€)" },
+const RULE_METRICS = (t) => [
+  { value:"clicks",      label:t("rules.metric.clicks") },
+  { value:"spend",       label:t("rules.metric.spend") },
+  { value:"sales",       label:t("rules.metric.sales") },
+  { value:"orders",      label:t("rules.metric.orders") },
+  { value:"impressions", label:t("rules.metric.impressions") },
+  { value:"acos",        label:t("rules.metric.acos") },
+  { value:"roas",        label:t("rules.metric.roas") },
+  { value:"ctr",         label:t("rules.metric.ctr") },
+  { value:"cpc",         label:t("rules.metric.cpc") },
+  { value:"bid",         label:t("rules.metric.bid") },
 ];
 const RULE_OPS = [
   { value:"gte", label:"≥" },
@@ -3601,24 +3601,24 @@ const RULE_OPS = [
   { value:"eq",  label:"=" },
   { value:"neq", label:"≠" },
 ];
-const RULE_ACTIONS_LIST = [
-  { value:"pause_keyword",         label:"⏸ Остановить ключевое слово",  et:"keyword" },
-  { value:"enable_keyword",        label:"▶ Запустить ключевое слово",    et:"keyword" },
-  { value:"adjust_bid_pct",        label:"⚡ Изменить ставку на %",       et:"keyword" },
-  { value:"set_bid",               label:"🎯 Установить ставку",           et:"keyword" },
-  { value:"add_negative_keyword",  label:"🚫 Добавить в негативные",      et:"keyword" },
-  { value:"pause_target",          label:"⏸ Остановить таргет",           et:"target" },
-  { value:"enable_target",         label:"▶ Запустить таргет",            et:"target" },
-  { value:"adjust_target_bid_pct", label:"⚡ Изменить ставку таргета %",  et:"target" },
-  { value:"add_negative_target",   label:"🚫 Таргет в негативные",        et:"target" },
+const RULE_ACTIONS_LIST = (t) => [
+  { value:"pause_keyword",         label:t("rules.pauseKeyword"),         et:"keyword" },
+  { value:"enable_keyword",        label:t("rules.enableKeyword"),        et:"keyword" },
+  { value:"adjust_bid_pct",        label:t("rules.adjustBidPct"),         et:"keyword" },
+  { value:"set_bid",               label:t("rules.setBid"),               et:"keyword" },
+  { value:"add_negative_keyword",  label:t("rules.addNegativeKeyword"),   et:"keyword" },
+  { value:"pause_target",          label:t("rules.pauseTarget"),          et:"target" },
+  { value:"enable_target",         label:t("rules.enableTarget"),         et:"target" },
+  { value:"adjust_target_bid_pct", label:t("rules.adjustTargetBidPct"),   et:"target" },
+  { value:"add_negative_target",   label:t("rules.addNegativeTarget"),    et:"target" },
 ];
 const RULE_MATCH_TYPES = [
   { value:"exact",  label:"Exact" },
   { value:"phrase", label:"Phrase" },
   { value:"broad",  label:"Broad" },
 ];
-const RULE_CAMP_TYPES = [
-  { value:"",                   label:"Все типы" },
+const RULE_CAMP_TYPES = (t) => [
+  { value:"",                   label:t("rules.allTypes") },
   { value:"sponsoredProducts",  label:"Sponsored Products" },
   { value:"sponsoredBrands",    label:"Sponsored Brands" },
   { value:"sponsoredDisplay",   label:"Sponsored Display" },
@@ -3627,6 +3627,9 @@ const RULE_CAMP_TYPES = [
 // ─── Rules Page ───────────────────────────────────────────────────────────────
 const RulesPage = ({ workspaceId }) => {
   const { t } = useI18n();
+  const ruleMetrics     = RULE_METRICS(t);
+  const ruleActionsList = RULE_ACTIONS_LIST(t);
+  const ruleCampTypes   = RULE_CAMP_TYPES(t);
   const [showForm,   setShowForm]   = useState(false);
   const [editRule,   setEditRule]   = useState(null);
   const [form,       setForm]       = useState(EMPTY_RULE_FORM);
@@ -3760,9 +3763,9 @@ const RulesPage = ({ workspaceId }) => {
                     outline:"none", boxSizing:"border-box" }} />
               </div>
               <div>
-                <div style={LABEL}>{t("rules.description") || "Описание"}</div>
+                <div style={LABEL}>{t("rules.description")}</div>
                 <input value={form.description} onChange={e => setForm(f => ({...f, description:e.target.value}))}
-                  placeholder="опционально"
+                  placeholder={t("common.optional")}
                   style={{ width:"100%", fontSize:13, padding:"8px 10px", borderRadius:6,
                     background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)",
                     outline:"none", boxSizing:"border-box" }} />
@@ -3795,11 +3798,11 @@ const RulesPage = ({ workspaceId }) => {
                   style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
                     background:"var(--s1)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
                   <option value={1}>{t("rules.yesterday")}</option>
-                  <option value={7}>7 дней</option>
-                  <option value={14}>14 дней</option>
-                  <option value={30}>30 дней</option>
-                  <option value={60}>60 дней</option>
-                  <option value={90}>90 дней</option>
+                  <option value={7}>{t("rules.periodDays", { days: 7 })}</option>
+                  <option value={14}>{t("rules.periodDays", { days: 14 })}</option>
+                  <option value={30}>{t("rules.periodDays", { days: 30 })}</option>
+                  <option value={60}>{t("rules.periodDays", { days: 60 })}</option>
+                  <option value={90}>{t("rules.periodDays", { days: 90 })}</option>
                 </select>
               </div>
             </div>
@@ -3817,7 +3820,7 @@ const RulesPage = ({ workspaceId }) => {
                   <select value={cond.metric} onChange={e => updCond(i,"metric",e.target.value)}
                     style={{ flex:1, fontSize:12, padding:"7px 8px", borderRadius:6,
                       background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                    {RULE_METRICS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    {ruleMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                   </select>
                   <select value={cond.op} onChange={e => updCond(i,"op",e.target.value)}
                     style={{ width:52, fontSize:13, padding:"7px 4px", borderRadius:6,
@@ -3841,7 +3844,7 @@ const RulesPage = ({ workspaceId }) => {
               <div style={LABEL}>{t("rules.actionsTitle")}</div>
               {form.actions.map((act, i) => {
                 const curEntityType = form.scope?.entity_type || "keyword";
-                const filteredActions = RULE_ACTIONS_LIST.filter(a =>
+                const filteredActions = ruleActionsList.filter(a =>
                   a.et === curEntityType || (curEntityType === "keyword" && a.et === "keyword") || (curEntityType === "product_target" && a.et === "target")
                 );
                 const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid" || act.type === "adjust_target_bid_pct";
@@ -3857,7 +3860,7 @@ const RulesPage = ({ workspaceId }) => {
                       <div style={{ display:"flex", alignItems:"center", gap:4 }}>
                         <input type="number" value={act.value}
                           onChange={e => updAct(i,"value",e.target.value)}
-                          placeholder={act.type === "set_bid" ? "напр. 0.50" : "напр. -20"}
+                          placeholder={act.type === "set_bid" ? "e.g. 0.50" : "e.g. -20"}
                           style={{ width:90, fontSize:13, padding:"7px 8px", borderRadius:6,
                             background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }} />
                         <span style={{ fontSize:11, color:"var(--tx3)" }}>
@@ -3889,16 +3892,16 @@ const RulesPage = ({ workspaceId }) => {
               <div style={LABEL}>{t("rules.scopeTitle")}</div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:10 }}>
                 <div>
-                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>Тип кампании</div>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.campaignType")}</div>
                   <select value={form.scope.campaign_type || ""}
                     onChange={e => setForm(f => ({ ...f, scope:{ ...f.scope, campaign_type:e.target.value } }))}
                     style={{ width:"100%", fontSize:12, padding:"7px 8px", borderRadius:6,
                       background:"var(--s2)", border:"1px solid var(--b2)", color:"var(--tx)", outline:"none" }}>
-                    {RULE_CAMP_TYPES.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
+                    {ruleCampTypes.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
                   </select>
                 </div>
                 <div>
-                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>Тип соответствия</div>
+                  <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>{t("rules.matchTypes")}</div>
                   <div style={{ display:"flex", gap:6 }}>
                     {RULE_MATCH_TYPES.map(mt => (
                       <button key={mt.value} onClick={() => toggleMatchType(mt.value)}
@@ -3940,12 +3943,12 @@ const RulesPage = ({ workspaceId }) => {
 
               <div style={{ marginBottom:10 }}>
                 <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>
-                  Кампании ({(form.scope.campaign_ids||[]).length} выбрано, пусто = все)
+                  {t("rules.campaigns")} ({t("rules.campaignsSelected", { count: (form.scope.campaign_ids||[]).length })})
                 </div>
                 <div style={{ maxHeight:120, overflowY:"auto", border:"1px solid var(--b2)",
                   borderRadius:6, padding:6, background:"var(--s2)" }}>
                   {!(campaigns||[]).length
-                    ? <div style={{ fontSize:12, color:"var(--tx3)", padding:4 }}>Загрузка кампаний…</div>
+                    ? <div style={{ fontSize:12, color:"var(--tx3)", padding:4 }}>{t("common.loading")}</div>
                     : (campaigns||[]).map(c => (
                       <label key={c.id} style={{ display:"flex", gap:8, alignItems:"center",
                         padding:"3px 4px", cursor:"pointer", fontSize:12,
@@ -3967,7 +3970,7 @@ const RulesPage = ({ workspaceId }) => {
               {adGroups.length > 0 && (
                 <div>
                   <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:4 }}>
-                    Группы объявлений ({(form.scope.ad_group_ids||[]).length} выбрано, пусто = все)
+                    {t("rules.adGroups")} ({t("rules.adGroupsSelected", { count: (form.scope.ad_group_ids||[]).length })})
                   </div>
                   <div style={{ maxHeight:100, overflowY:"auto", border:"1px solid var(--b2)",
                     borderRadius:6, padding:6, background:"var(--s2)" }}>
@@ -3991,7 +3994,7 @@ const RulesPage = ({ workspaceId }) => {
             {/* Safety + Options */}
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:10, marginBottom:20 }}>
               <div>
-                <div style={LABEL}>Min ставка (€)</div>
+                <div style={LABEL}>{t("rules.minBid")}</div>
                 <input type="number" value={form.safety.min_bid || "0.02"}
                   onChange={e => setForm(f => ({...f, safety:{...f.safety, min_bid:e.target.value}}))}
                   style={{ width:"100%", fontSize:12, padding:"6px 8px", borderRadius:6,
@@ -3999,7 +4002,7 @@ const RulesPage = ({ workspaceId }) => {
                     outline:"none", boxSizing:"border-box" }} />
               </div>
               <div>
-                <div style={LABEL}>Max ставка (€)</div>
+                <div style={LABEL}>{t("rules.maxBid")}</div>
                 <input type="number" value={form.safety.max_bid || "50"}
                   onChange={e => setForm(f => ({...f, safety:{...f.safety, max_bid:e.target.value}}))}
                   style={{ width:"100%", fontSize:12, padding:"6px 8px", borderRadius:6,
@@ -4012,7 +4015,7 @@ const RulesPage = ({ workspaceId }) => {
                     onChange={e => setForm(f => ({...f, dry_run:e.target.checked}))}
                     style={{ accentColor:"var(--ac)", width:14, height:14 }} />
                   <span style={{ color:form.dry_run?"var(--amb)":"var(--tx2)" }}>
-                    {t("rules.dryRun")} (симуляция)
+                    {t("rules.dryRun")}
                   </span>
                 </label>
               </div>
@@ -4053,14 +4056,14 @@ const RulesPage = ({ workspaceId }) => {
                   <div style={{ display:"flex", justifyContent:"space-between", marginBottom:16 }}>
                     <div>
                       <div style={{ fontFamily:"var(--disp)", fontSize:16, fontWeight:700 }}>
-                        {r.dry_run ? "🔍 Симуляция" : "✅ Результат запуска"}
+                        {r.dry_run ? t("rules.simulation") : t("rules.runResult")}
                       </div>
                       <div style={{ fontSize:12, color:"var(--tx3)", marginTop:4 }}>
                         {r.period?.start} – {r.period?.end}
-                        {r.period?.days ? ` · ${r.period.days === 1 ? "вчера" : r.period.days + "д"}` : ""}
+                        {r.period?.days ? ` · ${r.period.days === 1 ? t("rules.yesterday") : t("rules.periodDays", { days: r.period.days })}` : ""}
                         {r.entity_counts
-                          ? ` · ${r.entity_counts.keywords || 0} ключей + ${r.entity_counts.targets || 0} таргетов`
-                          : ` · ${r.total_evaluated} объектов проверено`}
+                          ? ` · ${r.entity_counts.keywords || 0} kw + ${r.entity_counts.targets || 0} tgt`
+                          : ` · ${r.total_evaluated} ${t("rules.evaluated").toLowerCase()}`}
                       </div>
                     </div>
                     <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}>✕</button>
@@ -4068,9 +4071,9 @@ const RulesPage = ({ workspaceId }) => {
 
                   <div style={{ display:"flex", gap:12, marginBottom:16 }}>
                     {[
-                      { label:"Проверено",   val:r.total_evaluated, color:"var(--tx2)" },
-                      { label:"Совпало",     val:r.matched_count,   color:"var(--amb)" },
-                      { label:r.dry_run?"Изменилось бы":"Изменено", val:r.applied_count, color:"var(--grn)" },
+                      { label:t("rules.evaluated"), val:r.total_evaluated, color:"var(--tx2)" },
+                      { label:t("rules.matched"),   val:r.matched_count,   color:"var(--amb)" },
+                      { label:r.dry_run ? t("rules.willChange") : t("rules.changed"), val:r.applied_count, color:"var(--grn)" },
                     ].map(s => (
                       <div key={s.label} className="card" style={{ flex:1, padding:"12px 14px",
                         background:"var(--s2)", textAlign:"center" }}>
@@ -4082,7 +4085,7 @@ const RulesPage = ({ workspaceId }) => {
 
                   {r.applied?.length > 0 ? (
                     <div>
-                      <div style={LABEL}>{r.dry_run ? "Будет изменено" : "Изменено"}</div>
+                      <div style={LABEL}>{r.dry_run ? t("rules.willChange") : t("rules.changed")}</div>
                       <div style={{ maxHeight:280, overflowY:"auto" }}>
                         {r.applied.map((a, i) => {
                           const entityLabel = a.keyword_text || (a.expression
@@ -4139,7 +4142,7 @@ const RulesPage = ({ workspaceId }) => {
 
       {/* ── Rules List ── */}
       {loading ? (
-        <div style={{ color:"var(--tx3)", padding:20 }}>Загрузка…</div>
+        <div style={{ color:"var(--tx3)", padding:20 }}>{t("common.loading")}</div>
       ) : rules.length === 0 ? (
         <div className="card" style={{ padding:"48px 32px", textAlign:"center" }}>
           <div style={{ fontSize:32, marginBottom:10 }}>⟁</div>
@@ -4179,7 +4182,7 @@ const RulesPage = ({ workspaceId }) => {
                         {scope.entity_type === "product_target" ? "🎯 targets" : "⌨ keywords"}
                       </span>
                       <span className="badge" style={{ fontSize:9, background:"var(--s3)", color:"var(--tx2)" }}>
-                        {scope.period_days === 1 ? "вчера" : `${scope.period_days || 14}д`}
+                        {scope.period_days === 1 ? t("rules.yesterday") : t("rules.periodDays", { days: scope.period_days || 14 })}
                       </span>
                       {last && (
                         <span style={{ fontSize:11, color:"var(--tx3)" }}>
@@ -4198,7 +4201,7 @@ const RulesPage = ({ workspaceId }) => {
                           background:"rgba(99,102,241,.12)", border:"1px solid rgba(99,102,241,.25)",
                           borderRadius:20, color:"var(--ac2)", fontFamily:"var(--mono)" }}>
                           {i > 0 && <span style={{ color:"var(--tx3)", marginRight:4 }}>AND</span>}
-                          {RULE_METRICS.find(m=>m.value===c.metric)?.label}
+                          {ruleMetrics.find(m=>m.value===c.metric)?.label}
                           {" "}{RULE_OPS.find(o=>o.value===c.op)?.label}
                           {" "}{c.value}
                         </span>
@@ -4208,7 +4211,7 @@ const RulesPage = ({ workspaceId }) => {
                         <span key={i} style={{ fontSize:11, padding:"3px 8px",
                           background:"rgba(34,197,94,.1)", border:"1px solid rgba(34,197,94,.25)",
                           borderRadius:20, color:"var(--grn)" }}>
-                          {RULE_ACTIONS_LIST.find(al=>al.value===a.type)?.label}
+                          {ruleActionsList.find(al=>al.value===a.type)?.label}
                           {a.value ? ` ${a.value}${a.type==="adjust_bid_pct"?"%":"€"}` : ""}
                         </span>
                       ))}
@@ -4216,10 +4219,10 @@ const RulesPage = ({ workspaceId }) => {
 
                     {/* Scope summary */}
                     <div style={{ fontSize:11, color:"var(--tx3)" }}>
-                      {(scope.campaign_ids?.length) ? `${scope.campaign_ids.length} кампаний` : t("rules.allEntities")}
+                      {(scope.campaign_ids?.length) ? t("rules.campaigns") + `: ${scope.campaign_ids.length}` : t("rules.allEntities")}
                       {scope.campaign_type ? ` · ${scope.campaign_type.replace("sponsored","").toUpperCase()}` : ""}
                       {scope.match_types?.length ? ` · ${scope.match_types.join("/")}` : ""}
-                      {scope.ad_group_ids?.length ? ` · ${scope.ad_group_ids.length} групп` : ""}
+                      {scope.ad_group_ids?.length ? ` · ${t("rules.adGroups")}: ${scope.ad_group_ids.length}` : ""}
                       {scope.campaign_name_contains ? ` · "${scope.campaign_name_contains}"` : ""}
                       {scope.targeting_type ? ` · ${scope.targeting_type}` : ""}
                     </div>
@@ -4440,18 +4443,18 @@ const AlertsPage = ({ workspaceId }) => {
                 ))}
               </div>
               <div style={{ fontSize: 13, color: "var(--tx2)" }}>
-                {((configPage - 1) * configPageSize) + 1}–{Math.min(configPage * configPageSize, configsData.pagination.total)} из {configsData.pagination.total}
+                {((configPage - 1) * configPageSize) + 1}–{Math.min(configPage * configPageSize, configsData.pagination.total)} {t("common.of")} {configsData.pagination.total}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-                  onClick={() => setConfigPage(p => Math.max(1, p - 1))} disabled={configPage === 1}>← Назад</button>
+                  onClick={() => setConfigPage(p => Math.max(1, p - 1))} disabled={configPage === 1}>{t("common.back")}</button>
                 {getPageRange(configPage, configsData.pagination.pages ?? 1).map((p, i) =>
                   p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
                   : <button key={p} onClick={() => setConfigPage(p)} className={`btn ${configPage === p ? "btn-primary" : "btn-ghost"}`}
                       style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
                 )}
                 <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-                  onClick={() => setConfigPage(p => Math.min(configsData.pagination.pages ?? 1, p + 1))} disabled={configPage === (configsData.pagination.pages ?? 1)}>Вперёд →</button>
+                  onClick={() => setConfigPage(p => Math.min(configsData.pagination.pages ?? 1, p + 1))} disabled={configPage === (configsData.pagination.pages ?? 1)}>{t("common.next")}</button>
               </div>
             </div>
           )}
@@ -4511,18 +4514,18 @@ const AlertsPage = ({ workspaceId }) => {
                 ))}
               </div>
               <div style={{ fontSize: 13, color: "var(--tx2)" }}>
-                {((instancePage - 1) * instancePageSize) + 1}–{Math.min(instancePage * instancePageSize, instancesData.pagination.total)} из {instancesData.pagination.total}
+                {((instancePage - 1) * instancePageSize) + 1}–{Math.min(instancePage * instancePageSize, instancesData.pagination.total)} {t("common.of")} {instancesData.pagination.total}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-                  onClick={() => setInstancePage(p => Math.max(1, p - 1))} disabled={instancePage === 1}>← Назад</button>
+                  onClick={() => setInstancePage(p => Math.max(1, p - 1))} disabled={instancePage === 1}>{t("common.back")}</button>
                 {getPageRange(instancePage, instancesData.pagination.pages ?? 1).map((p, i) =>
                   p === "..." ? <span key={`e${i}`} style={{ padding: "0 6px", color: "var(--tx3)" }}>…</span>
                   : <button key={p} onClick={() => setInstancePage(p)} className={`btn ${instancePage === p ? "btn-primary" : "btn-ghost"}`}
                       style={{ fontSize: 11, padding: "4px 8px", minWidth: 32 }}>{p}</button>
                 )}
                 <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
-                  onClick={() => setInstancePage(p => Math.min(instancesData.pagination.pages ?? 1, p + 1))} disabled={instancePage === (instancesData.pagination.pages ?? 1)}>Вперёд →</button>
+                  onClick={() => setInstancePage(p => Math.min(instancesData.pagination.pages ?? 1, p + 1))} disabled={instancePage === (instancesData.pagination.pages ?? 1)}>{t("common.next")}</button>
               </div>
             </div>
           )}
