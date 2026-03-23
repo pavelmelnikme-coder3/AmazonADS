@@ -101,8 +101,38 @@ const Styles = () => (
     .num{font-family:var(--mono);font-size:13px}
     .loader{width:14px;height:14px;border:2px solid rgba(255,255,255,.2);
       border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+    /* S1-3: ACOS semantic color — applied via acosColor() inline style helper */
+    /* S1-5: Hover-row action visibility */
+    .tbl-row .act-cell { opacity: 0; transition: opacity 150ms ease; }
+    .tbl-row:hover .act-cell { opacity: 1; }
+    .tbl-row.row-selected .act-cell { opacity: 1; }
+    @media (hover: none) { .tbl-row .act-cell { opacity: 1; } }
+    /* S1-7: Last sync timestamp */
+    .last-sync-label { font-size: 11px; color: var(--tx3); white-space: nowrap; }
   `}</style>
 );
+
+// ─── ACOS semantic color helper (S1-3) ────────────────────────────────────────
+const acosColor = (pct) => {
+  if (pct == null || isNaN(pct)) return 'var(--tx2)';
+  if (pct < 15)  return 'var(--grn)';
+  if (pct <= 30) return 'var(--amb)';
+  return 'var(--red)';
+};
+
+// ─── Last-sync relative time helper (S1-7) ────────────────────────────────────
+const fmtLastSync = (isoString) => {
+  if (!isoString) return null;
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60000);
+  const hrs  = Math.floor(diff / 3600000);
+  if (mins < 1)  return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  if (hrs  < 24) return `${hrs}h ago`;
+  const d = new Date(isoString);
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
+         + ', ' + d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+};
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const API = (import.meta?.env?.VITE_API_URL) || "http://localhost:4000/api/v1";
@@ -1346,6 +1376,22 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
     [workspaceId]
   );
 
+  // S1-7: connections for last-sync timestamp
+  const [connections, setConnections] = useState([]);
+  useEffect(() => {
+    if (workspaceId) {
+      get("/connections").then(data => {
+        if (Array.isArray(data)) setConnections(data);
+      }).catch(() => {});
+    }
+  }, [workspaceId]);
+  const lastSync = connections.length
+    ? connections.reduce((latest, c) =>
+        !latest || new Date(c.last_refresh_at) > new Date(latest)
+          ? c.last_refresh_at : latest
+      , null)
+    : null;
+
   // Update layout when user settings load
   useEffect(() => {
     if (user?.settings?.dashboardLayout) {
@@ -1527,7 +1573,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
                       <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{typeLabel(c.campaign_type)}</span></td>
                       <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend).toFixed(0)}</td>
                       <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
-                      <td className="num" style={{ textAlign: "right", color: parseFloat(c.acos) > 20 ? "var(--red)" : "var(--grn)" }}>
+                      <td className="num" style={{ textAlign: "right", color: acosColor(parseFloat(c.acos)) }}>
                         {parseFloat(c.acos) > 0 ? `${parseFloat(c.acos).toFixed(1)}%` : "—"}
                       </td>
                       <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
@@ -1564,7 +1610,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
                       <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{typeLabel(r.campaign_type)}</span></td>
                       <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(r.spend || 0).toFixed(0)}</td>
                       <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{parseFloat(r.sales || 0) > 0 ? `$${parseFloat(r.sales).toFixed(0)}` : "—"}</td>
-                      <td className="num" style={{ textAlign: "right", color: parseFloat(r.acos || 0) > 20 ? "var(--red)" : "var(--grn)" }}>
+                      <td className="num" style={{ textAlign: "right", color: acosColor(parseFloat(r.acos || 0)) }}>
                         {parseFloat(r.acos || 0) > 0 ? `${parseFloat(r.acos).toFixed(1)}%` : "—"}
                       </td>
                       <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
@@ -1676,6 +1722,11 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
           >
             <Ic icon={Repeat} size={13} /> {t("overview.refreshData")}
           </button>
+          {lastSync && (
+            <span className="last-sync-label" style={{ marginLeft: 2 }}>
+              · {fmtLastSync(lastSync)}
+            </span>
+          )}
           <SyncButton workspaceId={workspaceId} onSynced={() => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); }} />
           {[["7","7d"],["14","14d"],["30","30d"],["90","90d"]].map(([val,label]) => (
             <button
@@ -2146,6 +2197,22 @@ const CampaignsPage = ({ workspaceId }) => {
     "campaigns", [36, 200, 80, 90, 95, 85, 85, 75, 75, 60]
   );
 
+  // S1-7: connections for last-sync timestamp
+  const [connections, setConnections] = useState([]);
+  useEffect(() => {
+    if (workspaceId) {
+      get("/connections").then(data => {
+        if (Array.isArray(data)) setConnections(data);
+      }).catch(() => {});
+    }
+  }, [workspaceId]);
+  const lastSync = connections.length
+    ? connections.reduce((latest, c) =>
+        !latest || new Date(c.last_refresh_at) > new Date(latest)
+          ? c.last_refresh_at : latest
+      , null)
+    : null;
+
   function handleCampSort(field) {
     const isText = ["name", "state"].includes(field);
     if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
@@ -2281,6 +2348,11 @@ const CampaignsPage = ({ workspaceId }) => {
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
+          {lastSync && (
+            <span className="last-sync-label" style={{ marginLeft: 2 }}>
+              · {fmtLastSync(lastSync)}
+            </span>
+          )}
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={campResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
@@ -2323,7 +2395,7 @@ const CampaignsPage = ({ workspaceId }) => {
                   </thead>
                   <tbody>
                     {campaigns.map(c => (
-                      <tr key={c.id}>
+                      <tr key={c.id} className={`tbl-row${selected.has(c.id) ? ' row-selected' : ''}`}>
                         <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelect(c.id)} /></td>
                         <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>{c.name}</td>
                         <td><span className="badge bg-bl">{typeLabel(c.campaign_type)}</span></td>
@@ -2347,13 +2419,13 @@ const CampaignsPage = ({ workspaceId }) => {
                         <td className="num" style={{ textAlign: "right" }}>${parseFloat(c.daily_budget || 0).toFixed(0)}</td>
                         <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend || 0).toFixed(0)}</td>
                         <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
-                        <td className="num" style={{ textAlign: "right", color: c.acos > 20 ? "var(--red)" : c.acos > 0 ? "var(--grn)" : "var(--tx3)" }}>
+                        <td className="num" style={{ textAlign: "right", color: acosColor(c.acos) }}>
                           {c.acos > 0 ? `${parseFloat(c.acos).toFixed(1)}%` : "—"}
                         </td>
                         <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
                           {c.roas > 0 ? `${parseFloat(c.roas).toFixed(2)}×` : "—"}
                         </td>
-                        <td>
+                        <td className="act-cell">
                           {editId === c.id
                             ? (
                               <div style={{ display: "flex", gap: 4 }}>
@@ -2955,6 +3027,22 @@ const KeywordsPage = ({ workspaceId }) => {
     "keywords", [36, 220, 90, 100, 90, 170, 90]
   );
 
+  // S1-7: connections for last-sync timestamp
+  const [connections, setConnections] = useState([]);
+  useEffect(() => {
+    if (workspaceId) {
+      get("/connections").then(data => {
+        if (Array.isArray(data)) setConnections(data);
+      }).catch(() => {});
+    }
+  }, [workspaceId]);
+  const lastSync = connections.length
+    ? connections.reduce((latest, c) =>
+        !latest || new Date(c.last_refresh_at) > new Date(latest)
+          ? c.last_refresh_at : latest
+      , null)
+    : null;
+
   function handleKwSort(field) {
     const isText = ["keyword_text", "match_type", "state", "campaign"].includes(field);
     if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
@@ -3096,6 +3184,11 @@ const KeywordsPage = ({ workspaceId }) => {
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
+          {lastSync && (
+            <span className="last-sync-label" style={{ marginLeft: 2 }}>
+              · {fmtLastSync(lastSync)}
+            </span>
+          )}
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={kwResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
@@ -3146,7 +3239,7 @@ const KeywordsPage = ({ workspaceId }) => {
                   </thead>
                   <tbody>
                     {keywords.map(kw => (
-                      <tr key={kw.id}>
+                      <tr key={kw.id} className={`tbl-row${selected.has(kw.id) ? ' row-selected' : ''}`}>
                         <td><input type="checkbox" checked={selected.has(kw.id)} onChange={() => toggleSelect(kw.id)} /></td>
                         <td style={{ fontWeight: 500 }}>{kw.keyword_text}</td>
                         <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>
@@ -3173,7 +3266,7 @@ const KeywordsPage = ({ workspaceId }) => {
                           }
                         </td>
                         <td style={{ fontSize: 11, color: "var(--tx3)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kw.campaign_name}</td>
-                        <td>
+                        <td className="act-cell">
                           {editId !== kw.id && (
                             <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}>
                               {t("keywords.editBid")}
