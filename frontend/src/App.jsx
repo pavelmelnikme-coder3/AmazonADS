@@ -4188,7 +4188,7 @@ const RuleWizardModal = ({
           {step === 1 && (
             <div>
               {/* Template grid — only for new rules with empty name */}
-              {!editRule && !form.name && (
+              {!editRule?.id && !form.name && (
                 <div style={{ marginBottom:20 }}>
                   <div style={{ fontSize:11, color:"var(--tx3)", textTransform:"uppercase",
                     letterSpacing:"0.06em", fontWeight:600, marginBottom:10 }}>
