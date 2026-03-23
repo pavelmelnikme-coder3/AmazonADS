@@ -114,6 +114,9 @@ const Styles = () => (
     .audit-date-group td { padding: 4px 8px; font-size: 11px; color: var(--tx3);
       background: var(--s2); border-bottom: 1px solid var(--b1);
       font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+    /* S1-4: Clickable status badge */
+    .status-clickable { cursor: pointer; }
+    .status-clickable:hover { opacity: 0.75; text-decoration: underline dotted; }
   `}</style>
 );
 
@@ -2522,7 +2525,11 @@ const CampaignsPage = ({ workspaceId }) => {
                               </select>
                             )
                             : (
-                              <span className={`tag ${c.state === "enabled" ? "tag-on" : c.state === "paused" ? "tag-pause" : "tag-arch"}`}>
+                              <span
+                                className={`tag status-clickable ${c.state === "enabled" ? "tag-on" : c.state === "paused" ? "tag-pause" : "tag-arch"}`}
+                                onClick={() => { setEditId(c.id); setEditState(c.state); }}
+                                title="Click to change status"
+                              >
                                 <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
                                 {c.state}
                               </span>
@@ -3401,7 +3408,11 @@ const KeywordsPage = ({ workspaceId }) => {
                         <td style={{ fontWeight: 500 }}>{kw.keyword_text}</td>
                         <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>
                         <td>
-                          <span className={`tag ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}>
+                          <span
+                            className={`tag status-clickable ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}
+                            onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}
+                            title="Click to edit"
+                          >
                             <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
                             {kw.state}
                           </span>
@@ -3920,6 +3931,52 @@ const RULE_CAMP_TYPES = (t) => [
 ];
 
 // ─── Rule Wizard Modal ────────────────────────────────────────────────────────
+// ─── Rule templates (S1-1) ────────────────────────────────────────────────────
+const RULE_TEMPLATES = [
+  {
+    id: 'pause_losing_kw', icon: '🔥', label: 'Pause losing keywords',
+    description: 'Stop keywords with high spend and no orders',
+    name: 'Pause — High Clicks, Zero Orders', entityType: 'keyword', periodDays: 30,
+    conditions: [{ metric: 'clicks', op: 'gte', value: '20' }, { metric: 'orders', op: 'eq', value: '0' }],
+    actions: [{ type: 'pause_keyword', value: '' }], dry_run: true,
+  },
+  {
+    id: 'cut_high_acos', icon: '💸', label: 'Cut high ACOS bids',
+    description: 'Reduce bids when ACOS exceeds target',
+    name: 'Bid Down — ACOS > 40%', entityType: 'keyword', periodDays: 14,
+    conditions: [{ metric: 'acos', op: 'gt', value: '40' }, { metric: 'clicks', op: 'gte', value: '10' }],
+    actions: [{ type: 'adjust_bid_pct', value: '-15' }], dry_run: true,
+  },
+  {
+    id: 'boost_top_performers', icon: '📈', label: 'Boost top performers',
+    description: 'Increase bids on high-ROAS keywords',
+    name: 'Bid Up — ROAS > 5×, Active Orders', entityType: 'keyword', periodDays: 14,
+    conditions: [{ metric: 'roas', op: 'gt', value: '5' }, { metric: 'orders', op: 'gte', value: '3' }],
+    actions: [{ type: 'adjust_bid_pct', value: '15' }], dry_run: true,
+  },
+  {
+    id: 'add_negatives', icon: '🚫', label: 'Add wasted spend to negatives',
+    description: 'Negate keywords with clicks but no sales',
+    name: 'Negative Exact — Spend > €20, Zero Orders', entityType: 'keyword', periodDays: 30,
+    conditions: [{ metric: 'spend', op: 'gt', value: '20' }, { metric: 'orders', op: 'eq', value: '0' }],
+    actions: [{ type: 'add_negative_keyword', value: 'exact' }], dry_run: true,
+  },
+  {
+    id: 'pause_zero_targets', icon: '⏸', label: 'Pause non-converting targets',
+    description: 'Stop product targets that spend without orders',
+    name: 'Pause Targets — Clicks ≥ 10, Zero Orders', entityType: 'product_target', periodDays: 30,
+    conditions: [{ metric: 'clicks', op: 'gte', value: '10' }, { metric: 'orders', op: 'eq', value: '0' }],
+    actions: [{ type: 'pause_target', value: '' }], dry_run: true,
+  },
+  {
+    id: 'lower_low_roas', icon: '📉', label: 'Lower bids on low ROAS',
+    description: 'Reduce bids when ROAS falls below threshold',
+    name: 'Bid Down — ROAS < 2×', entityType: 'keyword', periodDays: 14,
+    conditions: [{ metric: 'roas', op: 'lt', value: '2' }, { metric: 'clicks', op: 'gte', value: '15' }],
+    actions: [{ type: 'adjust_bid_pct', value: '-10' }], dry_run: true,
+  },
+];
+
 const RuleWizardModal = ({
   form, setForm, editRule, campaigns, adGroups,
   ruleMetrics, ruleActionsList, ruleCampTypes,
@@ -3933,6 +3990,10 @@ const RuleWizardModal = ({
   const [nameErr, setNameErr] = useState(false);
   const [condErr, setCondErr] = useState(false);
   const [campSearch, setCampSearch] = useState("");
+  // S1-2: preview state
+  const [previewData, setPreviewData] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState(null);
 
   const LABEL = { fontSize:11, color:"var(--tx3)", marginBottom:4,
     fontFamily:"var(--mono)", textTransform:"uppercase", letterSpacing:".05em" };
@@ -4002,6 +4063,45 @@ const RuleWizardModal = ({
     );
   };
 
+  // S1-1: apply template
+  const applyTemplate = (tpl) => {
+    setForm(f => ({
+      ...f,
+      name: tpl.name,
+      dry_run: tpl.dry_run,
+      conditions: tpl.conditions,
+      actions: tpl.actions,
+      scope: { ...f.scope, entity_type: tpl.entityType, period_days: tpl.periodDays },
+    }));
+    setStep(2);
+  };
+
+  // S1-2: handle preview
+  const handlePreview = async () => {
+    setPreviewData(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    setStep(4);
+    try {
+      if (editRule?.id) {
+        const result = await post(`/rules/${editRule.id}/run`, { dry_run: true });
+        setPreviewData(result);
+      } else {
+        const tempName = `__preview_${Date.now()}`;
+        const created = await post('/rules', { ...form, name: tempName, dry_run: true, is_active: false });
+        if (created?.id) {
+          const result = await post(`/rules/${created.id}/run`, { dry_run: true });
+          setPreviewData(result);
+          await del(`/rules/${created.id}`);
+        }
+      }
+    } catch (e) {
+      setPreviewError('Preview failed — you can still save the rule directly.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const goNext = () => {
     if (step === 1) {
       if (!form.name.trim()) { setNameErr(true); return; }
@@ -4013,14 +4113,18 @@ const RuleWizardModal = ({
       setStep(3);
     }
   };
-  const goBack  = () => setStep(s => s - 1);
-  const goClose = () => { onClose(); setStep(1); };
+  const goBack  = () => {
+    if (step === 4) { setStep(3); setPreviewData(null); }
+    else setStep(s => s - 1);
+  };
+  const goClose = () => { onClose(); setStep(1); setPreviewData(null); setPreviewLoading(false); setPreviewError(null); };
 
   // Stepper header
   const steps = [
     { n:1, label: t("rules.wizardStep1") || "Основное" },
     { n:2, label: t("rules.wizardStep2") || "Условия" },
     { n:3, label: t("rules.wizardStep3") || "Действия" },
+    { n:4, label: "Предпросмотр" },
   ];
 
   const filteredCamps = (campaigns || []).filter(c =>
@@ -4083,6 +4187,39 @@ const RuleWizardModal = ({
           {/* ════ STEP 1: Basics ════ */}
           {step === 1 && (
             <div>
+              {/* Template grid — only for new rules with empty name */}
+              {!editRule && !form.name && (
+                <div style={{ marginBottom:20 }}>
+                  <div style={{ fontSize:11, color:"var(--tx3)", textTransform:"uppercase",
+                    letterSpacing:"0.06em", fontWeight:600, marginBottom:10 }}>
+                    Start from a template
+                  </div>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+                    {RULE_TEMPLATES.map(tpl => (
+                      <button key={tpl.id} onClick={() => applyTemplate(tpl)}
+                        style={{ background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:8,
+                          padding:"10px 12px", cursor:"pointer", textAlign:"left", transition:"border-color 150ms",
+                          display:"flex", flexDirection:"column", gap:4 }}
+                        onMouseEnter={e => e.currentTarget.style.borderColor = "var(--ac)"}
+                        onMouseLeave={e => e.currentTarget.style.borderColor = "var(--b2)"}>
+                        <span style={{ fontSize:16 }}>{tpl.icon}</span>
+                        <span style={{ fontSize:12, fontWeight:600, color:"var(--tx)", lineHeight:1.3 }}>
+                          {tpl.label}
+                        </span>
+                        <span style={{ fontSize:11, color:"var(--tx3)", lineHeight:1.4 }}>
+                          {tpl.description}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:10, margin:"14px 0 2px" }}>
+                    <div style={{ flex:1, height:1, background:"var(--b2)" }} />
+                    <span style={{ fontSize:11, color:"var(--tx3)" }}>or build from scratch</span>
+                    <div style={{ flex:1, height:1, background:"var(--b2)" }} />
+                  </div>
+                </div>
+              )}
+
               <div style={{ marginBottom:14 }}>
                 <div style={LABEL}>{t("rules.name")} *</div>
                 <input value={form.name} onChange={e => { setForm(f => ({...f, name:e.target.value})); setNameErr(false); }}
@@ -4414,6 +4551,102 @@ const RuleWizardModal = ({
               </div>
             </div>
           )}
+
+          {/* ════ STEP 4: Preview ════ */}
+          {step === 4 && (
+            <div>
+              <div style={{ marginBottom:16, fontSize:13, color:"var(--tx2)" }}>
+                Dry-run preview — rule evaluated against current data. No changes applied.
+              </div>
+
+              {previewLoading && (
+                <div style={{ display:"flex", alignItems:"center", gap:10, padding:"32px 0",
+                  justifyContent:"center", color:"var(--tx3)", fontSize:13 }}>
+                  <div style={{ width:18, height:18, border:"2px solid var(--ac)",
+                    borderTopColor:"transparent", borderRadius:"50%",
+                    animation:"spin 0.7s linear infinite" }} />
+                  Running preview…
+                </div>
+              )}
+
+              {previewError && (
+                <div style={{ background:"rgba(239,68,68,.08)", border:"1px solid var(--red)",
+                  borderRadius:8, padding:"12px 16px", fontSize:13, color:"var(--red)", marginBottom:16 }}>
+                  {previewError}
+                </div>
+              )}
+
+              {previewData && !previewLoading && (
+                <div>
+                  {/* Summary stats */}
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:20 }}>
+                    {[
+                      { label:"Entities matched",  value: previewData.matched_count ?? previewData.actions_taken ?? "—" },
+                      { label:"Actions planned",   value: previewData.actions_planned ?? previewData.actions_taken ?? "—" },
+                      { label:"Mode",              value: previewData.dry_run ? "Dry-run" : "Live" },
+                    ].map(stat => (
+                      <div key={stat.label} style={{ background:"var(--s2)", border:"1px solid var(--b2)",
+                        borderRadius:8, padding:"12px 16px", textAlign:"center" }}>
+                        <div style={{ fontSize:22, fontWeight:700, fontFamily:"var(--disp)",
+                          color:"var(--ac)" }}>{stat.value}</div>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginTop:3 }}>{stat.label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Sample matches table */}
+                  {Array.isArray(previewData.sample_matches) && previewData.sample_matches.length > 0 && (
+                    <div>
+                      <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:8, textTransform:"uppercase",
+                        letterSpacing:"0.06em", fontWeight:600 }}>
+                        Sample matches (up to 10)
+                      </div>
+                      <div style={{ border:"1px solid var(--b2)", borderRadius:8, overflow:"hidden" }}>
+                        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                          <thead>
+                            <tr style={{ background:"var(--s2)" }}>
+                              <th style={{ textAlign:"left", padding:"8px 12px", color:"var(--tx3)",
+                                fontWeight:600, fontSize:11 }}>Keyword / Target</th>
+                              <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)",
+                                fontWeight:600, fontSize:11 }}>Action</th>
+                              <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)",
+                                fontWeight:600, fontSize:11 }}>Value</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {previewData.sample_matches.slice(0, 10).map((m, i) => (
+                              <tr key={i} style={{ borderTop:"1px solid var(--b1)" }}>
+                                <td style={{ padding:"7px 12px", color:"var(--tx2)", maxWidth:260,
+                                  overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                  {m.keyword_text || m.target_text || m.entity_id}
+                                </td>
+                                <td style={{ padding:"7px 12px", textAlign:"right", color:"var(--tx3)" }}>
+                                  {m.action_type?.replace(/_/g," ")}
+                                </td>
+                                <td style={{ padding:"7px 12px", textAlign:"right",
+                                  color: m.action_value ? "var(--ac2)" : "var(--tx3)" }}>
+                                  {m.action_value ?? "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* No matches */}
+                  {(previewData.matched_count === 0 || previewData.actions_taken === 0) &&
+                    (!previewData.sample_matches || previewData.sample_matches.length === 0) && (
+                    <div style={{ padding:"20px", textAlign:"center", color:"var(--tx3)", fontSize:13,
+                      background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
+                      No entities matched the current conditions — rule will have no effect.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── Footer ── */}
@@ -4432,6 +4665,17 @@ const RuleWizardModal = ({
             <button onClick={goNext} className="btn btn-primary" style={{ fontSize:12, padding:"7px 20px" }}>
               {t("common.next")} <ChevronRight size={13} strokeWidth={1.75} />
             </button>
+          ) : step === 3 ? (
+            <>
+              <button onClick={goClose} className="btn btn-ghost" style={{ fontSize:12, padding:"7px 16px" }}>
+                {t("common.cancel")}
+              </button>
+              <button onClick={handlePreview} className="btn btn-primary"
+                style={{ fontSize:12, padding:"7px 20px" }}
+                disabled={!form.name || !form.conditions.length || !form.actions.length}>
+                Предпросмотр <ChevronRight size={13} strokeWidth={1.75} />
+              </button>
+            </>
           ) : (
             <>
               <button onClick={goClose} className="btn btn-ghost" style={{ fontSize:12, padding:"7px 16px" }}>
