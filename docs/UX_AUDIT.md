@@ -1,6 +1,7 @@
 # AdsFlow UX Audit — World-Class Standards
 
-> Date: March 2026
+> Date: 23 March 2026
+> Sprint 1 complete — 10/10 items delivered
 > Methodology: Live audit of all 12 sections + analysis of Pacvue, Helium10, Scale Insights, Intentwise, Adbrew + Nielsen Norman Group research
 
 ---
@@ -276,21 +277,26 @@ This is the single highest-signal metric for Amazon PPC health — green/yellow/
 
 | Feature | AdsFlow | Pacvue | Helium10 | Scale Insights | Intentwise |
 |---------|---------|--------|----------|----------------|------------|
-| Rule templates | ❌ | ✅ | ✅ | ✅ | ❌ |
-| Rule preview (object count) | ❌ | ✅ | ✅ | ✅ | ❌ |
-| ACOS color coding | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Inline status toggle | ❌ | ✅ | ✅ | ❌ | ✅ |
-| Search term harvesting | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Dayparting | ❌ | ✅ | ✅ | ✅ | ❌ |
-| AND/OR rule logic | ❌ | ✅ | ❌ | ✅ | ✅ |
-| Drill-down in tables | ❌ | ✅ | ✅ | ❌ | ✅ |
-| Budget utilization bar | ❌ | ✅ | ❌ | ❌ | ❌ |
-| Write-back to Amazon | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Algorithm stacking | ❌ | ❌ | ❌ | ✅ | ❌ |
-| Saved filter presets | ✅ | ✅ | ❌ | ❌ | ❌ |
-| 3-step rule wizard | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Live rule preview sentence | ✅ | ❌ | ❌ | ❌ | ❌ |
-| AI recommendations | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Rule templates | ✅ S1 Done | ✅ | ✅ | ✅ | ❌ |
+| Rule preview (object count) | ✅ S1 Done | ✅ | ✅ | ✅ | ❌ |
+| ACOS color coding | ✅ S1 Done | ✅ | ✅ | ✅ | ✅ |
+| Inline status toggle | ✅ S1 Done | ✅ | ✅ | ❌ | ✅ |
+| Search term harvesting | ❌ S3 | ✅ | ✅ | ✅ | ✅ |
+| Dayparting | ❌ S2 | ✅ | ✅ | ✅ | ❌ |
+| AND/OR rule logic | ❌ S2 | ✅ | ❌ | ✅ | ✅ |
+| Drill-down in tables | ❌ S2 | ✅ | ✅ | ❌ | ✅ |
+| Budget utilization bar | ❌ S2 | ✅ | ❌ | ❌ | ❌ |
+| Write-back to Amazon | ❌ S4 | ✅ | ✅ | ✅ | ✅ |
+| Algorithm stacking | ❌ S4 | ❌ | ❌ | ✅ | ❌ |
+| Hover-row actions | ✅ S1 Done | ✅ | ✅ | ❌ | ✅ |
+| Tooltips on technical terms | ✅ S1 Done | ❌ | ❌ | ❌ | ❌ |
+| Last sync timestamp | ✅ S1 Done | ✅ | ❌ | ❌ | ❌ |
+| Readable audit log | ✅ S1 Done | ✅ | ❌ | ✅ | ❌ |
+| Guided empty states | ✅ S1 Done | ✅ | ✅ | ❌ | ❌ |
+| Saved filter presets | ✅ Existing | ✅ | ❌ | ❌ | ❌ |
+| 3/4-step rule wizard | ✅ Existing | ❌ | ❌ | ❌ | ❌ |
+| Live rule preview sentence | ✅ Existing | ❌ | ❌ | ❌ | ❌ |
+| AI recommendations | ✅ Existing | ✅ | ✅ | ❌ | ❌ |
 
 ---
 

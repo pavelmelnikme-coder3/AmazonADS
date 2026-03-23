@@ -462,29 +462,40 @@ curl -X POST http://localhost:3000/api/v1/jobs/backfill-metrics \
 ### Change History
 - [x] Append-only audit with rollback, filters, sort, diff display
 
-### UI / Design System
-- [x] **Lucide React icons** — all unicode glyphs replaced with SVG (strokeWidth 1.75, consistent sizing)
-- [x] **Rule creation wizard** — 3-step flow: Basics → Conditions → Actions
+### UI / Design System — Sprint 1 ✅ Complete
+- [x] **Lucide React icons** — all unicode glyphs replaced with SVG (strokeWidth 1.75)
+- [x] **S1-3 ACOS semantic colors** — `acosColor()`: green < 15%, amber 15–30%, red > 30%
+- [x] **S1-4 Inline status toggle** — status badge clickable in Campaigns + Keywords tables
+- [x] **S1-5 Hover-row actions** — opacity 0→1 on row hover (150ms), always-on when selected
+- [x] **S1-6 Tooltips** — `Tip` component (zero deps): COOLDOWN, Attribution Window, SIM, Data Period
+- [x] **S1-7 Last sync timestamp** — `· X min ago` after Refresh in all 3 data pages
+- [x] **S1-8 Readable audit events** — 14-entry label map + date group separators + entity names
+- [x] **S1-9 Products empty state** — guided empty state, removed dev error message
+- [x] **S1-10 Reports UX** — date presets (7d/14d/30d), readable period/type, failed tooltip
+- [x] **S1-1 Rule templates** — 6 templates in 3×2 grid, auto-fill wizard + jump to Step 2
+- [x] **S1-2 Rule preview** — Step 4 wizard: dry-run via API, stat cards + sample matches table
+- [x] **Rule creation wizard** — 4-step flow: Basics → Conditions → Actions → Preview
 - [x] **Live rule preview** — IF/THEN sentence updates reactively as user edits
 - [x] **Condition row layout** — metric/operator/value flex proportions fixed
 - [x] **Unit suffixes** — €, %, × appear inline after condition value input
-- [x] **Campaign search** in rule scope — filters 40+ campaign checkbox list in real time
+- [x] **Campaign search** — filters 40+ campaign checkbox list in rule scope
 
 ### 📋 Roadmap
 See [docs/ROADMAP.md](./docs/ROADMAP.md) for the full prioritized feature roadmap.
 See [docs/UX_AUDIT.md](./docs/UX_AUDIT.md) for the complete UX audit with competitive analysis.
 
-**Sprint 1 priorities (quick wins):**
-1. Rule templates (Pacvue/Scale Insights pattern)
-2. Rule preview — object count before saving
-3. ACOS color coding in all tables
-4. Inline status toggle (click status dot to change)
-5. Hover-row actions (hide Edit button until hover)
+**Sprint 1 — ✅ COMPLETE (23 March 2026):**
+All 10 items delivered. See [CHANGELOG.md](./CHANGELOG.md) for full details.
 
-**Critical missing features vs competitors:**
-- Search Term Harvesting (present in Pacvue, Helium10, Adbrew, Intentwise)
-- Dayparting / hourly scheduling in rules
-- Write-back to Amazon API (currently local DB only)
+**Sprint 2 — Next up:**
+1. Metrics columns in Keywords table (Clicks/Orders/ACOS/Spend)
+2. AND/OR logic between rule conditions
+3. Budget utilization bar in Campaigns
+4. Drill-down slide panel on campaign click
+5. Dayparting / hourly scheduling in rules
+6. Onboarding checklist widget on Overview
+7. Hide raw JSON in AI recommendations
+8. Target ACOS indicator on dashboard
 
 ## 🚧 Known Issues / TODO
 
