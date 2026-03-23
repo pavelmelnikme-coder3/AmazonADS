@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
@@ -21,7 +21,8 @@ import {
   TrendingUp, TrendingDown,
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
-  BarChart2, FileBarChart, Settings, Orbit, Plug2
+  BarChart2, FileBarChart, Settings, Orbit, Plug2,
+  HelpCircle
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -109,6 +110,10 @@ const Styles = () => (
     @media (hover: none) { .tbl-row .act-cell { opacity: 1; } }
     /* S1-7: Last sync timestamp */
     .last-sync-label { font-size: 11px; color: var(--tx3); white-space: nowrap; }
+    /* S1-8: Audit date group header */
+    .audit-date-group td { padding: 4px 8px; font-size: 11px; color: var(--tx3);
+      background: var(--s2); border-bottom: 1px solid var(--b1);
+      font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
   `}</style>
 );
 
@@ -132,6 +137,96 @@ const fmtLastSync = (isoString) => {
   const d = new Date(isoString);
   return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
          + ', ' + d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+};
+
+// ─── Tooltip component (S1-6) ─────────────────────────────────────────────────
+const Tip = ({ text, children, width = 200 }) => {
+  const [show, setShow] = useState(false);
+  return (
+    <span
+      style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+    >
+      {children}
+      {show && (
+        <span style={{
+          position: 'absolute',
+          bottom: 'calc(100% + 6px)',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          width: width,
+          background: '#1e293b',
+          color: '#e2e8f0',
+          border: '1px solid #334155',
+          borderRadius: 6,
+          padding: '7px 10px',
+          fontSize: 11,
+          lineHeight: 1.5,
+          zIndex: 1000,
+          pointerEvents: 'none',
+          whiteSpace: 'normal',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+        }}>
+          <span style={{
+            position: 'absolute',
+            top: '100%',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            width: 0,
+            height: 0,
+            borderLeft: '5px solid transparent',
+            borderRight: '5px solid transparent',
+            borderTop: '5px solid #334155',
+          }} />
+          {text}
+        </span>
+      )}
+    </span>
+  );
+};
+
+// ─── Audit helpers (S1-8) ─────────────────────────────────────────────────────
+const AUDIT_ACTION_LABELS = {
+  'connection.created':          'Account connected',
+  'connection.sync_requested':   'Sync started',
+  'connection.sync_completed':   'Sync completed',
+  'connection.sync_failed':      'Sync failed',
+  'connection.deleted':          'Account disconnected',
+  'keyword.bid_change':          'Keyword bid updated',
+  'keyword.bid_change.rollback': 'Bid change rolled back',
+  'keyword.state_change':        'Keyword status changed',
+  'campaign.state_change':       'Campaign status changed',
+  'campaign.budget_change':      'Campaign budget updated',
+  'rule.executed':               'Rule executed',
+  'rule.dry_run':                'Rule dry-run executed',
+  'ai.recommendation.applied':   'AI recommendation applied',
+  'ai.recommendation.dismissed': 'AI recommendation dismissed',
+};
+const auditLabel = (action) =>
+  AUDIT_ACTION_LABELS[action] || action.replace(/[._]/g, ' ');
+
+const formatDateGroup = (iso) => {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+};
+
+// ─── Report helpers (S1-10) ───────────────────────────────────────────────────
+const fmtReportPeriod = (from, to) => {
+  if (!from || !to) return '—';
+  const f = new Date(from);
+  const t = new Date(to);
+  const opts = { day: 'numeric', month: 'short' };
+  return `${f.toLocaleDateString('en-GB', opts)} – ${t.toLocaleDateString('en-GB', opts)}`;
+};
+const fmtReportType = (type) => {
+  if (!type) return '—';
+  return type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 };
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -875,7 +970,7 @@ const ProductsPage = ({ workspaceId }) => {
             {tr("products.title")}
           </h1>
           <div style={{ fontSize: 12, color: "var(--tx3)" }}>
-            {tr("products.spApiWarning")}
+            Track BSR rankings and connect advertising spend to product performance
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -915,12 +1010,30 @@ const ProductsPage = ({ workspaceId }) => {
       {loading ? (
         <div style={{ color: "var(--tx3)", fontSize: 13 }}>Loading…</div>
       ) : (!products?.length) ? (
-        <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--tx3)" }}>
-          <div style={{ marginBottom: 8 }}><Package size={32} strokeWidth={1.5} color="var(--tx3)" /></div>
-          <div>{tr("products.noProducts")}</div>
-          <div style={{ fontSize: 12, marginTop: 6, color: "var(--tx3)" }}>
-            Enter a 10-character ASIN above to start tracking
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center',
+          justifyContent: 'center', padding: '60px 32px', gap: 16, textAlign: 'center' }}>
+          <Ic icon={Package} size={48} style={{ color: 'var(--tx3)', opacity: 0.4 }} />
+          <div>
+            <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--tx)', margin: '0 0 6px' }}>
+              Start tracking your products
+            </p>
+            <p style={{ fontSize: 13, color: 'var(--tx2)', margin: 0, maxWidth: 360, lineHeight: 1.6 }}>
+              Add an ASIN to see BSR trends, sales, and advertising spend
+              for each product in one place.
+            </p>
           </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4, fontSize: 12, color: 'var(--tx3)' }}>
+            <span>📦 BSR ranking history</span>
+            <span>·</span>
+            <span>💰 P&amp;L per ASIN</span>
+            <span>·</span>
+            <span>📊 Ad spend attribution</span>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 4,
+            background: 'var(--s2)', border: '1px solid var(--b2)',
+            borderRadius: 6, padding: '6px 12px' }}>
+            Enter a 10-character ASIN (e.g. B09XXXXX) in the field above
+          </p>
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2577,7 +2690,7 @@ const ReportsPage = ({ workspaceId }) => {
     <div className="fade">
       <div style={{ marginBottom: 20 }}>
         <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("reports.title")}</h1>
-        <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("reports.subtitle")}</div>
+        <div style={{ fontSize: 13, color: "var(--tx2)" }}>Download advertising performance data by campaign type and date range</div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 16 }}>
@@ -2598,6 +2711,18 @@ const ReportsPage = ({ workspaceId }) => {
           ))}
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", letterSpacing: ".06em", textTransform: "uppercase" }}>{t("reports.period")}</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              {[{ label: '7d', days: 7 }, { label: '14d', days: 14 }, { label: '30d', days: 30 }].map(({ label, days }) => (
+                <button key={label} onClick={() => {
+                  const to = new Date();
+                  const from = new Date();
+                  from.setDate(from.getDate() - days);
+                  setForm(f => ({ ...f, startDate: from.toISOString().slice(0, 10), endDate: to.toISOString().slice(0, 10) }));
+                }} style={{ fontSize: 11, padding: '3px 8px', background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 5, color: 'var(--tx2)', cursor: 'pointer' }}>
+                  {label}
+                </button>
+              ))}
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <input type="date" value={form.startDate} onChange={e => setForm(f => ({ ...f, startDate: e.target.value }))} style={{ flex: 1, fontSize: 12 }} />
               <input type="date" value={form.endDate} onChange={e => setForm(f => ({ ...f, endDate: e.target.value }))} style={{ flex: 1, fontSize: 12 }} />
@@ -2631,12 +2756,26 @@ const ReportsPage = ({ workspaceId }) => {
                   <tbody>
                     {reportsData.data.map(r => (
                       <tr key={r.id}>
-                        <td><span className="badge bg-bl">{r.campaign_type}</span> <span style={{ fontSize: 11, color: "var(--tx3)" }}>{r.report_type}</span></td>
-                        <td className="num" style={{ fontSize: 11 }}>{r.date_start} → {r.date_end}</td>
+                        <td><span className="badge bg-bl">{r.campaign_type}</span> <span style={{ fontSize: 11, color: "var(--tx3)" }}>{fmtReportType(r.report_type)}</span></td>
+                        <td className="num" style={{ fontSize: 11 }}>{fmtReportPeriod(r.date_start, r.date_end)}</td>
                         <td>
-                          <span className={`badge ${r.status === "completed" ? "bg-grn" : r.status === "failed" ? "bg-red" : "bg-amb"}`}>
-                            {r.status}
-                          </span>
+                          {r.status === 'failed' ? (
+                            <Tip text="Amazon API did not return data for this period. This is usually temporary — try re-running the report or check your connection." width={220}>
+                              <span style={{ fontSize: 10, padding: '2px 7px', background: 'rgba(239,68,68,0.15)',
+                                color: 'var(--red)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 4,
+                                cursor: 'help', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                failed <Ic icon={HelpCircle} size={10} />
+                              </span>
+                            </Tip>
+                          ) : (
+                            <span style={{ fontSize: 10, padding: '2px 7px',
+                              background: r.status === 'completed' ? 'rgba(34,197,94,0.15)' : 'var(--s3)',
+                              color: r.status === 'completed' ? 'var(--grn)' : 'var(--tx2)',
+                              border: `1px solid ${r.status === 'completed' ? 'rgba(34,197,94,0.3)' : 'var(--b2)'}`,
+                              borderRadius: 4 }}>
+                              {r.status}
+                            </span>
+                          )}
                         </td>
                         <td className="num">{r.row_count ?? "—"}</td>
                         <td style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(r.created_at).toLocaleString("ru")}</td>
@@ -2882,15 +3021,29 @@ const AuditPage = ({ workspaceId }) => {
               </tr>
             </thead>
             <tbody>
-              {events.map(event => {
+              {events.map((event, idx) => {
                 const diff = event.diff
                   ? (typeof event.diff === "string" ? JSON.parse(event.diff) : event.diff)
                   : null;
                 const canRb = canRollback(event);
                 const rbState = rollbackMsg[event.id];
                 const isRollingBack = rollingBack === event.id;
+                const prevDateStr = idx > 0 ? new Date(events[idx - 1].created_at).toDateString() : null;
+                const eventDateStr = new Date(event.created_at).toDateString();
+                const isNewDay = eventDateStr !== prevDateStr;
+                const entityDisplay = event.entity_name
+                  ? event.entity_name
+                  : event.entity_type === 'connection'
+                    ? 'Amazon Ads Account'
+                    : event.entity_id ? event.entity_id.slice(0, 8) + '…' : '—';
                 return (
-                  <tr key={event.id}>
+                  <React.Fragment key={event.id}>
+                    {isNewDay && (
+                      <tr className="audit-date-group">
+                        <td colSpan={6}>{formatDateGroup(event.created_at)}</td>
+                      </tr>
+                    )}
+                  <tr>
                     <td style={{ whiteSpace: "nowrap", fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx3)" }}>
                       {new Date(event.created_at).toLocaleString("ru", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                     </td>
@@ -2899,7 +3052,10 @@ const AuditPage = ({ workspaceId }) => {
                       {event.actor_name || "—"}
                     </td>
                     <td>
-                      <span className={`badge ${getActionBadge(event.action)}`} style={{ fontSize: 10 }}>
+                      <span style={{ fontSize: 12, color: 'var(--tx)', fontWeight: 500 }}>
+                        {auditLabel(event.action)}
+                      </span>
+                      <span style={{ display: 'block', fontSize: 10, color: 'var(--tx3)', marginTop: 1 }}>
                         {event.action}
                       </span>
                     </td>
@@ -2909,7 +3065,7 @@ const AuditPage = ({ workspaceId }) => {
                       )}
                       <span style={{ color: "var(--tx2)", maxWidth: 180, overflow: "hidden",
                         textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}>
-                        {event.entity_name || event.entity_id || "—"}
+                        {entityDisplay}
                       </span>
                     </td>
                     <td style={{ fontSize: 11, fontFamily: "var(--mono)" }}>
@@ -2943,6 +3099,7 @@ const AuditPage = ({ workspaceId }) => {
                       )}
                     </td>
                   </tr>
+                  </React.Fragment>
                 );
               })}
             </tbody>
@@ -3958,7 +4115,14 @@ const RuleWizardModal = ({
                   </div>
                 </div>
                 <div>
-                  <div style={LABEL}>{t("rules.periodLabel")}</div>
+                  <div style={LABEL}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      {t("rules.periodLabel")}
+                      <Tip text="How many days of historical data are used to evaluate rule conditions. Longer periods smooth out daily fluctuations but react more slowly.">
+                        <Ic icon={HelpCircle} size={11} style={{ color: 'var(--tx3)', cursor: 'help' }} />
+                      </Tip>
+                    </span>
+                  </div>
                   <select value={form.scope?.period_days || 14}
                     onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, period_days: parseInt(e.target.value) } }))}
                     style={{ width:"100%", ...SEL_SM }}>
@@ -4552,7 +4716,11 @@ const RulesPage = ({ workspaceId }) => {
                     {/* Title row */}
                     <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
                       <span style={{ fontSize:14, fontWeight:600 }}>{rule.name}</span>
-                      {rule.dry_run && <span className="badge bg-amb" style={{ fontSize:10 }}>SIM</span>}
+                      {rule.dry_run && (
+                        <Tip text="Simulation mode — the rule evaluates conditions and logs matches but makes no actual changes to bids or statuses.">
+                          <span className="badge bg-amb" style={{ fontSize:10 }}>SIM</span>
+                        </Tip>
+                      )}
                       <span className={`badge ${rule.is_active?"bg-grn":"bg-red"}`} style={{ fontSize:10 }}>
                         {rule.is_active ? t("rules.active") : t("rules.inactive")}
                       </span>
@@ -4768,7 +4936,14 @@ const AlertsPage = ({ workspaceId }) => {
                         <th>{t("alerts.colMetric")}</th>
                         <th>{t("alerts.colThreshold")}</th>
                         <th>{t("alerts.colChannels")}</th>
-                        <th>{t("alerts.colCooldown")}</th>
+                        <th>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            {t("alerts.colCooldown")}
+                            <Tip text="Minimum time before the same alert can fire again. Prevents repeated notifications for the same condition." width={210}>
+                              <Ic icon={HelpCircle} size={11} style={{ color: 'var(--tx3)', cursor: 'help' }} />
+                            </Tip>
+                          </span>
+                        </th>
                         <th>{t("alerts.colActive")}</th>
                         <th></th>
                       </tr>
@@ -5760,11 +5935,20 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, marginBottom: 14 }}>
                   {[
                     { key: "timezone", label: "Timezone", opts: ["UTC","Europe/Berlin","Europe/London","America/New_York","America/Los_Angeles","Asia/Tokyo"] },
-                    { key: "default_attribution_window", label: "Attribution Window", opts: ["1d","7d","14d","30d"] },
+                    { key: "default_attribution_window", label: "Attribution Window", opts: ["1d","7d","14d","30d"], tip: "How long after an ad click Amazon counts a sale as attributed to that ad. SP: 7 days, SB/SD: 14 days. Affects ACOS and ROAS calculations." },
                     { key: "currency", label: "Currency", opts: ["EUR","USD","GBP","JPY","CAD","AUD","PLN","SEK"] },
-                  ].map(({ key, label, opts }) => (
+                  ].map(({ key, label, opts, tip }) => (
                     <div key={key}>
-                      <div style={SL}>{label}</div>
+                      <div style={SL}>
+                        {tip ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            {label}
+                            <Tip text={tip} width={240}>
+                              <Ic icon={HelpCircle} size={11} style={{ color: 'var(--tx3)', cursor: 'help' }} />
+                            </Tip>
+                          </span>
+                        ) : label}
+                      </div>
                       <select value={wsForm.settings[key] || opts[0]} onChange={e => setWsForm(f => ({...f, settings: {...f.settings, [key]: e.target.value}}))} style={{ width: "100%", minWidth: 200 }}>
                         {opts.map(o => <option key={o} value={o}>{o}</option>)}
                       </select>
