@@ -462,6 +462,30 @@ curl -X POST http://localhost:3000/api/v1/jobs/backfill-metrics \
 ### Change History
 - [x] Append-only audit with rollback, filters, sort, diff display
 
+### UI / Design System
+- [x] **Lucide React icons** — all unicode glyphs replaced with SVG (strokeWidth 1.75, consistent sizing)
+- [x] **Rule creation wizard** — 3-step flow: Basics → Conditions → Actions
+- [x] **Live rule preview** — IF/THEN sentence updates reactively as user edits
+- [x] **Condition row layout** — metric/operator/value flex proportions fixed
+- [x] **Unit suffixes** — €, %, × appear inline after condition value input
+- [x] **Campaign search** in rule scope — filters 40+ campaign checkbox list in real time
+
+### 📋 Roadmap
+See [docs/ROADMAP.md](./docs/ROADMAP.md) for the full prioritized feature roadmap.
+See [docs/UX_AUDIT.md](./docs/UX_AUDIT.md) for the complete UX audit with competitive analysis.
+
+**Sprint 1 priorities (quick wins):**
+1. Rule templates (Pacvue/Scale Insights pattern)
+2. Rule preview — object count before saving
+3. ACOS color coding in all tables
+4. Inline status toggle (click status dot to change)
+5. Hover-row actions (hide Edit button until hover)
+
+**Critical missing features vs competitors:**
+- Search Term Harvesting (present in Pacvue, Helium10, Adbrew, Intentwise)
+- Dayparting / hourly scheduling in rules
+- Write-back to Amazon API (currently local DB only)
+
 ## 🚧 Known Issues / TODO
 
 - `negativeKeywords` entity sync — needs migration to `POST /sp/negativeKeywords/list`

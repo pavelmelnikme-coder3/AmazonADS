@@ -6,8 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
-## [Unreleased]
-> Changes staged for next release
+## [Unreleased] — 2026-03-23
+
+### Added
+- `docs/ROADMAP.md` — Full 4-sprint product roadmap (20 features) based on Pacvue / Scale Insights / Helium10 / Intentwise / Adbrew analysis + Nielsen Norman Group research
+- `docs/UX_AUDIT.md` — Complete UX audit of all 12 sections with competitive gap analysis table
+
+### Changed (UI)
+- All unicode icon characters replaced with Lucide React SVG icons (strokeWidth 1.75)
+- NAV icons: Activity, Megaphone, Tag, Package, Newspaper, Layers, Workflow, Bell, Sparkles, History, Cable, Cog
+- Action icons: Edit2, Trash2, Play, Pause, Eye, Undo2, Power, Percent, Target, Ban, Filter, Archive, Hourglass
+- Rule creation modal → 3-step wizard (Basics / Conditions / Actions) with step indicator and Вперёд/Назад navigation
+- Rule wizard Step 2 — live sentence preview updates reactively as user edits conditions
+- Rule conditions — metric select now has correct flex proportions (metric: flex:1, operator: 76px fixed, value: 130px fixed)
+- Rule conditions — unit suffixes added after value input (€ for spend/sales/bid/cpc, % for acos/ctr, × for roas)
+- Rule wizard Step 3 — two-column layout (Actions card + Scope card), campaign search filter, bid guardrails
+- `svg[class*="lucide"]` CSS rule added for consistent vertical alignment across all icon usages
 
 ---
 
