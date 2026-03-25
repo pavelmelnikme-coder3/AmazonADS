@@ -32,6 +32,7 @@ const bulkRoutes = require("./routes/bulk");
 const settingsRoutes = require("./routes/settings");
 const productsRoutes = require("./routes/products");
 const analyticsReportRouter = require("./routes/analyticsReport");
+const searchTermsRoutes = require("./routes/searchTerms");
 
 const app = express();
 
@@ -90,6 +91,7 @@ app.use(`${API}/bulk`, bulkRoutes);
 app.use(`${API}/settings`, settingsRoutes);
 app.use(`${API}/products`, productsRoutes);
 app.use(`${API}/analytics-report`, analyticsReportRouter);
+app.use(`${API}/search-terms`, searchTermsRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

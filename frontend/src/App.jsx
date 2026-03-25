@@ -3459,6 +3459,17 @@ const KeywordsPage = ({ workspaceId }) => {
   const [kwToast, setKwToast] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
+  const [kwTab, setKwTab] = useState('keywords'); // 'keywords' | 'searchterms'
+
+  // Search Terms state
+  const [searchTerms, setSearchTerms] = useState([]);
+  const [stLoading, setStLoading] = useState(false);
+  const [stTotal, setStTotal] = useState(0);
+  const [stSearch, setStSearch] = useState('');
+  const [stSortCol, setStSortCol] = useState('spend');
+  const [stSortDir, setStSortDir] = useState('desc');
+  const [stFilter, setStFilter] = useState('all'); // 'all' | 'harvest' | 'negate'
+
   const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
     "keywords", [36, 220, 90, 100, 90, 170, 65, 65, 75, 80, 90]
   );
@@ -3484,6 +3495,52 @@ const KeywordsPage = ({ workspaceId }) => {
     if (sortBy === field) setSortDir(d => d === "desc" ? "asc" : "desc");
     else { setSortBy(field); setSortDir(isText ? "asc" : "desc"); }
   }
+
+  // Search terms fetch
+  useEffect(() => {
+    if (kwTab !== 'searchterms') return;
+    setStLoading(true);
+    const params = new URLSearchParams({ limit: 200, sortBy: stSortCol, sortDir: stSortDir });
+    if (stSearch) params.set('search', stSearch);
+    if (stFilter === 'harvest') params.set('hasOrders', 'true');
+    if (stFilter === 'negate') params.set('noOrders', 'true');
+    apiFetch(`/search-terms?${params}`)
+      .then(d => { setSearchTerms(d?.data || []); setStTotal(d?.pagination?.total || 0); })
+      .catch(() => setSearchTerms([]))
+      .finally(() => setStLoading(false));
+  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter]);
+
+  const stRecommendation = (term) => {
+    const acos = parseFloat(term.sales) > 0 ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100 : null;
+    const clicks = parseInt(term.clicks || 0);
+    const orders = parseInt(term.orders || 0);
+    if (orders >= 2 && acos !== null && acos < 30) return 'harvest';
+    if (clicks >= 10 && orders === 0) return 'negate';
+    if (orders >= 1 && acos !== null && acos < 40) return 'harvest';
+    return 'neutral';
+  };
+
+  const addAsKeyword = async (term, matchType = 'exact') => {
+    try {
+      await post('/search-terms/add-keyword', { query: term.query, campaignId: term.campaign_id, adGroupId: term.ad_group_id, matchType, bid: 0.50 });
+      setKwToast(`"${term.query}" added as ${matchType} keyword`);
+      setTimeout(() => setKwToast(null), 3000);
+    } catch (e) {
+      setKwToast(e?.status === 409 ? 'Keyword already exists' : 'Error adding keyword');
+      setTimeout(() => setKwToast(null), 3000);
+    }
+  };
+
+  const addAsNegative = async (term, matchType = 'exact') => {
+    try {
+      await post('/search-terms/add-negative', { query: term.query, campaignId: term.campaign_id, adGroupId: term.ad_group_id, matchType });
+      setKwToast(`"${term.query}" added as negative ${matchType}`);
+      setTimeout(() => setKwToast(null), 3000);
+    } catch (e) {
+      setKwToast(e?.status === 409 ? 'Already a negative keyword' : 'Error adding negative');
+      setTimeout(() => setKwToast(null), 3000);
+    }
+  };
 
   useEffect(() => { setPage(1); }, [kwFilters, sortBy, sortDir]);
 
@@ -3562,11 +3619,30 @@ const KeywordsPage = ({ workspaceId }) => {
 
   return (
     <div className="fade">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <div>
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("keywords.title")}</h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("keywords.count", { count: kwTotal.toLocaleString() })}</div>
         </div>
+      </div>
+
+      {/* Tab selector */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: "1px solid var(--b1)", paddingBottom: 0 }}>
+        {[
+          { id: 'keywords',    label: t("keywords.title") || "Keywords" },
+          { id: 'searchterms', label: "Search Terms" },
+        ].map(tab => (
+          <button key={tab.id} onClick={() => setKwTab(tab.id)}
+            style={{
+              padding: "8px 16px", fontSize: 13, fontWeight: kwTab === tab.id ? 600 : 400,
+              background: "none", border: "none", cursor: "pointer",
+              color: kwTab === tab.id ? "var(--ac)" : "var(--tx3)",
+              borderBottom: `2px solid ${kwTab === tab.id ? "var(--ac)" : "transparent"}`,
+              marginBottom: -1, transition: "color 150ms, border-color 150ms",
+            }}>
+            {tab.label}
+          </button>
+        ))}
       </div>
 
       {kwToast && createPortal(
@@ -3576,6 +3652,186 @@ const KeywordsPage = ({ workspaceId }) => {
         document.body
       )}
 
+      {kwTab === 'searchterms' && (
+        <div>
+          {/* Search Terms toolbar */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              placeholder="Search queries…"
+              value={stSearch}
+              onChange={e => setStSearch(e.target.value)}
+              style={{ flex: "1 1 200px", padding: "6px 10px", fontSize: 12,
+                background: "var(--s2)", border: "1px solid var(--b2)",
+                borderRadius: 6, color: "var(--tx)" }}
+            />
+            {[
+              { id: 'all',     label: 'All' },
+              { id: 'harvest', label: '🟢 Harvest' },
+              { id: 'negate',  label: '🔴 Negate' },
+            ].map(f => (
+              <button key={f.id} onClick={() => setStFilter(f.id)}
+                className={`btn ${stFilter === f.id ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 11, padding: "5px 12px" }}>
+                {f.label}
+              </button>
+            ))}
+            <span style={{ fontSize: 11, color: "var(--tx3)", marginLeft: "auto" }}>
+              {stTotal.toLocaleString()} queries
+            </span>
+          </div>
+
+          {/* Search Terms table */}
+          {stLoading ? (
+            <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+          ) : searchTerms.length === 0 ? (
+            <div className="card" style={{ padding: "60px 32px", textAlign: "center" }}>
+              <Ic icon={Search} size={40} style={{ color: "var(--tx3)", opacity: 0.3, marginBottom: 12 }} />
+              <p style={{ fontSize: 15, fontWeight: 600, color: "var(--tx)", margin: "0 0 8px" }}>
+                No search term data yet
+              </p>
+              <p style={{ fontSize: 13, color: "var(--tx2)", margin: "0 0 16px", maxWidth: 400 }}>
+                Search term data comes from the Amazon SP Search Term report.
+                Run a report sync to populate this table.
+              </p>
+              <p style={{ fontSize: 11, color: "var(--tx3)", background: "var(--s2)",
+                border: "1px solid var(--b2)", borderRadius: 6, padding: "6px 14px", display: "inline-block" }}>
+                Report type: spSearchTerm · Amazon data lag: 24–48h
+              </p>
+            </div>
+          ) : (
+            <div className="card" style={{ overflow: "hidden" }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      {[
+                        { col: "query",       label: "Query",      align: "left",   width: 220 },
+                        { col: "campaign",    label: "Campaign",   align: "left",   width: 150, noSort: true },
+                        { col: "impressions", label: "Impr.",      align: "right",  width: 70 },
+                        { col: "clicks",      label: "Clicks",     align: "right",  width: 65 },
+                        { col: "orders",      label: "Orders",     align: "right",  width: 65 },
+                        { col: "spend",       label: "Spend",      align: "right",  width: 80 },
+                        { col: "acos",        label: "ACOS",       align: "right",  width: 70, noSort: true },
+                        { col: "rec",         label: "Suggestion", align: "center", width: 100, noSort: true },
+                        { col: "actions",     label: "",           align: "center", width: 160, noSort: true },
+                      ].map(h => (
+                        <th key={h.col}
+                          onClick={!h.noSort ? () => {
+                            if (stSortCol === h.col) setStSortDir(d => d === "asc" ? "desc" : "asc");
+                            else { setStSortCol(h.col); setStSortDir("desc"); }
+                          } : undefined}
+                          style={{
+                            padding: "8px 10px", textAlign: h.align,
+                            color: "var(--tx3)", fontWeight: 500, fontSize: 11,
+                            borderBottom: "2px solid var(--b1)",
+                            cursor: h.noSort ? "default" : "pointer",
+                            whiteSpace: "nowrap", width: h.width,
+                            background: "var(--s2)",
+                          }}>
+                          {h.label}
+                          {!h.noSort && stSortCol === h.col && (
+                            <span style={{ marginLeft: 4 }}>{stSortDir === "asc" ? "↑" : "↓"}</span>
+                          )}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {searchTerms.map((term, i) => {
+                      const acos = parseFloat(term.sales) > 0
+                        ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100
+                        : null;
+                      const rec = stRecommendation(term);
+                      return (
+                        <tr key={term.id || i} style={{
+                          borderBottom: "1px solid var(--b1)",
+                          background: rec === "harvest"
+                            ? "rgba(34,197,94,0.04)"
+                            : rec === "negate"
+                              ? "rgba(239,68,68,0.04)"
+                              : "transparent",
+                        }}>
+                          <td style={{ padding: "7px 10px", fontWeight: 500 }}>
+                            <span title={term.query} style={{
+                              display: "block", maxWidth: 210,
+                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            }}>{term.query}</span>
+                            {term.match_type && (
+                              <span style={{ fontSize: 10, color: "var(--tx3)", marginTop: 1, display: "block" }}>
+                                via {term.keyword_text || "—"} · {term.match_type}
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: "7px 10px", fontSize: 11, color: "var(--tx2)",
+                            maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            title={term.campaign_name}>
+                            {term.campaign_name || "—"}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "right", color: "var(--tx2)" }}>
+                            {parseInt(term.impressions || 0).toLocaleString()}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "right" }}>
+                            {parseInt(term.clicks || 0).toLocaleString()}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "right",
+                            color: parseInt(term.orders || 0) > 0 ? "var(--grn)" : "var(--tx3)" }}>
+                            {parseInt(term.orders || 0) > 0 ? parseInt(term.orders).toLocaleString() : "—"}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "right", color: "var(--ac2)" }}>
+                            {parseFloat(term.spend || 0) > 0 ? "$" + parseFloat(term.spend).toFixed(2) : "—"}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "right",
+                            color: acos !== null ? acosColor(acos) : "var(--tx3)" }}>
+                            {acos !== null ? acos.toFixed(1) + "%" : "—"}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "center" }}>
+                            {rec === "harvest" && (
+                              <span style={{ fontSize: 10, padding: "2px 7px",
+                                background: "rgba(34,197,94,0.15)", color: "var(--grn)",
+                                border: "1px solid rgba(34,197,94,0.3)", borderRadius: 10 }}>
+                                ✓ Add as KW
+                              </span>
+                            )}
+                            {rec === "negate" && (
+                              <span style={{ fontSize: 10, padding: "2px 7px",
+                                background: "rgba(239,68,68,0.15)", color: "var(--red)",
+                                border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10 }}>
+                                − Negate
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: "7px 10px", textAlign: "center" }}>
+                            <div style={{ display: "flex", gap: 4, justifyContent: "center" }}>
+                              <button onClick={() => addAsKeyword(term, "exact")}
+                                title="Add as exact match keyword"
+                                style={{ fontSize: 10, padding: "3px 8px", cursor: "pointer",
+                                  background: "rgba(34,197,94,0.15)", color: "var(--grn)",
+                                  border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4,
+                                  whiteSpace: "nowrap" }}>
+                                + Exact KW
+                              </button>
+                              <button onClick={() => addAsNegative(term, "exact")}
+                                title="Add as negative exact keyword"
+                                style={{ fontSize: 10, padding: "3px 8px", cursor: "pointer",
+                                  background: "rgba(239,68,68,0.10)", color: "var(--red)",
+                                  border: "1px solid rgba(239,68,68,0.3)", borderRadius: 4,
+                                  whiteSpace: "nowrap" }}>
+                                − Negate
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {kwTab === 'keywords' && <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
         <input placeholder={t("keywords.searchPlaceholder")} value={kwFilters.search}
           onChange={e => { setKwFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
@@ -3817,6 +4073,7 @@ const KeywordsPage = ({ workspaceId }) => {
           { key: "hasClicks", label: t("filter.hasActivity"), type: "toggle" },
         ]}
       />
+      </>}
     </div>
   );
 };
