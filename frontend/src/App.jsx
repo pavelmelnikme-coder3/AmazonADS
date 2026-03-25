@@ -2447,6 +2447,10 @@ const CampaignsPage = ({ workspaceId }) => {
   const [selected, setSelected] = useState(new Set());
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [budgetPct, setBudgetPct] = useState("");
+  // S2-4: Campaign drill-down panel
+  const [panelCampaign, setPanelCampaign] = useState(null);
+  const [panelKws, setPanelKws]           = useState([]);
+  const [panelLoading, setPanelLoading]   = useState(false);
   const { colgroup: campColgroup, resizeHandle: campRH, resetCols: campResetCols } = useResizableColumns(
     "campaigns", [36, 200, 80, 90, 95, 85, 85, 75, 75, 60]
   );
@@ -2466,6 +2470,30 @@ const CampaignsPage = ({ workspaceId }) => {
           ? c.last_refresh_at : latest
       , null)
     : null;
+
+  // S2-4: open campaign panel + Escape key close
+  const openCampaignPanel = async (campaign) => {
+    setPanelCampaign(campaign);
+    setPanelLoading(true);
+    setPanelKws([]);
+    try {
+      const data = await get('/keywords', { limit: 500, sortBy: 'spend', sortDir: 'desc' });
+      const allKws = data?.data || data?.keywords || [];
+      const campKws = allKws.filter(k => k.campaign_id === campaign.id);
+      campKws.sort((a, b) => parseFloat(b.spend || 0) - parseFloat(a.spend || 0));
+      setPanelKws(campKws);
+    } catch {
+      setPanelKws([]);
+    } finally {
+      setPanelLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape' && panelCampaign) setPanelCampaign(null); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [panelCampaign]);
 
   function handleCampSort(field) {
     const isText = ["name", "state"].includes(field);
@@ -2651,7 +2679,15 @@ const CampaignsPage = ({ workspaceId }) => {
                     {campaigns.map(c => (
                       <tr key={c.id} className={`tbl-row${selected.has(c.id) ? ' row-selected' : ''}`}>
                         <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelect(c.id)} /></td>
-                        <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>{c.name}</td>
+                        <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
+                          <span
+                            onClick={(e) => { e.stopPropagation(); openCampaignPanel(c); }}
+                            style={{ cursor: 'pointer', color: 'var(--ac2)' }}
+                            onMouseEnter={e => e.target.style.textDecoration = 'underline'}
+                            onMouseLeave={e => e.target.style.textDecoration = 'none'}
+                            title="View campaign details"
+                          >{c.name}</span>
+                        </td>
                         <td><span className="badge bg-bl">{typeLabel(c.campaign_type)}</span></td>
                         <td>
                           {editId === c.id
@@ -2782,6 +2818,79 @@ const CampaignsPage = ({ workspaceId }) => {
           </div>
         </div>,
       document.body
+      )}
+
+      {/* S2-4: Campaign drill-down panel */}
+      {panelCampaign && createPortal(
+        <div>
+          <div onClick={() => setPanelCampaign(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 800 }} />
+          <div style={{ position: 'fixed', top: 0, right: 0, width: 520, height: '100vh', background: 'var(--s2)', borderLeft: '1px solid var(--b1)', zIndex: 801, display: 'flex', flexDirection: 'column', overflowY: 'hidden', animation: 'slideInRight 200ms ease' }}>
+            {/* Header */}
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--b1)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexShrink: 0 }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--tx)', maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {panelCampaign.name}
+                </div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  {[
+                    { label: 'Type',       value: panelCampaign.campaign_type || '—' },
+                    { label: 'Status',     value: panelCampaign.state, color: panelCampaign.state === 'enabled' ? 'var(--grn)' : 'var(--tx3)' },
+                    { label: 'Budget/day', value: panelCampaign.daily_budget ? `$${parseFloat(panelCampaign.daily_budget).toFixed(0)}` : '—' },
+                    { label: 'Spend',      value: `$${parseFloat(panelCampaign.spend || 0).toFixed(0)}` },
+                    { label: 'ACOS',       value: panelCampaign.acos != null ? `${parseFloat(panelCampaign.acos).toFixed(1)}%` : '—', color: panelCampaign.acos != null ? acosColor(parseFloat(panelCampaign.acos)) : 'var(--tx3)' },
+                    { label: 'ROAS',       value: panelCampaign.roas != null ? `${parseFloat(panelCampaign.roas).toFixed(2)}×` : '—' },
+                  ].map(stat => (
+                    <span key={stat.label} style={{ fontSize: 11, background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 5, padding: '2px 8px', color: stat.color || 'var(--tx2)', whiteSpace: 'nowrap' }}>
+                      <span style={{ color: 'var(--tx3)' }}>{stat.label}:</span> {stat.value}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <button onClick={() => setPanelCampaign(null)} style={{ background: 'none', border: 'none', color: 'var(--tx3)', cursor: 'pointer', fontSize: 20, lineHeight: 1, padding: '0 4px', flexShrink: 0 }}>×</button>
+            </div>
+            {/* Keywords label */}
+            <div style={{ padding: '10px 20px 8px', borderBottom: '1px solid var(--b1)', fontSize: 11, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--tx3)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+              Keywords
+              {!panelLoading && <span style={{ background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 10, padding: '1px 7px', fontSize: 11, color: 'var(--tx2)', textTransform: 'none', letterSpacing: 0 }}>{panelKws.length}</span>}
+            </div>
+            {/* Keywords table */}
+            <div style={{ overflowY: 'auto', flex: 1 }}>
+              {panelLoading ? (
+                <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
+              ) : panelKws.length === 0 ? (
+                <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx3)', fontSize: 13 }}>No enabled keywords found for this campaign</div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ position: 'sticky', top: 0, background: 'var(--s2)' }}>
+                      {['Keyword', 'Match', 'Bid', 'Clicks', 'ACOS', 'Spend'].map(h => (
+                        <th key={h} style={{ padding: '8px 12px', textAlign: h === 'Keyword' || h === 'Match' ? 'left' : 'right', color: 'var(--tx3)', fontWeight: 500, fontSize: 11, borderBottom: '1px solid var(--b1)', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {panelKws.slice(0, 100).map((kw, i) => (
+                      <tr key={kw.id} style={{ borderBottom: '1px solid var(--b1)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.015)' }}>
+                        <td style={{ padding: '7px 12px', color: 'var(--tx)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={kw.keyword_text}>{kw.keyword_text}</td>
+                        <td style={{ padding: '7px 12px', color: 'var(--tx3)', fontSize: 10, textTransform: 'lowercase' }}>{kw.match_type}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--ac2)', fontFamily: 'var(--mono)' }}>${parseFloat(kw.bid || 0).toFixed(2)}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--tx2)', fontFamily: 'var(--mono)' }}>{kw.clicks ? Number(kw.clicks).toLocaleString() : '—'}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: kw.acos != null ? acosColor(parseFloat(kw.acos)) : 'var(--tx3)', fontFamily: 'var(--mono)' }}>{kw.acos != null ? parseFloat(kw.acos).toFixed(1) + '%' : '—'}</td>
+                        <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--tx2)', fontFamily: 'var(--mono)' }}>{kw.spend && parseFloat(kw.spend) > 0 ? '$' + parseFloat(kw.spend).toFixed(2) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            {/* Footer */}
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--b1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
+              <span style={{ fontSize: 11, color: 'var(--tx3)' }}>Showing top {Math.min(panelKws.length, 100)} keywords by spend</span>
+              <button onClick={() => setPanelCampaign(null)} style={{ fontSize: 12, padding: '4px 12px', background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 5, color: 'var(--tx2)', cursor: 'pointer' }}>Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
 
       <FilterPanel
@@ -4059,11 +4168,31 @@ const AnalyticsPage = ({ workspaceId }) => {
   );
 };
 
+const dayparthingToCron = (dp) => {
+  if (!dp) return null;
+  const hour = dp.hour != null ? dp.hour : '*';
+  const days = (dp.days && dp.days.length > 0 && dp.days.length < 7) ? dp.days.join(',') : '*';
+  if (hour === '*' && days === '*') return null;
+  return `0 ${hour} * * ${days}`;
+};
+const cronToDayparting = (cron) => {
+  if (!cron) return null;
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length < 5) return null;
+  const hourPart = parts[1];
+  const dayPart  = parts[4];
+  const hour = hourPart === '*' ? null : parseInt(hourPart);
+  const days = dayPart  === '*' ? [] : dayPart.split(',').map(Number);
+  if (hour === null && days.length === 0) return null;
+  return { hour, days };
+};
+const DP_DAYS = [['Mo',1],['Tu',2],['We',3],['Th',4],['Fr',5],['Sa',6],['Su',0]];
+
 const EMPTY_RULE_FORM = {
   name: "", description: "", dry_run: false, is_active: true,
   conditions: [{ metric: "clicks", op: "gte", value: "30" }],
   actions:    [{ type: "pause_keyword", value: "" }],
-  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "" },
+  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", dayparting: null },
   safety: { min_bid: "0.02", max_bid: "50" },
 };
 
@@ -4470,6 +4599,71 @@ const RuleWizardModal = ({
                     style={{ accentColor:"var(--ac)", width:14, height:14 }} />
                   <span>{t("rules.active")}</span>
                 </label>
+              </div>
+
+              {/* Dayparting */}
+              <div style={{ marginTop:16 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                  <div style={{ ...LABEL, marginBottom:0 }}>Dayparting</div>
+                  <span style={{ fontSize:11, color:"var(--tx3)" }}>(optional — restrict when the rule runs)</span>
+                </div>
+                <div style={{ padding:"12px 14px", background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
+                  <div style={{ display:"flex", gap:4, marginBottom:10 }}>
+                    {DP_DAYS.map(([lbl, val]) => {
+                      const sel = form.scope?.dayparting?.days?.includes(val);
+                      return (
+                        <button key={val}
+                          onClick={() => {
+                            const curr = form.scope?.dayparting || { days:[], hour:null };
+                            const days = curr.days || [];
+                            const nd = days.includes(val) ? days.filter(d => d !== val) : [...days, val];
+                            const ndp = (nd.length === 0 && curr.hour == null) ? null : { ...curr, days: nd };
+                            setForm(f => ({ ...f, scope: { ...f.scope, dayparting: ndp } }));
+                          }}
+                          style={{ flex:1, padding:"5px 0", fontSize:11, fontWeight: sel ? 600 : 400,
+                            background: sel ? "var(--ac)" : "var(--s3)",
+                            color: sel ? "#fff" : "var(--tx3)",
+                            border:`1px solid ${sel ? "var(--ac)" : "var(--b2)"}`,
+                            borderRadius:6, cursor:"pointer" }}>
+                          {lbl}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <span style={{ fontSize:11, color:"var(--tx3)", whiteSpace:"nowrap" }}>Run at hour:</span>
+                    <select
+                      value={form.scope?.dayparting?.hour ?? ""}
+                      onChange={e => {
+                        const hour = e.target.value === "" ? null : parseInt(e.target.value);
+                        const curr = form.scope?.dayparting || { days:[], hour:null };
+                        const ndp = ((curr.days?.length || 0) === 0 && hour == null) ? null : { ...curr, hour };
+                        setForm(f => ({ ...f, scope: { ...f.scope, dayparting: ndp } }));
+                      }}
+                      style={{ ...SEL_SM, width:120 }}>
+                      <option value="">Any hour</option>
+                      {Array.from({ length:24 }, (_,h) => (
+                        <option key={h} value={h}>{String(h).padStart(2,"0")}:00</option>
+                      ))}
+                    </select>
+                    {form.scope?.dayparting && (() => {
+                      const cron = dayparthingToCron(form.scope.dayparting);
+                      return cron ? (
+                        <span style={{ fontSize:11, color:"var(--tx3)", fontFamily:"var(--mono)" }}>
+                          → <strong style={{ color:"var(--tx)" }}>{cron}</strong>
+                        </span>
+                      ) : null;
+                    })()}
+                    {form.scope?.dayparting && (
+                      <button
+                        onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, dayparting: null } }))}
+                        style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer",
+                          color:"var(--tx3)", fontSize:11, padding:"2px 6px" }}>
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -4935,6 +5129,9 @@ const RulesPage = ({ workspaceId }) => {
   const openNew = () => { setForm(EMPTY_RULE_FORM); setEditRule(null); setShowForm(true); setCondOperators([]); };
   const openEdit = (rule) => {
     const parse = (v, fb) => { if (!v) return fb; if (typeof v === "string") { try { return JSON.parse(v); } catch { return fb; } } return v; };
+    const parsedScope = parse(rule.scope, EMPTY_RULE_FORM.scope);
+    // Restore dayparting from rule.schedule if scope doesn't have it
+    const dayparting = parsedScope.dayparting || cronToDayparting(rule.schedule);
     setForm({
       name:        rule.name,
       description: rule.description || "",
@@ -4942,7 +5139,7 @@ const RulesPage = ({ workspaceId }) => {
       is_active:   rule.is_active !== false,
       conditions:  parse(rule.conditions, EMPTY_RULE_FORM.conditions),
       actions:     parse(rule.actions,    EMPTY_RULE_FORM.actions),
-      scope:       parse(rule.scope,      EMPTY_RULE_FORM.scope),
+      scope:       { ...parsedScope, dayparting },
       safety:      parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
     setEditRule(rule); setShowForm(true);
@@ -4953,12 +5150,14 @@ const RulesPage = ({ workspaceId }) => {
   const saveRule = async () => {
     if (!form.name) return alert(t("rules.alertName"));
     try {
+      const cronStr = dayparthingToCron(form.scope?.dayparting);
       const payload = {
         ...form,
         conditions: form.conditions.map((c, i) => ({
           ...c,
           ...(i < form.conditions.length - 1 ? { nextOperator: condOperators[i] || 'AND' } : {}),
         })),
+        ...(cronStr ? { schedule: cronStr, schedule_type: "cron" } : { schedule: null, schedule_type: "hourly" }),
       };
       editRule ? await patch(`/rules/${editRule.id}`, payload) : await post("/rules", payload);
       setShowForm(false); reload();
@@ -5201,6 +5400,21 @@ const RulesPage = ({ workspaceId }) => {
                           {last.dry_run?" (sim)":""}
                         </span>
                       )}
+                      {rule.schedule && rule.schedule_type === "cron" && (() => {
+                        const dp = cronToDayparting(rule.schedule);
+                        if (!dp) return null;
+                        const DAY_SHORT = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+                        const dayStr = dp.days && dp.days.length > 0 && dp.days.length < 7
+                          ? dp.days.sort((a,b) => { const ord = [1,2,3,4,5,6,0]; return ord.indexOf(a) - ord.indexOf(b); }).map(d => DAY_SHORT[d]).join(',')
+                          : null;
+                        const hourStr = dp.hour != null ? `${String(dp.hour).padStart(2,'0')}:00` : null;
+                        const label = [dayStr, hourStr].filter(Boolean).join(' · ');
+                        return label ? (
+                          <span className="badge" style={{ fontSize:9, background:"rgba(20,184,166,.12)", color:"var(--teal)", border:"1px solid rgba(20,184,166,.3)" }}>
+                            ⏰ {label}
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
 
                     {/* Condition badges */}
