@@ -128,6 +128,52 @@ const acosColor = (pct) => {
   return 'var(--red)';
 };
 
+// ─── S2-3: Budget utilization helper ──────────────────────────────────────────
+const budgetUtil = (spend, budget, days) => {
+  if (!budget || budget <= 0) return null;
+  const avgDaily = spend / (days || 30);
+  return Math.round((avgDaily / budget) * 100);
+};
+
+// ─── S2-7: AI recommendation params renderer ──────────────────────────────────
+const AI_PARAM_LABELS = {
+  target_acos:               'Target ACOS',
+  recommended_daily_budget:  'Daily budget',
+  product_categories:        'Categories',
+  target_roas:               'Target ROAS',
+  bid_adjustment:            'Bid adjustment',
+  campaign_type:             'Campaign type',
+  match_type:                'Match type',
+  keyword:                   'Keyword',
+  acos:                      'Current ACOS',
+  spend:                     'Spend',
+  orders:                    'Orders',
+  recommended_bid:           'Recommended bid',
+  new_bid:                   'New bid',
+  old_bid:                   'Old bid',
+};
+const renderAiParams = (params) => {
+  if (!params) return null;
+  const obj = (typeof params === 'string')
+    ? (() => { try { return JSON.parse(params); } catch { return null; } })()
+    : (typeof params === 'object' ? params : null);
+  if (!obj) return null;
+  const entries = Object.entries(obj);
+  if (entries.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 4,
+      padding: '6px 10px', background: 'var(--s2)', borderRadius: 6, border: '1px solid var(--b2)' }}>
+      {entries.map(([key, val]) => (
+        <span key={key} style={{ fontSize: 11, color: 'var(--tx2)', whiteSpace: 'nowrap' }}>
+          <span style={{ color: 'var(--tx3)' }}>{AI_PARAM_LABELS[key] || key.replace(/_/g, ' ')}:</span>
+          {' '}
+          <span style={{ color: 'var(--tx)', fontWeight: 600 }}>{String(val)}</span>
+        </span>
+      ))}
+    </div>
+  );
+};
+
 // ─── Last-sync relative time helper (S1-7) ────────────────────────────────────
 const fmtLastSync = (isoString) => {
   if (!isoString) return null;
@@ -302,7 +348,7 @@ const Spark = ({ data = [], color = "#3B82F6", h = 36 }) => {
 };
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
-const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", loading }) => (
+const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", loading, extra }) => (
   <div className="card fade" style={{ padding: "18px 20px" }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
       <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", fontFamily: "var(--mono)" }}>{label}</span>
@@ -322,6 +368,7 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
         </div>
     }
     <Spark data={spark || []} color={color} />
+    {extra}
   </div>
 );
 
@@ -1616,7 +1663,24 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
     if (item.id.startsWith("kpi_")) {
       const kpi = kpiMap[item.id];
       if (!kpi) return null;
-      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} loading={sl} />;
+      let extra = null;
+      if (item.id === "kpi_acos") {
+        const targetAcos = user?.settings?.target_acos;
+        if (targetAcos && hasData) {
+          const currentAcos = parseFloat(totals.acos);
+          const target = parseFloat(targetAcos);
+          extra = (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              fontSize: 11, color: 'var(--tx3)', marginTop: 4, marginBottom: 2 }}>
+              <span>Target: {targetAcos}%</span>
+              <span style={{ color: currentAcos <= target ? 'var(--grn)' : 'var(--red)', fontWeight: 600, fontSize: 11 }}>
+                {currentAcos <= target ? '✓ On target' : '↑ Above target'}
+              </span>
+            </div>
+          );
+        }
+      }
+      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} loading={sl} extra={extra} />;
     }
 
     if (item.id === "chart_spend") {
@@ -2536,7 +2600,33 @@ const CampaignsPage = ({ workspaceId }) => {
                             )
                           }
                         </td>
-                        <td className="num" style={{ textAlign: "right" }}>${parseFloat(c.daily_budget || 0).toFixed(0)}</td>
+                        <td className="num" style={{ textAlign: "right", minWidth: 80 }}>
+                          {(() => {
+                            const pct = budgetUtil(c.spend, c.daily_budget, campFilters.metricsDays || 30);
+                            const barColor = pct === null ? null
+                              : pct >= 100 ? 'var(--red)'
+                              : pct >= 85  ? 'var(--amb)'
+                              : pct >= 50  ? 'var(--grn)'
+                              : 'var(--tx3)';
+                            const tipText = pct !== null
+                              ? `Avg daily spend: $${(c.spend / (campFilters.metricsDays || 30)).toFixed(2)} / $${parseFloat(c.daily_budget).toFixed(0)} budget (${pct}% utilized)`
+                              : 'No budget set';
+                            return (
+                              <Tip text={tipText} width={210}>
+                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                                    {c.daily_budget ? `$${parseFloat(c.daily_budget).toFixed(0)}` : '—'}
+                                  </span>
+                                  {pct !== null && (
+                                    <div style={{ width: 60, height: 3, borderRadius: 2, background: 'var(--b2)', marginTop: 3, overflow: 'hidden' }}>
+                                      <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: barColor, borderRadius: 2, transition: 'width 300ms ease' }} />
+                                    </div>
+                                  )}
+                                </div>
+                              </Tip>
+                            );
+                          })()}
+                        </td>
                         <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend || 0).toFixed(0)}</td>
                         <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
                         <td className="num" style={{ textAlign: "right", color: acosColor(c.acos) }}>
@@ -5862,9 +5952,7 @@ function AIPage({ workspaceId }) {
                             <span style={{ fontFamily:"var(--mono)" }}>{a.entity_name || a.entity_id}</span>
                             <span>—</span>
                             <span>{a.action_type?.replace(/_/g," ")}</span>
-                            {a.params && Object.keys(a.params).length > 0 && (
-                              <span style={{ color:"var(--ac2)" }}>{JSON.stringify(a.params)}</span>
-                            )}
+                            {a.params && Object.keys(a.params).length > 0 && renderAiParams(a.params)}
                           </div>
                         ))}
                       </div>
@@ -6198,6 +6286,27 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
                       </select>
                     </div>
                   ))}
+                </div>
+                <div style={{ marginBottom: 14 }}>
+                  <div style={SL}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      Target ACOS (%)
+                      <Tip text="Your profitability target. Used to color-code ACOS on the dashboard. Typical range: 15–30%." width={240}>
+                        <Ic icon={HelpCircle} size={11} style={{ color: 'var(--tx3)', cursor: 'help' }} />
+                      </Tip>
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    min="1" max="200" step="0.1"
+                    placeholder="e.g. 20"
+                    value={wsForm.settings.target_acos || ''}
+                    onChange={e => setWsForm(f => ({ ...f, settings: { ...f.settings, target_acos: e.target.value } }))}
+                    style={{ width: 140 }}
+                  />
+                  <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 3 }}>
+                    SP campaigns: aim for 15–25%. SB/SD: typically 25–40%.
+                  </div>
                 </div>
                 <button className="btn btn-primary" onClick={saveWorkspace} disabled={saving}>
                   {saving ? <span className="loader" /> : t("settings.saveChanges")}
