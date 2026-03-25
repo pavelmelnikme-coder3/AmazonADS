@@ -2477,9 +2477,8 @@ const CampaignsPage = ({ workspaceId }) => {
     setPanelLoading(true);
     setPanelKws([]);
     try {
-      const data = await apiFetch('/keywords?limit=500');
-      const allKws = data?.data || data?.keywords || [];
-      const campKws = allKws.filter(k => k.campaign_id === campaign.id);
+      const data = await apiFetch(`/keywords?limit=200&campaignId=${campaign.id}`);
+      const campKws = data?.data || data?.keywords || [];
       campKws.sort((a, b) => parseFloat(b.spend || 0) - parseFloat(a.spend || 0));
       setPanelKws(campKws);
     } catch {
