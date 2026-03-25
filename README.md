@@ -480,6 +480,9 @@ curl -X POST http://localhost:3000/api/v1/jobs/backfill-metrics \
 - [x] **S2-7** AI recommendation params — human-readable key:value pills
 - [x] **S2-8** Target ACOS — Settings input + Overview KPI card indicator
 
+**Sprint 3 (started 25 March 2026):**
+- [x] **S3-1** Search Term Harvesting — `search_term_metrics` table, `GET /search-terms` (paginated+ACOS), add-keyword + add-negative endpoints, Keywords tab with stRecommendation() auto-classify + row tints + action buttons
+
 ### 📋 Roadmap
 See [docs/ROADMAP.md](./docs/ROADMAP.md) for the full prioritized feature roadmap.
 See [docs/UX_AUDIT.md](./docs/UX_AUDIT.md) for the complete UX audit with competitive analysis.
@@ -490,8 +493,8 @@ All 10 items delivered. See [CHANGELOG.md](./CHANGELOG.md) for full details.
 **Sprint 2 — ✅ COMPLETE (25 March 2026):**
 All 8 items delivered. See [CHANGELOG.md](./CHANGELOG.md) for full details.
 
-**Sprint 3 — Next up (critical for competitiveness):**
-1. **Search Term Harvesting** ⭐⭐ — present in ALL competitors (Pacvue, Helium10, Adbrew, Intentwise)
+**Sprint 3 — Started (25 March 2026):**
+1. **Search Term Harvesting** ⭐⭐ ✅ — `search_term_metrics` table, 3 API endpoints, Keywords tab with harvest/negate workflow
 2. Rule execution history modal — full audit trail per rule
 3. AI suggested prompts — blank textarea guidance (Pacvue Copilot pattern)
 4. Negative keywords management — dedicated tab in Keywords section

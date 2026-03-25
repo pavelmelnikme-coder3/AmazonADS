@@ -214,9 +214,9 @@ Set in Workspace Settings
 
 ---
 
-## 🗓 Sprint 3 — Professional Features (1–2 weeks)
+## 🗓 Sprint 3 — Professional Features (started 25 March 2026)
 
-### S3-1 · Search Term Harvesting ⭐⭐ CRITICAL FOR COMPETITIVENESS
+### ✅ S3-1 · Search Term Harvesting ⭐⭐ CRITICAL FOR COMPETITIVENESS
 **Source:** Pacvue, Helium10, Adbrew, Intentwise — ALL call this a core feature
 
 New tab `Search Terms` in Keywords section:
@@ -357,7 +357,7 @@ Migrate to `POST /sp/negativeKeywords/list` for negative keyword sync
 | Onboarding checklist | S2 | ✅ Done | 🟡 Important | Medium | NNg Research |
 | Hide JSON in AI | S2 | ✅ Done | 🟡 Important | Low | UX Audit |
 | Target ACOS on dashboard | S2 | ✅ Done | 🟡 Important | Low | Helium10 |
-| Search Term Harvesting | S3 | ⏳ Next | 🔴 Critical | High | All competitors |
+| Search Term Harvesting | S3 | ✅ Done | 🔴 Critical | High | All competitors |
 | Rule execution history | S3 | ⏳ Next | 🟡 Important | Medium | Scale Insights |
 | AI suggested prompts | S3 | ⏳ Next | 🟡 Important | Low | Pacvue Copilot |
 | Negative KW management | S3 | ⏳ Next | 🟡 Important | Medium | Scale Insights |

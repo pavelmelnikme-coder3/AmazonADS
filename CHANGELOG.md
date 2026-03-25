@@ -8,6 +8,22 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ## [Unreleased] — 2026-03-25
 
+### Added — Sprint 3 · S3-1 Search Term Harvesting
+
+- **S3-1 · Search Term Harvesting** — Full-stack implementation. New "Search Terms" tab in
+  Keywords page (beside Ключевые слова / Таргеты). Backend: `search_term_metrics` table
+  (migration `009_search_terms.sql`) with workspace/campaign/keyword FKs, unique constraint,
+  4 indexes. Three endpoints: `GET /api/v1/search-terms` (paginated, 5 filters, server-side
+  ACOS), `POST /search-terms/add-keyword` (harvest query → enabled keyword, profile_id +
+  ad_group_id lookup, dedup, audit), `POST /search-terms/add-negative` (campaign-level negative,
+  fallback ad_group lookup via `amazon_keyword_id = 'harvest_neg_' + uuid`). `spSearchTerm`
+  report type added to reporting pipeline. Frontend: toolbar with search + All/🟢 Harvest/🔴
+  Negate filters + count; sortable table (Query/Campaign/Impr./Clicks/Orders/Spend/ACOS/
+  Suggestion/Actions); `stRecommendation()` auto-classifies rows (harvest: orders≥1 + ACOS<40%,
+  or orders≥2 + ACOS<30%; negate: clicks≥10 + orders=0); row tints rgba(green,0.04) /
+  rgba(red,0.04); "+ Exact KW" and "− Negate" action buttons per row; empty state with
+  spSearchTerm explanation + 24-48h data lag note.
+
 ### Added — Sprint 2 · Group C (Architecture)
 
 - **S2-4 · Campaign drill-down slide panel** — Click campaign name (turns blue/underlined on hover)
