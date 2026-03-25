@@ -1,7 +1,7 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 23 March 2026
-> Sprint 1 fully completed ✅
+> Last updated: 25 March 2026
+> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -12,6 +12,23 @@
 - **Amazon-first UX** — users familiar with Seller Central navigate without instructions
 - **Progressive disclosure** — simple for beginners, deep for power users (NNg: reduces task time by 20–40%)
 - **Inline first** — minimize modals, maximize in-context actions
+
+---
+
+## ✅ Sprint 2 — Completed (25 March 2026)
+
+All 8 Sprint 2 items delivered. Verified in production.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| S2-1 · Keyword metrics columns | ✅ Done | Clicks/Orders/ACOS/Spend, sortable, acosColor() |
+| S2-2 · AND/OR rule conditions | ✅ Done | Per-gap toggle, amber OR, live preview, payload |
+| S2-3 · Budget utilization bar | ✅ Done | 3px bar, green/amber/red thresholds, Tip tooltip |
+| S2-4 · Campaign drill-down panel | ✅ Done | 520px slide panel, keywords table, campaignId filter |
+| S2-5 · Dayparting in rules | ✅ Done | Day buttons + hour dropdown, cron generation, card badge |
+| S2-6 · Onboarding checklist | ✅ Done | 5 auto-detected steps, progress bar, localStorage dismiss |
+| S2-7 · AI params readable | ✅ Done | renderAiParams() + PARAM_LABELS, key:value pills |
+| S2-8 · Target ACOS on dashboard | ✅ Done | KPI card indicator, Settings input, ✓/↑ color-coded |
 
 ---
 
@@ -124,16 +141,16 @@ Remove `"SP-API not configured — add SP_API_* to .env"`. Replace with guided e
 
 ---
 
-## 🗓 Sprint 2 — Depth Features (3–5 days each)
+## 🗓 Sprint 2 — Depth Features ✅ ALL DONE
 
-### S2-1 · Performance Metrics in Keywords Table
+### ✅ S2-1 · Performance Metrics in Keywords Table
 **Source:** All competitors — Clicks/Orders/ACOS/Spend are primary keyword signals
 
 Add columns: Clicks / Orders / ACOS / Spend (with period selector matching Campaigns page)
 
 ---
 
-### S2-2 · AND/OR Logic in Rule Conditions
+### ✅ S2-2 · AND/OR Logic in Rule Conditions
 **Source:** Scale Insights, Pacvue — advanced rule logic
 
 - Toggle `AND` / `OR` between condition rows
@@ -141,14 +158,14 @@ Add columns: Clicks / Orders / ACOS / Spend (with period selector matching Campa
 
 ---
 
-### S2-3 · Budget Utilization Bar in Campaigns
+### ✅ S2-3 · Budget Utilization Bar in Campaigns
 **Source:** Pacvue — visual budget health at a glance
 
 Mini progress bar below budget value: `$289 / $300` → 96% bar (red when >90%)
 
 ---
 
-### S2-4 · Drill-Down Panel for Campaigns
+### ✅ S2-4 · Drill-Down Panel for Campaigns
 **Source:** Intentwise — top-tier UX, intuitive drill-down
 
 Click campaign name → slide-in panel with:
@@ -158,7 +175,7 @@ Click campaign name → slide-in panel with:
 
 ---
 
-### S2-5 · Dayparting / Hourly Scheduling
+### ✅ S2-5 · Dayparting / Hourly Scheduling
 **Source:** Scale Insights, Helium10 Ads, Adbrew — featured as a key differentiator
 
 Heatmap-style schedule picker (24h × 7d) for rule execution windows.
@@ -166,7 +183,7 @@ Rules only fire during selected hours.
 
 ---
 
-### S2-6 · Onboarding Checklist Widget
+### ✅ S2-6 · Onboarding Checklist Widget
 **Source:** NNg — *"progress bars and checklists increase completion rates (Zeigarnik Effect)"*
 
 Getting Started widget on Overview for new users:
@@ -180,7 +197,7 @@ Auto-hides when all steps complete.
 
 ---
 
-### S2-7 · Hide Raw JSON in AI Recommendations
+### ✅ S2-7 · Hide Raw JSON in AI Recommendations
 **Source:** UX audit — raw JSON visible in recommendation card
 
 Parse and display human-readable parameter card:
@@ -188,7 +205,7 @@ Parse and display human-readable parameter card:
 
 ---
 
-### S2-8 · Target ACOS on Dashboard
+### ✅ S2-8 · Target ACOS on Dashboard
 **Source:** Helium10 Ads, Intentwise — *"simply set target ACoS, AI handles the rest"*
 
 On ACOS KPI card — add line:
@@ -332,15 +349,22 @@ Migrate to `POST /sp/negativeKeywords/list` for negative keyword sync
 | Readable audit events | S1 | ✅ Done | 🟡 Important | Low | UX Audit |
 | Products empty state | S1 | ✅ Done | 🔴 Critical | Low | Research |
 | Reports UX | S1 | ✅ Done | 🟡 Important | Low | UX Audit |
-| Metrics in Keywords | S2 | ⏳ Next | 🟡 Important | Medium | All |
-| AND/OR rule logic | S2 | ⏳ Next | 🟡 Important | Low | Scale Insights |
-| Budget utilization bar | S2 | ⏳ Next | 🟡 Important | Low | Pacvue |
-| Drill-down / slide panel | S2 | ⏳ Next | 🟡 Important | Medium | Intentwise |
-| Dayparting in rules | S2 | ⏳ Next | 🟡 Important | Medium | Scale Insights |
-| Onboarding checklist | S2 | ⏳ Next | 🟡 Important | Medium | NNg Research |
-| Hide JSON in AI | S2 | ⏳ Next | 🟡 Important | Low | UX Audit |
-| Target ACOS on dashboard | S2 | ⏳ Next | 🟡 Important | Low | Helium10 |
-| Search Term Harvesting | S3 | 📋 Planned | 🔴 Critical | High | All competitors |
+| Metrics in Keywords | S2 | ✅ Done | 🟡 Important | Medium | All |
+| AND/OR rule logic | S2 | ✅ Done | 🟡 Important | Low | Scale Insights |
+| Budget utilization bar | S2 | ✅ Done | 🟡 Important | Low | Pacvue |
+| Campaign drill-down | S2 | ✅ Done | 🟡 Important | Medium | Intentwise |
+| Dayparting in rules | S2 | ✅ Done | 🟡 Important | Medium | Scale Insights |
+| Onboarding checklist | S2 | ✅ Done | 🟡 Important | Medium | NNg Research |
+| Hide JSON in AI | S2 | ✅ Done | 🟡 Important | Low | UX Audit |
+| Target ACOS on dashboard | S2 | ✅ Done | 🟡 Important | Low | Helium10 |
+| Search Term Harvesting | S3 | ⏳ Next | 🔴 Critical | High | All competitors |
+| Rule execution history | S3 | ⏳ Next | 🟡 Important | Medium | Scale Insights |
+| AI suggested prompts | S3 | ⏳ Next | 🟡 Important | Low | Pacvue Copilot |
+| Negative KW management | S3 | ⏳ Next | 🟡 Important | Medium | Scale Insights |
+| TACoS metric | S3 | ⏳ Next | 🟡 Important | Low | Helium10 |
+| Keyboard shortcuts | S3 | ⏳ Next | 🟢 Nice to have | Low | Pacvue |
+| User-saved filters | S3 | ⏳ Next | 🟡 Important | Low | Pacvue |
+| Column resize & hide | S3 | ⏳ Next | 🟡 Important | Medium | NNg |
 | Write-back to Amazon | S4 | 📋 Planned | 🔴 Critical | High | README TODO |
 | Algorithm stacking | S4 | 📋 Planned | 🟢 Nice to have | High | Scale Insights |
 
