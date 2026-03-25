@@ -1493,7 +1493,7 @@ const GlobalProgressBar = ({ workspaceId }) => {
   );
 };
 
-const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
+const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
   const { t } = useI18n();
   const [rangeMode, setRangeMode] = useState("7");
   const [customStart, setCustomStart] = useState(() => {
@@ -1508,6 +1508,12 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   const [layout, setLayout] = useState(() => user?.settings?.dashboardLayout || DEFAULT_LAYOUT);
   const [saveStatus, setSaveStatus] = useState(null);
   const saveTimerRef = useRef(null);
+
+  // S2-6: Onboarding checklist
+  const [checklistDismissed, setChecklistDismissed] = useState(
+    () => localStorage.getItem('af_checklist_done') === '1'
+  );
+  const [rulesCount, setRulesCount] = useState(0);
 
   const endDate   = rangeMode !== "custom" ? new Date().toISOString().split("T")[0] : customEnd;
   const startDate = rangeMode !== "custom"
@@ -1554,6 +1560,13 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
           ? c.last_refresh_at : latest
       , null)
     : null;
+
+  // S2-6: fetch rules count for checklist
+  useEffect(() => {
+    if (workspaceId) {
+      get('/rules', { limit: 1 }).then(d => setRulesCount(d?.pagination?.total || d?.data?.length || 0)).catch(() => {});
+    }
+  }, [workspaceId]);
 
   // Update layout when user settings load
   useEffect(() => {
@@ -1658,6 +1671,26 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
   };
 
   const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || (ct || "").slice(0, 3).toUpperCase();
+
+  // S2-6: Checklist steps (derived from existing state — no extra API calls)
+  const checklistSteps = [
+    { id: 'connected', label: 'Connect your Amazon Ads account', done: (connections?.length || 0) > 0, action: () => onNavigate && onNavigate('connect'), cta: 'Connect →' },
+    { id: 'synced',    label: 'Run your first sync',             done: connections?.some(c => c.last_refresh_at != null) || false, action: null, cta: null },
+    { id: 'rule',      label: 'Create your first automation rule', done: rulesCount > 0, action: () => onNavigate && onNavigate('rules'), cta: 'Create rule →' },
+    { id: 'target_acos', label: 'Set your target ACOS',          done: !!(user?.settings?.target_acos), action: () => onNavigate && onNavigate('settings'), cta: 'Set target →' },
+    { id: 'ai',        label: 'Review AI recommendations',       done: false, action: () => onNavigate && onNavigate('ai'), cta: 'View →' },
+  ];
+  const completedCount = checklistSteps.filter(s => s.done).length;
+  const totalSteps = checklistSteps.length;
+  const allDone = completedCount === totalSteps;
+
+  useEffect(() => {
+    if (allDone) {
+      localStorage.setItem('af_checklist_done', '1');
+      const t = setTimeout(() => setChecklistDismissed(true), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [allDone]);
 
   function renderWidget(item) {
     if (item.id.startsWith("kpi_")) {
@@ -2028,6 +2061,47 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate }) => {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ── S2-6: Onboarding checklist ── */}
+      {!checklistDismissed && completedCount < totalSteps && (
+        <div style={{ background: 'var(--s1)', border: '1px solid var(--b2)', borderRadius: 12, padding: '16px 20px', marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div>
+              <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--tx)' }}>🚀 Get started with AdsFlow</span>
+              <span style={{ fontSize: 12, color: 'var(--tx3)', marginLeft: 12 }}>{completedCount}/{totalSteps} completed</span>
+            </div>
+            <button
+              onClick={() => { setChecklistDismissed(true); localStorage.setItem('af_checklist_done', '1'); }}
+              style={{ background: 'none', border: 'none', color: 'var(--tx3)', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
+              title="Dismiss"
+            >×</button>
+          </div>
+          <div style={{ height: 4, background: 'var(--b2)', borderRadius: 2, marginBottom: 14, overflow: 'hidden' }}>
+            <div style={{ height: '100%', width: `${(completedCount / totalSteps) * 100}%`, background: 'var(--ac)', borderRadius: 2, transition: 'width 400ms ease' }} />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {checklistSteps.map(step => (
+              <div key={step.id} style={{ display: 'flex', alignItems: 'center', gap: 10, opacity: step.done ? 0.6 : 1 }}>
+                <div style={{ width: 18, height: 18, borderRadius: '50%', flexShrink: 0,
+                  background: step.done ? 'var(--grn)' : 'var(--s2)',
+                  border: `2px solid ${step.done ? 'var(--grn)' : 'var(--b2)'}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 300ms' }}>
+                  {step.done && <span style={{ color: '#fff', fontSize: 10, fontWeight: 700 }}>✓</span>}
+                </div>
+                <span style={{ fontSize: 13, color: step.done ? 'var(--tx3)' : 'var(--tx)', textDecoration: step.done ? 'line-through' : 'none', flex: 1 }}>
+                  {step.label}
+                </span>
+                {!step.done && step.cta && step.action && (
+                  <button onClick={step.action}
+                    style={{ fontSize: 11, padding: '3px 10px', background: 'var(--ac)', color: '#fff', border: 'none', borderRadius: 5, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                    {step.cta}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -3278,7 +3352,7 @@ const KeywordsPage = ({ workspaceId }) => {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
-    "keywords", [36, 220, 90, 100, 90, 170, 90]
+    "keywords", [36, 220, 90, 100, 90, 170, 65, 65, 75, 80, 90]
   );
 
   // S1-7: connections for last-sync timestamp
@@ -3488,7 +3562,11 @@ const KeywordsPage = ({ workspaceId }) => {
                       <SortHeader field="state"        label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(3)} />
                       <SortHeader field="bid"          label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(4)} />
                       <SortHeader field="campaign"     label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(5)} />
-                      <th>{kwRH(6)}</th>
+                      <SortHeader field="clicks"  label="Клики"  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(6)} />
+                      <SortHeader field="orders"  label="Заказы" currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(7)} />
+                      <SortHeader field="acos"    label="ACOS"   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(8)} />
+                      <SortHeader field="spend"   label="Spend"  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(9)} />
+                      <th>{kwRH(10)}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3524,6 +3602,18 @@ const KeywordsPage = ({ workspaceId }) => {
                           }
                         </td>
                         <td style={{ fontSize: 11, color: "var(--tx3)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kw.campaign_name}</td>
+                        <td className="num" style={{ textAlign: 'right' }}>
+                          {kw.clicks ? Number(kw.clicks).toLocaleString() : '—'}
+                        </td>
+                        <td className="num" style={{ textAlign: 'right' }}>
+                          {kw.orders ? Number(kw.orders).toLocaleString() : '—'}
+                        </td>
+                        <td className="num" style={{ textAlign: 'right', color: kw.acos != null && parseFloat(kw.acos) > 0 ? acosColor(parseFloat(kw.acos)) : 'var(--tx3)' }}>
+                          {kw.acos != null && parseFloat(kw.acos) > 0 ? parseFloat(kw.acos).toFixed(1) + '%' : '—'}
+                        </td>
+                        <td className="num" style={{ textAlign: 'right', color: 'var(--ac2)' }}>
+                          {kw.spend && parseFloat(kw.spend) > 0 ? '$' + parseFloat(kw.spend).toFixed(2) : '—'}
+                        </td>
                         <td className="act-cell">
                           {editId !== kw.id && (
                             <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}>
@@ -4070,6 +4160,7 @@ const RULE_TEMPLATES = [
 const RuleWizardModal = ({
   form, setForm, editRule, campaigns, adGroups,
   ruleMetrics, ruleActionsList, ruleCampTypes,
+  condOperators, setCondOperators,
   updCond, remCond, addCond,
   updAct,  remAct,  addAct,
   toggleCampaign, toggleAdGroup, toggleMatchType,
@@ -4113,9 +4204,10 @@ const RuleWizardModal = ({
     const condStr = form.conditions.map((c, i) => {
       const mLabel = ruleMetrics.find(m => m.value === c.metric)?.label || c.metric;
       const opLabel = RULE_OPS.find(o => o.value === c.op)?.label || c.op;
+      const gapOp = condOperators[i - 1] || 'AND';
       return (
         <span key={i}>
-          {i > 0 && <span style={{ color:"var(--tx3)", margin:"0 6px", fontFamily:"var(--mono)" }}>AND</span>}
+          {i > 0 && <span style={{ color: gapOp === 'OR' ? 'var(--amb)' : 'var(--tx3)', margin:"0 6px", fontFamily:"var(--mono)", fontWeight: 600 }}>{gapOp}</span>}
           <span style={{ color:"var(--ac)", fontWeight:600 }}>{mLabel}</span>
           {" "}<span style={{ color:"var(--pur)", fontFamily:"var(--mono)" }}>{opLabel}</span>{" "}
           <span style={{ color:"var(--ac)", fontWeight:600 }}>{c.value}</span>
@@ -4163,6 +4255,7 @@ const RuleWizardModal = ({
       actions: tpl.actions,
       scope: { ...f.scope, entity_type: tpl.entityType, period_days: tpl.periodDays },
     }));
+    setCondOperators(tpl.conditions.slice(1).map(() => 'AND'));
     setStep(2);
   };
 
@@ -4397,9 +4490,28 @@ const RuleWizardModal = ({
                   {i > 0 && (
                     <div style={{ display:"flex", alignItems:"center", gap:8, margin:"4px 0" }}>
                       <div style={{ flex:1, height:1, background:"var(--b1)" }} />
-                      <span style={{ fontSize:10, color:"var(--tx3)", fontFamily:"var(--mono)",
-                        background:"var(--s2)", border:"1px solid var(--b2)", padding:"2px 8px",
-                        borderRadius:100 }}>AND</span>
+                      <button
+                        onClick={() => setCondOperators(ops => {
+                          const next = [...ops];
+                          next[i - 1] = next[i - 1] === 'AND' ? 'OR' : 'AND';
+                          return next;
+                        })}
+                        style={{
+                          background: (condOperators[i - 1] || 'AND') === 'OR' ? 'rgba(245,158,11,0.15)' : 'var(--s2)',
+                          border: `1px solid ${(condOperators[i - 1] || 'AND') === 'OR' ? 'var(--amb)' : 'var(--b2)'}`,
+                          color: (condOperators[i - 1] || 'AND') === 'OR' ? 'var(--amb)' : 'var(--tx3)',
+                          borderRadius: 100,
+                          padding: '2px 10px',
+                          fontSize: 10,
+                          fontFamily: 'var(--mono)',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          transition: 'all 150ms',
+                        }}
+                        title={(condOperators[i - 1] || 'AND') === 'AND' ? 'Click to switch to OR' : 'Click to switch to AND'}
+                      >
+                        {condOperators[i - 1] || 'AND'}
+                      </button>
                       <div style={{ flex:1, height:1, background:"var(--b1)" }} />
                     </div>
                   )}
@@ -4793,6 +4905,7 @@ const RulesPage = ({ workspaceId }) => {
   const [showForm,   setShowForm]   = useState(false);
   const [editRule,   setEditRule]   = useState(null);
   const [form,       setForm]       = useState(EMPTY_RULE_FORM);
+  const [condOperators, setCondOperators] = useState([]);
   const [adGroups,   setAdGroups]   = useState([]);
   const [runningId,  setRunningId]  = useState(null);
   const [runResult,  setRunResult]  = useState({});
@@ -4819,7 +4932,7 @@ const RulesPage = ({ workspaceId }) => {
       .then(results => setAdGroups(results.flat())).catch(() => {});
   }, [JSON.stringify(form.scope?.campaign_ids)]);
 
-  const openNew = () => { setForm(EMPTY_RULE_FORM); setEditRule(null); setShowForm(true); };
+  const openNew = () => { setForm(EMPTY_RULE_FORM); setEditRule(null); setShowForm(true); setCondOperators([]); };
   const openEdit = (rule) => {
     const parse = (v, fb) => { if (!v) return fb; if (typeof v === "string") { try { return JSON.parse(v); } catch { return fb; } } return v; };
     setForm({
@@ -4833,12 +4946,21 @@ const RulesPage = ({ workspaceId }) => {
       safety:      parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
     setEditRule(rule); setShowForm(true);
+    const parsedConds = parse(rule.conditions, EMPTY_RULE_FORM.conditions);
+    setCondOperators(parsedConds.slice(1).map(() => 'AND'));
   };
 
   const saveRule = async () => {
     if (!form.name) return alert(t("rules.alertName"));
     try {
-      editRule ? await patch(`/rules/${editRule.id}`, form) : await post("/rules", form);
+      const payload = {
+        ...form,
+        conditions: form.conditions.map((c, i) => ({
+          ...c,
+          ...(i < form.conditions.length - 1 ? { nextOperator: condOperators[i] || 'AND' } : {}),
+        })),
+      };
+      editRule ? await patch(`/rules/${editRule.id}`, payload) : await post("/rules", payload);
       setShowForm(false); reload();
     } catch (e) { alert(t("common.error") + e.message); }
   };
@@ -4865,8 +4987,14 @@ const RulesPage = ({ workspaceId }) => {
 
   // Condition helpers
   const updCond = (i, f, v) => setForm(fm => { const c = [...fm.conditions]; c[i] = { ...c[i], [f]: v }; return { ...fm, conditions: c }; });
-  const remCond = (i)       => setForm(f => ({ ...f, conditions: f.conditions.filter((_,idx) => idx !== i) }));
-  const addCond = ()        => setForm(f => ({ ...f, conditions: [...f.conditions, { metric:"clicks", op:"gte", value:"10" }] }));
+  const remCond = (i) => {
+    setForm(f => ({ ...f, conditions: f.conditions.filter((_,idx) => idx !== i) }));
+    setCondOperators(ops => ops.filter((_,idx) => idx !== (i > 0 ? i - 1 : 0)));
+  };
+  const addCond = () => {
+    setForm(f => ({ ...f, conditions: [...f.conditions, { metric:"clicks", op:"gte", value:"10" }] }));
+    setCondOperators(ops => [...ops, 'AND']);
+  };
 
   // Action helpers
   const updAct = (i, f, v) => setForm(fm => { const a = [...fm.actions]; a[i] = { ...a[i], [f]: v }; return { ...fm, actions: a }; });
@@ -4908,6 +5036,7 @@ const RulesPage = ({ workspaceId }) => {
           ruleMetrics={ruleMetrics}
           ruleActionsList={ruleActionsList}
           ruleCampTypes={ruleCampTypes}
+          condOperators={condOperators} setCondOperators={setCondOperators}
           updCond={updCond} remCond={remCond} addCond={addCond}
           updAct={updAct}   remAct={remAct}   addAct={addAct}
           toggleCampaign={toggleCampaign}
@@ -6573,7 +6702,7 @@ export default function App() {
   };
 
   const pages = {
-    overview: <OverviewPage workspaceId={wid} user={user} onSettingsUpdate={handleSettingsUpdate} />,
+    overview: <OverviewPage workspaceId={wid} user={user} onSettingsUpdate={handleSettingsUpdate} onNavigate={setActive} />,
     campaigns: <CampaignsPage workspaceId={wid} />,
     products: <ProductsPage workspaceId={wid} />,
     keywords: <KeywordsPage workspaceId={wid} />,
