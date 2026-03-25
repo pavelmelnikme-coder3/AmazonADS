@@ -105,12 +105,19 @@ router.post("/add-keyword", async (req, res, next) => {
       return res.status(409).json({ error: "Keyword already exists", keywordId: existing[0].id });
     }
 
+    const { rows: campRows } = await query(
+      "SELECT profile_id FROM campaigns WHERE id = $1",
+      [campaignId]
+    );
+    const profileId = campRows[0]?.profile_id;
+    if (!profileId) return res.status(400).json({ error: "Campaign not found" });
+
     const { rows: [kw] } = await query(
       `INSERT INTO keywords
-         (workspace_id, ad_group_id, campaign_id, keyword_text, match_type, state, bid, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 'enabled', $6, NOW(), NOW())
+         (workspace_id, profile_id, ad_group_id, campaign_id, keyword_text, match_type, state, bid, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'enabled', $7, NOW(), NOW())
        RETURNING id`,
-      [req.workspaceId, adGroupId, campaignId || null, searchQuery, matchType, parseFloat(bid) || 0.50]
+      [req.workspaceId, profileId, adGroupId, campaignId, searchQuery, matchType, parseFloat(bid) || 0.50]
     );
 
     await writeAudit({
@@ -147,12 +154,19 @@ router.post("/add-negative", async (req, res, next) => {
       return res.status(409).json({ error: "Negative keyword already exists" });
     }
 
+    const { rows: campRows } = await query(
+      "SELECT profile_id FROM campaigns WHERE id = $1",
+      [campaignId]
+    );
+    const profileId = campRows[0]?.profile_id;
+    if (!profileId) return res.status(400).json({ error: "Campaign not found" });
+
     const { rows: [kw] } = await query(
       `INSERT INTO keywords
-         (workspace_id, campaign_id, ad_group_id, keyword_text, match_type, state, bid, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 'negative', 0, NOW(), NOW())
+         (workspace_id, profile_id, campaign_id, ad_group_id, keyword_text, match_type, state, bid, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'negative', 0, NOW(), NOW())
        RETURNING id`,
-      [req.workspaceId, campaignId, adGroupId || null, searchQuery, matchType]
+      [req.workspaceId, profileId, campaignId, adGroupId || null, searchQuery, matchType]
     );
 
     await writeAudit({
