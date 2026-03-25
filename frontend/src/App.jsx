@@ -2477,7 +2477,7 @@ const CampaignsPage = ({ workspaceId }) => {
     setPanelLoading(true);
     setPanelKws([]);
     try {
-      const data = await get('/keywords', { limit: 500, sortBy: 'spend', sortDir: 'desc' });
+      const data = await apiFetch('/keywords?limit=500');
       const allKws = data?.data || data?.keywords || [];
       const campKws = allKws.filter(k => k.campaign_id === campaign.id);
       campKws.sort((a, b) => parseFloat(b.spend || 0) - parseFloat(a.spend || 0));
@@ -2858,7 +2858,7 @@ const CampaignsPage = ({ workspaceId }) => {
               {panelLoading ? (
                 <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
               ) : panelKws.length === 0 ? (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx3)', fontSize: 13 }}>No enabled keywords found for this campaign</div>
+                <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx3)', fontSize: 13 }}>No keywords found for this campaign in the current data period</div>
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
