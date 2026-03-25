@@ -92,17 +92,9 @@ router.get("/", async (req, res, next) => {
 // POST /search-terms/add-keyword — harvest query as new keyword
 router.post("/add-keyword", async (req, res, next) => {
   try {
-    const { query: searchQuery, campaignId, adGroupId, bid, matchType = "exact" } = req.body;
-    if (!searchQuery || !adGroupId) {
-      return res.status(400).json({ error: "query and adGroupId are required" });
-    }
-
-    const { rows: existing } = await query(
-      "SELECT id FROM keywords WHERE ad_group_id = $1 AND LOWER(keyword_text) = LOWER($2) AND match_type = $3",
-      [adGroupId, searchQuery, matchType]
-    );
-    if (existing.length > 0) {
-      return res.status(409).json({ error: "Keyword already exists", keywordId: existing[0].id });
+    const { query: searchQuery, campaignId, adGroupId: adGroupIdReq, bid, matchType = "exact" } = req.body;
+    if (!searchQuery || !campaignId) {
+      return res.status(400).json({ error: "query and campaignId are required" });
     }
 
     const { rows: campRows } = await query(
@@ -112,10 +104,27 @@ router.post("/add-keyword", async (req, res, next) => {
     const profileId = campRows[0]?.profile_id;
     if (!profileId) return res.status(400).json({ error: "Campaign not found" });
 
+    // Resolve ad_group_id (NOT NULL) — use provided value or fall back to first ad group
+    const { rows: agRows } = await query(
+      "SELECT id FROM ad_groups WHERE campaign_id = $1 ORDER BY created_at ASC LIMIT 1",
+      [campaignId]
+    );
+    const adGroupId = adGroupIdReq || agRows[0]?.id;
+    if (!adGroupId) return res.status(400).json({ error: "No ad group found for this campaign" });
+
+    const { rows: existing } = await query(
+      "SELECT id FROM keywords WHERE ad_group_id = $1 AND LOWER(keyword_text) = LOWER($2) AND match_type = $3",
+      [adGroupId, searchQuery, matchType]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({ error: "Keyword already exists", keywordId: existing[0].id });
+    }
+
     const { rows: [kw] } = await query(
       `INSERT INTO keywords
-         (workspace_id, profile_id, ad_group_id, campaign_id, keyword_text, match_type, state, bid, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'enabled', $7, NOW(), NOW())
+         (workspace_id, profile_id, ad_group_id, campaign_id, amazon_keyword_id,
+          keyword_text, match_type, state, bid, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'harvest_' || gen_random_uuid(), $5, $6, 'enabled', $7, NOW(), NOW())
        RETURNING id`,
       [req.workspaceId, profileId, adGroupId, campaignId, searchQuery, matchType, parseFloat(bid) || 0.50]
     );
@@ -161,12 +170,19 @@ router.post("/add-negative", async (req, res, next) => {
     const profileId = campRows[0]?.profile_id;
     if (!profileId) return res.status(400).json({ error: "Campaign not found" });
 
+    const { rows: agRows } = await query(
+      "SELECT id FROM ad_groups WHERE campaign_id = $1 ORDER BY created_at ASC LIMIT 1",
+      [campaignId]
+    );
+    const resolvedAdGroupId = adGroupId || agRows[0]?.id;
+    if (!resolvedAdGroupId) return res.status(400).json({ error: "No ad group found for this campaign" });
+
     const { rows: [kw] } = await query(
       `INSERT INTO keywords
-         (workspace_id, profile_id, campaign_id, ad_group_id, keyword_text, match_type, state, bid, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'negative', 0, NOW(), NOW())
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_keyword_id, keyword_text, match_type, state, bid, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'harvest_neg_' || gen_random_uuid(), $5, $6, 'negative', 0, NOW(), NOW())
        RETURNING id`,
-      [req.workspaceId, profileId, campaignId, adGroupId || null, searchQuery, matchType]
+      [req.workspaceId, profileId, campaignId, resolvedAdGroupId, searchQuery, matchType]
     );
 
     await writeAudit({
