@@ -1,7 +1,7 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 25 March 2026
-> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete
+> Last updated: 26 March 2026
+> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 🔄 In Progress · Production Deployment ✅
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -12,6 +12,29 @@
 - **Amazon-first UX** — users familiar with Seller Central navigate without instructions
 - **Progressive disclosure** — simple for beginners, deep for power users (NNg: reduces task time by 20–40%)
 - **Inline first** — minimize modals, maximize in-context actions
+
+---
+
+## 🔄 Production Deployment + Security Hardening — (26 March 2026)
+
+Deployed to Hetzner server 159.69.222.12. Security audit performed.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Production deployment (Docker Compose) | ✅ Done | nginx static build, Vite prod build with VITE_API_URL |
+| DB migration to server | ✅ Done | pg_dump → pg_restore, all data migrated |
+| Amazon OAuth reconnection | ✅ Done | Profiles + campaigns synced |
+| Email invitations (Brevo SMTP) | ✅ Done | workspace_invitations table, 7-day TTL, HTML email |
+| User invite accept flow | ✅ Done | GET+POST /auth/invite/:token, auto-login |
+| Logout button | ✅ Done | Clears JWT + workspace, resets state |
+| OAuth CSRF state → Redis | ✅ Done | Replaces in-memory Map, atomic get+del, TTL |
+| Auth brute-force protection | ✅ Done | 20 req/15 min on login/register/accept-invite |
+| Token leak prevention | ✅ Done | Removed tokenPreview from access token logs |
+
+**Pending (SSH access required):**
+- Close ports 5432/6379 (remove docker-compose port bindings for postgres/redis)
+- Add Redis password (`requirepass`)
+- Set `NODE_ENV=production`
 
 ---
 

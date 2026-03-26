@@ -83,7 +83,7 @@ router.get("/sync/status", async (req, res, next) => {
 router.get("/amazon/init", async (req, res, next) => {
   try {
     const region = req.query.region || "EU";
-    const { url, state } = buildAuthUrl(req.user.id, req.orgId, region);
+    const { url, state } = await buildAuthUrl(req.user.id, req.orgId, region);
     res.json({ url, state, region });
   } catch (err) {
     next(err);
@@ -100,7 +100,7 @@ router.post("/amazon/callback", async (req, res, next) => {
     if (!state) return res.status(400).json({ error: "Missing state parameter" });
 
     // Verify CSRF state
-    const stateData = validateState(state);
+    const stateData = await validateState(state);
     if (!stateData || stateData.userId !== req.user.id) {
       return res.status(400).json({ error: "Invalid or expired state. Please try connecting again." });
     }

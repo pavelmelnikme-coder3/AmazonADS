@@ -6,7 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
-## [Unreleased] — 2026-03-25
+## [Unreleased] — 2026-03-26
+
+### Security — Production Hardening
+
+- **OAuth CSRF state → Redis** — `buildAuthUrl` / `validateState` in `lwa.js` migrated from
+  in-memory `Map` to Redis (`oauth:state:<token>`, TTL 10 min). Tokens consumed atomically
+  (`GET` + `DEL`). Survives server restarts; safe for multi-instance deployments.
+
+- **Auth rate limiting** — Dedicated `express-rate-limit` limiter (20 req / 15 min per IP)
+  applied to `POST /auth/login`, `POST /auth/register`, `POST /auth/accept-invite`. Prevents
+  brute-force and credential stuffing attacks. Global API limiter (300 req/min) still applies.
+
+- **Token leak prevention** — Removed `tokenPreview` field from `getValidAccessToken` logs
+  (was logging first 20 chars of decrypted access token).
+
+### Added — User Invitation System
+
+- **Email invitations via Brevo SMTP** — `backend/src/services/email.js` with nodemailer +
+  smtp-relay.brevo.com:587. `sendInviteEmail()` sends branded HTML invite with role, workspace
+  name, and one-click accept link (7-day TTL). Non-fatal: invite saved to DB even if email fails.
+
+- **`workspace_invitations` table** (migration `007_invitations.sql`) — UUID PK, unique token
+  (64-char hex), `is_new_user` flag, `accepted_at`, `expires_at` (default +7 days).
+
+- **Invite flow** — `POST /settings/workspaces/:id/invite` generates token + sends email.
+  Existing users added to workspace immediately; new users register via invite link.
+  `GET /auth/invite/:token` returns invite info. `POST /auth/accept-invite/:token` sets
+  password (new users), adds to `workspace_members`, returns JWT for auto-login.
+
+- **`InvitePage` frontend** — Auto-detected via `/invite/[64-char-hex]` path pattern.
+  Shows workspace name, inviter, role. Password field for new users. Auto-logs in after accept.
+
+### Added — Logout
+
+- **Logout button** — `LogOut` icon in sidebar (bottom-right). Clears `af_token` +
+  `af_workspace` from localStorage, resets all React state.
 
 ### Added — Sprint 3 · S3-1 Search Term Harvesting
 

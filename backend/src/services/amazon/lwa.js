@@ -15,24 +15,25 @@ const crypto = require("crypto");
 const { encrypt, decrypt } = require("../../config/encryption");
 const { query, withTransaction } = require("../../db/pool");
 const logger = require("../../config/logger");
+const { getRedis } = require("../../config/redis");
 
 const LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token";
 const LWA_AUTH_URL = "https://www.amazon.com/ap/oa";
 const AMAZON_ADS_SCOPE = "advertising::campaign_management";
-
-// State map for CSRF protection (in prod: use Redis with TTL)
-const pendingStates = new Map();
+const OAUTH_STATE_TTL = 10 * 60; // 10 minutes in seconds
 
 /**
  * Generate the Amazon OAuth authorization URL.
- * The state parameter is a CSRF token tied to the user session.
+ * The state parameter is a CSRF token stored in Redis (TTL: 10 min).
  */
-function buildAuthUrl(userId, orgId, region = "EU") {
+async function buildAuthUrl(userId, orgId, region = "EU") {
   const state = crypto.randomBytes(24).toString("base64url");
-
-  // Store state with region for verification in callback (TTL: 10 minutes)
-  pendingStates.set(state, { userId, orgId, region, createdAt: Date.now() });
-  setTimeout(() => pendingStates.delete(state), 10 * 60 * 1000);
+  const redis = getRedis();
+  await redis.setex(
+    `oauth:state:${state}`,
+    OAUTH_STATE_TTL,
+    JSON.stringify({ userId, orgId, region })
+  );
 
   const params = new URLSearchParams({
     client_id: process.env.AMAZON_CLIENT_ID,
@@ -156,12 +157,12 @@ async function getValidAccessToken(connectionId) {
   // Refresh if expired or expiring soon
   if (expiresAt.getTime() - Date.now() < fiveMinutes) {
     const refreshed = await refreshAccessToken(connectionId);
-    logger.info("getValidAccessToken: refreshed token", { connectionId, tokenLength: refreshed.accessToken?.length, tokenPreview: refreshed.accessToken?.slice(0, 20) });
+    logger.info("getValidAccessToken: refreshed token", { connectionId, tokenLength: refreshed.accessToken?.length });
     return refreshed.accessToken;
   }
 
   const token = decrypt(conn.access_token_enc);
-  logger.info("getValidAccessToken: decrypted token", { connectionId, tokenLength: token?.length, tokenPreview: token?.slice(0, 20) });
+  logger.info("getValidAccessToken: decrypted token", { connectionId, tokenLength: token?.length });
   return token;
 }
 
@@ -224,19 +225,15 @@ async function revokeConnection(connectionId, userId) {
 
 /**
  * Validate OAuth state parameter (CSRF protection).
+ * Atomically reads and deletes from Redis (one-time use).
  */
-function validateState(state) {
-  const data = pendingStates.get(state);
-  if (!data) return null;
-
-  // Check expiry (10 minutes)
-  if (Date.now() - data.createdAt > 10 * 60 * 1000) {
-    pendingStates.delete(state);
-    return null;
-  }
-
-  pendingStates.delete(state);
-  return data;
+async function validateState(state) {
+  const redis = getRedis();
+  const key = `oauth:state:${state}`;
+  const raw = await redis.get(key);
+  if (!raw) return null;
+  await redis.del(key);
+  return JSON.parse(raw);
 }
 
 module.exports = {
