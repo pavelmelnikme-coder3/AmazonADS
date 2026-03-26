@@ -440,7 +440,7 @@ const Sidebar = ({ active, setActive, user, workspace, onLogout }) => {
         <LanguageSwitcher />
         <button
           onClick={onLogout}
-          title="Sign out"
+          title={t("common.signOut")}
           style={{ background: "transparent", border: "none", cursor: "pointer", padding: 4, color: "var(--tx3)", display: "flex", alignItems: "center", borderRadius: 6, flexShrink: 0 }}
           onMouseEnter={e => e.currentTarget.style.color = "var(--red)"}
           onMouseLeave={e => e.currentTarget.style.color = "var(--tx3)"}
@@ -1674,7 +1674,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: sparkData.roas },
     kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: sparkData.clicks },
     kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: sparkData.impressions },
-    kpi_orders:      { label: "Orders",                      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: sparkData.orders },
+    kpi_orders:      { label: t("overview.kpiOrders"),      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: sparkData.orders },
     kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: sparkData.ctr },
     kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc },
   };
@@ -1683,11 +1683,11 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
 
   // S2-6: Checklist steps (derived from existing state — no extra API calls)
   const checklistSteps = [
-    { id: 'connected', label: 'Connect your Amazon Ads account', done: (connections?.length || 0) > 0, action: () => onNavigate && onNavigate('connect'), cta: 'Connect →' },
-    { id: 'synced',    label: 'Run your first sync',             done: connections?.some(c => c.last_refresh_at != null) || false, action: null, cta: null },
-    { id: 'rule',      label: 'Create your first automation rule', done: rulesCount > 0, action: () => onNavigate && onNavigate('rules'), cta: 'Create rule →' },
-    { id: 'target_acos', label: 'Set your target ACOS',          done: !!(user?.settings?.target_acos), action: () => onNavigate && onNavigate('settings'), cta: 'Set target →' },
-    { id: 'ai',        label: 'Review AI recommendations',       done: false, action: () => onNavigate && onNavigate('ai'), cta: 'View →' },
+    { id: 'connected',   label: t("overview.checklistStep1"), done: (connections?.length || 0) > 0,                          action: () => onNavigate && onNavigate('connect'),   cta: t("overview.checklistStep1Cta") },
+    { id: 'synced',      label: t("overview.checklistStep2"), done: connections?.some(c => c.last_refresh_at != null) || false, action: null,                                        cta: null },
+    { id: 'rule',        label: t("overview.checklistStep3"), done: rulesCount > 0,                                           action: () => onNavigate && onNavigate('rules'),     cta: t("overview.checklistStep3Cta") },
+    { id: 'target_acos', label: t("overview.checklistStep4"), done: !!(user?.settings?.target_acos),                         action: () => onNavigate && onNavigate('settings'),  cta: t("overview.checklistStep4Cta") },
+    { id: 'ai',          label: t("overview.checklistStep5"), done: false,                                                    action: () => onNavigate && onNavigate('ai'),        cta: t("overview.checklistStep5Cta") },
   ];
   const completedCount = checklistSteps.filter(s => s.done).length;
   const totalSteps = checklistSteps.length;
@@ -1714,9 +1714,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
           extra = (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               fontSize: 11, color: 'var(--tx3)', marginTop: 4, marginBottom: 2 }}>
-              <span>Target: {targetAcos}%</span>
+              <span>{t("overview.targetAcos", { acos: targetAcos })}</span>
               <span style={{ color: currentAcos <= target ? 'var(--grn)' : 'var(--red)', fontWeight: 600, fontSize: 11 }}>
-                {currentAcos <= target ? '✓ On target' : '↑ Above target'}
+                {currentAcos <= target ? t("overview.onTarget") : t("overview.aboveTarget")}
               </span>
             </div>
           );
@@ -1730,7 +1730,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
         <div className="card" style={{ padding: "18px 20px" }}>
           <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("overview.spendByDay")}</div>
           {trend.length === 0
-            ? <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            ? <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--tx3)", fontSize: 12 }}>{t("overview.noDataWidget")}</div>
             : <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 64 }}>
                 {trend.map((r, i) => {
                   const max = Math.max(...trend.map(x => parseFloat(x.spend)));
@@ -1752,14 +1752,14 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
 
     if (item.id === "chart_trend") {
       const metrics = [
-        { key: "clicks", label: "Clicks", color: "#14B8A6" },
-        { key: "sales",  label: "Sales",  color: "#22C55E" },
+        { key: "clicks", label: t("overview.kpiClicks"), color: "#14B8A6" },
+        { key: "sales",  label: t("overview.kpiSales"),  color: "#22C55E" },
       ];
       return (
         <div className="card" style={{ padding: "18px 20px" }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Multi-trend</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("overview.multiTrend")}</div>
           {trend.length === 0
-            ? <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            ? <div style={{ height: 64, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--tx3)", fontSize: 12 }}>{t("overview.noDataWidget")}</div>
             : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {metrics.map(({ key, label, color }) => (
                   <div key={key}>
@@ -1778,7 +1778,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
         <div className="card" style={{ overflow: "hidden" }}>
           <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("overview.topCampaigns")}</div>
           {!topCampaigns?.length
-            ? <div style={{ padding: "20px", textAlign: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            ? <div style={{ padding: "20px", textAlign: "center", color: "var(--tx3)", fontSize: 12 }}>{t("overview.noDataWidget")}</div>
             : <table>
                 <thead><tr>
                   <th>{t("overview.colCampaign")}</th>
@@ -1814,12 +1814,12 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       const rows = byType || [];
       return (
         <div className="card" style={{ overflow: "hidden" }}>
-          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>By Campaign Type</div>
+          <div style={{ padding: "14px 18px 10px", fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600 }}>{t("overview.byCampType")}</div>
           {!rows.length
-            ? <div style={{ padding: "20px", textAlign: "center", color: "var(--tx3)", fontSize: 12 }}>No data</div>
+            ? <div style={{ padding: "20px", textAlign: "center", color: "var(--tx3)", fontSize: 12 }}>{t("overview.noDataWidget")}</div>
             : <table>
                 <thead><tr>
-                  <th>Type</th>
+                  <th>{t("overview.typeCol")}</th>
                   <th style={{ textAlign: "right" }}>Spend</th>
                   <th style={{ textAlign: "right" }}>Sales</th>
                   <th style={{ textAlign: "right" }}>ACOS</th>
@@ -1852,9 +1852,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       const alerts = alertsData?.data || [];
       return (
         <div className="card" style={{ padding: "14px 18px" }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Alerts</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>{t("overview.alertsWidget")}</div>
           {!alerts.length
-            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>No active alerts</div>
+            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("overview.noActiveAlerts")}</div>
             : <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {alerts.slice(0, 3).map(a => (
                   <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
@@ -1872,9 +1872,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       const recs = Array.isArray(aiRecs) ? aiRecs : [];
       return (
         <div className="card" style={{ padding: "14px 18px" }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>AI Recommendations</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>{t("overview.aiRecs")}</div>
           {!recs.length
-            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>No recommendations</div>
+            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("overview.noRecs")}</div>
             : <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {recs.slice(0, 3).map(r => (
                   <div key={r.id} style={{ borderBottom: "1px solid var(--b1)", paddingBottom: 8 }}>
@@ -1895,9 +1895,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       const syncProfiles = profiles || [];
       return (
         <div className="card" style={{ padding: "14px 18px" }}>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Sync Status</div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 14, fontWeight: 600, marginBottom: 10 }}>{t("overview.syncStatus")}</div>
           {!syncProfiles.length
-            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>No profiles</div>
+            ? <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("overview.noProfiles")}</div>
             : <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {syncProfiles.slice(0, 5).map(p => (
                   <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
@@ -2037,10 +2037,10 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
             </div>
           </div>
           {[
-            { key: "kpi",   label: "KPI" },
-            { key: "chart", label: "Charts" },
-            { key: "table", label: "Tables" },
-            { key: "other", label: "Other" },
+            { key: "kpi",   label: t("overview.widgetGroupKpi") },
+            { key: "chart", label: t("overview.widgetGroupCharts") },
+            { key: "table", label: t("overview.widgetGroupTables") },
+            { key: "other", label: t("overview.widgetGroupOther") },
           ].map(({ key, label }) => {
             const groupDefs = WIDGET_DEFS.filter(d => d.group === key);
             return (
@@ -2078,13 +2078,13 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
         <div style={{ background: 'var(--s1)', border: '1px solid var(--b2)', borderRadius: 12, padding: '16px 20px', marginBottom: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div>
-              <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--tx)' }}>🚀 Get started with AdsFlow</span>
-              <span style={{ fontSize: 12, color: 'var(--tx3)', marginLeft: 12 }}>{completedCount}/{totalSteps} completed</span>
+              <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--tx)' }}>{t("overview.checklistTitle")}</span>
+              <span style={{ fontSize: 12, color: 'var(--tx3)', marginLeft: 12 }}>{t("overview.checklistCompleted", { done: completedCount, total: totalSteps })}</span>
             </div>
             <button
               onClick={() => { setChecklistDismissed(true); localStorage.setItem('af_checklist_done', '1'); }}
               style={{ background: 'none', border: 'none', color: 'var(--tx3)', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}
-              title="Dismiss"
+              title={t("overview.checklistDismiss")}
             >×</button>
           </div>
           <div style={{ height: 4, background: 'var(--b2)', borderRadius: 2, marginBottom: 14, overflow: 'hidden' }}>
@@ -2599,16 +2599,16 @@ const CampaignsPage = ({ workspaceId }) => {
           onChange={e => { setCampFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
         {[
           { value: "", label: t("filter.all") },
-          { value: "enabled", label: "Enabled" },
-          { value: "paused", label: "Paused" },
-          { value: "archived", label: "Archived" },
+          { value: "enabled",  label: t("common.statusEnabled") },
+          { value: "paused",   label: t("common.statusPaused") },
+          { value: "archived", label: t("common.statusArchived") },
         ].map(s => (
           <button key={s.value} onClick={() => { setCampFilter("status", s.value); setPage(1); }}
             className={`btn ${campFilters.status === s.value ? "btn-primary" : "btn-ghost"}`}
             style={{ fontSize: 12, padding: "5px 12px" }}>{s.label}</button>
         ))}
         {[
-          { value: "", label: "All" },
+          { value: "", label: t("filter.all") },
           { value: "SP", label: "SP" },
           { value: "SB", label: "SB" },
           { value: "SD", label: "SD" },
@@ -3846,19 +3846,19 @@ const KeywordsPage = ({ workspaceId }) => {
           onChange={e => { setKwFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
         {[
           { value: "", label: t("filter.all") },
-          { value: "enabled", label: "Enabled" },
-          { value: "paused", label: "Paused" },
-          { value: "archived", label: "Archived" },
+          { value: "enabled",  label: t("common.statusEnabled") },
+          { value: "paused",   label: t("common.statusPaused") },
+          { value: "archived", label: t("common.statusArchived") },
         ].map(s => (
           <button key={s.value} onClick={() => { setKwFilter("state", s.value); setPage(1); }}
             className={`btn ${kwFilters.state === s.value ? "btn-primary" : "btn-ghost"}`}
             style={{ fontSize: 11, padding: "4px 8px" }}>{s.label}</button>
         ))}
         {[
-          { value: "", label: "All" },
-          { value: "exact", label: "Exact" },
-          { value: "phrase", label: "Phrase" },
-          { value: "broad", label: "Broad" },
+          { value: "", label: t("keywords.matchAll") },
+          { value: "exact",  label: t("keywords.matchExact") },
+          { value: "phrase", label: t("keywords.matchPhrase") },
+          { value: "broad",  label: t("keywords.matchBroad") },
         ].map(m => (
           <button key={m.value} onClick={() => { setKwFilter("matchType", m.value); setPage(1); }}
             className={`btn ${kwFilters.matchType === m.value ? "btn-primary" : "btn-ghost"}`}
@@ -3935,10 +3935,10 @@ const KeywordsPage = ({ workspaceId }) => {
                       <SortHeader field="state"        label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(3)} />
                       <SortHeader field="bid"          label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(4)} />
                       <SortHeader field="campaign"     label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(5)} />
-                      <SortHeader field="clicks"  label="Клики"  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(6)} />
-                      <SortHeader field="orders"  label="Заказы" currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(7)} />
-                      <SortHeader field="acos"    label="ACOS"   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(8)} />
-                      <SortHeader field="spend"   label="Spend"  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(9)} />
+                      <SortHeader field="clicks" label={t("keywords.colClicks")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(6)} />
+                      <SortHeader field="orders" label={t("keywords.colOrders")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(7)} />
+                      <SortHeader field="acos"   label="ACOS"                    currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(8)} />
+                      <SortHeader field="spend"  label={t("keywords.colSpend")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(9)} />
                       <th>{kwRH(10)}</th>
                     </tr>
                   </thead>
