@@ -130,6 +130,87 @@ router.get("/me", requireAuth, async (req, res) => {
   res.json({ user: { ...req.user, settings: req.user.settings || {} }, workspaces });
 });
 
+// GET /auth/invite/:token — get invite info
+router.get("/invite/:token", async (req, res, next) => {
+  try {
+    const { rows: [inv] } = await query(
+      `SELECT wi.*, w.name as workspace_name, u.name as inviter_name
+       FROM workspace_invitations wi
+       JOIN workspaces w ON w.id = wi.workspace_id
+       LEFT JOIN users u ON u.id = wi.invited_by
+       WHERE wi.token = $1`,
+      [req.params.token]
+    );
+    if (!inv) return res.status(404).json({ error: "Invitation not found or expired" });
+    if (inv.accepted_at) return res.status(410).json({ error: "Invitation already accepted" });
+    if (new Date(inv.expires_at) < new Date()) return res.status(410).json({ error: "Invitation has expired" });
+
+    res.json({
+      email: inv.email,
+      workspace_name: inv.workspace_name,
+      inviter_name: inv.inviter_name,
+      role: inv.role,
+      is_new_user: inv.is_new_user,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /auth/accept-invite/:token — accept invitation
+router.post("/accept-invite/:token", async (req, res, next) => {
+  try {
+    const { password } = req.body;
+
+    const { rows: [inv] } = await query(
+      `SELECT wi.*, w.name as workspace_name
+       FROM workspace_invitations wi
+       JOIN workspaces w ON w.id = wi.workspace_id
+       WHERE wi.token = $1`,
+      [req.params.token]
+    );
+    if (!inv) return res.status(404).json({ error: "Invitation not found" });
+    if (inv.accepted_at) return res.status(410).json({ error: "Invitation already accepted" });
+    if (new Date(inv.expires_at) < new Date()) return res.status(410).json({ error: "Invitation has expired" });
+
+    // New users must set a password
+    if (inv.is_new_user) {
+      if (!password || password.length < 8) {
+        return res.status(400).json({ error: "Password must be at least 8 characters" });
+      }
+      const hash = await bcrypt.hash(password, 12);
+      await query("UPDATE users SET password_hash=$1, is_active=true, updated_at=NOW() WHERE id=$2", [hash, inv.user_id]);
+    }
+
+    // Add to workspace (for new users — first time; for existing — idempotent)
+    await query(
+      "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+      [inv.workspace_id, inv.user_id, inv.role, inv.invited_by]
+    );
+
+    // Mark invitation as accepted
+    await query("UPDATE workspace_invitations SET accepted_at=NOW() WHERE id=$1", [inv.id]);
+    await query("UPDATE users SET last_login_at=NOW() WHERE id=$1", [inv.user_id]);
+
+    // Return JWT so user is auto-logged in
+    const { rows: [user] } = await query(
+      "SELECT id, org_id, email, name, role, settings FROM users WHERE id=$1",
+      [inv.user_id]
+    );
+    const { rows: workspaces } = await query(
+      `SELECT w.id, w.name, wm.role as workspace_role
+       FROM workspaces w JOIN workspace_members wm ON wm.workspace_id = w.id
+       WHERE wm.user_id = $1 ORDER BY w.created_at`,
+      [inv.user_id]
+    );
+
+    const tokens = generateTokens(user.id);
+    res.json({
+      ...tokens,
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, orgId: user.org_id, settings: user.settings || {} },
+      workspaces,
+    });
+  } catch (err) { next(err); }
+});
+
 // PATCH /auth/me — update user settings
 router.patch("/me", requireAuth, async (req, res, next) => {
   try {

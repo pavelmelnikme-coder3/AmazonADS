@@ -6079,6 +6079,112 @@ const AlertsPage = ({ workspaceId }) => {
   );
 };
 
+// ─── Invite Accept Page ───────────────────────────────────────────────────────
+const InvitePage = ({ token, onLogin }) => {
+  const [info, setInfo] = useState(null);
+  const [error, setError] = useState(null);
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+
+  const ROLE_LABELS = {
+    admin: "Admin", analyst: "Analyst", media_buyer: "Media Buyer",
+    ai_operator: "AI Operator", read_only: "Read Only",
+  };
+
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_API_URL || "http://localhost:4000/api/v1"}/auth/invite/${token}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) setError(data.error);
+        else setInfo(data);
+      })
+      .catch(() => setError("Failed to load invitation"))
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  async function accept() {
+    setSubmitting(true); setError(null);
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || "http://localhost:4000/api/v1"}/auth/accept-invite/${token}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(info?.is_new_user ? { password } : {}),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to accept invitation");
+      localStorage.setItem("af_token", data.accessToken);
+      if (data.workspaces?.[0]) localStorage.setItem("af_workspace", data.workspaces[0].id);
+      window.history.replaceState({}, "", "/");
+      onLogin(data);
+    } catch (e) {
+      setError(e.message);
+    }
+    setSubmitting(false);
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)" }}>
+      <Styles />
+      <div style={{ width: 420, padding: "36px 32px", background: "var(--s1)", borderRadius: 14, border: "1px solid var(--b1)" }}>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <div style={{ width: 48, height: 48, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}>
+            <Activity size={24} strokeWidth={1.75} color="#fff" />
+          </div>
+          <div style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 800 }}>AdsFlow</div>
+          <div style={{ fontSize: 12, color: "var(--tx3)" }}>Amazon Ads Dashboard</div>
+        </div>
+
+        {loading && <div style={{ textAlign: "center", color: "var(--tx3)", padding: "20px 0" }}>Loading invitation…</div>}
+
+        {!loading && error && (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ padding: "16px", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, color: "var(--red)", fontSize: 13, marginBottom: 16 }}>{error}</div>
+            <button className="btn btn-secondary" onClick={() => { window.history.replaceState({}, "", "/"); window.location.reload(); }}>Back to login</button>
+          </div>
+        )}
+
+        {!loading && info && (
+          <>
+            <div style={{ background: "var(--s2)", borderRadius: 10, padding: "16px 18px", marginBottom: 20 }}>
+              <div style={{ fontSize: 13, color: "var(--tx3)", marginBottom: 4 }}>You've been invited by <strong style={{ color: "var(--tx)" }}>{info.inviter_name}</strong></div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "var(--tx)", marginBottom: 4 }}>{info.workspace_name}</div>
+              <div style={{ display: "inline-block", background: "rgba(167,139,250,0.12)", color: "#a78bfa", borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 600 }}>
+                {ROLE_LABELS[info.role] || info.role}
+              </div>
+            </div>
+
+            {error && <div style={{ marginBottom: 14, padding: "10px 14px", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, color: "var(--red)", fontSize: 12 }}>{error}</div>}
+
+            {info.is_new_user && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 12, color: "var(--tx3)", marginBottom: 8 }}>Set a password for your new account (<strong style={{ color: "var(--tx2)" }}>{info.email}</strong>)</div>
+                <input
+                  type="password"
+                  placeholder="Choose a password (min 8 characters)"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && accept()}
+                  style={{ width: "100%", boxSizing: "border-box" }}
+                />
+              </div>
+            )}
+
+            <button
+              className="btn btn-primary"
+              style={{ width: "100%", justifyContent: "center", padding: "11px" }}
+              onClick={accept}
+              disabled={submitting || (info.is_new_user && password.length < 8)}
+            >
+              {submitting ? <span className="loader" /> : "Accept Invitation & Open Dashboard"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ─── Login Page ───────────────────────────────────────────────────────────────
 const LoginPage = ({ onLogin }) => {
   const { t } = useI18n();
@@ -7126,6 +7232,10 @@ export default function App() {
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [toast, setToast] = useState(null);
 
+  // Detect /invite/:token path
+  const inviteTokenMatch = window.location.pathname.match(/^\/invite\/([a-f0-9]{64})$/);
+  const inviteToken = inviteTokenMatch?.[1] || null;
+
   useEffect(() => {
     const handler = (e) => { setToast(e.detail); setTimeout(() => setToast(null), 2000); };
     window.addEventListener("af:toast", handler);
@@ -7163,6 +7273,7 @@ export default function App() {
     }
   }
 
+  if (inviteToken) return <InvitePage token={inviteToken} onLogin={handleLogin} />;
   if (!authed) return <LoginPage onLogin={handleLogin} />;
 
   const wid = workspace?.id || localStorage.getItem("af_workspace");

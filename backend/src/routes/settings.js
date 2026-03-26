@@ -1,7 +1,9 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
+const { sendInviteEmail } = require("../services/email");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -103,8 +105,8 @@ router.post("/members/invite", requirePerm("invite"), async (req, res, next) => 
       userId = existingUsers[0].id;
       isNewUser = false;
     } else {
-      // Create user with temp password, they'll need to reset
-      const tempHash = await bcrypt.hash(Math.random().toString(36) + Date.now(), 10);
+      // Create user with temp password — they'll set real one when accepting invite
+      const tempHash = await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10);
       const { rows: [newUser] } = await query(
         `INSERT INTO users (org_id, email, password_hash, name, role)
          VALUES ($1, $2, $3, $4, 'analyst') RETURNING id`,
@@ -112,14 +114,43 @@ router.post("/members/invite", requirePerm("invite"), async (req, res, next) => 
       );
       userId = newUser.id;
       isNewUser = true;
-      // In production, send invite email. For now, log it.
-      console.log(`[INVITE] New user created: ${email}, invite link would be sent here`);
     }
 
+    // For existing users who aren't yet members — add them directly
+    if (!isNewUser) {
+      await query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        [req.workspaceId, userId, workspace_role, req.user.id]
+      );
+    }
+
+    // Generate invite token
+    const token = crypto.randomBytes(32).toString("hex");
+    const { rows: [ws] } = await query("SELECT name FROM workspaces WHERE id=$1", [req.workspaceId]);
+    const { rows: [inviter] } = await query("SELECT name FROM users WHERE id=$1", [req.user.id]);
+
     await query(
-      "INSERT INTO workspace_members (workspace_id, user_id, role, invited_by) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
-      [req.workspaceId, userId, workspace_role, req.user.id]
+      `INSERT INTO workspace_invitations (workspace_id, email, role, token, invited_by, user_id, is_new_user)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [req.workspaceId, email.toLowerCase(), workspace_role, token, req.user.id, userId, isNewUser]
     );
+
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const inviteUrl = `${frontendUrl}/invite/${token}`;
+
+    try {
+      await sendInviteEmail({
+        to: email.toLowerCase(),
+        inviterName: inviter?.name || "A team member",
+        workspaceName: ws?.name || "AdsFlow Workspace",
+        role: workspace_role,
+        inviteUrl,
+        isNewUser,
+      });
+    } catch (emailErr) {
+      // Email failure is non-fatal — invitation is saved, log and continue
+      require("../config/logger").warn(`Invite email failed for ${email}`, { error: emailErr.message });
+    }
 
     res.status(201).json({ invited: true, user_id: userId, isNewUser });
   } catch (err) { next(err); }
