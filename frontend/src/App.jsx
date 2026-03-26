@@ -2866,7 +2866,7 @@ const CampaignsPage = ({ workspaceId }) => {
               {panelLoading ? (
                 <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
               ) : panelKws.length === 0 ? (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx3)', fontSize: 13 }}>No keywords found for this campaign in the current data period</div>
+                <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx3)', fontSize: 13 }}>{t("settings.noPanelKeywords")}</div>
               ) : (
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
@@ -2894,7 +2894,7 @@ const CampaignsPage = ({ workspaceId }) => {
             {/* Footer */}
             <div style={{ padding: '12px 20px', borderTop: '1px solid var(--b1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
               <span style={{ fontSize: 11, color: 'var(--tx3)' }}>Showing top {Math.min(panelKws.length, 100)} keywords by spend</span>
-              <button onClick={() => setPanelCampaign(null)} style={{ fontSize: 12, padding: '4px 12px', background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 5, color: 'var(--tx2)', cursor: 'pointer' }}>Close</button>
+              <button onClick={() => setPanelCampaign(null)} style={{ fontSize: 12, padding: '4px 12px', background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 5, color: 'var(--tx2)', cursor: 'pointer' }}>{t("settings.close")}</button>
             </div>
           </div>
         </div>,
@@ -4698,10 +4698,10 @@ const RuleWizardModal = ({
 
   // Stepper header
   const steps = [
-    { n:1, label: t("rules.wizardStep1") || "Основное" },
-    { n:2, label: t("rules.wizardStep2") || "Условия" },
-    { n:3, label: t("rules.wizardStep3") || "Действия" },
-    { n:4, label: "Предпросмотр" },
+    { n:1, label: t("rules.wizardStep1") },
+    { n:2, label: t("rules.wizardStep2") },
+    { n:3, label: t("rules.wizardStep3") },
+    { n:4, label: t("rules.wizardStep4") },
   ];
 
   const filteredCamps = (campaigns || []).filter(c =>
@@ -4769,7 +4769,7 @@ const RuleWizardModal = ({
                 <div style={{ marginBottom:20 }}>
                   <div style={{ fontSize:11, color:"var(--tx3)", textTransform:"uppercase",
                     letterSpacing:"0.06em", fontWeight:600, marginBottom:10 }}>
-                    Start from a template
+                    {t("rules.fromTemplate")}
                   </div>
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
                     {RULE_TEMPLATES.map(tpl => (
@@ -4781,17 +4781,17 @@ const RuleWizardModal = ({
                         onMouseLeave={e => e.currentTarget.style.borderColor = "var(--b2)"}>
                         <span style={{ fontSize:16 }}>{tpl.icon}</span>
                         <span style={{ fontSize:12, fontWeight:600, color:"var(--tx)", lineHeight:1.3 }}>
-                          {tpl.label}
+                          {t(`rules.tpl_${tpl.id}`) || tpl.label}
                         </span>
                         <span style={{ fontSize:11, color:"var(--tx3)", lineHeight:1.4 }}>
-                          {tpl.description}
+                          {t(`rules.tpl_${tpl.id}_desc`) || tpl.description}
                         </span>
                       </button>
                     ))}
                   </div>
                   <div style={{ display:"flex", alignItems:"center", gap:10, margin:"14px 0 2px" }}>
                     <div style={{ flex:1, height:1, background:"var(--b2)" }} />
-                    <span style={{ fontSize:11, color:"var(--tx3)" }}>or build from scratch</span>
+                    <span style={{ fontSize:11, color:"var(--tx3)" }}>{t("rules.buildFromScratch")}</span>
                     <div style={{ flex:1, height:1, background:"var(--b2)" }} />
                   </div>
                 </div>
@@ -4869,8 +4869,8 @@ const RuleWizardModal = ({
               {/* Dayparting */}
               <div style={{ marginTop:16 }}>
                 <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-                  <div style={{ ...LABEL, marginBottom:0 }}>Dayparting</div>
-                  <span style={{ fontSize:11, color:"var(--tx3)" }}>(optional — restrict when the rule runs)</span>
+                  <div style={{ ...LABEL, marginBottom:0 }}>{t("rules.dayparting")}</div>
+                  <span style={{ fontSize:11, color:"var(--tx3)" }}>({t("rules.daypartingHint")})</span>
                 </div>
                 <div style={{ padding:"12px 14px", background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
                   <div style={{ display:"flex", gap:4, marginBottom:10 }}>
@@ -4896,7 +4896,7 @@ const RuleWizardModal = ({
                     })}
                   </div>
                   <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    <span style={{ fontSize:11, color:"var(--tx3)", whiteSpace:"nowrap" }}>Run at hour:</span>
+                    <span style={{ fontSize:11, color:"var(--tx3)", whiteSpace:"nowrap" }}>{t("rules.runAtHour")}</span>
                     <select
                       value={form.scope?.dayparting?.hour ?? ""}
                       onChange={e => {
@@ -4906,7 +4906,7 @@ const RuleWizardModal = ({
                         setForm(f => ({ ...f, scope: { ...f.scope, dayparting: ndp } }));
                       }}
                       style={{ ...SEL_SM, width:120 }}>
-                      <option value="">Any hour</option>
+                      <option value="">{t("rules.anyHour")}</option>
                       {Array.from({ length:24 }, (_,h) => (
                         <option key={h} value={h}>{String(h).padStart(2,"0")}:00</option>
                       ))}
@@ -4924,7 +4924,7 @@ const RuleWizardModal = ({
                         onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, dayparting: null } }))}
                         style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer",
                           color:"var(--tx3)", fontSize:11, padding:"2px 6px" }}>
-                        Clear
+                        {t("rules.clear")}
                       </button>
                     )}
                   </div>
@@ -5217,7 +5217,7 @@ const RuleWizardModal = ({
           {step === 4 && (
             <div>
               <div style={{ marginBottom:16, fontSize:13, color:"var(--tx2)" }}>
-                Dry-run preview — rule evaluated against current data. No changes applied.
+                {t("rules.previewDesc")}
               </div>
 
               {previewLoading && (
@@ -5226,7 +5226,7 @@ const RuleWizardModal = ({
                   <div style={{ width:18, height:18, border:"2px solid var(--ac)",
                     borderTopColor:"transparent", borderRadius:"50%",
                     animation:"spin 0.7s linear infinite" }} />
-                  Running preview…
+                  {t("rules.previewRunning")}
                 </div>
               )}
 
@@ -5242,9 +5242,9 @@ const RuleWizardModal = ({
                   {/* Summary stats */}
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:20 }}>
                     {[
-                      { label:"Entities matched",  value: previewData.matched_count ?? previewData.actions_taken ?? "—" },
-                      { label:"Actions planned",   value: previewData.actions_planned ?? previewData.actions_taken ?? "—" },
-                      { label:"Mode",              value: previewData.dry_run ? "Dry-run" : "Live" },
+                      { label: t("rules.entitiesMatched"), value: previewData.matched_count ?? previewData.actions_taken ?? "—" },
+                      { label: t("rules.actionsPlanned"),  value: previewData.actions_planned ?? previewData.actions_taken ?? "—" },
+                      { label: t("rules.previewModeLabel"), value: previewData.dry_run ? t("rules.modeDryRun") : t("rules.modeLive") },
                     ].map(stat => (
                       <div key={stat.label} style={{ background:"var(--s2)", border:"1px solid var(--b2)",
                         borderRadius:8, padding:"12px 16px", textAlign:"center" }}>
@@ -5260,18 +5260,18 @@ const RuleWizardModal = ({
                     <div>
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:8, textTransform:"uppercase",
                         letterSpacing:"0.06em", fontWeight:600 }}>
-                        Sample matches (up to 10)
+                        {t("rules.sampleMatches")}
                       </div>
                       <div style={{ border:"1px solid var(--b2)", borderRadius:8, overflow:"hidden" }}>
                         <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                           <thead>
                             <tr style={{ background:"var(--s2)" }}>
                               <th style={{ textAlign:"left", padding:"8px 12px", color:"var(--tx3)",
-                                fontWeight:600, fontSize:11 }}>Keyword / Target</th>
+                                fontWeight:600, fontSize:11 }}>{t("rules.colKeywordTarget")}</th>
                               <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)",
-                                fontWeight:600, fontSize:11 }}>Action</th>
+                                fontWeight:600, fontSize:11 }}>{t("rules.colAction")}</th>
                               <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)",
-                                fontWeight:600, fontSize:11 }}>Value</th>
+                                fontWeight:600, fontSize:11 }}>{t("rules.colValue")}</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -5301,7 +5301,7 @@ const RuleWizardModal = ({
                     (!previewData.sample_matches || previewData.sample_matches.length === 0) && (
                     <div style={{ padding:"20px", textAlign:"center", color:"var(--tx3)", fontSize:13,
                       background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
-                      No entities matched the current conditions — rule will have no effect.
+                      {t("rules.noMatchDesc")}
                     </div>
                   )}
                 </div>
@@ -6980,9 +6980,9 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
                   style={{ ...INPUT_W, height: 70, resize: "vertical", padding: "7px 12px", background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 7, color: "var(--tx)", fontFamily: "var(--ui)", fontSize: 13 }} />
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, marginBottom: 14 }}>
                   {[
-                    { key: "timezone", label: "Timezone", opts: ["UTC","Europe/Berlin","Europe/London","America/New_York","America/Los_Angeles","Asia/Tokyo"] },
-                    { key: "default_attribution_window", label: "Attribution Window", opts: ["1d","7d","14d","30d"], tip: "How long after an ad click Amazon counts a sale as attributed to that ad. SP: 7 days, SB/SD: 14 days. Affects ACOS and ROAS calculations." },
-                    { key: "currency", label: "Currency", opts: ["EUR","USD","GBP","JPY","CAD","AUD","PLN","SEK"] },
+                    { key: "timezone", label: t("settings.timezone"), opts: ["UTC","Europe/Berlin","Europe/London","America/New_York","America/Los_Angeles","Asia/Tokyo"] },
+                    { key: "default_attribution_window", label: t("settings.attributionWindow"), opts: ["1d","7d","14d","30d"], tip: t("settings.attributionWindowTip") },
+                    { key: "currency", label: t("settings.currency"), opts: ["EUR","USD","GBP","JPY","CAD","AUD","PLN","SEK"] },
                   ].map(({ key, label, opts, tip }) => (
                     <div key={key}>
                       <div style={SL}>
@@ -7098,10 +7098,10 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
           <div className="card" style={{ padding: 24 }}>
             {!notifs ? <span className="loader" /> : <>
               {[
-                { heading: "Email Notifications", keys: [
-                  { key: "email_alerts",        label: "Campaign alerts" },
-                  { key: "email_weekly_report", label: "Weekly report" },
-                  { key: "email_ai_summary",    label: "AI summary" },
+                { heading: t("settings.notificationsTitle"), keys: [
+                  { key: "email_alerts",        label: t("settings.notifCampaignAlerts") },
+                  { key: "email_weekly_report", label: t("settings.notifWeeklyReport") },
+                  { key: "email_ai_summary",    label: t("settings.notifAiSummary") },
                 ]},
                 { heading: "Alert Types", keys: [
                   { key: "alert_acos",       label: "High ACoS" },
