@@ -22,7 +22,7 @@ import {
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
-  HelpCircle
+  HelpCircle, LogOut
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -388,7 +388,7 @@ const NAV = [
   { id: "settings",  icon: Cog       },
 ];
 
-const Sidebar = ({ active, setActive, user, workspace }) => {
+const Sidebar = ({ active, setActive, user, workspace, onLogout }) => {
   const { t } = useI18n();
   return (
     <aside style={{
@@ -430,14 +430,23 @@ const Sidebar = ({ active, setActive, user, workspace }) => {
       </nav>
 
       <div style={{ padding: "12px 14px", borderTop: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "#fff" }}>
+        <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "#fff", flexShrink: 0 }}>
           {user?.name?.slice(0, 2).toUpperCase() || "??"}
         </div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 500 }}>{user?.name || "—"}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.name || "—"}</div>
           <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{user?.role || ""}</div>
         </div>
         <LanguageSwitcher />
+        <button
+          onClick={onLogout}
+          title="Sign out"
+          style={{ background: "transparent", border: "none", cursor: "pointer", padding: 4, color: "var(--tx3)", display: "flex", alignItems: "center", borderRadius: 6, flexShrink: 0 }}
+          onMouseEnter={e => e.currentTarget.style.color = "var(--red)"}
+          onMouseLeave={e => e.currentTarget.style.color = "var(--tx3)"}
+        >
+          <Ic icon={LogOut} size={15} />
+        </button>
       </div>
     </aside>
   );
@@ -7273,6 +7282,14 @@ export default function App() {
     }
   }
 
+  function handleLogout() {
+    localStorage.removeItem("af_token");
+    localStorage.removeItem("af_workspace");
+    setAuthed(false);
+    setUser(null);
+    setWorkspace(null);
+  }
+
   if (inviteToken) return <InvitePage token={inviteToken} onLogin={handleLogin} />;
   if (!authed) return <LoginPage onLogin={handleLogin} />;
 
@@ -7301,7 +7318,7 @@ export default function App() {
     <>
       <Styles />
       <div style={{ display: "flex", minHeight: "100vh" }}>
-        <Sidebar active={active} setActive={setActive} user={user} workspace={workspace} />
+        <Sidebar active={active} setActive={setActive} user={user} workspace={workspace} onLogout={handleLogout} />
         <main style={{ marginLeft: 220, flex: 1, padding: "26px 30px", minHeight: "100vh", overflow: "auto" }}>
           {pages[active]}
         </main>
