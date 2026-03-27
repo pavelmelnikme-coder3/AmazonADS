@@ -583,4 +583,22 @@ export default {
     settingsTitle: "Settings",
     settingsDesc: "Account and integration settings",
   },
+  negatives: {
+    title: "Negative Keywords",
+    add: "Add negative",
+    matchExact: "Exact",
+    matchPhrase: "Phrase",
+    allCampaigns: "All campaigns",
+    noResults: "No negative keywords",
+  },
+  rulesHistory: {
+    title: "Run History",
+    noRuns: "No runs yet",
+    modeLive: "Live",
+    modeSim: "Simulation",
+  },
+  metrics: {
+    tacos: "TACoS",
+    tacosTooltip: "Total ACoS = Ad Spend / Total Sales (organic + ads)",
+  },
 };

@@ -632,4 +632,20 @@ router.post("/:id/run", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /rules/:id/runs — execution history
+router.get("/:id/runs", async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT id, started_at, completed_at, dry_run, status,
+              entities_evaluated, entities_matched, actions_taken, actions_failed,
+              summary, error_message
+       FROM rule_executions
+       WHERE rule_id = $1 AND workspace_id = $2
+       ORDER BY started_at DESC LIMIT 50`,
+      [req.params.id, req.workspaceId]
+    );
+    res.json({ data: rows });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

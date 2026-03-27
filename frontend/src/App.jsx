@@ -22,7 +22,7 @@ import {
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
-  HelpCircle, LogOut
+  HelpCircle, LogOut, Plus
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -3437,6 +3437,397 @@ function getPageRange(current, total) {
   return result;
 }
 
+// ─── DateRangePicker ──────────────────────────────────────────────────────────
+function DateRangePicker({ dateFrom, dateTo, metricsDays, onChange }) {
+  const [showCustom, setShowCustom] = React.useState(!!(dateFrom || dateTo));
+  const PRESETS = [
+    { label: '7d',  days: 7  },
+    { label: '14d', days: 14 },
+    { label: '30d', days: 30 },
+    { label: '90d', days: 90 },
+  ];
+
+  const applyPreset = (days) => {
+    setShowCustom(false);
+    const to   = new Date();
+    const from = new Date();
+    from.setDate(from.getDate() - days);
+    onChange({
+      dateFrom: from.toISOString().slice(0, 10),
+      dateTo:   to.toISOString().slice(0, 10),
+      metricsDays: days,
+    });
+  };
+
+  const today   = new Date().toISOString().slice(0, 10);
+  const minDate = '2024-01-01';
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+      {PRESETS.map(p => (
+        <button
+          key={p.days}
+          onClick={() => applyPreset(p.days)}
+          className={`btn ${!showCustom && p.days === (metricsDays || 30) ? 'btn-primary' : 'btn-ghost'}`}
+          style={{ fontSize: 11, padding: '4px 8px' }}
+        >{p.label}</button>
+      ))}
+      <button
+        onClick={() => setShowCustom(v => !v)}
+        className={`btn ${showCustom ? 'btn-primary' : 'btn-ghost'}`}
+        style={{ fontSize: 11, padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4 }}
+      >
+        <Calendar size={11} strokeWidth={1.75} /> Range
+      </button>
+      {showCustom && (
+        <>
+          <input
+            type="date" value={dateFrom || ''} min={minDate} max={dateTo || today}
+            onChange={e => onChange({ dateFrom: e.target.value, dateTo, metricsDays: null })}
+            style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--b2)',
+                     background: 'var(--s2)', color: 'var(--tx)', fontSize: 12 }}
+          />
+          <span style={{ color: 'var(--tx2)', fontSize: 12 }}>—</span>
+          <input
+            type="date" value={dateTo || ''} min={dateFrom || minDate} max={today}
+            onChange={e => onChange({ dateFrom, dateTo: e.target.value, metricsDays: null })}
+            style={{ padding: '4px 8px', borderRadius: 6, border: '1px solid var(--b2)',
+                     background: 'var(--s2)', color: 'var(--tx)', fontSize: 12 }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── CampaignMultiSelect ──────────────────────────────────────────────────────
+function CampaignMultiSelect({ selectedIds, onChange }) {
+  const [open, setOpen]           = useState(false);
+  const [campaigns, setCampaigns] = useState([]);
+  const [search, setSearch]       = useState('');
+
+  useEffect(() => {
+    if (!open || campaigns.length > 0) return;
+    apiFetch('/campaigns?limit=500')
+      .then(d => setCampaigns(d.data || []))
+      .catch(() => {});
+  }, [open]);
+
+  const filtered = campaigns.filter(c =>
+    c.name?.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggle = (id) => {
+    onChange(
+      selectedIds.includes(id)
+        ? selectedIds.filter(x => x !== id)
+        : [...selectedIds, id]
+    );
+  };
+
+  const label = selectedIds.length === 0
+    ? 'All campaigns'
+    : selectedIds.length === 1
+      ? (campaigns.find(c => c.id === selectedIds[0])?.name || '1 campaign')
+      : `${selectedIds.length} campaigns`;
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className={`btn ${selectedIds.length > 0 ? 'btn-primary' : 'btn-ghost'}`}
+        style={{ fontSize: 11, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 5, minWidth: 130 }}
+      >
+        <Filter size={11} strokeWidth={1.75} />
+        <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{label}</span>
+        <ChevronDown size={11} strokeWidth={1.75} />
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: '110%', left: 0, zIndex: 999,
+          background: 'var(--s1)', border: '1px solid var(--b2)',
+          borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          minWidth: 260, maxHeight: 300, display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--b1)' }}>
+            <input
+              autoFocus placeholder="Search campaigns…" value={search}
+              onChange={e => setSearch(e.target.value)}
+              style={{ width: '100%', padding: '5px 8px', borderRadius: 5, fontSize: 12,
+                background: 'var(--s2)', border: '1px solid var(--b2)',
+                color: 'var(--tx)', outline: 'none', boxSizing: 'border-box' }}
+            />
+          </div>
+          {selectedIds.length > 0 && (
+            <div style={{ padding: '5px 10px', borderBottom: '1px solid var(--b1)' }}>
+              <button onClick={() => onChange([])}
+                style={{ fontSize: 11, color: 'var(--ac)', background: 'none',
+                         border: 'none', cursor: 'pointer', padding: 0 }}>
+                Clear ({selectedIds.length})
+              </button>
+            </div>
+          )}
+          <div style={{ overflowY: 'auto', flex: 1 }}>
+            {filtered.length === 0 && (
+              <div style={{ padding: 16, textAlign: 'center', color: 'var(--tx2)', fontSize: 12 }}>
+                No campaigns
+              </div>
+            )}
+            {filtered.map(c => (
+              <label key={c.id}
+                style={{ display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 12px', cursor: 'pointer',
+                  background: selectedIds.includes(c.id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
+                <input type="checkbox" checked={selectedIds.includes(c.id)}
+                  onChange={() => toggle(c.id)}
+                  style={{ accentColor: 'var(--ac)', width: 13, height: 13 }} />
+                <span style={{ fontSize: 12, flex: 1, overflow: 'hidden',
+                               textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {c.name}
+                </span>
+                {c.campaign_type && (
+                  <span style={{ fontSize: 10, color: 'var(--tx3)', background: 'var(--s2)',
+                                 padding: '1px 5px', borderRadius: 4 }}>
+                    {c.campaign_type === 'sponsoredProducts' ? 'SP'
+                      : c.campaign_type === 'sponsoredBrands' ? 'SB' : 'SD'}
+                  </span>
+                )}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+      {open && <div onClick={() => setOpen(false)}
+        style={{ position: 'fixed', inset: 0, zIndex: 998 }} />}
+    </div>
+  );
+}
+
+// ─── NegativesTab ─────────────────────────────────────────────────────────────
+function NegativesTab({ workspaceId }) {
+  const [negatives, setNegatives]   = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [search, setSearch]         = useState('');
+  const [filterCampaignId, setFilterCampaignId] = useState('');
+  const [campaigns, setCampaigns]   = useState([]);
+  const [adding, setAdding]         = useState(false);
+  const [newKw, setNewKw]           = useState({ campaignId: '', keywordText: '', matchType: 'negativeExact' });
+
+  useEffect(() => {
+    apiFetch('/campaigns?limit=500')
+      .then(d => setCampaigns(d.data || []))
+      .catch(() => {});
+  }, [workspaceId]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    const p = new URLSearchParams({ limit: 200 });
+    if (search) p.set('search', search);
+    if (filterCampaignId) p.set('campaignId', filterCampaignId);
+    apiFetch(`/negative-keywords?${p}`)
+      .then(d => setNegatives(d.data || []))
+      .catch(() => setNegatives([]))
+      .finally(() => setLoading(false));
+  }, [search, filterCampaignId, workspaceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const remove = async (id) => {
+    await apiFetch(`/negative-keywords/${id}`, { method: 'DELETE' });
+    setNegatives(n => n.filter(x => x.id !== id));
+  };
+
+  const add = async () => {
+    if (!newKw.campaignId || !newKw.keywordText.trim()) return;
+    try {
+      await apiFetch('/negative-keywords', {
+        method: 'POST',
+        body: JSON.stringify({ campaignId: newKw.campaignId, keywordText: newKw.keywordText, matchType: newKw.matchType }),
+      });
+      setAdding(false);
+      setNewKw({ campaignId: '', keywordText: '', matchType: 'negativeExact' });
+      load();
+    } catch (e) { alert('Error: ' + e.message); }
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}
+          style={{ width: 180, padding: '5px 10px', fontSize: 12 }} />
+        <select value={filterCampaignId} onChange={e => setFilterCampaignId(e.target.value)}
+          style={{ padding: '5px 8px', fontSize: 12 }}>
+          <option value="">All campaigns</option>
+          {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <button onClick={() => setAdding(true)} className="btn btn-primary"
+          style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <Plus size={12} strokeWidth={1.75} /> Add negative
+        </button>
+        <span style={{ color: 'var(--tx3)', fontSize: 12, marginLeft: 'auto' }}>
+          {negatives.length} negatives
+        </span>
+      </div>
+
+      {adding && (
+        <div className="card" style={{ padding: 14, marginBottom: 14,
+          display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 4 }}>Campaign *</div>
+            <select value={newKw.campaignId} onChange={e => setNewKw(n => ({ ...n, campaignId: e.target.value }))}
+              style={{ padding: '5px 8px', fontSize: 12 }}>
+              <option value="">Select…</option>
+              {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 160 }}>
+            <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 4 }}>Keyword *</div>
+            <input value={newKw.keywordText}
+              onChange={e => setNewKw(n => ({ ...n, keywordText: e.target.value }))}
+              placeholder="Enter keyword…"
+              style={{ width: '100%', padding: '5px 10px', fontSize: 12, boxSizing: 'border-box' }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 4 }}>Type</div>
+            <select value={newKw.matchType} onChange={e => setNewKw(n => ({ ...n, matchType: e.target.value }))}
+              style={{ padding: '5px 8px', fontSize: 12 }}>
+              <option value="negativeExact">Exact</option>
+              <option value="negativePhrase">Phrase</option>
+            </select>
+          </div>
+          <button onClick={add} className="btn btn-primary" style={{ fontSize: 12, padding: '5px 14px' }}>Save</button>
+          <button onClick={() => setAdding(false)} className="btn btn-ghost" style={{ fontSize: 12, padding: '5px 10px' }}>Cancel</button>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
+      ) : (
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--b1)' }}>
+                {['Keyword', 'Type', 'Level', 'Campaign', ''].map(h => (
+                  <th key={h} style={{ padding: '8px 12px', textAlign: 'left',
+                    color: 'var(--tx3)', fontWeight: 500, fontSize: 11 }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {negatives.length === 0 ? (
+                <tr><td colSpan={5} style={{ padding: 32, textAlign: 'center', color: 'var(--tx2)' }}>
+                  No negative keywords
+                </td></tr>
+              ) : negatives.map(n => (
+                <tr key={n.id} style={{ borderBottom: '1px solid var(--b1)' }}>
+                  <td style={{ padding: '9px 12px', fontWeight: 500 }}>{n.keyword_text}</td>
+                  <td style={{ padding: '9px 12px' }}>
+                    <span className="badge bg-red" style={{ fontSize: 10 }}>
+                      {n.match_type === 'negativeExact' ? 'Exact' : 'Phrase'}
+                    </span>
+                  </td>
+                  <td style={{ padding: '9px 12px', fontSize: 12, color: 'var(--tx3)' }}>
+                    {n.level || 'ad_group'}
+                  </td>
+                  <td style={{ padding: '9px 12px', fontSize: 12, color: 'var(--tx2)' }}>{n.campaign_name || '—'}</td>
+                  <td style={{ padding: '9px 12px' }}>
+                    <button onClick={() => remove(n.id)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer',
+                               color: 'var(--tx3)', padding: 4 }} title="Delete">
+                      <Trash2 size={13} strokeWidth={1.75} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── RuleHistoryModal ─────────────────────────────────────────────────────────
+function RuleHistoryModal({ rule, onClose }) {
+  const [runs, setRuns]     = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiFetch(`/rules/${rule.id}/runs`)
+      .then(d => { setRuns(d.data || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [rule.id]);
+
+  return createPortal(
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
+                  zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+         onClick={onClose}>
+      <div className="card" style={{ width: 640, maxHeight: '80vh', overflow: 'auto',
+                                     padding: 28, margin: 16 }}
+           onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <h3 style={{ margin: 0, fontFamily: 'var(--disp)', fontSize: 16 }}>
+            History: {rule.name}
+          </h3>
+          <button onClick={onClose}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--tx2)' }}>
+            <X size={18} strokeWidth={1.75} />
+          </button>
+        </div>
+        {loading && <div style={{ textAlign: 'center', padding: 32 }}><span className="loader" /></div>}
+        {!loading && runs.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 32, color: 'var(--tx2)', fontSize: 13 }}>
+            No runs yet
+          </div>
+        )}
+        {runs.map(run => (
+          <div key={run.id} style={{
+            border: '1px solid var(--b1)', borderRadius: 8, padding: 14, marginBottom: 10,
+            background: run.error_message ? 'rgba(239,68,68,0.05)' : 'var(--s2)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'var(--tx2)' }}>
+                {new Date(run.started_at).toLocaleString()}
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <span className={`badge ${run.dry_run ? 'bg-amb' : 'bg-grn'}`} style={{ fontSize: 10 }}>
+                  {run.dry_run ? 'Simulation' : 'Live'}
+                </span>
+                <span className="badge" style={{ fontSize: 10, background: 'var(--s3)', color: 'var(--tx2)' }}>
+                  {run.status || 'completed'}
+                </span>
+                <span className="badge bg-bl" style={{ fontSize: 10 }}>
+                  {run.entities_matched || 0} matched · {run.actions_taken || 0} actions
+                </span>
+              </div>
+            </div>
+            {run.error_message && (
+              <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 4 }}>{run.error_message}</div>
+            )}
+            {run.summary && Array.isArray(run.summary) && run.summary.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                {run.summary.slice(0, 3).map((a, i) => (
+                  <div key={i} style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 2 }}>
+                    • {a.entity_name || a.keyword_text}: {a.action}
+                    {a.old_bid && ` $${a.old_bid} → $${a.new_bid}`}
+                  </div>
+                ))}
+                {run.summary.length > 3 && (
+                  <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 2 }}>
+                    …and {run.summary.length - 3} more
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 // ─── Keywords Page ────────────────────────────────────────────────────────────
 const KEYWORD_DEFAULT_FILTERS = {
   search: "", state: "", matchType: "", campaignType: "",
@@ -3468,7 +3859,13 @@ const KeywordsPage = ({ workspaceId }) => {
   const [kwToast, setKwToast] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
-  const [kwTab, setKwTab] = useState('keywords'); // 'keywords' | 'searchterms'
+  const [kwTab, setKwTab] = useState('keywords'); // 'keywords' | 'searchterms' | 'negatives'
+
+  // Keywords date range + campaign filter
+  const [kwDateFrom, setKwDateFrom]     = useState(null);
+  const [kwDateTo, setKwDateTo]         = useState(null);
+  const [kwMetricsDays, setKwMetricsDays] = useState(30);
+  const [kwCampaignIds, setKwCampaignIds] = useState([]);
 
   // Search Terms state
   const [searchTerms, setSearchTerms] = useState([]);
@@ -3478,6 +3875,10 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stSortCol, setStSortCol] = useState('spend');
   const [stSortDir, setStSortDir] = useState('desc');
   const [stFilter, setStFilter] = useState('all'); // 'all' | 'harvest' | 'negate'
+  const [stDateFrom, setStDateFrom]     = useState(null);
+  const [stDateTo, setStDateTo]         = useState(null);
+  const [stMetricsDays, setStMetricsDays] = useState(30);
+  const [stCampaignIds, setStCampaignIds] = useState([]);
 
   const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
     "keywords", [36, 220, 90, 100, 90, 170, 65, 65, 75, 80, 90]
@@ -3513,11 +3914,18 @@ const KeywordsPage = ({ workspaceId }) => {
     if (stSearch) params.set('search', stSearch);
     if (stFilter === 'harvest') params.set('hasOrders', 'true');
     if (stFilter === 'negate') params.set('noOrders', 'true');
+    if (stDateFrom && stDateTo) {
+      params.set('dateFrom', stDateFrom);
+      params.set('dateTo', stDateTo);
+    } else {
+      params.set('metricsDays', stMetricsDays);
+    }
+    stCampaignIds.forEach(id => params.append('campaignIds[]', id));
     apiFetch(`/search-terms?${params}`)
       .then(d => { setSearchTerms(d?.data || []); setStTotal(d?.pagination?.total || 0); })
       .catch(() => setSearchTerms([]))
       .finally(() => setStLoading(false));
-  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter]);
+  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds]);
 
   const stRecommendation = (term) => {
     const acos = parseFloat(term.sales) > 0 ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100 : null;
@@ -3558,25 +3966,37 @@ const KeywordsPage = ({ workspaceId }) => {
   }, [page]);
 
   const { data: kwResponse, loading, reload } = useAsync(
-    () => workspaceId ? get("/keywords", {
-      page, limit: pageSize, sortBy, sortDir,
-      search:       kwFilters.search       || undefined,
-      state:        kwFilters.state        || undefined,
-      matchType:    kwFilters.matchType    || undefined,
-      campaignType: kwFilters.campaignType || undefined,
-      bidMin:       kwFilters.bidMin       || undefined,
-      bidMax:       kwFilters.bidMax       || undefined,
-      spendMin:     kwFilters.spendMin     || undefined,
-      spendMax:     kwFilters.spendMax     || undefined,
-      acosMin:      kwFilters.acosMin      || undefined,
-      acosMax:      kwFilters.acosMax      || undefined,
-      clicksMin:    kwFilters.clicksMin    || undefined,
-      ordersMin:    kwFilters.ordersMin    || undefined,
-      noSales:      kwFilters.noSales      || undefined,
-      hasClicks:    kwFilters.hasClicks    || undefined,
-      metricsDays:  kwFilters.metricsDays !== 30 ? kwFilters.metricsDays : undefined,
-    }) : Promise.resolve({ data: [], pagination: { total: 0, page: 1, limit: 100, pages: 0 } }),
-    [workspaceId, page, pageSize, sortBy, sortDir, kwFilters]
+    () => {
+      if (!workspaceId) return Promise.resolve({ data: [], pagination: { total: 0, page: 1, limit: 100, pages: 0 } });
+      const p = new URLSearchParams();
+      p.set('page', page);
+      p.set('limit', pageSize);
+      p.set('sortBy', sortBy);
+      p.set('sortDir', sortDir);
+      if (kwFilters.search)       p.set('search', kwFilters.search);
+      if (kwFilters.state)        p.set('state', kwFilters.state);
+      if (kwFilters.matchType)    p.set('matchType', kwFilters.matchType);
+      if (kwFilters.campaignType) p.set('campaignType', kwFilters.campaignType);
+      if (kwFilters.bidMin)       p.set('bidMin', kwFilters.bidMin);
+      if (kwFilters.bidMax)       p.set('bidMax', kwFilters.bidMax);
+      if (kwFilters.spendMin)     p.set('spendMin', kwFilters.spendMin);
+      if (kwFilters.spendMax)     p.set('spendMax', kwFilters.spendMax);
+      if (kwFilters.acosMin)      p.set('acosMin', kwFilters.acosMin);
+      if (kwFilters.acosMax)      p.set('acosMax', kwFilters.acosMax);
+      if (kwFilters.clicksMin)    p.set('clicksMin', kwFilters.clicksMin);
+      if (kwFilters.ordersMin)    p.set('ordersMin', kwFilters.ordersMin);
+      if (kwFilters.noSales)      p.set('noSales', 'true');
+      if (kwFilters.hasClicks)    p.set('hasClicks', 'true');
+      if (kwDateFrom && kwDateTo) {
+        p.set('dateFrom', kwDateFrom);
+        p.set('dateTo', kwDateTo);
+      } else if (kwFilters.metricsDays !== 30) {
+        p.set('metricsDays', kwFilters.metricsDays);
+      }
+      kwCampaignIds.forEach(id => p.append('campaignIds[]', id));
+      return apiFetch('/keywords?' + p.toString());
+    },
+    [workspaceId, page, pageSize, sortBy, sortDir, kwFilters, kwDateFrom, kwDateTo, kwMetricsDays, kwCampaignIds]
   );
 
   const keywords = kwResponse?.data ?? [];
@@ -3640,6 +4060,7 @@ const KeywordsPage = ({ workspaceId }) => {
         {[
           { id: 'keywords',    label: t("keywords.title") || "Keywords" },
           { id: 'searchterms', label: "Search Terms" },
+          { id: 'negatives',   label: "Negatives" },
         ].map(tab => (
           <button key={tab.id} onClick={() => setKwTab(tab.id)}
             style={{
@@ -3669,7 +4090,7 @@ const KeywordsPage = ({ workspaceId }) => {
               placeholder="Search queries…"
               value={stSearch}
               onChange={e => setStSearch(e.target.value)}
-              style={{ flex: "1 1 200px", padding: "6px 10px", fontSize: 12,
+              style={{ flex: "1 1 160px", maxWidth: 200, padding: "6px 10px", fontSize: 12,
                 background: "var(--s2)", border: "1px solid var(--b2)",
                 borderRadius: 6, color: "var(--tx)" }}
             />
@@ -3684,6 +4105,18 @@ const KeywordsPage = ({ workspaceId }) => {
                 {f.label}
               </button>
             ))}
+            <DateRangePicker
+              dateFrom={stDateFrom} dateTo={stDateTo} metricsDays={stMetricsDays}
+              onChange={({ dateFrom, dateTo, metricsDays }) => {
+                setStDateFrom(dateFrom || null);
+                setStDateTo(dateTo || null);
+                if (metricsDays) setStMetricsDays(metricsDays);
+              }}
+            />
+            <CampaignMultiSelect
+              selectedIds={stCampaignIds}
+              onChange={setStCampaignIds}
+            />
             <span style={{ fontSize: 11, color: "var(--tx3)", marginLeft: "auto" }}>
               {stTotal.toLocaleString()} queries
             </span>
@@ -3840,6 +4273,10 @@ const KeywordsPage = ({ workspaceId }) => {
         </div>
       )}
 
+      {kwTab === 'negatives' && (
+        <NegativesTab workspaceId={workspaceId} />
+      )}
+
       {kwTab === 'keywords' && <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
         <input placeholder={t("keywords.searchPlaceholder")} value={kwFilters.search}
@@ -3864,12 +4301,19 @@ const KeywordsPage = ({ workspaceId }) => {
             className={`btn ${kwFilters.matchType === m.value ? "btn-primary" : "btn-ghost"}`}
             style={{ fontSize: 11, padding: "4px 8px" }}>{m.label}</button>
         ))}
-        <select value={kwFilters.metricsDays}
-          onChange={e => { setKwFilter("metricsDays", parseInt(e.target.value)); setPage(1); }}
-          style={{ fontSize: 12, padding: "5px 8px", borderRadius: 5,
-            background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)" }}>
-          {[7,14,30,60,90].map(d => <option key={d} value={d}>{d}d</option>)}
-        </select>
+        <DateRangePicker
+          dateFrom={kwDateFrom} dateTo={kwDateTo} metricsDays={kwMetricsDays}
+          onChange={({ dateFrom, dateTo, metricsDays }) => {
+            setKwDateFrom(dateFrom || null);
+            setKwDateTo(dateTo || null);
+            if (metricsDays) setKwMetricsDays(metricsDays);
+            setPage(1);
+          }}
+        />
+        <CampaignMultiSelect
+          selectedIds={kwCampaignIds}
+          onChange={(ids) => { setKwCampaignIds(ids); setPage(1); }}
+        />
         <button onClick={() => setShowKwFilters(true)}
           className={`btn ${kwActiveCount > 0 ? "btn-primary" : "btn-ghost"}`}
           style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
@@ -5370,6 +5814,7 @@ const RulesPage = ({ workspaceId }) => {
   const [runResult,  setRunResult]  = useState({});
   const [showResult, setShowResult] = useState(null);
   const [toast,      setToast]      = useState(null);
+  const [historyRule, setHistoryRule] = useState(null);
 
   const [page, setPage] = useState(1);
 
@@ -5511,6 +5956,9 @@ const RulesPage = ({ workspaceId }) => {
         />,
       document.body
       )}
+
+      {/* ── Rule History Modal ── */}
+      {historyRule && <RuleHistoryModal rule={historyRule} onClose={() => setHistoryRule(null)} />}
 
       {/* ── Run Result Modal ── */}
       {showResult && runResult[showResult] && createPortal(
@@ -5734,6 +6182,10 @@ const RulesPage = ({ workspaceId }) => {
                       style={{ fontSize:11, padding:"5px 8px" }}><Ic icon={Edit2} size={13} /></button>
                     <button onClick={() => deleteRule(rule.id)} className="btn btn-red"
                       style={{ fontSize:11, padding:"5px 8px" }}><X size={13} strokeWidth={1.75} /></button>
+                    <button onClick={() => setHistoryRule(rule)} className="btn btn-ghost"
+                      style={{ fontSize:11, padding:"5px 8px" }} title="Run history">
+                      <Ic icon={History} size={13} />
+                    </button>
                     {(last || runResult[rule.id]) && (
                       <button onClick={() => {
                         if (runResult[rule.id]) setRunResult(r => ({...r,[rule.id]:runResult[rule.id]}));
@@ -6503,6 +6955,24 @@ function AIPage({ workspaceId }) {
             <button key={v} onClick={() => setScope(v)}
               className={`btn ${scope===v?"btn-primary":"btn-ghost"}`}
               style={{ fontSize:11, padding:"4px 10px" }}>{l}
+            </button>
+          ))}
+        </div>
+
+        {/* Suggested prompts */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {[
+            "Which campaigns are overspending budget?",
+            "Where is ACOS too high?",
+            "Which keywords should be paused?",
+            "Show top performers this week",
+            "Which search terms to add as keywords?",
+            "Where are the most wasteful clicks?",
+          ].map(p => (
+            <button key={p} onClick={() => setPrompt(p)}
+              className="btn btn-ghost"
+              style={{ fontSize: 11, padding: "4px 10px", borderRadius: 20, color: "var(--tx3)" }}>
+              {p}
             </button>
           ))}
         </div>

@@ -582,4 +582,22 @@ export default {
     settingsTitle: "Einstellungen",
     settingsDesc: "Konto- und Integrationseinstellungen",
   },
+  negatives: {
+    title: "Negative Keywords",
+    add: "Negativ hinzufügen",
+    matchExact: "Exakt",
+    matchPhrase: "Phrase",
+    allCampaigns: "Alle Kampagnen",
+    noResults: "Keine negativen Keywords",
+  },
+  rulesHistory: {
+    title: "Ausführungsverlauf",
+    noRuns: "Noch keine Ausführungen",
+    modeLive: "Live",
+    modeSim: "Simulation",
+  },
+  metrics: {
+    tacos: "TACoS",
+    tacosTooltip: "Total ACoS = Werbeausgaben / Gesamtumsatz (organisch + Anzeigen)",
+  },
 };

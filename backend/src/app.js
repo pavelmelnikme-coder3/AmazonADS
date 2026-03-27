@@ -33,6 +33,7 @@ const settingsRoutes = require("./routes/settings");
 const productsRoutes = require("./routes/products");
 const analyticsReportRouter = require("./routes/analyticsReport");
 const searchTermsRoutes = require("./routes/searchTerms");
+const negativeKeywordsRoutes = require("./routes/negativeKeywords");
 
 const app = express();
 
@@ -104,6 +105,7 @@ app.use(`${API}/settings`, settingsRoutes);
 app.use(`${API}/products`, productsRoutes);
 app.use(`${API}/analytics-report`, analyticsReportRouter);
 app.use(`${API}/search-terms`, searchTermsRoutes);
+app.use(`${API}/negative-keywords`, negativeKeywordsRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

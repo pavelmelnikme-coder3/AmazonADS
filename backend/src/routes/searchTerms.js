@@ -15,11 +15,13 @@ router.get("/", async (req, res, next) => {
       sortBy = "spend",
       sortDir = "desc",
       search,
-      campaignId,
       minClicks,
       minSpend,
       hasOrders,
       noOrders,
+      dateFrom,
+      dateTo,
+      metricsDays,
     } = req.query;
 
     const VALID_LIMITS = [25, 50, 100, 200, 500];
@@ -30,10 +32,26 @@ router.get("/", async (req, res, next) => {
     const params = [req.workspaceId];
     let pi = 2;
 
-    if (campaignId) {
-      conditions.push(`stm.campaign_id = $${pi++}`);
-      params.push(campaignId);
+    // Multi-campaign filter
+    const rawCampaignIds = req.query['campaignIds[]'] || req.query.campaignIds;
+    const campaignIds = rawCampaignIds
+      ? (Array.isArray(rawCampaignIds) ? rawCampaignIds : rawCampaignIds.split(','))
+          .filter(id => id && id.trim())
+      : null;
+    if (campaignIds && campaignIds.length > 0) {
+      conditions.push(`stm.campaign_id = ANY($${pi++})`);
+      params.push(campaignIds);
     }
+
+    // Date range filter using date_start/date_end columns
+    if (dateFrom && dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) && /^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      conditions.push(`stm.date_start >= $${pi++}::date AND stm.date_end <= $${pi++}::date`);
+      params.push(dateFrom, dateTo);
+    } else {
+      const days = Math.min(Math.max(parseInt(metricsDays) || 30, 1), 365);
+      conditions.push(`stm.date_start >= (NOW() - INTERVAL '${days} days')::date`);
+    }
+
     if (search) {
       conditions.push(`stm.query ILIKE $${pi++}`);
       params.push(`%${search}%`);

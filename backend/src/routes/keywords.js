@@ -10,18 +10,26 @@ router.use(requireAuth, requireWorkspace);
 router.get("/", async (req, res, next) => {
   try {
     const VALID_LIMITS = [25, 50, 100, 200, 500];
-    const { campaignId, adGroupId, state, search, page = 1, sortBy = "keyword_text", sortDir = "asc" } = req.query;
+    const { adGroupId, state, search, page = 1, sortBy = "keyword_text", sortDir = "asc", dateFrom, dateTo, metricsDays } = req.query;
     const rawLimit = parseInt(req.query.limit);
     const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 100;
     const offset = (parseInt(page) - 1) * limit;
-
-    const metricsInterval = Math.min(Math.max(parseInt(req.query.metricsDays) || 30, 1), 365);
 
     const conditions = ["k.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;
 
-    if (campaignId) { conditions.push(`k.campaign_id = $${pi++}`);      params.push(campaignId); }
+    // Multi-campaign filter
+    const rawCampaignIds = req.query['campaignIds[]'] || req.query.campaignIds;
+    const campaignIds = rawCampaignIds
+      ? (Array.isArray(rawCampaignIds) ? rawCampaignIds : rawCampaignIds.split(','))
+          .filter(id => id && id.trim())
+      : null;
+    if (campaignIds && campaignIds.length > 0) {
+      conditions.push(`k.campaign_id = ANY($${pi++})`);
+      params.push(campaignIds);
+    }
+
     if (adGroupId)  { conditions.push(`k.ad_group_id = $${pi++}`);      params.push(adGroupId); }
     if (state)      { conditions.push(`k.state = $${pi++}`);            params.push(state); }
     if (search)     { conditions.push(`k.keyword_text ILIKE $${pi++}`); params.push(`%${search}%`); }
@@ -74,6 +82,16 @@ router.get("/", async (req, res, next) => {
     const orderField = allowedSortKw[sortBy] || "k.keyword_text";
     const orderDir   = sortDir === "asc" ? "ASC" : "DESC";
 
+    // Date range for metrics — dateFrom/dateTo take priority over metricsDays
+    let dateCondition;
+    if (dateFrom && dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) && /^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      dateCondition = `AND date >= $${pi++}::date AND date <= $${pi++}::date`;
+      params.push(dateFrom, dateTo);
+    } else {
+      const days = Math.min(Math.max(parseInt(metricsDays) || 30, 1), 365);
+      dateCondition = `AND date >= NOW() - INTERVAL '${days} days'`;
+    }
+
     const metricsJoin = `LEFT JOIN (
         SELECT amazon_id,
           SUM(clicks) as clicks,
@@ -85,7 +103,7 @@ router.get("/", async (req, res, next) => {
           CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) END as cpc
         FROM fact_metrics_daily
         WHERE workspace_id = $1 AND entity_type = 'keyword'
-          AND date >= NOW() - INTERVAL '${metricsInterval} days'
+          ${dateCondition}
         GROUP BY amazon_id
       ) m ON m.amazon_id = k.amazon_keyword_id`;
 

@@ -583,4 +583,22 @@ export default {
     settingsTitle: "Настройки",
     settingsDesc: "Настройки аккаунта и интеграций",
   },
+  negatives: {
+    title: "Негативные КС",
+    add: "Добавить негатив",
+    matchExact: "Exact",
+    matchPhrase: "Phrase",
+    allCampaigns: "Все кампании",
+    noResults: "Нет негативных ключевых слов",
+  },
+  rulesHistory: {
+    title: "История запусков",
+    noRuns: "Правило ещё не запускалось",
+    modeLive: "Live",
+    modeSim: "Симуляция",
+  },
+  metrics: {
+    tacos: "TACoS",
+    tacosTooltip: "Total ACoS = Расходы на рекламу / Общие продажи (органика + реклама)",
+  },
 };
