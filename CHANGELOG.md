@@ -6,6 +6,55 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-03-27
+
+### Added — Sprint 3 · S3-2..S3-5 + Custom Date Range + Multi-Campaign Filter
+
+#### S3-2 · Rule Execution History Modal
+- **`GET /api/v1/rules/:id/runs`** — returns last 50 rows from `rule_executions` table (started_at,
+  completed_at, dry_run, status, entities_evaluated, entities_matched, actions_taken, summary, error_message)
+- **`RuleHistoryModal`** — portal modal triggered by new `History` icon button on every rule card.
+  Shows per-run cards with timestamp, Live/Simulation badge, matched/actions counts, up to 3 summary
+  items, error message on failure.
+
+#### S3-3 · AI Suggested Prompts
+- 6 prompt chips above AI textarea (zero-deps, no library). Click fills `prompt` state.
+  Prompts: "Which campaigns are overspending budget?", "Where is ACOS too high?",
+  "Which keywords should be paused?", "Show top performers this week",
+  "Which search terms to add as keywords?", "Where are the most wasteful clicks?"
+
+#### S3-4 · Negative Keywords Management
+- **`GET/POST/DELETE /api/v1/negative-keywords`** — uses existing `negative_keywords` table
+  (migration 004). POST auto-looks up `profile_id` from campaign, generates
+  `manual_neg_<timestamp>_<6-char-random>` as `amazon_neg_keyword_id`. Supports multi-campaign
+  `campaignIds[]` array filter.
+- **`NegativesTab`** — new "Negatives" tab in Keywords page (alongside Keywords / Search Terms).
+  Toolbar: text search + campaign select dropdown + "Add negative" button + count.
+  Inline add form: campaign select / keyword input / match type (negativeExact|negativePhrase).
+  Table: Keyword / Type badge / Level / Campaign / Delete action.
+
+#### Custom Date Range in Keywords & Search Terms
+- **Backend `keywords.js`**: removed static `metricsInterval`, replaced with `dateFrom`/`dateTo`
+  (ISO `YYYY-MM-DD`, regex-validated) that override `metricsDays` fallback. Date params are
+  passed as SQL parameters (`$N::date`) — no string interpolation of user input.
+- **Backend `searchTerms.js`**: same pattern; filters by `date_start >= dateFrom AND date_end <= dateTo`
+  (columns that exist in `search_term_metrics`). Default fallback filters by `date_start >= NOW()-Ndays`.
+- **Frontend `DateRangePicker`** — reusable component: 4 preset buttons (7d/14d/30d/90d) +
+  "Range" toggle showing two native `<input type="date">` fields. Zero external dependencies.
+  Active preset highlighted with `btn-primary`.
+
+#### Multi-Campaign Filter in Keywords & Search Terms
+- **Backend**: both routes accept `campaignIds[]` (Express array) or `campaignIds` (comma-separated
+  string). Uses `= ANY($N)` parameterized — SQL-injection safe.
+- **Frontend `CampaignMultiSelect`** — dropdown with checkbox list, search input, lazy-load of campaigns
+  on first open via `apiFetch('/campaigns?limit=500')`. Shows campaign type badge (SP/SB/SD).
+  "Clear (N)" button when selection active. Overlay click-away to close.
+
+#### i18n
+- Added `negatives.*`, `rulesHistory.*`, `metrics.tacos/tacosTooltip` keys to EN / RU / DE.
+
+---
+
 ## [Unreleased] — 2026-03-26
 
 ### Security — Production Hardening

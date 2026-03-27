@@ -1,7 +1,7 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 26 March 2026
-> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 🔄 In Progress · Production Deployment ✅
+> Last updated: 27 March 2026
+> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 🔄 In Progress (S3-1..S3-4 ✅, S3-5..S3-8 pending) · Production Deployment ✅
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -35,6 +35,25 @@ Deployed to Hetzner server 159.69.222.12. Security audit performed.
 - Close ports 5432/6379 (remove docker-compose port bindings for postgres/redis)
 - Add Redis password (`requirepass`)
 - Set `NODE_ENV=production`
+
+---
+
+## 🔄 Sprint 3 — In Progress (started 25 March 2026)
+
+S3-1..S3-4 delivered. S3-5..S3-8 pending.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| S3-1 · Search Term Harvesting | ✅ Done | Search Terms tab, harvest/negate actions, spSearchTerm report |
+| S3-2 · Rule Execution History | ✅ Done | GET /rules/:id/runs, RuleHistoryModal, History button on cards |
+| S3-3 · AI Suggested Prompts | ✅ Done | 6 prompt chips above textarea, click-to-fill |
+| S3-4 · Negative Keywords | ✅ Done | /negative-keywords CRUD, NegativesTab (3rd tab in Keywords) |
+| Custom Date Range | ✅ Done | DateRangePicker (7/14/30/90d + custom inputs) in Keywords + ST |
+| Multi-Campaign Filter | ✅ Done | CampaignMultiSelect (checkbox dropdown) in Keywords + ST |
+| S3-5 · TACoS Metric | ⏳ Pending | ACOS↕TACoS toggle on Overview KPI card |
+| S3-6 · Keyboard Shortcuts | ⏳ Pending | `/` search, `R` refresh, `Esc` close, `?` help |
+| S3-7 · User-Saved Filters | ⏳ Pending | (partially done — useSavedFilters hook exists) |
+| S3-8 · Column Resize & Visibility | ⏳ Pending | (partially done — useResizableColumns hook exists) |
 
 ---
 
@@ -250,33 +269,34 @@ New tab `Search Terms` in Keywords section:
 
 ---
 
-### S3-2 · Rule Execution History Modal
+### ✅ S3-2 · Rule Execution History Modal
 **Source:** Scale Insights — full audit trail per rule
+**Delivered:** 27 March 2026
 
-Click rule card → history tab showing:
-- When the rule ran
-- How many entities were affected
-- What changed (diff)
-- Dry-run vs live execution
+- `GET /api/v1/rules/:id/runs` — last 50 executions from `rule_executions` table
+- `History` icon button on every rule card → `RuleHistoryModal` portal
+- Shows: timestamp, Live/Simulation badge, matched count, actions count, summary items, error
+- Custom date range filter + multi-campaign filter also added to Keywords and Search Terms
 
 ---
 
-### S3-3 · Suggested AI Prompts
+### ✅ S3-3 · Suggested AI Prompts
 **Source:** UX audit — blank AI textarea with no guidance
+**Delivered:** 27 March 2026
 
-Suggested prompt chips below input:
-- `[Which campaigns are overspending?]`
-- `[Where is ACOS too high?]`
-- `[Which keywords should be paused?]`
-- `[Show top performers this week]`
+- 6 prompt chips above AI textarea (zero-deps, inline style)
+- Click chip fills textarea: overspending, high ACOS, keywords to pause, top performers, search terms to harvest, wasteful clicks
 
 ---
 
-### S3-4 · Negative Keywords Management
+### ✅ S3-4 · Negative Keywords Management
 **Source:** Scale Insights Blacklist/Whitelist, Helium10 Auto Negation
+**Delivered:** 27 March 2026
 
-`Negatives` tab in Keywords section
-Quick add, filter by campaign
+- `GET/POST/DELETE /api/v1/negative-keywords` using existing `negative_keywords` table (migration 004)
+- `NegativesTab` — 3rd tab in Keywords page alongside Keywords / Search Terms
+- Add form: campaign select / keyword text / match type (Exact/Phrase)
+- Multi-campaign filter + search
 
 ---
 
