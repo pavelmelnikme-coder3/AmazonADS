@@ -6,6 +6,70 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-03-28
+
+### Added — SP-API Infrastructure (BSR / Inventory / Orders / Financials / Pricing)
+
+- **Migration `010_sp_api.sql`** — new tables: `products`, `bsr_snapshots`, `sp_inventory`,
+  `sp_orders`, `sp_order_items`, `sp_financials`, `sp_pricing`, `sp_sync_log`.
+  Partition `fact_metrics_daily_2027` added. All tables with indexes and `updated_at` triggers.
+- **`spClient.js`** rewritten — added `_spRequest()` helper with 429 retry/backoff.
+  New methods: `getInventory()`, `getOrders()`, `getOrderItems()`, `getFinancialEvents()`,
+  `getCompetitivePricing()` — all with pagination loops.
+- **`spSync.js`** (new) — `syncBsr()`, `syncInventory()`, `syncOrders()`, `syncFinancials()`,
+  `syncPricing()`. Each writes to `sp_sync_log`, handles incremental sync, upserts data.
+- **SP_SYNC BullMQ queue** — `queueSpSync(workspaceId, marketplaceId, syncTypes, priority)`,
+  `spSyncWorker` (concurrency 2) added to `workers.js`.
+- **Scheduler** — `spSyncJob` (every 4h: bsr+inventory+pricing), `spDailyJob` (05:00 UTC: orders+financials).
+- **`GET/POST /api/v1/sp/*`** routes — inventory, inventory/summary, orders, orders/summary,
+  orders/:id/items, financials, financials/summary, pricing/current, pricing/:asin,
+  sync (manual trigger), sync/status.
+
+### Added — Full Report Coverage (SB + SD ad_group/target)
+
+- **`reporting.js`** — added SB section (`sbCampaigns`, `sbKeywords`, `sbAdGroups`) and SD
+  `sdAdGroups` + `sdTargeting` to `REPORT_CONFIGS`. Daily scheduler now queues all 10 report
+  type/level combinations (SP×4, SB×3, SD×3).
+
+### Added — UI: Light Theme + Dark/Light Toggle
+
+- **Light theme** — `[data-theme="light"]` CSS variable overrides: neutral `#F0F4F8` background,
+  white surfaces, `#0F172A` text (contrast 16:1), adjusted accent/semantic colors for light bg.
+- **Theme toggle** button (Sun/Moon icon) in sidebar footer; state persisted in `localStorage`
+  (`af_theme`). Applied via `data-theme` attribute on `<html>`.
+
+### Added — UI: Collapsible Sidebar
+
+- **Sidebar collapse** to 56px icon-only rail. Nav items show `title` tooltip on hover.
+  Workspace chip + user name hidden when collapsed.
+- **Fixed edge toggle button** (`position: fixed`, `left` transitions with sidebar) — stays at
+  the sidebar/content boundary regardless of collapsed state. Pattern matches Linear/Notion.
+- State persisted in `localStorage` (`af_sidebar`). `<main>` margin transitions synchronously.
+
+### Added — UI: Avatar Profile Dropdown (logout protection)
+
+- **Avatar dropdown** — logout button removed from direct access. Clicking avatar opens portal
+  dropdown (rendered via `createPortal` to escape `overflow: hidden`): user info, language,
+  theme toggle, sign out. Portal uses `getBoundingClientRect` for `position: fixed` placement.
+- Prevents accidental logout (requires 2 deliberate clicks). Pattern: Linear / Vercel / GitHub.
+
+### Fixed — UI: Bid Input Decimal Precision
+
+- Bid editor now initialises with `parseFloat(bid).toFixed(2)` — always 2 decimal places,
+  never shows raw DB values like `1.5000`.
+
+### Fixed — UI: "Edit Bid" Button Hover Persistence
+
+- Replaced CSS `.tbl-row:hover .act-cell` approach (which persisted after cursor left) with
+  React-controlled `hoveredKwId` state + inline `opacity`/`pointerEvents` style override.
+
+### Fixed — UI: Rule Templates Collapsible Section
+
+- Added expand/collapse toggle to "Start from template" section in Rules wizard step 1.
+  State local to modal; arrow indicator rotates on toggle. Default: expanded.
+
+---
+
 ## [Unreleased] — 2026-03-27
 
 ### Added — Sprint 3 · S3-2..S3-5 + Custom Date Range + Multi-Campaign Filter

@@ -23,7 +23,6 @@ const REPORTING_BASE = "/reporting/reports";
 
 // ─── Report Type Definitions ──────────────────────────────────────────────────
 // Map our internal types to Amazon's v3 reportType strings + exact column names.
-// SB reporting v3 is in preview — excluded until GA.
 const REPORT_CONFIGS = {
   SP: {
     campaign: {
@@ -62,11 +61,53 @@ const REPORT_CONFIGS = {
         "sales1d","sales7d","sales14d","sales30d","date"],
     },
   },
+  SB: {
+    campaign: {
+      reportType: "sbCampaigns",
+      groupBy: ["campaign"],
+      metrics: ["campaignId","campaignName","impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
+    },
+    keyword: {
+      reportType: "sbKeywords",
+      groupBy: ["keyword"],
+      metrics: ["keywordId","keywordText","matchType",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
+    },
+    ad_group: {
+      reportType: "sbAdGroups",
+      groupBy: ["adGroup"],
+      metrics: ["adGroupId","adGroupName","campaignId","campaignName",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
+    },
+  },
   SD: {
     campaign: {
       reportType: "sdCampaigns",
       groupBy: ["campaign"],
       metrics: ["campaignId","campaignName","impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
+    },
+    ad_group: {
+      reportType: "sdAdGroups",
+      groupBy: ["adGroup"],
+      metrics: ["adGroupId","adGroupName","campaignId","campaignName",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
+    },
+    target: {
+      reportType: "sdTargeting",
+      groupBy: ["targeting"],
+      metrics: ["targetId","targetingExpression","targetingText","targetingType",
+        "campaignId","campaignName","adGroupId","adGroupName",
+        "impressions","clicks","cost",
         "purchases1d","purchases7d","purchases14d","purchases30d",
         "sales1d","sales7d","sales14d","sales30d","date"],
     },
@@ -430,13 +471,17 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
     [workspaceId]
   );
 
-  // Report types to backfill. SB v3 reporting is in preview — excluded.
   const reportTypes = [
     ["SP", "campaign"],
     ["SP", "keyword"],
     ["SP", "target"],
     ["SP", "advertised_product"],
+    ["SB", "campaign"],
+    ["SB", "keyword"],
+    ["SB", "ad_group"],
     ["SD", "campaign"],
+    ["SD", "ad_group"],
+    ["SD", "target"],
   ];
 
   // Amazon daily reports max date range = 31 days — split into chunks

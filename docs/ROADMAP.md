@@ -1,7 +1,7 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 27 March 2026
-> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 🔄 In Progress (S3-1..S3-4 ✅, S3-5..S3-8 pending) · Production Deployment ✅
+> Last updated: 28 March 2026
+> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 🔄 In Progress (S3-1..S3-4 ✅, S3-5..S3-8 pending) · Production Deployment ✅ · UI Polish ✅
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -54,6 +54,24 @@ S3-1..S3-4 delivered. S3-5..S3-8 pending.
 | S3-6 · Keyboard Shortcuts | ⏳ Pending | `/` search, `R` refresh, `Esc` close, `?` help |
 | S3-7 · User-Saved Filters | ⏳ Pending | (partially done — useSavedFilters hook exists) |
 | S3-8 · Column Resize & Visibility | ⏳ Pending | (partially done — useResizableColumns hook exists) |
+
+---
+
+## ✅ UI Polish — Completed (28 March 2026)
+
+Cross-sprint UX improvements based on user feedback and competitor research (Linear / Notion / Vercel / GitHub).
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Light / Dark theme toggle | ✅ Done | `[data-theme="light"]` CSS vars, Sun/Moon in sidebar, localStorage |
+| Collapsible sidebar | ✅ Done | 56px icon rail, fixed edge toggle button, localStorage, animated |
+| Avatar profile dropdown | ✅ Done | Portal-rendered, logout behind 2 clicks, language + theme inside |
+| SP-API data infrastructure | ✅ Done | 8 new tables, spSync service, BullMQ queue, /api/v1/sp/* routes |
+| Full report coverage (SB+SD) | ✅ Done | SB campaigns/keywords/ad_groups + SD ad_groups/targets |
+| Bid input precision fix | ✅ Done | Always 2 decimal places in editor |
+| "Edit Bid" hover persistence fix | ✅ Done | React-controlled opacity, not CSS :hover |
+| Rule templates collapsible | ✅ Done | Toggle in wizard step 1, persists within modal session |
+| Page navigation persistence | ✅ Done | localStorage `af_page`, cleared on logout |
 
 ---
 

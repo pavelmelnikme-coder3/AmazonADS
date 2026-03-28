@@ -22,7 +22,7 @@ import {
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
-  HelpCircle, LogOut, Plus
+  HelpCircle, LogOut, Plus, Sun, Moon
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -44,6 +44,29 @@ const Styles = () => (
     --ac:#3B82F6;--ac2:#60A5FA;--teal:#14B8A6;--amb:#F59E0B;--red:#EF4444;--grn:#22C55E;
     --pur:#A78BFA;--tx:#E2E8F0;--tx2:#94A3B8;--tx3:#4A5568;
     --mono:'DM Mono',monospace;--ui:'Outfit',sans-serif;--disp:'Syne',sans-serif;}
+    [data-theme="light"]{
+      --bg:#F0F4F8;--s1:#FFFFFF;--s2:#F1F5F9;--s3:#E2E8F0;--b1:#E2E8F0;--b2:#CBD5E1;
+      --ac:#2563EB;--ac2:#3B82F6;--teal:#0D9488;--amb:#D97706;--red:#DC2626;--grn:#16A34A;
+      --pur:#7C3AED;--tx:#0F172A;--tx2:#475569;--tx3:#94A3B8;
+    }
+    [data-theme="light"] body{background:var(--bg);color:var(--tx);}
+    [data-theme="light"] ::-webkit-scrollbar-track{background:var(--s2);}
+    [data-theme="light"] ::-webkit-scrollbar-thumb{background:var(--b2);}
+    [data-theme="light"] tr:hover td{background:rgba(0,0,0,.025)}
+    [data-theme="light"] .loader{border-color:rgba(0,0,0,.15);border-top-color:var(--tx2);}
+    [data-theme="light"] .tag-on{background:rgba(22,163,74,.1);color:#15803d}
+    [data-theme="light"] .tag-pause{background:rgba(217,119,6,.1);color:#b45309}
+    [data-theme="light"] .tag-arch{background:rgba(100,116,139,.12);color:#475569}
+    [data-theme="light"] .btn-ghost{color:var(--tx2);border-color:var(--b2);}
+    [data-theme="light"] .btn-ghost:hover{background:var(--s3);color:var(--tx);}
+    [data-theme="light"] .card{background:var(--s1);border-color:var(--b1);}
+    [data-theme="light"] .card:hover{border-color:var(--b2);}
+    [data-theme="light"] .audit-date-group td{background:var(--s2);border-bottom:1px solid var(--b1);}
+    [data-theme="light"] .bg-grn{background:rgba(22,163,74,.1);color:#15803d}
+    [data-theme="light"] .bg-red{background:rgba(220,38,38,.1);color:#b91c1c}
+    [data-theme="light"] .bg-amb{background:rgba(217,119,6,.1);color:#b45309}
+    [data-theme="light"] .bg-bl{background:rgba(37,99,235,.1);color:#2563eb}
+    [data-theme="light"] .bg-pur{background:rgba(124,58,237,.1);color:#7c3aed}
     *{box-sizing:border-box;margin:0;padding:0;}
     body{background:var(--bg);color:var(--tx);font-family:var(--ui);overflow-x:hidden;}
     ::-webkit-scrollbar{width:4px;height:4px;}
@@ -388,66 +411,177 @@ const NAV = [
   { id: "settings",  icon: Cog       },
 ];
 
-const Sidebar = ({ active, setActive, user, workspace, onLogout }) => {
+const SIDEBAR_W = 220;
+const SIDEBAR_W_COLLAPSED = 56;
+
+const Sidebar = ({ active, setActive, user, workspace, onLogout, theme, toggleTheme, collapsed, toggleCollapsed }) => {
   const { t } = useI18n();
+  const W = collapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState({ bottom: 0, left: 0 });
+  const footerRef = useRef(null);
+  const popupRef = useRef(null);
+
+  const openMenu = () => {
+    if (footerRef.current) {
+      const rect = footerRef.current.getBoundingClientRect();
+      setMenuPos({ bottom: window.innerHeight - rect.top + 6, left: rect.left });
+    }
+    setMenuOpen(o => !o);
+  };
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e) => {
+      const inPopup = popupRef.current?.contains(e.target);
+      const inFooter = footerRef.current?.contains(e.target);
+      if (!inPopup && !inFooter) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  const iconBtn = (onClick, titleKey, Icon, hoverColor = "var(--tx)") => (
+    <button onClick={onClick} title={t(titleKey)}
+      style={{ background: "transparent", border: "none", cursor: "pointer", padding: 4,
+        color: "var(--tx3)", display: "flex", alignItems: "center", borderRadius: 6, flexShrink: 0 }}
+      onMouseEnter={e => e.currentTarget.style.color = hoverColor}
+      onMouseLeave={e => e.currentTarget.style.color = "var(--tx3)"}>
+      <Ic icon={Icon} size={15} />
+    </button>
+  );
+
   return (
     <aside style={{
-      width: 220, minHeight: "100vh", background: "var(--s1)", borderRight: "1px solid var(--b1)",
-      display: "flex", flexDirection: "column", position: "fixed", left: 0, top: 0, bottom: 0, zIndex: 100
+      width: W, minHeight: "100vh", background: "var(--s1)", borderRight: "1px solid var(--b1)",
+      display: "flex", flexDirection: "column", position: "fixed", left: 0, top: 0, bottom: 0, zIndex: 100,
+      transition: "width 220ms cubic-bezier(0.4,0,0.2,1)", overflow: "hidden",
     }}>
-      <div style={{ padding: "20px 20px 14px", borderBottom: "1px solid var(--b1)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}><Activity size={16} strokeWidth={1.75} color="#fff" /></div>
-          <div>
-            <div style={{ fontFamily: "var(--disp)", fontWeight: 700, fontSize: 15 }}>AdsFlow</div>
-            <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>Amazon Ads</div>
+
+      {/* ── Logo header ── */}
+      <div style={{ padding: "16px 12px 14px", borderBottom: "1px solid var(--b1)",
+        display: "flex", alignItems: "center", justifyContent: "center", minHeight: 64 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, overflow: "hidden" }}>
+          <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3B82F6,#A78BFA)",
+            borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Activity size={16} strokeWidth={1.75} color="#fff" />
           </div>
+          {!collapsed && (
+            <div>
+              <div style={{ fontFamily: "var(--disp)", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap" }}>AdsFlow</div>
+              <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>Amazon Ads</div>
+            </div>
+          )}
         </div>
       </div>
 
-      {workspace && (
-        <div style={{ padding: "10px 12px", margin: "8px 10px", background: "var(--s2)", borderRadius: 8, border: "1px solid var(--b1)" }}>
-          <div style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)", marginBottom: 3, letterSpacing: ".06em" }}>{t("common.workspace")}</div>
-          <div style={{ fontSize: 12, fontWeight: 500 }}>{workspace.name}</div>
+      {/* ── Workspace chip ── */}
+      {workspace && !collapsed && (
+        <div style={{ padding: "10px 12px", margin: "8px 10px", background: "var(--s2)",
+          borderRadius: 8, border: "1px solid var(--b1)" }}>
+          <div style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)", marginBottom: 3,
+            letterSpacing: ".06em" }}>{t("common.workspace")}</div>
+          <div style={{ fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden",
+            textOverflow: "ellipsis" }}>{workspace.name}</div>
         </div>
       )}
 
-      <nav style={{ flex: 1, padding: "6px 8px", display: "flex", flexDirection: "column", gap: 2 }}>
+      {/* ── Nav ── */}
+      <nav style={{ flex: 1, padding: collapsed ? "6px 4px" : "6px 8px", display: "flex",
+        flexDirection: "column", gap: 2, overflowY: "auto", overflowX: "hidden" }}>
         {NAV.map(({ id, icon }) => (
-          <button key={id} onClick={() => setActive(id)} style={{
-            display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 7,
-            background: active === id ? "var(--s3)" : "transparent",
-            border: active === id ? "1px solid var(--b2)" : "1px solid transparent",
-            color: active === id ? "var(--tx)" : "var(--tx2)",
-            cursor: "pointer", fontSize: 13, fontFamily: "var(--ui)", width: "100%", textAlign: "left",
-            transition: "all .15s", position: "relative"
-          }}>
-            <Ic icon={icon} size={15} color={active === id ? 'var(--ac2)' : 'var(--tx3)'} />
-            {t("nav." + id)}
-            {active === id && <span style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)", width: 3, height: 18, background: "var(--ac)", borderRadius: "2px 0 0 2px" }} />}
+          <button key={id} onClick={() => setActive(id)}
+            title={collapsed ? t("nav." + id) : undefined}
+            style={{
+              display: "flex", alignItems: "center", gap: 10,
+              padding: collapsed ? "9px 0" : "8px 12px",
+              justifyContent: collapsed ? "center" : "flex-start",
+              borderRadius: 7,
+              background: active === id ? "var(--s3)" : "transparent",
+              border: active === id ? "1px solid var(--b2)" : "1px solid transparent",
+              color: active === id ? "var(--tx)" : "var(--tx2)",
+              cursor: "pointer", fontSize: 13, fontFamily: "var(--ui)", width: "100%", textAlign: "left",
+              transition: "all .15s", position: "relative", whiteSpace: "nowrap",
+            }}>
+            <Ic icon={icon} size={15} color={active === id ? "var(--ac2)" : "var(--tx3)"} />
+            {!collapsed && t("nav." + id)}
+            {active === id && (
+              <span style={{ position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)",
+                width: 3, height: 18, background: "var(--ac)", borderRadius: "2px 0 0 2px" }} />
+            )}
           </button>
         ))}
       </nav>
 
-      <div style={{ padding: "12px 14px", borderTop: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3B82F6,#8B5CF6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, color: "#fff", flexShrink: 0 }}>
+      {/* ── Footer ── */}
+      <div ref={footerRef} style={{ padding: collapsed ? "10px 4px" : "12px 14px",
+        borderTop: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 8 }}>
+
+        {/* Avatar — triggers menu */}
+        <button onClick={openMenu} title={user?.name || ""}
+          style={{ width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
+            background: menuOpen ? "linear-gradient(135deg,#2563EB,#7C3AED)" : "linear-gradient(135deg,#3B82F6,#8B5CF6)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 11, fontWeight: 600, color: "#fff", cursor: "pointer",
+            border: menuOpen ? "2px solid var(--ac)" : "2px solid transparent",
+            transition: "border-color 150ms", padding: 0,
+            marginLeft: collapsed ? "auto" : 0, marginRight: collapsed ? "auto" : 0 }}>
           {user?.name?.slice(0, 2).toUpperCase() || "??"}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.name || "—"}</div>
-          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{user?.role || ""}</div>
-        </div>
-        <LanguageSwitcher />
-        <button
-          onClick={onLogout}
-          title={t("common.signOut")}
-          style={{ background: "transparent", border: "none", cursor: "pointer", padding: 4, color: "var(--tx3)", display: "flex", alignItems: "center", borderRadius: 6, flexShrink: 0 }}
-          onMouseEnter={e => e.currentTarget.style.color = "var(--red)"}
-          onMouseLeave={e => e.currentTarget.style.color = "var(--tx3)"}
-        >
-          <Ic icon={LogOut} size={15} />
         </button>
+
+        {!collapsed && (
+          <>
+            <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={openMenu}>
+              <div style={{ fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis",
+                whiteSpace: "nowrap" }}>{user?.name || "—"}</div>
+              <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{user?.role || ""}</div>
+            </div>
+            {iconBtn(toggleTheme, theme === "dark" ? "common.lightTheme" : "common.darkTheme",
+              theme === "dark" ? Sun : Moon)}
+          </>
+        )}
       </div>
+
+      {/* ── Profile popup — rendered via portal to escape overflow:hidden ── */}
+      {menuOpen && createPortal(
+        <div ref={popupRef} style={{
+          position: "fixed",
+          bottom: menuPos.bottom, left: menuPos.left,
+          width: 210, background: "var(--s1)", border: "1px solid var(--b2)",
+          borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.28)",
+          zIndex: 500, overflow: "hidden", animation: "slideDown .15s ease both",
+        }}>
+          <div style={{ padding: "12px 14px 10px", borderBottom: "1px solid var(--b1)" }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)", overflow: "hidden",
+              textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{user?.name || "—"}</div>
+            <div style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 2 }}>{user?.role || ""}</div>
+          </div>
+          <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--b1)",
+            display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 11, color: "var(--tx3)", paddingLeft: 6, flex: 1 }}>{t("settings.language")}</span>
+            <LanguageSwitcher />
+          </div>
+          <button onClick={() => { toggleTheme(); }}
+            style={{ width: "100%", display: "flex", alignItems: "center", gap: 10,
+              padding: "9px 14px", background: "none", border: "none", cursor: "pointer",
+              color: "var(--tx2)", fontSize: 13, fontFamily: "var(--ui)", borderBottom: "1px solid var(--b1)" }}
+            onMouseEnter={e => { e.currentTarget.style.background = "var(--s2)"; e.currentTarget.style.color = "var(--tx)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--tx2)"; }}>
+            <Ic icon={theme === "dark" ? Sun : Moon} size={14} color="var(--tx3)" />
+            {theme === "dark" ? t("common.lightTheme") : t("common.darkTheme")}
+          </button>
+          <button onClick={() => { setMenuOpen(false); onLogout(); }}
+            style={{ width: "100%", display: "flex", alignItems: "center", gap: 10,
+              padding: "9px 14px", background: "none", border: "none", cursor: "pointer",
+              color: "var(--tx2)", fontSize: 13, fontFamily: "var(--ui)" }}
+            onMouseEnter={e => { e.currentTarget.style.background = "rgba(239,68,68,.08)"; e.currentTarget.style.color = "var(--red)"; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--tx2)"; }}>
+            <Ic icon={LogOut} size={14} color="var(--tx3)" />
+            {t("common.signOut")}
+          </button>
+        </div>,
+        document.body
+      )}
     </aside>
   );
 };
@@ -3857,6 +3991,7 @@ const KeywordsPage = ({ workspaceId }) => {
   const [saving, setSaving] = useState(false);
   const [bulkPct, setBulkPct] = useState("");
   const [kwToast, setKwToast] = useState(null);
+  const [hoveredKwId, setHoveredKwId] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const [kwTab, setKwTab] = useState('keywords'); // 'keywords' | 'searchterms' | 'negatives'
@@ -4388,14 +4523,14 @@ const KeywordsPage = ({ workspaceId }) => {
                   </thead>
                   <tbody>
                     {keywords.map(kw => (
-                      <tr key={kw.id} className={`tbl-row${selected.has(kw.id) ? ' row-selected' : ''}`}>
+                      <tr key={kw.id} className={`tbl-row${selected.has(kw.id) ? ' row-selected' : ''}`} onMouseEnter={() => setHoveredKwId(kw.id)} onMouseLeave={() => setHoveredKwId(null)}>
                         <td><input type="checkbox" checked={selected.has(kw.id)} onChange={() => toggleSelect(kw.id)} /></td>
                         <td style={{ fontWeight: 500 }}>{kw.keyword_text}</td>
                         <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>
                         <td>
                           <span
                             className={`tag status-clickable ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}
-                            onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}
+                            onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}
                             title="Click to edit"
                           >
                             <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
@@ -4412,7 +4547,7 @@ const KeywordsPage = ({ workspaceId }) => {
                               </div>
                             )
                             : (
-                              <span style={{ cursor: "pointer", color: "var(--ac2)" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}>
+                              <span style={{ cursor: "pointer", color: "var(--ac2)" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}>
                                 ${parseFloat(kw.bid || 0).toFixed(2)}
                               </span>
                             )
@@ -4431,9 +4566,9 @@ const KeywordsPage = ({ workspaceId }) => {
                         <td className="num" style={{ textAlign: 'right', color: 'var(--ac2)' }}>
                           {kw.spend && parseFloat(kw.spend) > 0 ? '$' + parseFloat(kw.spend).toFixed(2) : '—'}
                         </td>
-                        <td className="act-cell">
+                        <td className="act-cell" style={{ opacity: (hoveredKwId === kw.id || selected.has(kw.id)) ? 1 : 0, pointerEvents: (hoveredKwId === kw.id || selected.has(kw.id)) ? 'auto' : 'none' }}>
                           {editId !== kw.id && (
-                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid || ""); }}>
+                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}>
                               {t("keywords.editBid")}
                             </button>
                           )}
@@ -5008,6 +5143,7 @@ const RuleWizardModal = ({
   const [step, setStep] = useState(1);
   const [nameErr, setNameErr] = useState(false);
   const [condErr, setCondErr] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(true);
   const [campSearch, setCampSearch] = useState("");
   // S1-2: preview state
   const [previewData, setPreviewData] = useState(null);
@@ -5211,33 +5347,43 @@ const RuleWizardModal = ({
               {/* Template grid — only for new rules with empty name */}
               {!editRule?.id && !form.name && (
                 <div style={{ marginBottom:20 }}>
-                  <div style={{ fontSize:11, color:"var(--tx3)", textTransform:"uppercase",
-                    letterSpacing:"0.06em", fontWeight:600, marginBottom:10 }}>
-                    {t("rules.fromTemplate")}
-                  </div>
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
-                    {RULE_TEMPLATES.map(tpl => (
-                      <button key={tpl.id} onClick={() => applyTemplate(tpl)}
-                        style={{ background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:8,
-                          padding:"10px 12px", cursor:"pointer", textAlign:"left", transition:"border-color 150ms",
-                          display:"flex", flexDirection:"column", gap:4 }}
-                        onMouseEnter={e => e.currentTarget.style.borderColor = "var(--ac)"}
-                        onMouseLeave={e => e.currentTarget.style.borderColor = "var(--b2)"}>
-                        <span style={{ fontSize:16 }}>{tpl.icon}</span>
-                        <span style={{ fontSize:12, fontWeight:600, color:"var(--tx)", lineHeight:1.3 }}>
-                          {t(`rules.tpl_${tpl.id}`) || tpl.label}
-                        </span>
-                        <span style={{ fontSize:11, color:"var(--tx3)", lineHeight:1.4 }}>
-                          {t(`rules.tpl_${tpl.id}_desc`) || tpl.description}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                  <div style={{ display:"flex", alignItems:"center", gap:10, margin:"14px 0 2px" }}>
-                    <div style={{ flex:1, height:1, background:"var(--b2)" }} />
-                    <span style={{ fontSize:11, color:"var(--tx3)" }}>{t("rules.buildFromScratch")}</span>
-                    <div style={{ flex:1, height:1, background:"var(--b2)" }} />
-                  </div>
+                  <button onClick={() => setTemplatesOpen(o => !o)}
+                    style={{ display:"flex", alignItems:"center", gap:6, background:"none", border:"none",
+                      cursor:"pointer", padding:0, marginBottom: templatesOpen ? 10 : 0 }}>
+                    <span style={{ fontSize:11, color:"var(--tx3)", textTransform:"uppercase",
+                      letterSpacing:"0.06em", fontWeight:600 }}>
+                      {t("rules.fromTemplate")}
+                    </span>
+                    <span style={{ fontSize:10, color:"var(--tx3)", transform: templatesOpen ? "rotate(180deg)" : "rotate(0deg)",
+                      transition:"transform 150ms", display:"inline-block" }}>▼</span>
+                  </button>
+                  {templatesOpen && (
+                    <>
+                      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+                        {RULE_TEMPLATES.map(tpl => (
+                          <button key={tpl.id} onClick={() => applyTemplate(tpl)}
+                            style={{ background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:8,
+                              padding:"10px 12px", cursor:"pointer", textAlign:"left", transition:"border-color 150ms",
+                              display:"flex", flexDirection:"column", gap:4 }}
+                            onMouseEnter={e => e.currentTarget.style.borderColor = "var(--ac)"}
+                            onMouseLeave={e => e.currentTarget.style.borderColor = "var(--b2)"}>
+                            <span style={{ fontSize:16 }}>{tpl.icon}</span>
+                            <span style={{ fontSize:12, fontWeight:600, color:"var(--tx)", lineHeight:1.3 }}>
+                              {t(`rules.tpl_${tpl.id}`) || tpl.label}
+                            </span>
+                            <span style={{ fontSize:11, color:"var(--tx3)", lineHeight:1.4 }}>
+                              {t(`rules.tpl_${tpl.id}_desc`) || tpl.description}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, margin:"14px 0 2px" }}>
+                        <div style={{ flex:1, height:1, background:"var(--b2)" }} />
+                        <span style={{ fontSize:11, color:"var(--tx3)" }}>{t("rules.buildFromScratch")}</span>
+                        <div style={{ flex:1, height:1, background:"var(--b2)" }} />
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -7707,9 +7853,23 @@ export default function App() {
   const [authed, setAuthed] = useState(!!localStorage.getItem("af_token"));
   const [user, setUser] = useState(null);
   const [workspace, setWorkspace] = useState(null);
-  const [active, setActive] = useState("overview");
+  const [active, setActive] = useState(() => localStorage.getItem("af_page") || "overview");
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [toast, setToast] = useState(null);
+  const [theme, setTheme] = useState(() => localStorage.getItem("af_theme") || "dark");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("af_sidebar") === "1");
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("af_theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem("af_sidebar", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
+
+  const toggleTheme = () => setTheme(t => t === "dark" ? "light" : "dark");
+  const toggleSidebar = () => setSidebarCollapsed(c => !c);
 
   // Detect /invite/:token path
   const inviteTokenMatch = window.location.pathname.match(/^\/invite\/([a-f0-9]{64})$/);
@@ -7755,6 +7915,7 @@ export default function App() {
   function handleLogout() {
     localStorage.removeItem("af_token");
     localStorage.removeItem("af_workspace");
+    localStorage.removeItem("af_page");
     setAuthed(false);
     setUser(null);
     setWorkspace(null);
@@ -7788,8 +7949,35 @@ export default function App() {
     <>
       <Styles />
       <div style={{ display: "flex", minHeight: "100vh" }}>
-        <Sidebar active={active} setActive={setActive} user={user} workspace={workspace} onLogout={handleLogout} />
-        <main style={{ marginLeft: 220, flex: 1, padding: "26px 30px", minHeight: "100vh", overflow: "auto" }}>
+        <Sidebar active={active} setActive={(p) => { localStorage.setItem("af_page", p); setActive(p); }} user={user} workspace={workspace} onLogout={handleLogout} theme={theme} toggleTheme={toggleTheme} collapsed={sidebarCollapsed} toggleCollapsed={toggleSidebar} />
+
+        {/* ── Fixed sidebar edge toggle — stays at the boundary regardless of state ── */}
+        <button
+          onClick={toggleSidebar}
+          title={sidebarCollapsed ? t("common.expandSidebar") : t("common.collapseSidebar")}
+          style={{
+            position: "fixed",
+            left: (sidebarCollapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W) - 12,
+            top: 20,
+            zIndex: 200,
+            width: 24, height: 24,
+            borderRadius: "50%",
+            background: "var(--s1)",
+            border: "1px solid var(--b2)",
+            boxShadow: "0 1px 4px rgba(0,0,0,.18)",
+            cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "var(--tx3)",
+            transition: "left 220ms cubic-bezier(0.4,0,0.2,1), background 150ms, color 150ms",
+            padding: 0,
+          }}
+          onMouseEnter={e => { e.currentTarget.style.background = "var(--s3)"; e.currentTarget.style.color = "var(--tx)"; }}
+          onMouseLeave={e => { e.currentTarget.style.background = "var(--s1)"; e.currentTarget.style.color = "var(--tx3)"; }}
+        >
+          <Ic icon={sidebarCollapsed ? ChevronRight : ChevronLeft} size={13} />
+        </button>
+
+        <main style={{ marginLeft: sidebarCollapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W, flex: 1, padding: "26px 30px", minHeight: "100vh", overflow: "auto", transition: "margin-left 220ms cubic-bezier(0.4,0,0.2,1)" }}>
           {pages[active]}
         </main>
       </div>

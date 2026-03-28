@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 
@@ -73,7 +73,11 @@ async function startScheduler() {
             ["SP", "target"],
             ["SP", "advertised_product"],
             ["SB", "campaign"],
+            ["SB", "keyword"],
+            ["SB", "ad_group"],
             ["SD", "campaign"],
+            ["SD", "ad_group"],
+            ["SD", "target"],
           ]) {
             await queueReportPipeline(id, type, level, dateStr, dateStr);
           }
@@ -155,54 +159,39 @@ async function startScheduler() {
     null, true, "UTC"
   );
 
-  // ─── BSR sync: every 6 hours ───────────────────────────────────────────────
-  const bsrSyncJob = new CronJob("0 */6 * * *", async () => {
-    if (!process.env.SP_API_REFRESH_TOKEN) return; // skip if not configured
-    logger.info("Cron: Starting BSR sync for all active products");
+  // ─── SP-API sync: every 4 hours (BSR + inventory + pricing) ─────────────────
+  const spSyncJob = new CronJob("0 */4 * * *", async () => {
+    if (!process.env.SP_API_REFRESH_TOKEN) return;
     try {
-      const { getCatalogItem } = require("../services/amazon/spClient");
-      const { rows: products } = await query(
-        "SELECT id, asin, marketplace_id FROM products WHERE is_active = true"
+      const { rows } = await query(
+        "SELECT DISTINCT workspace_id, marketplace_id FROM products WHERE is_active = true"
       );
-
-      for (const product of products) {
-        try {
-          const data = await getCatalogItem(product.asin, product.marketplace_id);
-
-          await query(
-            "UPDATE products SET title=$1, brand=$2, image_url=$3, updated_at=NOW() WHERE id=$4",
-            [data.title, data.brand, data.imageUrl, product.id]
-          );
-
-          const allRanks = [...data.classificationRanks, ...data.displayGroupRanks];
-          const best = allRanks.reduce((b, r) => (!b || r.rank < b.rank ? r : b), null);
-
-          await query(
-            `INSERT INTO bsr_snapshots
-               (product_id, classification_ranks, display_group_ranks, best_rank, best_category)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [
-              product.id,
-              JSON.stringify(data.classificationRanks),
-              JSON.stringify(data.displayGroupRanks),
-              best?.rank || null,
-              best?.title || null,
-            ]
-          );
-
-          // Throttle: 200ms between requests (SP-API rate: 2 req/sec)
-          await new Promise(r => setTimeout(r, 200));
-        } catch (err) {
-          logger.warn("BSR sync failed for product", { asin: product.asin, error: err.message });
-        }
+      for (const { workspace_id, marketplace_id } of rows) {
+        await queueSpSync(workspace_id, marketplace_id, ["bsr", "inventory", "pricing"]);
       }
-      logger.info("Cron: BSR sync complete", { count: products.length });
+      logger.info("Cron: SP sync queued", { pairs: rows.length });
     } catch (err) {
-      logger.error("Cron BSR sync failed", { error: err.message });
+      logger.error("Cron SP sync failed", { error: err.message });
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, bsrSyncJob];
+  // ─── SP-API orders + financials: daily at 05:00 UTC ──────────────────────────
+  const spDailyJob = new CronJob("0 5 * * *", async () => {
+    if (!process.env.SP_API_REFRESH_TOKEN) return;
+    try {
+      const { rows } = await query(
+        "SELECT DISTINCT workspace_id, marketplace_id FROM products WHERE is_active = true"
+      );
+      for (const { workspace_id, marketplace_id } of rows) {
+        await queueSpSync(workspace_id, marketplace_id, ["orders", "financials"]);
+      }
+      logger.info("Cron: SP orders+financials queued", { pairs: rows.length });
+    } catch (err) {
+      logger.error("Cron SP daily sync failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

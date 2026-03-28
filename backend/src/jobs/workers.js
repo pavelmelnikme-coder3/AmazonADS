@@ -31,6 +31,7 @@ const QUEUES = {
   ALERT_CHECK:      "alert-check",
   METRICS_BACKFILL: "metrics-backfill",
   AI_ANALYSIS:      "ai-analysis",
+  SP_SYNC:          "sp-sync",
 };
 
 const defaultJobOptions = {
@@ -66,6 +67,11 @@ async function queueReportPipeline(profileId, campaignType, reportLevel, startDa
 async function queueMetricsBackfill(workspaceId, dateFrom, dateTo) {
   const queue = getQueue(QUEUES.METRICS_BACKFILL);
   return queue.add("backfill", { workspaceId, dateFrom, dateTo }, { priority: 3 });
+}
+
+async function queueSpSync(workspaceId, marketplaceId, syncTypes = ["bsr", "inventory", "pricing"], priority = 5) {
+  const queue = getQueue(QUEUES.SP_SYNC);
+  return queue.add("sync", { workspaceId, marketplaceId, syncTypes }, { priority });
 }
 
 async function queueAiAnalysis(workspaceId, locale = "en") {
@@ -369,7 +375,44 @@ async function startWorkers() {
     logger.error("AI analysis worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker];
+  const { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing } = require("../services/amazon/spSync");
+  const { decrypt } = require("../config/encryption");
+  const spSyncWorker = new Worker(
+    QUEUES.SP_SYNC,
+    async (job) => {
+      const { workspaceId, marketplaceId, syncTypes } = job.data;
+      // Resolve refresh token: env var fallback
+      const refreshToken = process.env.SP_API_REFRESH_TOKEN || null;
+      if (!refreshToken) {
+        logger.warn("SP_SYNC: SP_API_REFRESH_TOKEN not configured, skipping", { workspaceId });
+        return { skipped: true };
+      }
+      const results = {};
+      const step = Math.floor(100 / syncTypes.length);
+      let progress = 0;
+      for (const type of syncTypes) {
+        try {
+          if (type === "bsr")        results.bsr        = await syncBsr(workspaceId, marketplaceId, refreshToken);
+          if (type === "inventory")  results.inventory  = await syncInventory(workspaceId, marketplaceId, refreshToken);
+          if (type === "orders")     results.orders     = await syncOrders(workspaceId, marketplaceId, refreshToken);
+          if (type === "financials") results.financials = await syncFinancials(workspaceId, marketplaceId, refreshToken);
+          if (type === "pricing")    results.pricing    = await syncPricing(workspaceId, marketplaceId, refreshToken);
+        } catch (err) {
+          logger.warn(`SP_SYNC: ${type} failed`, { workspaceId, error: err.message });
+          results[type] = { error: err.message };
+        }
+        progress += step;
+        await job.updateProgress(Math.min(progress, 99));
+      }
+      return { workspaceId, marketplaceId, results };
+    },
+    { connection: createRedisConnection(), concurrency: 2 }
+  );
+  spSyncWorker.on("failed", (job, err) => {
+    logger.error("SP sync worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 }
 
@@ -387,6 +430,7 @@ module.exports = {
   queueRuleEngine,
   queueRuleExecution,
   queueAiAnalysis,
+  queueSpSync,
   startWorkers,
   stopWorkers,
   QUEUES,
