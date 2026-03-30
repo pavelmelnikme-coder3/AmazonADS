@@ -6,6 +6,82 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-03-30
+
+### Added — Search Terms Pipeline
+
+- **`spSearchTerm` report config** added to `reporting.js` — `REPORT_CONFIGS` now includes
+  `SP.searchTerm` with groupBy `["searchTerm"]` and full metrics set.
+- **`ingestSearchTermData()`** — new function in `reporting.js`: resolves campaign/adGroup/keyword
+  UUIDs by Amazon ID, upserts per-day rows into `search_term_metrics`, handles missing entities
+  gracefully. Called by `runReportingPipeline` when `reportLevel === "searchTerm"`.
+- **`queueMetricsBackfillJobs`** now includes `["SP", "searchTerm"]` — backfill syncs search
+  term data alongside keyword/campaign metrics.
+- **Daily scheduler** — `reportSyncJob` extended with `["SP", "searchTerm"]` report pair.
+- **`POST /api/v1/search-terms/sync`** — manual trigger endpoint, queues `queueMetricsBackfill`
+  for last 30 days for the current workspace.
+
+### Added — Search Terms UI
+
+- **Campaign type filter** (SP / SB / SD) — filter buttons above the table, maps to
+  `campaignType` query param; backend filters via `campaigns` join subquery.
+- **Multi-select checkboxes** — select-all header checkbox + per-row checkbox, same pattern as
+  Keywords tab. `stSelected` Set state, cleared on reload.
+- **Bulk panel** — appears when ≥1 row selected: "Add as keyword" and "Add as negative" bulk
+  actions, count badge.
+- **Harvest modal** — supports 3 levels:
+  - *Account* — applies query to all campaigns (uses `campaignIds[]` bulk API)
+  - *Campaign* — picker with live search across workspace campaigns + ad groups
+  - *Ad group* — nested ad group picker within selected campaign
+  - Configurable match type and bid; totals `added`/`skipped` across all targets.
+- **`GET /api/v1/search-terms/campaigns`** — new endpoint returns campaigns with nested
+  `ad_groups` JSON array for the harvest modal picker.
+
+### Added — Negatives Tab: Full Rebuild
+
+- **Filters** — search text, match type (Exact / Phrase / All), level (Campaign / Ad Group / All),
+  campaign type (SP / SB / SD). All filters combined server-side.
+- **Sort** — by keyword text, match type, level, campaign, date (asc/desc toggle).
+- **Pagination** — page size selector (25/50/100/200), prev/next navigation, total count.
+- **Inline edit** — double-click any keyword text to edit in-place; Enter to save, Escape to cancel.
+- **Match type toggle** — click Exact/Phrase badge to flip match type in one click.
+- **Bulk select** — select-all + per-row checkboxes; bulk panel shows count + actions.
+- **Bulk delete** — `DELETE /api/v1/negative-keywords/bulk` with `{ ids }`.
+- **Add single modal** — campaign picker + keyword text + match type.
+- **Bulk add modal** — multi-line textarea (one keyword per line), campaign multi-select,
+  match type selector. Uses `POST /api/v1/negative-keywords/bulk`.
+- **Copy to campaigns modal** — copies selected negatives to one or more other campaigns.
+- **Export CSV** — `GET /api/v1/negative-keywords/export.csv` streams CSV with auth header.
+- **Response fields** — `ad_group_name`, `campaign_type`, `campaign_name` included in all
+  GET responses via LEFT JOIN.
+- **Match type normalisation** — backend accepts and stores both `negativeExact`/`negativePhrase`
+  (camelCase) and `negative_exact`/`negative_phrase` (snake_case); GET filter uses
+  `ANY(['negativeExact','negative_exact'])` to match either format.
+- **`PATCH /api/v1/negative-keywords/:id`** — update `keyword_text` and/or `match_type`;
+  validates both camelCase and snake_case formats; writes audit log.
+
+### Added — Auth: Password Reset Flow
+
+- **Migration `012_password_reset.sql`** — `password_reset_tokens` table with expiry and
+  `used_at` tracking.
+- **`POST /api/v1/auth/forgot-password`** — generates token, sends reset email via `email.js`.
+- **`POST /api/v1/auth/reset-password`** — validates token, updates password hash, marks
+  token used.
+- **`email.js`** extended — `sendPasswordResetEmail()` with HTML + text templates.
+
+### Fixed — CampaignMultiSelect dropdown overflow
+
+- Dropdown was opening off-screen to the right when the trigger button is near the right edge.
+  Fixed: `right: 0` anchor (was `left: 0`), `width: 320px` fixed width (was `minWidth: 260px`).
+
+### Added — i18n
+
+- New keys in `en.js` / `ru.js` / `de.js`: `searchTerms.harvestModal.*`,
+  `negatives.addModal.*`, `negatives.bulkAdd.*`, `negatives.copyTo.*`,
+  `negatives.filters.*`, `negatives.export` covering all new UI strings.
+
+---
+
 ## [Unreleased] — 2026-03-28
 
 ### Added — SP-API Infrastructure (BSR / Inventory / Orders / Financials / Pricing)

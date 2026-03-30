@@ -41,6 +41,14 @@ const REPORT_CONFIGS = {
         "sales1d","sales7d","sales14d","sales30d",
         "topOfSearchImpressionShare","campaignBudgetCurrencyCode","currency","date"],
     },
+    searchTerm: {
+      reportType: "spSearchTerm",
+      groupBy: ["searchTerm"],
+      metrics: ["campaignId","campaignName","adGroupId","adGroupName",
+        "keywordId","keywordText","matchType","searchTerm",
+        "impressions","clicks","cost",
+        "purchases14d","sales14d","date"],
+    },
     target: {
       reportType: "spTargeting",
       groupBy: ["targeting"],
@@ -329,6 +337,89 @@ async function ingestReportData({ reportRequestId, workspaceId, profileDbId, rep
   return processed;
 }
 
+// ─── Ingest Search Term Data into search_term_metrics ────────────────────────
+/**
+ * Parse downloaded search term report rows and upsert into search_term_metrics.
+ * Each row becomes a per-day entry (date_start = date_end = row.date).
+ */
+async function ingestSearchTermData({ workspaceId, profileDbId, rows, startDate, endDate }) {
+  if (!rows?.length) return 0;
+  let processed = 0;
+
+  for (const row of rows) {
+    // Only process rows that actually have a searchTerm
+    const searchTerm = row.searchTerm || row.query;
+    if (!searchTerm) continue;
+
+    try {
+      const date = row.date || startDate;
+      const amazonCampaignId = row.campaignId ? String(row.campaignId) : null;
+      const amazonAdGroupId  = row.adGroupId  ? String(row.adGroupId)  : null;
+      const amazonKeywordId  = row.keywordId  ? String(row.keywordId)  : null;
+
+      // Resolve local UUIDs
+      const campaignUuid = amazonCampaignId
+        ? (await query("SELECT id FROM campaigns WHERE amazon_campaign_id = $1 AND workspace_id = $2 LIMIT 1",
+            [amazonCampaignId, workspaceId]))?.rows?.[0]?.id || null
+        : null;
+
+      const adGroupUuid = amazonAdGroupId
+        ? (await query("SELECT id FROM ad_groups WHERE amazon_ag_id = $1 AND workspace_id = $2 LIMIT 1",
+            [amazonAdGroupId, workspaceId]))?.rows?.[0]?.id || null
+        : null;
+
+      const keywordUuid = amazonKeywordId
+        ? (await query("SELECT id FROM keywords WHERE amazon_keyword_id = $1 AND workspace_id = $2 LIMIT 1",
+            [amazonKeywordId, workspaceId]))?.rows?.[0]?.id || null
+        : null;
+
+      await query(
+        `INSERT INTO search_term_metrics
+           (workspace_id, profile_id, campaign_id, ad_group_id, campaign_name, ad_group_name,
+            query, keyword_id, keyword_text, match_type,
+            impressions, clicks, spend, orders, sales,
+            date_start, date_end)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         ON CONFLICT (workspace_id, campaign_id, query, date_start, date_end)
+         WHERE campaign_id IS NOT NULL
+         DO UPDATE SET
+           impressions  = EXCLUDED.impressions,
+           clicks       = EXCLUDED.clicks,
+           spend        = EXCLUDED.spend,
+           orders       = EXCLUDED.orders,
+           sales        = EXCLUDED.sales,
+           keyword_id   = COALESCE(EXCLUDED.keyword_id, search_term_metrics.keyword_id),
+           keyword_text = COALESCE(EXCLUDED.keyword_text, search_term_metrics.keyword_text),
+           updated_at   = NOW()`,
+        [
+          workspaceId,
+          profileDbId,
+          campaignUuid,
+          adGroupUuid,
+          row.campaignName || null,
+          row.adGroupName  || null,
+          searchTerm,
+          keywordUuid,
+          row.keywordText  || null,
+          row.matchType    || null,
+          row.impressions  || 0,
+          row.clicks       || 0,
+          row.cost         || 0,
+          row.purchases14d || row.purchases || 0,
+          row.sales14d     || row.sales     || 0,
+          date,
+          date,
+        ]
+      );
+      processed++;
+    } catch (err) {
+      logger.warn("Failed to ingest search term row", { error: err.message, searchTerm });
+    }
+  }
+
+  return processed;
+}
+
 // ─── Full report pipeline (request → poll → download → ingest) ────────────────
 /**
  * Orchestrate the full async reporting cycle for a profile.
@@ -386,8 +477,19 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
         const rows = await downloadReport(statusData.url);
         await query("UPDATE report_requests SET status = 'processing', updated_at = NOW() WHERE id = $1", [requestId]);
 
-        // 5. Ingest
-        const processed = await ingestReportData({ reportRequestId: requestId, workspaceId, profileDbId, reportLevel, rows });
+        // 5. Ingest — search term reports go to search_term_metrics; others to fact_metrics_daily
+        let processed;
+        if (reportLevel === "searchTerm") {
+          processed = await ingestSearchTermData({ workspaceId, profileDbId, rows, startDate, endDate });
+        } else {
+          processed = await ingestReportData({ reportRequestId: requestId, workspaceId, profileDbId, reportLevel, rows });
+          // SB keyword report (sbSearchTerm) also populates search_term_metrics
+          if (reportLevel === "keyword") {
+            await ingestSearchTermData({ workspaceId, profileDbId, rows, startDate, endDate }).catch(e =>
+              logger.warn("SB searchTerm side-ingest failed (non-fatal)", { error: e.message })
+            );
+          }
+        }
 
         await query(
           "UPDATE report_requests SET status = 'completed', completed_at = NOW(), row_count = $1 WHERE id = $2",
@@ -496,6 +598,7 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
   const reportTypes = [
     ["SP", "campaign"],
     ["SP", "keyword"],
+    ["SP", "searchTerm"],
     ["SP", "target"],
     ["SP", "advertised_product"],
     ["SB", "campaign"],
@@ -543,6 +646,7 @@ module.exports = {
   pollReportStatus,
   downloadReport,
   ingestReportData,
+  ingestSearchTermData,
   runReportingPipeline,
   queueMetricsBackfillJobs,
   REPORT_CONFIGS,

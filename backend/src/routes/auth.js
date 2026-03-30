@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -5,6 +6,11 @@ const { v4: uuidv4 } = require("uuid");
 const { body, validationResult } = require("express-validator");
 const { query } = require("../db/pool");
 const { requireAuth } = require("../middleware/auth");
+const { sendPasswordResetEmail } = require("../services/email");
+
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
 
 const router = express.Router();
 
@@ -228,5 +234,86 @@ router.patch("/me", requireAuth, async (req, res, next) => {
     res.json({ user });
   } catch (err) { next(err); }
 });
+
+// POST /auth/forgot-password
+router.post("/forgot-password",
+  [body("email").isEmail().normalizeEmail()],
+  async (req, res, next) => {
+    // Always return the same response to prevent user enumeration
+    const SAFE_RESPONSE = { message: "If that email is registered, a reset link has been sent." };
+
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.json(SAFE_RESPONSE);
+
+    try {
+      const { email } = req.body;
+      const { rows: [user] } = await query(
+        "SELECT id, email, name FROM users WHERE email = $1 AND is_active = true",
+        [email]
+      );
+
+      if (!user) return res.json(SAFE_RESPONSE); // no hint that email doesn't exist
+
+      // Invalidate any existing tokens for this user
+      await query("DELETE FROM password_reset_tokens WHERE user_id = $1", [user.id]);
+
+      // Generate a cryptographically secure token
+      const rawToken   = crypto.randomBytes(32).toString("hex"); // 64-char hex
+      const tokenHash  = hashToken(rawToken);
+      const expiresAt  = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await query(
+        "INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)",
+        [user.id, tokenHash, expiresAt]
+      );
+
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+      const resetUrl = `${frontendUrl}/reset-password/${rawToken}`;
+
+      try {
+        await sendPasswordResetEmail({ to: user.email, resetUrl });
+      } catch (emailErr) {
+        // Log but don't expose email failures — token is created, admin can resend manually
+        const logger = require("../config/logger");
+        logger.error("Password reset email failed", { userId: user.id, error: emailErr.message });
+      }
+
+      res.json(SAFE_RESPONSE);
+    } catch (err) { next(err); }
+  }
+);
+
+// POST /auth/reset-password/:token
+router.post("/reset-password/:token",
+  [body("password").isLength({ min: 8 })],
+  async (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: "Password must be at least 8 characters" });
+
+    try {
+      const tokenHash = hashToken(req.params.token);
+
+      const { rows: [record] } = await query(
+        `SELECT prt.*, u.id as uid
+         FROM password_reset_tokens prt
+         JOIN users u ON u.id = prt.user_id
+         WHERE prt.token_hash = $1`,
+        [tokenHash]
+      );
+
+      if (!record)                            return res.status(400).json({ error: "Invalid or expired reset link." });
+      if (record.used_at)                     return res.status(400).json({ error: "This reset link has already been used." });
+      if (new Date(record.expires_at) < new Date()) return res.status(400).json({ error: "This reset link has expired. Please request a new one." });
+
+      const { password } = req.body;
+      const hash = await bcrypt.hash(password, 12);
+
+      await query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", [hash, record.user_id]);
+      await query("UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1", [record.id]);
+
+      res.json({ message: "Password updated successfully. You can now log in." });
+    } catch (err) { next(err); }
+  }
+);
 
 module.exports = router;

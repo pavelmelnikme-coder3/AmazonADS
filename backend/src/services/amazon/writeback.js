@@ -34,11 +34,11 @@ async function pushKeywordUpdates(updates) {
       const payload = batch.map(u => {
         const kw = { keywordId: u.amazonKeywordId };
         if (u.bid   !== undefined) kw.bid   = parseFloat(u.bid);
-        if (u.state !== undefined) kw.state = u.state;
+        if (u.state !== undefined) kw.state = u.state.toUpperCase(); // SP v3 requires ENABLED/PAUSED
         return kw;
       });
       try {
-        await put({
+        const result = await put({
           connectionId: first.connectionId,
           profileId:    first.profileId.toString(),
           marketplace:  first.marketplaceId,
@@ -46,7 +46,11 @@ async function pushKeywordUpdates(updates) {
           data:         { keywords: payload },
           group:        "keywords",
         });
-        logger.info("SP keyword write-back ok", { profileId, count: batch.length });
+        const errors = result?.keywords?.error ?? result?.error ?? [];
+        if (errors.length) {
+          logger.warn("SP keyword write-back partial errors", { profileId, errors });
+        }
+        logger.info("SP keyword write-back ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
         logger.warn("SP keyword write-back failed (non-fatal)", { profileId, error: e.message });
       }
@@ -61,11 +65,11 @@ async function pushKeywordUpdates(updates) {
       const payload = batch.map(u => {
         const kw = { keywordId: u.amazonKeywordId };
         if (u.bid   !== undefined) kw.bid   = parseFloat(u.bid);
-        if (u.state !== undefined) kw.state = u.state;
+        if (u.state !== undefined) kw.state = u.state.toUpperCase(); // SB also requires uppercase
         return kw;
       });
       try {
-        await put({
+        const result = await put({
           connectionId: first.connectionId,
           profileId:    first.profileId.toString(),
           marketplace:  first.marketplaceId,
@@ -73,7 +77,11 @@ async function pushKeywordUpdates(updates) {
           data:         { keywords: payload },
           group:        "keywords",
         });
-        logger.info("SB keyword write-back ok", { profileId, count: batch.length });
+        const errors = result?.keywords?.error ?? result?.error ?? [];
+        if (errors.length) {
+          logger.warn("SB keyword write-back partial errors", { profileId, errors });
+        }
+        logger.info("SB keyword write-back ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
         logger.warn("SB keyword write-back failed (non-fatal)", { profileId, error: e.message });
       }

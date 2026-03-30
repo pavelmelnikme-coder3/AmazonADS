@@ -70,6 +70,7 @@ async function startScheduler() {
           for (const [type, level] of [
             ["SP", "campaign"],
             ["SP", "keyword"],
+            ["SP", "searchTerm"],
             ["SP", "target"],
             ["SP", "advertised_product"],
             ["SB", "campaign"],

@@ -1,6 +1,6 @@
 # AdsFlow — Amazon Ads Dashboard
 
-Full-featured Amazon Ads management dashboard: AI-powered recommendations, automated rules engine (keywords + product targets + negative actions), advanced filters with saved presets, customizable analytics, BSR tracking, weekly P&L reporting, complete change history with rollback, and global sync progress bar. Supports SP/SB/SD campaign types across NA/EU/FE regions.
+Full-featured Amazon Ads management dashboard: AI-powered recommendations, automated rules engine (keywords + product targets + negative actions), advanced filters with saved presets, customizable analytics, BSR tracking, weekly P&L reporting, complete change history with rollback, and global sync progress bar. Search term analysis with harvest workflow (account / campaign / ad group levels). Full negative keywords management with inline edit, bulk operations, CSV export and copy-to-campaigns. Supports SP/SB/SD campaign types across NA/EU/FE regions.
 
 ---
 

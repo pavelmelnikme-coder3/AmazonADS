@@ -22,7 +22,7 @@ import {
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
-  HelpCircle, LogOut, Plus, Sun, Moon
+  HelpCircle, LogOut, Plus, Sun, Moon, Copy
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -305,7 +305,7 @@ const fmtReportType = (type) => {
 const API = (import.meta?.env?.VITE_API_URL) || "http://localhost:4000/api/v1";
 
 // ─── API client ───────────────────────────────────────────────────────────────
-async function apiFetch(path, opts = {}) {
+async function apiFetch(path, opts = {}, asBlob = false) {
   const token = localStorage.getItem("af_token");
   const wsId = localStorage.getItem("af_workspace");
   const headers = { "Content-Type": "application/json", ...opts.headers };
@@ -317,6 +317,10 @@ async function apiFetch(path, opts = {}) {
     localStorage.removeItem("af_token");
     window.location.reload();
     return;
+  }
+  if (asBlob) {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.blob();
   }
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -350,7 +354,10 @@ function useAsync(fn, deps = []) {
     }
   }, deps);
   useEffect(() => { load(); }, [load]);
-  return { ...state, reload: load };
+  const mutate = useCallback((updater) => {
+    setState(s => ({ ...s, data: typeof updater === "function" ? updater(s.data) : updater }));
+  }, []);
+  return { ...state, reload: load, mutate };
 }
 
 // ─── Micro-chart ──────────────────────────────────────────────────────────────
@@ -3970,10 +3977,10 @@ function CampaignMultiSelect({ selectedIds, onChange }) {
 
       {open && (
         <div style={{
-          position: 'absolute', top: '110%', left: 0, zIndex: 999,
+          position: 'absolute', top: '110%', right: 0, zIndex: 999,
           background: 'var(--s1)', border: '1px solid var(--b2)',
           borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
-          minWidth: 260, maxHeight: 300, display: 'flex', flexDirection: 'column',
+          width: 320, maxHeight: 340, display: 'flex', flexDirection: 'column',
         }}>
           <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--b1)' }}>
             <input
@@ -4031,144 +4038,590 @@ function CampaignMultiSelect({ selectedIds, onChange }) {
 
 // ─── NegativesTab ─────────────────────────────────────────────────────────────
 function NegativesTab({ workspaceId }) {
-  const { t } = useI18n();
   const [negatives, setNegatives]   = useState([]);
+  const [total, setTotal]           = useState(0);
   const [loading, setLoading]       = useState(true);
-  const [search, setSearch]         = useState('');
-  const [filterCampaignId, setFilterCampaignId] = useState('');
-  const [campaigns, setCampaigns]   = useState([]);
-  const [adding, setAdding]         = useState(false);
-  const [newKw, setNewKw]           = useState({ campaignId: '', keywordText: '', matchType: 'negativeExact' });
+  const [page, setPage]             = useState(1);
+  const PAGE_SIZE = 100;
 
+  // Filters
+  const [search, setSearch]         = useState('');
+  const [filterMatchType, setFilterMatchType] = useState('');   // '' | 'negativeExact' | 'negativePhrase'
+  const [filterLevel, setFilterLevel] = useState('');           // '' | 'campaign' | 'ad_group'
+  const [filterCampaignType, setFilterCampaignType] = useState(''); // '' | 'SP' | 'SB' | 'SD'
+  const [filterCampaignIds, setFilterCampaignIds] = useState([]);
+  const [sortBy, setSortBy]         = useState('created_at');
+  const [sortDir, setSortDir]       = useState('desc');
+
+  // Selection
+  const [selected, setSelected]     = useState(new Set());
+
+  // Editing
+  const [editId, setEditId]         = useState(null);
+  const [editText, setEditText]     = useState('');
+  const [editType, setEditType]     = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Modals
+  const [showAddModal, setShowAddModal]   = useState(false);    // single add
+  const [showBulkAdd, setShowBulkAdd]     = useState(false);    // bulk add textarea
+  const [showCopyTo, setShowCopyTo]       = useState(false);    // copy selected to campaigns
+  const [copyTargets, setCopyTargets]     = useState([]);
+  const [bulkAddText, setBulkAddText]     = useState('');
+  const [bulkAddType, setBulkAddType]     = useState('negativeExact');
+  const [bulkAddCampaigns, setBulkAddCampaigns] = useState([]);
+  const [bulkAddCampSearch, setBulkAddCampSearch] = useState('');
+  const [bulkAdding, setBulkAdding]       = useState(false);
+  const [toast, setToast]                 = useState(null);
+
+  // Add single form
+  const [newKw, setNewKw] = useState({ campaignId: '', adGroupId: '', keywordText: '', matchType: 'negativeExact' });
+  const [newKwAdGroups, setNewKwAdGroups] = useState([]);
+  const [addSaving, setAddSaving]   = useState(false);
+
+  // Campaigns list (for pickers)
+  const [campaigns, setCampaigns]   = useState([]);
   useEffect(() => {
     apiFetch('/campaigns?limit=500')
       .then(d => setCampaigns(d.data || []))
       .catch(() => {});
   }, [workspaceId]);
 
+  // Load ad groups when campaign selected in add form
+  useEffect(() => {
+    if (!newKw.campaignId) { setNewKwAdGroups([]); return; }
+    apiFetch(`/ad-groups?campaignId=${newKw.campaignId}&limit=100`)
+      .then(d => setNewKwAdGroups(d.data || d || []))
+      .catch(() => setNewKwAdGroups([]));
+  }, [newKw.campaignId]);
+
+  const showToast = (msg, ms = 3500) => { setToast(msg); setTimeout(() => setToast(null), ms); };
+
   const load = useCallback(() => {
     setLoading(true);
-    const p = new URLSearchParams({ limit: 200 });
+    const p = new URLSearchParams({ limit: PAGE_SIZE, page, sortBy, sortDir });
     if (search) p.set('search', search);
-    if (filterCampaignId) p.set('campaignId', filterCampaignId);
+    if (filterMatchType) p.set('matchType', filterMatchType);
+    if (filterLevel) p.set('level', filterLevel);
+    if (filterCampaignType) p.set('campaignType', filterCampaignType);
+    filterCampaignIds.forEach(id => p.append('campaignIds[]', id));
     apiFetch(`/negative-keywords?${p}`)
-      .then(d => setNegatives(d.data || []))
+      .then(d => { setNegatives(d.data || []); setTotal(d.pagination?.total || 0); setSelected(new Set()); })
       .catch(() => setNegatives([]))
       .finally(() => setLoading(false));
-  }, [search, filterCampaignId, workspaceId]);
+  }, [search, filterMatchType, filterLevel, filterCampaignType, filterCampaignIds, sortBy, sortDir, page, workspaceId]);
 
   useEffect(() => { load(); }, [load]);
 
+  // ── Sort helper ──
+  const handleSort = (col) => {
+    if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(col); setSortDir('asc'); }
+  };
+  const SortIcon = ({ col }) => sortBy === col ? <span style={{ marginLeft: 3 }}>{sortDir === 'asc' ? '↑' : '↓'}</span> : null;
+
+  // ── Selection ──
+  const toggleSelect = (id) => { const s = new Set(selected); s.has(id) ? s.delete(id) : s.add(id); setSelected(s); };
+  const toggleAll = () => selected.size === negatives.length ? setSelected(new Set()) : setSelected(new Set(negatives.map(n => n.id)));
+
+  // ── Delete single ──
   const remove = async (id) => {
     await apiFetch(`/negative-keywords/${id}`, { method: 'DELETE' });
     setNegatives(n => n.filter(x => x.id !== id));
+    setTotal(t => t - 1);
+    setSelected(s => { const ns = new Set(s); ns.delete(id); return ns; });
   };
 
-  const add = async () => {
+  // ── Bulk delete ──
+  const bulkDelete = async () => {
+    if (!selected.size) return;
+    if (!window.confirm(`Delete ${selected.size} negative(s)?`)) return;
+    const ids = Array.from(selected);
+    await apiFetch('/negative-keywords/bulk', { method: 'DELETE', body: JSON.stringify({ ids }) });
+    setNegatives(n => n.filter(x => !ids.includes(x.id)));
+    setTotal(t => t - ids.length);
+    setSelected(new Set());
+    showToast(`Deleted ${ids.length} negative(s)`);
+  };
+
+  // ── Inline edit ──
+  const startEdit = (n) => { setEditId(n.id); setEditText(n.keyword_text); setEditType(n.match_type); };
+  const saveEdit = async () => {
+    if (!editId) return;
+    setEditSaving(true);
+    try {
+      const r = await apiFetch(`/negative-keywords/${editId}`, {
+        method: 'PATCH', body: JSON.stringify({ keywordText: editText, matchType: editType }),
+      });
+      setNegatives(ns => ns.map(n => n.id === editId ? { ...n, keyword_text: r.data.keyword_text, match_type: r.data.match_type } : n));
+      setEditId(null);
+      showToast('Saved');
+    } catch (e) { showToast('Error: ' + e.message); }
+    setEditSaving(false);
+  };
+  const cancelEdit = () => setEditId(null);
+
+  // ── Quick match type toggle ──
+  const toggleMatchType = async (n) => {
+    const newType = isExact(n.match_type) ? 'negativePhrase' : 'negativeExact';
+    const r = await apiFetch(`/negative-keywords/${n.id}`, {
+      method: 'PATCH', body: JSON.stringify({ matchType: newType }),
+    });
+    setNegatives(ns => ns.map(x => x.id === n.id ? { ...x, match_type: r.data.match_type } : x));
+  };
+
+  // ── Add single ──
+  const addSingle = async () => {
     if (!newKw.campaignId || !newKw.keywordText.trim()) return;
+    setAddSaving(true);
     try {
       await apiFetch('/negative-keywords', {
         method: 'POST',
-        body: JSON.stringify({ campaignId: newKw.campaignId, keywordText: newKw.keywordText, matchType: newKw.matchType }),
+        body: JSON.stringify({ campaignId: newKw.campaignId, adGroupId: newKw.adGroupId || undefined,
+          keywordText: newKw.keywordText, matchType: newKw.matchType }),
       });
-      setAdding(false);
-      setNewKw({ campaignId: '', keywordText: '', matchType: 'negativeExact' });
+      setShowAddModal(false);
+      setNewKw({ campaignId: '', adGroupId: '', keywordText: '', matchType: 'negativeExact' });
       load();
-    } catch (e) { alert(t("common.error") + e.message); }
+      showToast('Negative keyword added');
+    } catch (e) { showToast('Error: ' + e.message); }
+    setAddSaving(false);
   };
+
+  // ── Bulk add ──
+  const submitBulkAdd = async () => {
+    const lines = bulkAddText.split('\n').map(l => l.trim()).filter(Boolean);
+    if (!lines.length || !bulkAddCampaigns.length) return;
+    setBulkAdding(true);
+    try {
+      const r = await apiFetch('/negative-keywords/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ keywords: lines.map(t => ({ keywordText: t, matchType: bulkAddType })),
+          campaignIds: bulkAddCampaigns }),
+      });
+      showToast(`Added ${r.added}, skipped ${r.skipped} (duplicates)`);
+      setShowBulkAdd(false);
+      setBulkAddText(''); setBulkAddCampaigns([]);
+      load();
+    } catch (e) { showToast('Error: ' + e.message); }
+    setBulkAdding(false);
+  };
+
+  // ── Copy selected to campaigns ──
+  const submitCopyTo = async () => {
+    if (!selected.size || !copyTargets.length) return;
+    setBulkAdding(true);
+    const selectedNeg = negatives.filter(n => selected.has(n.id));
+    const keywords = selectedNeg.map(n => ({ keywordText: n.keyword_text, matchType: n.match_type }));
+    try {
+      const r = await apiFetch('/negative-keywords/bulk', {
+        method: 'POST', body: JSON.stringify({ keywords, campaignIds: copyTargets }),
+      });
+      showToast(`Copied: added ${r.added}, skipped ${r.skipped}`);
+      setShowCopyTo(false); setCopyTargets([]); setSelected(new Set());
+    } catch (e) { showToast('Error: ' + e.message); }
+    setBulkAdding(false);
+  };
+
+  // ── Export CSV ──
+  const exportCsv = () => {
+    const url = `/api/v1/negative-keywords/export.csv`;
+    const a = document.createElement('a');
+    a.href = url; a.download = 'negative-keywords.csv';
+    // Include auth header via fetch + blob
+    apiFetch('/negative-keywords/export.csv', {}, true)
+      .then(blob => { const u = URL.createObjectURL(blob); a.href = u; a.click(); URL.revokeObjectURL(u); })
+      .catch(() => showToast('Export failed'));
+  };
+
+  const isExact = (mt) => mt === 'negativeExact' || mt === 'negative_exact';
+  const matchLabel = (mt) => isExact(mt) ? 'Exact' : 'Phrase';
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 14, alignItems: 'center', flexWrap: 'wrap' }}>
-        <input placeholder="Search…" value={search} onChange={e => setSearch(e.target.value)}
-          style={{ width: 180, padding: '5px 10px', fontSize: 12 }} />
-        <select value={filterCampaignId} onChange={e => setFilterCampaignId(e.target.value)}
-          style={{ padding: '5px 8px', fontSize: 12 }}>
-          <option value="">All campaigns</option>
-          {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-        <button onClick={() => setAdding(true)} className="btn btn-primary"
-          style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
-          <Plus size={12} strokeWidth={1.75} /> Add negative
-        </button>
-        <span style={{ color: 'var(--tx3)', fontSize: 12, marginLeft: 'auto' }}>
-          {negatives.length} negatives
-        </span>
+      {/* Toast */}
+      {toast && createPortal(
+        <div style={{ position: 'fixed', top: 20, right: 20, zIndex: 9999, background: 'var(--grn)', color: '#fff',
+          padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: '0 4px 20px rgba(0,0,0,.3)' }}>
+          {toast}
+        </div>, document.body
+      )}
+
+      {/* Toolbar */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input placeholder="Search…" value={search}
+          onChange={e => { setSearch(e.target.value); setPage(1); }}
+          style={{ width: 180, padding: '5px 10px', fontSize: 12,
+            background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }} />
+
+        {/* Match type filter */}
+        {[{ v: '', l: 'All types' }, { v: 'negativeExact', l: 'Exact' }, { v: 'negativePhrase', l: 'Phrase' }].map(f => (
+          <button key={f.v} onClick={() => { setFilterMatchType(f.v); setPage(1); }}
+            className={`btn ${filterMatchType === f.v ? 'btn-primary' : 'btn-ghost'}`}
+            style={{ fontSize: 11, padding: '4px 10px' }}>{f.l}</button>
+        ))}
+        <div style={{ width: 1, height: 20, background: 'var(--b2)' }} />
+        {/* Level filter */}
+        {[{ v: '', l: 'All levels' }, { v: 'campaign', l: 'Campaign' }, { v: 'ad_group', l: 'Ad Group' }].map(f => (
+          <button key={f.v} onClick={() => { setFilterLevel(f.v); setPage(1); }}
+            className={`btn ${filterLevel === f.v ? 'btn-primary' : 'btn-ghost'}`}
+            style={{ fontSize: 11, padding: '4px 10px' }}>{f.l}</button>
+        ))}
+        <div style={{ width: 1, height: 20, background: 'var(--b2)' }} />
+        {/* Campaign type filter */}
+        {[{ v: '', l: 'All' }, { v: 'SP', l: 'SP' }, { v: 'SB', l: 'SB' }, { v: 'SD', l: 'SD' }].map(f => (
+          <button key={f.v} onClick={() => { setFilterCampaignType(f.v); setPage(1); }}
+            className={`btn ${filterCampaignType === f.v ? 'btn-primary' : 'btn-ghost'}`}
+            style={{ fontSize: 11, padding: '4px 8px' }}>{f.l}</button>
+        ))}
+
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: 'var(--tx3)', fontSize: 12 }}>{total.toLocaleString()} negatives</span>
+          <button onClick={exportCsv} className="btn btn-ghost" title="Export CSV"
+            style={{ fontSize: 11, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Download size={12} strokeWidth={1.75} /> CSV
+          </button>
+          <button onClick={() => setShowBulkAdd(true)} className="btn btn-ghost"
+            style={{ fontSize: 11, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Plus size={12} strokeWidth={1.75} /> Bulk add
+          </button>
+          <button onClick={() => setShowAddModal(true)} className="btn btn-primary"
+            style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Plus size={12} strokeWidth={1.75} /> Add negative
+          </button>
+        </div>
       </div>
 
-      {adding && (
-        <div className="card" style={{ padding: 14, marginBottom: 14,
-          display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 4 }}>Campaign *</div>
-            <select value={newKw.campaignId} onChange={e => setNewKw(n => ({ ...n, campaignId: e.target.value }))}
-              style={{ padding: '5px 8px', fontSize: 12 }}>
-              <option value="">Select…</option>
-              {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </div>
-          <div style={{ flex: 1, minWidth: 160 }}>
-            <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 4 }}>Keyword *</div>
-            <input value={newKw.keywordText}
-              onChange={e => setNewKw(n => ({ ...n, keywordText: e.target.value }))}
-              placeholder="Enter keyword…"
-              style={{ width: '100%', padding: '5px 10px', fontSize: 12, boxSizing: 'border-box' }} />
-          </div>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 4 }}>Type</div>
-            <select value={newKw.matchType} onChange={e => setNewKw(n => ({ ...n, matchType: e.target.value }))}
-              style={{ padding: '5px 8px', fontSize: 12 }}>
-              <option value="negativeExact">Exact</option>
-              <option value="negativePhrase">Phrase</option>
-            </select>
-          </div>
-          <button onClick={add} className="btn btn-primary" style={{ fontSize: 12, padding: '5px 14px' }}>Save</button>
-          <button onClick={() => setAdding(false)} className="btn btn-ghost" style={{ fontSize: 12, padding: '5px 10px' }}>Cancel</button>
+      {/* Bulk action panel */}
+      {selected.size > 0 && (
+        <div className="card fade" style={{ padding: '10px 16px', marginBottom: 12, display: 'flex', gap: 10,
+          alignItems: 'center', flexWrap: 'wrap', borderColor: 'rgba(59,130,246,.4)', background: 'rgba(59,130,246,.05)' }}>
+          <span style={{ fontSize: 13, color: 'var(--ac2)', fontWeight: 500 }}>{selected.size} selected</span>
+          <button className="btn btn-ghost" onClick={() => { setShowCopyTo(true); setCopyTargets([]); }}
+            style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Copy size={11} strokeWidth={1.75} /> Copy to…
+          </button>
+          <button className="btn btn-ghost" onClick={bulkDelete}
+            style={{ fontSize: 12, padding: '5px 12px', color: 'var(--red)', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Trash2 size={11} strokeWidth={1.75} /> Delete selected
+          </button>
+          <button className="btn btn-ghost" onClick={() => setSelected(new Set())} style={{ fontSize: 12, padding: '5px 10px' }}>Cancel</button>
         </div>
       )}
 
+      {/* Table */}
       {loading ? (
         <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
       ) : (
         <div className="card" style={{ overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid var(--b1)' }}>
-                {['Keyword', 'Type', 'Level', 'Campaign', ''].map(h => (
-                  <th key={h} style={{ padding: '8px 12px', textAlign: 'left',
-                    color: 'var(--tx3)', fontWeight: 500, fontSize: 11 }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {negatives.length === 0 ? (
-                <tr><td colSpan={5} style={{ padding: 32, textAlign: 'center', color: 'var(--tx2)' }}>
-                  No negative keywords
-                </td></tr>
-              ) : negatives.map(n => (
-                <tr key={n.id} style={{ borderBottom: '1px solid var(--b1)' }}>
-                  <td style={{ padding: '9px 12px', fontWeight: 500 }}>{n.keyword_text}</td>
-                  <td style={{ padding: '9px 12px' }}>
-                    <span className="badge bg-red" style={{ fontSize: 10 }}>
-                      {n.match_type === 'negativeExact' ? 'Exact' : 'Phrase'}
-                    </span>
-                  </td>
-                  <td style={{ padding: '9px 12px', fontSize: 12, color: 'var(--tx3)' }}>
-                    {n.level || 'ad_group'}
-                  </td>
-                  <td style={{ padding: '9px 12px', fontSize: 12, color: 'var(--tx2)' }}>{n.campaign_name || '—'}</td>
-                  <td style={{ padding: '9px 12px' }}>
-                    <button onClick={() => remove(n.id)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer',
-                               color: 'var(--tx3)', padding: 4 }} title="Delete">
-                      <Trash2 size={13} strokeWidth={1.75} />
-                    </button>
-                  </td>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: 'var(--s2)' }}>
+                  <th style={{ width: 36, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>
+                    <input type="checkbox"
+                      checked={negatives.length > 0 && selected.size === negatives.length}
+                      onChange={toggleAll} />
+                  </th>
+                  {[
+                    { col: 'keyword_text', label: 'Keyword' },
+                    { col: 'match_type',   label: 'Type' },
+                    { col: 'level',        label: 'Level' },
+                    { col: 'campaign',     label: 'Campaign / Ad Group' },
+                    { col: 'created_at',   label: 'Added' },
+                  ].map(h => (
+                    <th key={h.col} onClick={() => handleSort(h.col)}
+                      style={{ padding: '8px 12px', textAlign: 'left', cursor: 'pointer',
+                        color: 'var(--tx3)', fontWeight: 500, fontSize: 11, borderBottom: '2px solid var(--b1)',
+                        whiteSpace: 'nowrap' }}>
+                      {h.label}<SortIcon col={h.col} />
+                    </th>
+                  ))}
+                  <th style={{ width: 80, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }} />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {negatives.length === 0 ? (
+                  <tr><td colSpan={7} style={{ padding: 40, textAlign: 'center', color: 'var(--tx2)' }}>
+                    No negative keywords
+                  </td></tr>
+                ) : negatives.map(n => (
+                  <tr key={n.id} style={{
+                    borderBottom: '1px solid var(--b1)',
+                    background: selected.has(n.id) ? 'rgba(59,130,246,0.06)' : 'transparent',
+                  }}>
+                    <td style={{ padding: '8px 12px' }}>
+                      <input type="checkbox" checked={selected.has(n.id)} onChange={() => toggleSelect(n.id)} />
+                    </td>
+                    {/* Keyword text — inline edit */}
+                    <td style={{ padding: '8px 12px', fontWeight: 500, minWidth: 180 }}>
+                      {editId === n.id ? (
+                        <input autoFocus value={editText} onChange={e => setEditText(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
+                          style={{ width: '100%', padding: '4px 8px', fontSize: 13,
+                            background: 'var(--s2)', border: '1px solid var(--ac)', borderRadius: 4, color: 'var(--tx)' }} />
+                      ) : (
+                        <span style={{ cursor: 'text' }} onDoubleClick={() => startEdit(n)}
+                          title="Double-click to edit">{n.keyword_text}</span>
+                      )}
+                    </td>
+                    {/* Match type — click to toggle */}
+                    <td style={{ padding: '8px 12px' }}>
+                      {editId === n.id ? (
+                        <select value={editType} onChange={e => setEditType(e.target.value)}
+                          style={{ padding: '3px 6px', fontSize: 11, background: 'var(--s2)',
+                            border: '1px solid var(--b2)', borderRadius: 4, color: 'var(--tx)' }}>
+                          <option value="negativeExact">Exact</option>
+                          <option value="negativePhrase">Phrase</option>
+                        </select>
+                      ) : (
+                        <button onClick={() => toggleMatchType(n)} title="Click to toggle Exact/Phrase"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                          <span className={`badge ${isExact(n.match_type) ? 'bg-red' : 'bg-amb'}`}
+                            style={{ fontSize: 10 }}>
+                            {matchLabel(n.match_type)}
+                          </span>
+                        </button>
+                      )}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx3)' }}>
+                      {n.level || 'ad_group'}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx2)', maxWidth: 260 }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {n.campaign_name || '—'}
+                      </div>
+                      {n.ad_group_name && (
+                        <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 1 }}>
+                          {n.ad_group_name}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--tx3)', whiteSpace: 'nowrap' }}>
+                      {n.created_at ? new Date(n.created_at).toLocaleDateString() : '—'}
+                    </td>
+                    {/* Actions */}
+                    <td style={{ padding: '8px 12px' }}>
+                      {editId === n.id ? (
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button onClick={saveEdit} disabled={editSaving}
+                            style={{ background: 'var(--grn)', color: '#fff', border: 'none', cursor: 'pointer',
+                              borderRadius: 4, padding: '3px 8px', fontSize: 11 }}>
+                            {editSaving ? '…' : '✓'}
+                          </button>
+                          <button onClick={cancelEdit}
+                            style={{ background: 'none', border: '1px solid var(--b2)', cursor: 'pointer',
+                              borderRadius: 4, padding: '3px 8px', fontSize: 11, color: 'var(--tx3)' }}>✕</button>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                          <button onClick={() => startEdit(n)} title="Edit"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--tx3)', padding: 4 }}>
+                            <PenLine size={13} strokeWidth={1.75} />
+                          </button>
+                          <button onClick={() => remove(n.id)} title="Delete"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--tx3)', padding: 4 }}>
+                            <Trash2 size={13} strokeWidth={1.75} />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8,
+              padding: '12px 16px', borderTop: '1px solid var(--b1)' }}>
+              <button className="btn btn-ghost" onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1} style={{ fontSize: 12, padding: '4px 10px' }}>← Prev</button>
+              <span style={{ fontSize: 12, color: 'var(--tx2)' }}>
+                Page {page} of {totalPages} · {total.toLocaleString()} total
+              </span>
+              <button className="btn btn-ghost" onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages} style={{ fontSize: 12, padding: '4px 10px' }}>Next →</button>
+            </div>
+          )}
         </div>
+      )}
+
+      {/* ── Add single modal ── */}
+      {showAddModal && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 9000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowAddModal(false); }}>
+          <div className="card" style={{ width: 460, padding: 28, borderRadius: 12 }}>
+            <h3 style={{ fontFamily: 'var(--disp)', fontSize: 16, fontWeight: 700, marginBottom: 20 }}>Add Negative Keyword</h3>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Keyword *</div>
+              <input value={newKw.keywordText} onChange={e => setNewKw(n => ({ ...n, keywordText: e.target.value }))}
+                placeholder="Enter keyword…" autoFocus
+                style={{ width: '100%', padding: '8px 10px', fontSize: 13, boxSizing: 'border-box',
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }} />
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Match Type</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {[['negativeExact', 'Exact'], ['negativePhrase', 'Phrase']].map(([v, l]) => (
+                    <button key={v} onClick={() => setNewKw(n => ({ ...n, matchType: v }))}
+                      className={`btn ${newKw.matchType === v ? 'btn-primary' : 'btn-ghost'}`}
+                      style={{ fontSize: 12, padding: '5px 14px' }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Level</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {[['', 'Campaign'], [newKw.adGroupId || '__ag__', 'Ad Group']].map(([v, l]) => (
+                    <button key={l} onClick={() => setNewKw(n => ({ ...n, adGroupId: v === '__ag__' ? '' : v }))}
+                      className={`btn ${(l === 'Campaign' ? !newKw.adGroupId : !!newKw.adGroupId) ? 'btn-primary' : 'btn-ghost'}`}
+                      style={{ fontSize: 12, padding: '5px 14px' }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Campaign *</div>
+              <select value={newKw.campaignId} onChange={e => setNewKw(n => ({ ...n, campaignId: e.target.value, adGroupId: '' }))}
+                style={{ width: '100%', padding: '7px 10px', fontSize: 12, boxSizing: 'border-box',
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }}>
+                <option value="">Select campaign…</option>
+                {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            {newKw.campaignId && newKwAdGroups.length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Ad Group (optional)</div>
+                <select value={newKw.adGroupId} onChange={e => setNewKw(n => ({ ...n, adGroupId: e.target.value }))}
+                  style={{ width: '100%', padding: '7px 10px', fontSize: 12, boxSizing: 'border-box',
+                    background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }}>
+                  <option value="">Campaign level</option>
+                  {newKwAdGroups.map(ag => <option key={ag.id} value={ag.id}>{ag.name}</option>)}
+                </select>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={() => setShowAddModal(false)} style={{ fontSize: 13 }}>Cancel</button>
+              <button className="btn btn-primary" onClick={addSingle} disabled={addSaving || !newKw.campaignId || !newKw.keywordText.trim()}
+                style={{ fontSize: 13, minWidth: 100 }}>{addSaving ? 'Saving…' : 'Add Negative'}</button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+
+      {/* ── Bulk add modal ── */}
+      {showBulkAdd && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 9000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowBulkAdd(false); }}>
+          <div className="card" style={{ width: 540, padding: 28, borderRadius: 12 }}>
+            <h3 style={{ fontFamily: 'var(--disp)', fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Bulk Add Negatives</h3>
+            <p style={{ fontSize: 12, color: 'var(--tx2)', marginBottom: 16 }}>One keyword per line. Will be added to all selected campaigns.</p>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Keywords (one per line)</div>
+              <textarea value={bulkAddText} onChange={e => setBulkAddText(e.target.value)}
+                rows={7} placeholder={"bad keyword 1\nbad keyword 2\nbad keyword 3"}
+                style={{ width: '100%', padding: '8px 10px', fontSize: 12, boxSizing: 'border-box', resize: 'vertical',
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)', fontFamily: 'monospace' }} />
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 4 }}>
+                {bulkAddText.split('\n').filter(l => l.trim()).length} keywords
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 14 }}>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Match Type</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {[['negativeExact', 'Exact'], ['negativePhrase', 'Phrase']].map(([v, l]) => (
+                    <button key={v} onClick={() => setBulkAddType(v)}
+                      className={`btn ${bulkAddType === v ? 'btn-primary' : 'btn-ghost'}`}
+                      style={{ fontSize: 12, padding: '5px 14px' }}>{l}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Target Campaigns</div>
+              <input placeholder="Search campaigns…" value={bulkAddCampSearch}
+                onChange={e => setBulkAddCampSearch(e.target.value)}
+                style={{ width: '100%', padding: '6px 10px', fontSize: 12, boxSizing: 'border-box', marginBottom: 6,
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }} />
+              <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--b2)', borderRadius: 6 }}>
+                {campaigns.filter(c => !bulkAddCampSearch || c.name.toLowerCase().includes(bulkAddCampSearch.toLowerCase()))
+                  .map(c => (
+                  <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', cursor: 'pointer',
+                    background: bulkAddCampaigns.includes(c.id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
+                    <input type="checkbox" checked={bulkAddCampaigns.includes(c.id)}
+                      onChange={() => setBulkAddCampaigns(ids => ids.includes(c.id) ? ids.filter(x => x !== c.id) : [...ids, c.id])}
+                      style={{ accentColor: 'var(--ac)' }} />
+                    <span style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                    <span style={{ fontSize: 10, color: 'var(--tx3)' }}>
+                      {c.campaign_type === 'sponsoredProducts' ? 'SP' : c.campaign_type === 'sponsoredBrands' ? 'SB' : 'SD'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 4 }}>
+                {bulkAddCampaigns.length} campaigns selected
+                {bulkAddCampaigns.length > 0 && (
+                  <button onClick={() => setBulkAddCampaigns([])}
+                    style={{ marginLeft: 8, background: 'none', border: 'none', color: 'var(--ac)', cursor: 'pointer', fontSize: 11 }}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={() => setShowBulkAdd(false)} style={{ fontSize: 13 }}>Cancel</button>
+              <button className="btn btn-primary" onClick={submitBulkAdd}
+                disabled={bulkAdding || !bulkAddText.trim() || !bulkAddCampaigns.length}
+                style={{ fontSize: 13, minWidth: 120 }}>
+                {bulkAdding ? 'Adding…' : `Add to ${bulkAddCampaigns.length} campaign(s)`}
+              </button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+
+      {/* ── Copy to campaigns modal ── */}
+      {showCopyTo && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 9000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowCopyTo(false); }}>
+          <div className="card" style={{ width: 440, padding: 28, borderRadius: 12 }}>
+            <h3 style={{ fontFamily: 'var(--disp)', fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Copy to Campaigns</h3>
+            <p style={{ fontSize: 12, color: 'var(--tx2)', marginBottom: 16 }}>
+              Copy <strong style={{ color: 'var(--tx)' }}>{selected.size} negative(s)</strong> to selected campaigns.
+              Duplicates are skipped.
+            </p>
+            <div style={{ maxHeight: 240, overflowY: 'auto', border: '1px solid var(--b2)', borderRadius: 6, marginBottom: 20 }}>
+              {campaigns.map(c => (
+                <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', cursor: 'pointer',
+                  background: copyTargets.includes(c.id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
+                  <input type="checkbox" checked={copyTargets.includes(c.id)}
+                    onChange={() => setCopyTargets(ids => ids.includes(c.id) ? ids.filter(x => x !== c.id) : [...ids, c.id])}
+                    style={{ accentColor: 'var(--ac)' }} />
+                  <span style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                  <span style={{ fontSize: 10, color: 'var(--tx3)' }}>
+                    {c.campaign_type === 'sponsoredProducts' ? 'SP' : c.campaign_type === 'sponsoredBrands' ? 'SB' : 'SD'}
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={() => setShowCopyTo(false)} style={{ fontSize: 13 }}>Cancel</button>
+              <button className="btn btn-primary" onClick={submitCopyTo}
+                disabled={bulkAdding || !copyTargets.length}
+                style={{ fontSize: 13, minWidth: 120 }}>
+                {bulkAdding ? 'Copying…' : `Copy to ${copyTargets.length} campaign(s)`}
+              </button>
+            </div>
+          </div>
+        </div>, document.body
       )}
     </div>
   );
@@ -4306,6 +4759,19 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stDateTo, setStDateTo]         = useState(null);
   const [stMetricsDays, setStMetricsDays] = useState(30);
   const [stCampaignIds, setStCampaignIds] = useState([]);
+  const [stCampaignType, setStCampaignType] = useState('');   // '' | 'SP' | 'SB' | 'SD'
+  const [stSyncing, setStSyncing] = useState(false);
+  const [stSelected, setStSelected] = useState(new Set());
+  // Harvest modal state
+  const [stHarvestModal, setStHarvestModal] = useState(null); // { terms: [], mode: 'keyword'|'negative' }
+  const [stHarvestLevel, setStHarvestLevel] = useState('campaign'); // 'account'|'campaign'|'adgroup'
+  const [stHarvestCampaigns, setStHarvestCampaigns] = useState([]);
+  const [stHarvestSelCampaign, setStHarvestSelCampaign] = useState('');
+  const [stHarvestSelAdGroup, setStHarvestSelAdGroup] = useState('');
+  const [stHarvestMatchType, setStHarvestMatchType] = useState('exact');
+  const [stHarvestBid, setStHarvestBid] = useState('0.50');
+  const [stHarvestCampaignSearch, setStHarvestCampaignSearch] = useState('');
+  const [stHarvestSaving, setStHarvestSaving] = useState(false);
 
   const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
     "keywords", [36, 220, 90, 100, 90, 170, 65, 65, 75, 80, 90]
@@ -4365,11 +4831,12 @@ const KeywordsPage = ({ workspaceId }) => {
       params.set('metricsDays', stMetricsDays);
     }
     stCampaignIds.forEach(id => params.append('campaignIds[]', id));
+    if (stCampaignType) params.set('campaignType', stCampaignType);
     apiFetch(`/search-terms?${params}`)
-      .then(d => { setSearchTerms(d?.data || []); setStTotal(d?.pagination?.total || 0); })
+      .then(d => { setSearchTerms(d?.data || []); setStTotal(d?.pagination?.total || 0); setStSelected(new Set()); })
       .catch(() => setSearchTerms([]))
       .finally(() => setStLoading(false));
-  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds]);
+  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds, stCampaignType]);
 
   const stRecommendation = (term) => {
     const acos = parseFloat(term.sales) > 0 ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100 : null;
@@ -4381,26 +4848,75 @@ const KeywordsPage = ({ workspaceId }) => {
     return 'neutral';
   };
 
-  const addAsKeyword = async (term, matchType = 'exact') => {
+  const openHarvestModal = async (termsOrTerm, mode) => {
+    const terms = Array.isArray(termsOrTerm) ? termsOrTerm : [termsOrTerm];
+    setStHarvestModal({ terms, mode });
+    setStHarvestLevel('campaign');
+    setStHarvestMatchType('exact');
+    setStHarvestBid('0.50');
+    setStHarvestCampaignSearch('');
+    // Pre-fill campaign if all selected terms share the same campaign
+    const sharedCampaign = terms.every(t => t.campaign_id && t.campaign_id === terms[0].campaign_id)
+      ? terms[0].campaign_id : '';
+    setStHarvestSelCampaign(sharedCampaign);
+    setStHarvestSelAdGroup(sharedCampaign && terms.length === 1 ? (terms[0].ad_group_id || '') : '');
+    setStHarvestSaving(false);
     try {
-      await post('/search-terms/add-keyword', { query: term.query, campaignId: term.campaign_id, adGroupId: term.ad_group_id, matchType, bid: 0.50 });
-      setKwToast(`"${term.query}" added as ${matchType} keyword`);
-      setTimeout(() => setKwToast(null), 3000);
-    } catch (e) {
-      setKwToast(e?.status === 409 ? 'Keyword already exists' : 'Error adding keyword');
-      setTimeout(() => setKwToast(null), 3000);
-    }
+      const camps = await apiFetch('/search-terms/campaigns');
+      setStHarvestCampaigns(Array.isArray(camps) ? camps : []);
+    } catch { setStHarvestCampaigns([]); }
   };
 
-  const addAsNegative = async (term, matchType = 'exact') => {
+  const submitHarvest = async () => {
+    if (!stHarvestModal) return;
+    const { terms, mode } = stHarvestModal;
+    setStHarvestSaving(true);
     try {
-      await post('/search-terms/add-negative', { query: term.query, campaignId: term.campaign_id, adGroupId: term.ad_group_id, matchType });
-      setKwToast(`"${term.query}" added as negative ${matchType}`);
-      setTimeout(() => setKwToast(null), 3000);
+      const endpoint = mode === 'keyword' ? '/search-terms/add-keyword' : '/search-terms/add-negative';
+      let totalAdded = 0, totalSkipped = 0;
+
+      for (const term of terms) {
+        const body = { query: term.query, matchType: stHarvestMatchType };
+        if (mode === 'keyword') body.bid = parseFloat(stHarvestBid) || 0.50;
+
+        if (stHarvestLevel === 'account') {
+          body.campaignIds = stHarvestCampaigns.map(c => c.id);
+        } else if (stHarvestLevel === 'adgroup') {
+          body.campaignId = stHarvestSelCampaign;
+          body.adGroupId = stHarvestSelAdGroup;
+        } else {
+          body.campaignId = stHarvestSelCampaign;
+        }
+
+        const r = await post(endpoint, body);
+        totalAdded += r.added ?? (r.success ? 1 : 0);
+        totalSkipped += r.skipped ?? 0;
+      }
+
+      const what = mode === 'keyword' ? 'keyword(s)' : 'negative(s)';
+      const msg = `Added ${totalAdded} ${what}${totalSkipped ? `, ${totalSkipped} skipped (duplicate)` : ''}`;
+      setKwToast(msg);
+      setTimeout(() => setKwToast(null), 4000);
+      setStHarvestModal(null);
+      setStSelected(new Set());
     } catch (e) {
-      setKwToast(e?.status === 409 ? 'Already a negative keyword' : 'Error adding negative');
+      setKwToast('Error: ' + (e?.message || 'unknown'));
       setTimeout(() => setKwToast(null), 3000);
     }
+    setStHarvestSaving(false);
+  };
+
+  const syncSearchTerms = async () => {
+    setStSyncing(true);
+    try {
+      await post('/search-terms/sync', {});
+      setKwToast('Search term sync queued — data will appear in a few minutes');
+      setTimeout(() => setKwToast(null), 5000);
+    } catch (e) {
+      setKwToast('Sync failed: ' + (e?.message || 'unknown error'));
+      setTimeout(() => setKwToast(null), 4000);
+    }
+    setStSyncing(false);
   };
 
   useEffect(() => { setPage(1); }, [kwFilters, sortBy, sortDir]);
@@ -4409,7 +4925,7 @@ const KeywordsPage = ({ workspaceId }) => {
     document.querySelector(".fade")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [page]);
 
-  const { data: kwResponse, loading, reload } = useAsync(
+  const { data: kwResponse, loading, reload, mutate: mutateKw } = useAsync(
     () => {
       if (!workspaceId) return Promise.resolve({ data: [], pagination: { total: 0, page: 1, limit: 100, pages: 0 } });
       const p = new URLSearchParams();
@@ -4459,11 +4975,47 @@ const KeywordsPage = ({ workspaceId }) => {
   }
 
   async function saveBid(id) {
+    const bid = Math.max(0.02, parseFloat(editBid));
     setSaving(true);
     try {
-      await patch(`/keywords/${id}`, { bid: parseFloat(editBid) });
-      reload();
+      await patch(`/keywords/${id}`, { bid });
+      mutateKw(prev => prev ? { ...prev, data: prev.data.map(k => k.id === id ? { ...k, bid: bid.toFixed(4) } : k) } : prev);
       setEditId(null);
+    } catch (e) { alert(t("common.error") + e.message); }
+    setSaving(false);
+  }
+
+  async function toggleState(id, currentState, keywordText) {
+    if (currentState === "archived") return;
+    const newState = currentState === "enabled" ? "paused" : "enabled";
+    const label = newState === "paused" ? t("keywords.confirmPause") : t("keywords.confirmEnable");
+    if (!window.confirm(`${label}: "${keywordText}"?`)) return;
+    mutateKw(prev => prev ? { ...prev, data: prev.data.map(k => k.id === id ? { ...k, state: newState } : k) } : prev);
+    try {
+      await patch(`/keywords/${id}`, { state: newState });
+    } catch (e) {
+      mutateKw(prev => prev ? { ...prev, data: prev.data.map(k => k.id === id ? { ...k, state: currentState } : k) } : prev);
+      alert(t("common.error") + e.message);
+    }
+  }
+
+  async function bulkStateUpdate(newState) {
+    if (!selected.size) return;
+    const ids = Array.from(selected).filter(id => {
+      const kw = keywords.find(k => k.id === id);
+      return kw && kw.state !== "archived" && kw.state !== newState;
+    });
+    if (!ids.length) return;
+    const label = newState === "paused" ? t("keywords.confirmPause") : t("keywords.confirmEnable");
+    if (!window.confirm(`${label} ${ids.length} keywords?`)) return;
+    setSaving(true);
+    try {
+      const updates = ids.map(id => ({ id, state: newState }));
+      await patch("/keywords/bulk", { updates });
+      mutateKw(prev => prev ? { ...prev, data: prev.data.map(k => ids.includes(k.id) ? { ...k, state: newState } : k) } : prev);
+      setSelected(new Set());
+      setKwToast(t("keywords.updateBids", { count: ids.length }));
+      setTimeout(() => setKwToast(null), 3000);
     } catch (e) { alert(t("common.error") + e.message); }
     setSaving(false);
   }
@@ -4526,6 +5078,144 @@ const KeywordsPage = ({ workspaceId }) => {
         document.body
       )}
 
+      {/* Harvest Modal */}
+      {stHarvestModal && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={e => { if (e.target === e.currentTarget) setStHarvestModal(null); }}>
+          <div className="card" style={{ width: 480, maxWidth: "95vw", padding: 28, borderRadius: 12 }}>
+            <h3 style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 4 }}>
+              {stHarvestModal.mode === 'keyword' ? '+ Add as Keyword' : '− Add as Negative'}
+            </h3>
+            <p style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 20 }}>
+              {stHarvestModal.terms.length === 1
+                ? <>Query: <strong style={{ color: "var(--tx)" }}>"{stHarvestModal.terms[0].query}"</strong></>
+                : <><strong style={{ color: "var(--tx)" }}>{stHarvestModal.terms.length} queries</strong> selected</>
+              }
+            </p>
+
+            {/* Level selector */}
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Level</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[
+                  { id: 'account',  label: 'Account (all campaigns)' },
+                  { id: 'campaign', label: 'Campaign' },
+                  { id: 'adgroup',  label: 'Ad Group' },
+                ].map(lv => (
+                  <button key={lv.id} onClick={() => { setStHarvestLevel(lv.id); setStHarvestSelCampaign(''); setStHarvestSelAdGroup(''); }}
+                    className={`btn ${stHarvestLevel === lv.id ? 'btn-primary' : 'btn-ghost'}`}
+                    style={{ fontSize: 11, padding: "5px 12px" }}>
+                    {lv.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Campaign picker — shown for campaign and adgroup levels */}
+            {(stHarvestLevel === 'campaign' || stHarvestLevel === 'adgroup') && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Campaign</div>
+                <input
+                  placeholder="Search campaigns…"
+                  value={stHarvestCampaignSearch}
+                  onChange={e => setStHarvestCampaignSearch(e.target.value)}
+                  style={{ width: "100%", padding: "7px 10px", fontSize: 12, marginBottom: 6,
+                    background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)" }}
+                />
+                <div style={{ maxHeight: 160, overflowY: "auto", border: "1px solid var(--b2)", borderRadius: 6, background: "var(--s2)" }}>
+                  {stHarvestCampaigns
+                    .filter(c => !stHarvestCampaignSearch || c.name.toLowerCase().includes(stHarvestCampaignSearch.toLowerCase()))
+                    .map(c => (
+                      <div key={c.id} onClick={() => { setStHarvestSelCampaign(c.id); setStHarvestSelAdGroup(''); }}
+                        style={{ padding: "7px 12px", cursor: "pointer", fontSize: 12,
+                          background: stHarvestSelCampaign === c.id ? "var(--ac)" : "transparent",
+                          color: stHarvestSelCampaign === c.id ? "#fff" : "var(--tx)" }}>
+                        <span style={{ fontSize: 10, opacity: 0.7, marginRight: 6 }}>
+                          {c.campaign_type === 'sponsoredProducts' ? 'SP' : c.campaign_type === 'sponsoredBrands' ? 'SB' : 'SD'}
+                        </span>
+                        {c.name}
+                      </div>
+                    ))}
+                  {stHarvestCampaigns.length === 0 && (
+                    <div style={{ padding: "20px 12px", textAlign: "center", fontSize: 12, color: "var(--tx3)" }}>Loading…</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Ad Group picker */}
+            {stHarvestLevel === 'adgroup' && stHarvestSelCampaign && (() => {
+              const camp = stHarvestCampaigns.find(c => c.id === stHarvestSelCampaign);
+              const adGroups = camp?.ad_groups || [];
+              return (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Ad Group</div>
+                  <div style={{ maxHeight: 120, overflowY: "auto", border: "1px solid var(--b2)", borderRadius: 6, background: "var(--s2)" }}>
+                    {adGroups.map(ag => (
+                      <div key={ag.id} onClick={() => setStHarvestSelAdGroup(ag.id)}
+                        style={{ padding: "7px 12px", cursor: "pointer", fontSize: 12,
+                          background: stHarvestSelAdGroup === ag.id ? "var(--ac)" : "transparent",
+                          color: stHarvestSelAdGroup === ag.id ? "#fff" : "var(--tx)" }}>
+                        {ag.name}
+                      </div>
+                    ))}
+                    {adGroups.length === 0 && (
+                      <div style={{ padding: "12px", fontSize: 12, color: "var(--tx3)" }}>No ad groups</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Account level info */}
+            {stHarvestLevel === 'account' && (
+              <div style={{ marginBottom: 14, padding: "10px 14px", background: "rgba(96,165,250,0.08)",
+                border: "1px solid rgba(96,165,250,0.2)", borderRadius: 8, fontSize: 12, color: "var(--tx2)" }}>
+                Will add to <strong style={{ color: "var(--tx)" }}>{stHarvestCampaigns.length} campaigns</strong>.
+                Duplicates are skipped automatically.
+              </div>
+            )}
+
+            {/* Match type + bid */}
+            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Match Type</div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {['exact', 'phrase', 'broad'].map(mt => (
+                    <button key={mt} onClick={() => setStHarvestMatchType(mt)}
+                      className={`btn ${stHarvestMatchType === mt ? 'btn-primary' : 'btn-ghost'}`}
+                      style={{ fontSize: 11, padding: "4px 10px", textTransform: "capitalize" }}>
+                      {mt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {stHarvestModal.mode === 'keyword' && (
+                <div>
+                  <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Bid $</div>
+                  <input type="number" step="0.01" min="0.02" value={stHarvestBid}
+                    onChange={e => setStHarvestBid(e.target.value)}
+                    style={{ width: 90, padding: "6px 10px", fontSize: 13,
+                      background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)" }} />
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setStHarvestModal(null)}
+                style={{ fontSize: 13 }}>Cancel</button>
+              <button className="btn btn-primary" onClick={submitHarvest} disabled={stHarvestSaving ||
+                ((stHarvestLevel === 'campaign' || stHarvestLevel === 'adgroup') && !stHarvestSelCampaign) ||
+                (stHarvestLevel === 'adgroup' && !stHarvestSelAdGroup)}
+                style={{ fontSize: 13, minWidth: 100 }}>
+                {stHarvestSaving ? "Saving…" : stHarvestModal.mode === 'keyword' ? 'Add Keyword' : 'Add Negative'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
       {kwTab === 'searchterms' && (
         <div>
           {/* Search Terms toolbar */}
@@ -4540,12 +5230,25 @@ const KeywordsPage = ({ workspaceId }) => {
             />
             {[
               { id: 'all',     label: 'All' },
-              { id: 'harvest', label: '🟢 Harvest' },
-              { id: 'negate',  label: '🔴 Negate' },
+              { id: 'harvest', label: '+ Harvest' },
+              { id: 'negate',  label: '− Negate' },
             ].map(f => (
               <button key={f.id} onClick={() => setStFilter(f.id)}
                 className={`btn ${stFilter === f.id ? "btn-primary" : "btn-ghost"}`}
                 style={{ fontSize: 11, padding: "5px 12px" }}>
+                {f.label}
+              </button>
+            ))}
+            <div style={{ width: 1, height: 20, background: "var(--b2)", margin: "0 2px" }} />
+            {[
+              { id: '', label: 'All types' },
+              { id: 'SP', label: 'SP' },
+              { id: 'SB', label: 'SB' },
+              { id: 'SD', label: 'SD' },
+            ].map(f => (
+              <button key={f.id} onClick={() => setStCampaignType(f.id)}
+                className={`btn ${stCampaignType === f.id ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 11, padding: "5px 10px" }}>
                 {f.label}
               </button>
             ))}
@@ -4564,7 +5267,33 @@ const KeywordsPage = ({ workspaceId }) => {
             <span style={{ fontSize: 11, color: "var(--tx3)", marginLeft: "auto" }}>
               {stTotal.toLocaleString()} queries
             </span>
+            <button
+              className="btn btn-ghost"
+              onClick={syncSearchTerms}
+              disabled={stSyncing}
+              title="Sync search term data from Amazon (last 30 days)"
+              style={{ fontSize: 11, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
+              <Ic icon={RefreshCw} size={12} style={stSyncing ? { animation: "spin 1s linear infinite" } : {}} />
+              {stSyncing ? "Syncing…" : "Sync"}
+            </button>
           </div>
+
+          {/* Search Terms bulk panel */}
+          {stSelected.size > 0 && (
+            <div className="card fade" style={{ padding: "10px 16px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", borderColor: "rgba(59,130,246,.4)", background: "rgba(59,130,246,.05)" }}>
+              <span style={{ fontSize: 13, color: "var(--ac2)", fontWeight: 500 }}>{stSelected.size} selected</span>
+              <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px", color: "var(--grn)" }}
+                onClick={() => openHarvestModal(searchTerms.filter(t => stSelected.has(t.id)), 'keyword')}>
+                + Add as Keywords
+              </button>
+              <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px", color: "var(--red)" }}
+                onClick={() => openHarvestModal(searchTerms.filter(t => stSelected.has(t.id)), 'negative')}>
+                − Add as Negatives
+              </button>
+              <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }}
+                onClick={() => setStSelected(new Set())}>Cancel</button>
+            </div>
+          )}
 
           {/* Search Terms table */}
           {stLoading ? (
@@ -4580,9 +5309,14 @@ const KeywordsPage = ({ workspaceId }) => {
                 Run a report sync to populate this table.
               </p>
               <p style={{ fontSize: 11, color: "var(--tx3)", background: "var(--s2)",
-                border: "1px solid var(--b2)", borderRadius: 6, padding: "6px 14px", display: "inline-block" }}>
+                border: "1px solid var(--b2)", borderRadius: 6, padding: "6px 14px", display: "inline-block", marginBottom: 16 }}>
                 Report type: spSearchTerm · Amazon data lag: 24–48h
               </p>
+              <br />
+              <button className="btn btn-primary" onClick={syncSearchTerms} disabled={stSyncing}
+                style={{ fontSize: 12, padding: "8px 20px" }}>
+                {stSyncing ? "Syncing…" : "Sync Now"}
+              </button>
             </div>
           ) : (
             <div className="card" style={{ overflow: "hidden" }}>
@@ -4590,6 +5324,14 @@ const KeywordsPage = ({ workspaceId }) => {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                   <thead>
                     <tr>
+                      <th style={{ width: 36, padding: "8px 10px", background: "var(--s2)", borderBottom: "2px solid var(--b1)" }}>
+                        <input type="checkbox"
+                          checked={searchTerms.length > 0 && stSelected.size === searchTerms.length}
+                          onChange={() => stSelected.size === searchTerms.length
+                            ? setStSelected(new Set())
+                            : setStSelected(new Set(searchTerms.map(t => t.id)))}
+                        />
+                      </th>
                       {[
                         { col: "query",       label: "Query",      align: "left",   width: 220 },
                         { col: "campaign",    label: "Campaign",   align: "left",   width: 150, noSort: true },
@@ -4628,15 +5370,27 @@ const KeywordsPage = ({ workspaceId }) => {
                         ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100
                         : null;
                       const rec = stRecommendation(term);
+                      const isSel = stSelected.has(term.id);
                       return (
                         <tr key={term.id || i} style={{
                           borderBottom: "1px solid var(--b1)",
-                          background: rec === "harvest"
-                            ? "rgba(34,197,94,0.04)"
-                            : rec === "negate"
-                              ? "rgba(239,68,68,0.04)"
-                              : "transparent",
+                          background: isSel
+                            ? "rgba(59,130,246,0.08)"
+                            : rec === "harvest"
+                              ? "rgba(34,197,94,0.04)"
+                              : rec === "negate"
+                                ? "rgba(239,68,68,0.04)"
+                                : "transparent",
+                          cursor: "default",
                         }}>
+                          <td style={{ padding: "7px 10px" }}>
+                            <input type="checkbox" checked={isSel}
+                              onChange={() => {
+                                const s = new Set(stSelected);
+                                isSel ? s.delete(term.id) : s.add(term.id);
+                                setStSelected(s);
+                              }} />
+                          </td>
                           <td style={{ padding: "7px 10px", fontWeight: 500 }}>
                             <span title={term.query} style={{
                               display: "block", maxWidth: 210,
@@ -4688,21 +5442,21 @@ const KeywordsPage = ({ workspaceId }) => {
                           </td>
                           <td style={{ padding: "7px 10px", textAlign: "center" }}>
                             <div style={{ display: "flex", gap: 4, justifyContent: "center" }}>
-                              <button onClick={() => addAsKeyword(term, "exact")}
-                                title="Add as exact match keyword"
+                              <button onClick={() => openHarvestModal(term, 'keyword')}
+                                title="Add as keyword"
                                 style={{ fontSize: 10, padding: "3px 8px", cursor: "pointer",
                                   background: "rgba(34,197,94,0.15)", color: "var(--grn)",
                                   border: "1px solid rgba(34,197,94,0.3)", borderRadius: 4,
                                   whiteSpace: "nowrap" }}>
-                                + Exact KW
+                                + KW
                               </button>
-                              <button onClick={() => addAsNegative(term, "exact")}
-                                title="Add as negative exact keyword"
+                              <button onClick={() => openHarvestModal(term, 'negative')}
+                                title="Add as negative"
                                 style={{ fontSize: 10, padding: "3px 8px", cursor: "pointer",
                                   background: "rgba(239,68,68,0.10)", color: "var(--red)",
                                   border: "1px solid rgba(239,68,68,0.3)", borderRadius: 4,
                                   whiteSpace: "nowrap" }}>
-                                − Negate
+                                − Neg
                               </button>
                             </div>
                           </td>
@@ -4801,6 +5555,13 @@ const KeywordsPage = ({ workspaceId }) => {
           <button className="btn btn-primary" style={{ fontSize: 12, padding: "5px 12px" }} onClick={bulkBidUpdate} disabled={saving || !bulkPct}>
             {saving ? <span className="loader" /> : t("keywords.applyBid")}
           </button>
+          <div style={{ width: 1, background: "var(--b1)", alignSelf: "stretch" }} />
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px", color: "var(--grn)" }} onClick={() => bulkStateUpdate("enabled")} disabled={saving}>
+            <Play size={11} strokeWidth={2} style={{ display: "inline-block", verticalAlign: "middle", marginRight: 4 }} />{t("keywords.enableSelected")}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px", color: "var(--amb)" }} onClick={() => bulkStateUpdate("paused")} disabled={saving}>
+            <Pause size={11} strokeWidth={2} style={{ display: "inline-block", verticalAlign: "middle", marginRight: 4 }} />{t("keywords.pauseSelected")}
+          </button>
           <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 12px" }} onClick={() => setSelected(new Set())}>{t("common.cancel")}</button>
         </div>
       )}
@@ -4839,9 +5600,9 @@ const KeywordsPage = ({ workspaceId }) => {
                         {kwCV("match") && <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>}
                         {kwCV("status") && <td>
                           <span
-                            className={`tag status-clickable ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}
-                            onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}
-                            title="Click to edit"
+                            className={`tag ${kw.state !== "archived" ? "status-clickable" : ""} ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}
+                            onClick={() => toggleState(kw.id, kw.state, kw.keyword_text)}
+                            title={kw.state !== "archived" ? (kw.state === "enabled" ? t("keywords.clickToPause") : t("keywords.clickToEnable")) : ""}
                           >
                             <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
                             {kw.state}
@@ -7545,6 +8306,10 @@ const LoginPage = ({ onLogin }) => {
   const [form, setForm] = useState({ email: "", password: "", name: "", orgName: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotDone, setForgotDone] = useState(false);
 
   async function submit() {
     setLoading(true); setError(null);
@@ -7564,17 +8329,76 @@ const LoginPage = ({ onLogin }) => {
     setLoading(false);
   }
 
+  async function submitForgot() {
+    setForgotLoading(true);
+    try {
+      await post("/auth/forgot-password", { email: forgotEmail });
+      setForgotDone(true);
+    } catch (_) {
+      // Always show success to prevent user enumeration
+      setForgotDone(true);
+    }
+    setForgotLoading(false);
+  }
+
   const f = (field) => ({ value: form[field], onChange: e => setForm(f => ({ ...f, [field]: e.target.value }) )});
+
+  const logoBlock = (
+    <div style={{ textAlign: "center", marginBottom: 28 }}>
+      <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}><Activity size={22} strokeWidth={1.75} color="#fff" /></div>
+      <div style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 800 }}>AdsFlow</div>
+      <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("login.subtitle")}</div>
+    </div>
+  );
+
+  if (showForgot) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)" }}>
+        <Styles />
+        <div style={{ width: 380, padding: "36px 32px", background: "var(--s1)", borderRadius: 14, border: "1px solid var(--b1)" }}>
+          {logoBlock}
+          {forgotDone ? (
+            <div style={{ textAlign: "center" }}>
+              <div style={{ width: 48, height: 48, background: "rgba(34,197,94,.12)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--grn)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "var(--tx)", marginBottom: 8 }}>{t("login.resetEmailSent")}</div>
+              <div style={{ fontSize: 13, color: "var(--tx3)", lineHeight: 1.6, marginBottom: 20 }}>{t("login.resetEmailSentDesc")}</div>
+              <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "center" }} onClick={() => { setShowForgot(false); setForgotDone(false); setForgotEmail(""); }}>
+                {t("login.backToLogin")}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "var(--tx)", marginBottom: 6 }}>{t("login.resetPasswordTitle")}</div>
+                <div style={{ fontSize: 13, color: "var(--tx3)" }}>{t("login.resetPasswordSubtitle")}</div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <input placeholder={t("login.emailPlaceholder")} type="email" value={forgotEmail}
+                  onChange={e => setForgotEmail(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && forgotEmail && submitForgot()} />
+                <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", padding: "10px" }}
+                  onClick={submitForgot} disabled={forgotLoading || !forgotEmail}>
+                  {forgotLoading ? <span className="loader" /> : t("login.sendResetLink")}
+                </button>
+                <button className="btn btn-secondary" style={{ width: "100%", justifyContent: "center" }}
+                  onClick={() => setShowForgot(false)}>
+                  {t("login.backToLogin")}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)" }}>
       <Styles />
       <div style={{ width: 380, padding: "36px 32px", background: "var(--s1)", borderRadius: 14, border: "1px solid var(--b1)" }}>
-        <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}><Activity size={22} strokeWidth={1.75} color="#fff" /></div>
-          <div style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 800 }}>AdsFlow</div>
-          <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("login.subtitle")}</div>
-        </div>
+        {logoBlock}
 
         <div style={{ display: "flex", gap: 0, marginBottom: 20, background: "var(--s2)", borderRadius: 8, padding: 3 }}>
           {["login", "register"].map(tabId => (
@@ -7601,6 +8425,14 @@ const LoginPage = ({ onLogin }) => {
           <input placeholder={t("login.emailPlaceholder")} type="email" {...f("email")} />
           <input placeholder={t("login.passwordPlaceholder")} type="password" {...f("password")}
             onKeyDown={e => e.key === "Enter" && submit()} />
+          {tab === "login" && (
+            <div style={{ textAlign: "right", marginTop: -4 }}>
+              <button style={{ background: "none", border: "none", color: "var(--ac)", fontSize: 12, cursor: "pointer", padding: 0 }}
+                onClick={() => { setShowForgot(true); setForgotEmail(form.email); }}>
+                {t("login.forgotPassword")}
+              </button>
+            </div>
+          )}
           <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", padding: "10px" }} onClick={submit} disabled={loading}>
             {loading ? <span className="loader" /> : tab === "login" ? t("login.login") : t("login.createAccount")}
           </button>
@@ -7610,6 +8442,76 @@ const LoginPage = ({ onLogin }) => {
           <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.12)", borderRadius: 8, fontSize: 11, color: "var(--tx3)" }}>
             {t("login.demoHint")}
           </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Reset Password Page ───────────────────────────────────────────────────────
+const ResetPasswordPage = ({ token, onLogin }) => {
+  const { t } = useI18n();
+  const [password, setPassword]   = useState("");
+  const [confirm, setConfirm]     = useState("");
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
+  const [done, setDone]           = useState(false);
+
+  async function submit() {
+    if (password !== confirm) { setError(t("login.passwordMismatch")); return; }
+    setLoading(true); setError(null);
+    try {
+      await post(`/auth/reset-password/${token}`, { password });
+      setDone(true);
+    } catch (e) {
+      setError(e.message);
+    }
+    setLoading(false);
+  }
+
+  const logoBlock = (
+    <div style={{ textAlign: "center", marginBottom: 28 }}>
+      <div style={{ width: 44, height: 44, background: "linear-gradient(135deg,#3B82F6,#A78BFA)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 12px" }}><Activity size={22} strokeWidth={1.75} color="#fff" /></div>
+      <div style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 800 }}>AdsFlow</div>
+      <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("login.subtitle")}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)" }}>
+      <Styles />
+      <div style={{ width: 380, padding: "36px 32px", background: "var(--s1)", borderRadius: 14, border: "1px solid var(--b1)" }}>
+        {logoBlock}
+        {done ? (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ width: 48, height: 48, background: "rgba(34,197,94,.12)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--grn)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--tx)", marginBottom: 8 }}>{t("login.passwordReset")}</div>
+            <div style={{ fontSize: 13, color: "var(--tx3)", lineHeight: 1.6, marginBottom: 20 }}>{t("login.passwordResetDesc")}</div>
+            <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }}
+              onClick={() => { window.history.replaceState({}, "", "/"); window.location.reload(); }}>
+              {t("login.login")}
+            </button>
+          </div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: "var(--tx)", marginBottom: 6 }}>{t("login.resetPasswordTitle")}</div>
+            </div>
+            {error && <div style={{ marginBottom: 14, padding: "10px 14px", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, color: "var(--red)", fontSize: 12 }}>{error}</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <input placeholder={t("login.newPassword")} type="password" value={password}
+                onChange={e => setPassword(e.target.value)} />
+              <input placeholder={t("login.confirmPassword")} type="password" value={confirm}
+                onChange={e => setConfirm(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && password.length >= 8 && submit()} />
+              <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", padding: "10px" }}
+                onClick={submit} disabled={loading || password.length < 8}>
+                {loading ? <span className="loader" /> : t("login.setNewPassword")}
+              </button>
+            </div>
+          </>
         )}
       </div>
     </div>
@@ -8621,6 +9523,10 @@ export default function App() {
   const inviteTokenMatch = window.location.pathname.match(/^\/invite\/([a-f0-9]{64})$/);
   const inviteToken = inviteTokenMatch?.[1] || null;
 
+  // Detect /reset-password/:token path
+  const resetTokenMatch = window.location.pathname.match(/^\/reset-password\/([a-f0-9]{64})$/);
+  const resetToken = resetTokenMatch?.[1] || null;
+
   useEffect(() => {
     const handler = (e) => { setToast(e.detail); setTimeout(() => setToast(null), 2000); };
     window.addEventListener("af:toast", handler);
@@ -8668,6 +9574,7 @@ export default function App() {
   }
 
   if (inviteToken) return <InvitePage token={inviteToken} onLogin={handleLogin} />;
+  if (resetToken)  return <ResetPasswordPage token={resetToken} onLogin={handleLogin} />;
   if (!authed) return <LoginPage onLogin={handleLogin} />;
 
   const wid = workspace?.id || localStorage.getItem("af_workspace");
