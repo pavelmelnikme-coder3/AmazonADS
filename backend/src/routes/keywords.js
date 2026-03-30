@@ -2,6 +2,8 @@ const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit } = require("./audit");
+const { pushKeywordUpdates, loadKeywordContext } = require("../services/amazon/writeback");
+const logger = require("../config/logger");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -150,6 +152,7 @@ router.patch("/bulk", async (req, res, next) => {
     const { updates } = req.body;
     if (!updates?.length) return res.status(400).json({ error: "updates required" });
     let updated = 0;
+    const updatedIds = [];
     for (const { id, bid, state } of updates) {
       const { rows: [kw] } = await query(
         "SELECT id, keyword_text, bid, state FROM keywords WHERE id = $1 AND workspace_id = $2",
@@ -187,7 +190,29 @@ router.patch("/bulk", async (req, res, next) => {
         source: "ui",
       });
       updated++;
+      updatedIds.push(id);
     }
+
+    // Amazon write-back (non-fatal)
+    if (updatedIds.length > 0) {
+      const ctxRows = await loadKeywordContext(req.workspaceId, updatedIds);
+      const writebackUpdates = ctxRows.map(r => {
+        const upd = updates.find(u => u.id === r.id);
+        return {
+          amazonKeywordId: r.amazon_keyword_id,
+          campaignType:    r.campaign_type,
+          connectionId:    r.connection_id,
+          profileId:       r.amazon_profile_id,
+          marketplaceId:   r.marketplace_id,
+          ...(upd?.bid   !== undefined ? { bid:   upd.bid }   : {}),
+          ...(upd?.state !== undefined ? { state: upd.state } : {}),
+        };
+      });
+      pushKeywordUpdates(writebackUpdates).catch(e =>
+        logger.warn("bulk keyword write-back error", { error: e.message })
+      );
+    }
+
     res.json({ updated });
   } catch (err) { next(err); }
 });
@@ -207,6 +232,23 @@ router.patch("/:id", async (req, res, next) => {
       vals
     );
     if (!kw) return res.status(404).json({ error: "Keyword not found" });
+
+    // Amazon write-back (non-fatal, fire-and-forget)
+    loadKeywordContext(req.workspaceId, [req.params.id]).then(ctxRows => {
+      if (!ctxRows.length) return;
+      const r = ctxRows[0];
+      const upd = {
+        amazonKeywordId: r.amazon_keyword_id,
+        campaignType:    r.campaign_type,
+        connectionId:    r.connection_id,
+        profileId:       r.amazon_profile_id,
+        marketplaceId:   r.marketplace_id,
+        ...(bid   !== undefined ? { bid }   : {}),
+        ...(state !== undefined ? { state } : {}),
+      };
+      return pushKeywordUpdates([upd]);
+    }).catch(e => logger.warn("single keyword write-back error", { error: e.message }));
+
     res.json(kw);
   } catch (err) { next(err); }
 });

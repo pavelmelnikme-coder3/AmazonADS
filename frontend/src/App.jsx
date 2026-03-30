@@ -403,8 +403,9 @@ const NAV = [
   { id: "keywords",  icon: Tag       },
   { id: "reports",   icon: Newspaper },
   { id: "analytics", icon: Layers    },
-  { id: "rules",     icon: Workflow  },
-  { id: "alerts",    icon: Bell      },
+  { id: "rules",      icon: Workflow  },
+  { id: "strategies", icon: Orbit    },
+  { id: "alerts",     icon: Bell     },
   { id: "ai",        icon: Sparkles  },
   { id: "audit",     icon: History   },
   { id: "connect",   icon: Cable     },
@@ -658,6 +659,239 @@ function useResizableColumns(tableId, defaultWidths) {
   );
 
   return { widths, colgroup, resizeHandle, resetCols };
+}
+
+// ─── useColumnVisibility ──────────────────────────────────────────────────────
+function useColumnVisibility(tableId, columnDefs) {
+  // columnDefs: [{ key, label, defaultVisible?: boolean }]
+  const storageKey = `af:colvis:${tableId}`;
+  const [visible, setVisible] = useState(() => {
+    const defaults = Object.fromEntries(columnDefs.map(c => [c.key, c.defaultVisible !== false]));
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || "null");
+      if (saved && typeof saved === "object") return { ...defaults, ...saved };
+    } catch {}
+    return defaults;
+  });
+  const [open, setOpen] = useState(false);
+  const dropRef = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (dropRef.current && !dropRef.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const toggle = useCallback((key) => {
+    setVisible(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [storageKey]);
+
+  const isVisible = useCallback((key) => visible[key] !== false, [visible]);
+
+  const ColVisDropdown = (
+    <div ref={dropRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        className="btn btn-ghost"
+        style={{ fontSize: 12, padding: "5px 10px", display: "flex", alignItems: "center", gap: 4 }}
+        onClick={() => setOpen(o => !o)}
+        title="Toggle columns"
+      >
+        <SlidersHorizontal size={13} /> Cols
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", right: 0, top: "100%", marginTop: 4,
+          background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 8,
+          padding: "6px 4px", zIndex: 200, minWidth: 150, boxShadow: "0 4px 16px rgba(0,0,0,.15)"
+        }}>
+          {columnDefs.map(col => (
+            <div
+              key={col.key}
+              onClick={() => toggle(col.key)}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "5px 12px",
+                cursor: "pointer", borderRadius: 5, fontSize: 12, color: "var(--tx)",
+                userSelect: "none"
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"}
+              onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+            >
+              <span style={{
+                width: 13, height: 13, borderRadius: 3, border: "1.5px solid var(--ac2)",
+                background: visible[col.key] !== false ? "var(--ac2)" : "transparent",
+                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0
+              }}>
+                {visible[col.key] !== false && <Check size={9} strokeWidth={3} color="#fff" />}
+              </span>
+              {col.label}
+            </div>
+          ))}
+          <div style={{ borderTop: "1px solid var(--b2)", margin: "4px 8px 0" }}>
+            <div
+              onClick={() => {
+                const def = Object.fromEntries(columnDefs.map(c => [c.key, c.defaultVisible !== false]));
+                setVisible(def);
+                try { localStorage.removeItem(storageKey); } catch {}
+              }}
+              style={{ padding: "5px 4px", cursor: "pointer", fontSize: 11, color: "var(--tx3)", borderRadius: 5, marginTop: 2 }}
+              onMouseEnter={e => e.currentTarget.style.color = "var(--tx)"}
+              onMouseLeave={e => e.currentTarget.style.color = "var(--tx3)"}
+            >Reset columns</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  return { isVisible, ColVisDropdown };
+}
+
+// ─── useKeyboardShortcuts ──────────────────────────────────────────────────────
+function useKeyboardShortcuts(shortcuts) {
+  const shortcutsRef = useRef(shortcuts);
+  shortcutsRef.current = shortcuts;
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const inInput = e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable;
+      if (inInput) {
+        if (e.key === "Escape") e.target.blur();
+        return;
+      }
+      for (const sc of shortcutsRef.current) {
+        const ctrlMatch = sc.ctrl ? e.ctrlKey || e.metaKey : !e.ctrlKey && !e.metaKey;
+        if (sc.key === e.key && ctrlMatch) {
+          e.preventDefault();
+          sc.handler();
+          break;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+}
+
+// ─── KeyboardShortcutsHelp overlay ───────────────────────────────────────────
+const KeyboardShortcutsHelp = ({ onClose }) => {
+  const { t } = useI18n();
+  return createPortal(
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 9999, display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={onClose}
+    >
+      <div
+        style={{ background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 12, padding: "24px 28px", minWidth: 300, boxShadow: "0 8px 32px rgba(0,0,0,.3)" }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <span style={{ fontFamily: "var(--disp)", fontSize: 15, fontWeight: 700 }}>{t("shortcuts.title")}</span>
+          <button className="btn btn-ghost" style={{ padding: "3px 8px" }} onClick={onClose}><X size={14} /></button>
+        </div>
+        {[
+          { keys: ["/"],       label: t("shortcuts.search") },
+          { keys: ["r"],       label: t("shortcuts.refresh") },
+          { keys: ["Esc"],     label: t("shortcuts.close") },
+          { keys: ["?"],       label: t("shortcuts.help") },
+        ].map(({ keys, label }) => (
+          <div key={keys[0]} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--b2)", fontSize: 13 }}>
+            <span style={{ color: "var(--tx2)" }}>{label}</span>
+            <div style={{ display: "flex", gap: 4 }}>
+              {keys.map(k => (
+                <kbd key={k} style={{
+                  background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 5,
+                  padding: "2px 8px", fontSize: 12, fontFamily: "monospace", color: "var(--tx)"
+                }}>{k}</kbd>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>,
+    document.body
+  );
+};
+
+// ─── ChangeHistory popup ──────────────────────────────────────────────────────
+function ChangeHistoryBtn({ entityId }) {
+  const [open, setOpen] = useState(false);
+  const [events, setEvents] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    get(`/audit/entity/${entityId}`, { limit: 8 })
+      .then(data => { setEvents(data); setLoading(false); })
+      .catch(() => { setEvents([]); setLoading(false); });
+  }, [open, entityId]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const fmtDiff = (ev) => {
+    const diff = ev.diff;
+    if (!diff) return ev.action;
+    const parts = Object.entries(diff).map(([k, v]) => {
+      const before = v.before != null ? v.before : "—";
+      const after  = v.after  != null ? v.after  : "—";
+      return `${k}: ${before} → ${after}`;
+    });
+    return parts.join(", ") || ev.action;
+  };
+
+  return (
+    <div ref={ref} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        className="btn btn-ghost"
+        style={{ padding: "3px 6px", opacity: 0.6 }}
+        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+        title="Change history"
+      >
+        <History size={12} />
+      </button>
+      {open && createPortal(
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: "fixed",
+            top: ref.current ? ref.current.getBoundingClientRect().bottom + 4 : 100,
+            left: ref.current ? Math.max(8, ref.current.getBoundingClientRect().right - 280) : 100,
+            width: 280, zIndex: 2000,
+            background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 8,
+            boxShadow: "0 6px 24px rgba(0,0,0,.25)", padding: "10px 0",
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx2)", padding: "0 12px 6px", borderBottom: "1px solid var(--b2)" }}>
+            Change History
+          </div>
+          {loading && <div style={{ padding: "12px", fontSize: 12, color: "var(--tx3)", textAlign: "center" }}>Loading…</div>}
+          {!loading && events?.length === 0 && (
+            <div style={{ padding: "12px", fontSize: 12, color: "var(--tx3)", textAlign: "center" }}>No history found</div>
+          )}
+          {!loading && events?.map(ev => (
+            <div key={ev.id} style={{ padding: "6px 12px", borderBottom: "1px solid var(--b2)" }}>
+              <div style={{ fontSize: 11, color: "var(--tx)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {fmtDiff(ev)}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 2 }}>
+                {ev.actor_name || ev.actor_type} · {new Date(ev.created_at).toLocaleString()}
+              </div>
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
+    </div>
+  );
 }
 
 // ─── Connect / OAuth Page ─────────────────────────────────────────────────────
@@ -1420,7 +1654,7 @@ const SyncButton = ({ workspaceId, onSynced }) => {
       setTimeout(() => setDone(false), 2000);
       onSynced?.();
     } catch (e) {
-      alert("Sync error: " + e.message);
+      alert(t("sync.error") + ": " + e.message);
     } finally {
       setSyncing(false);
     }
@@ -1644,6 +1878,8 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     return d.toISOString().split("T")[0];
   });
   const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().split("T")[0]);
+  const [acosMode, setAcosMode] = useState("acos"); // "acos" | "tacos"
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState(null);
   const [syncOk, setSyncOk] = useState(true);
@@ -1710,6 +1946,13 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       get('/rules', { limit: 1 }).then(d => setRulesCount(d?.pagination?.total || d?.data?.length || 0)).catch(() => {});
     }
   }, [workspaceId]);
+
+  // S3-6: keyboard shortcuts
+  useKeyboardShortcuts([
+    { key: "?", handler: () => setShowShortcutsHelp(h => !h) },
+    { key: "r", handler: () => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); } },
+    { key: "R", handler: () => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); } },
+  ]);
 
   // Update layout when user settings load
   useEffect(() => {
@@ -1804,7 +2047,11 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
   const kpiMap = {
     kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: sparkData.spend },
     kpi_sales:       { label: t("overview.kpiSales"),       value: hasData ? fmt$(totals.sales)       : "—", delta: deltas.sales, color: "#22C55E", spark: sparkData.sales },
-    kpi_acos:        { label: "ACOS",                        value: hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—", delta: deltas.acos,  color: "#F59E0B", spark: sparkData.acos },
+    kpi_acos:        { label: acosMode === "tacos" ? t("metrics.tacos") : "ACOS",
+                       value: acosMode === "tacos"
+                         ? (hasData && totals.tacos != null ? `${parseFloat(totals.tacos).toFixed(1)}%` : "—")
+                         : (hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—"),
+                       delta: acosMode === "tacos" ? null : deltas.acos, color: "#F59E0B", spark: sparkData.acos },
     kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: sparkData.roas },
     kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: sparkData.clicks },
     kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: sparkData.impressions },
@@ -1842,19 +2089,38 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       let extra = null;
       if (item.id === "kpi_acos") {
         const targetAcos = user?.settings?.target_acos;
-        if (targetAcos && hasData) {
-          const currentAcos = parseFloat(totals.acos);
-          const target = parseFloat(targetAcos);
-          extra = (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              fontSize: 11, color: 'var(--tx3)', marginTop: 4, marginBottom: 2 }}>
-              <span>{t("overview.targetAcos", { acos: targetAcos })}</span>
-              <span style={{ color: currentAcos <= target ? 'var(--grn)' : 'var(--red)', fontWeight: 600, fontSize: 11 }}>
-                {currentAcos <= target ? t("overview.onTarget") : t("overview.aboveTarget")}
-              </span>
+        const hasTacos = hasData && totals.tacos != null;
+        extra = (
+          <div>
+            <div style={{ display: "flex", gap: 3, marginTop: 5, marginBottom: 2 }}>
+              <button
+                className={`btn ${acosMode === "acos" ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 10, padding: "2px 8px", height: 22 }}
+                onClick={() => setAcosMode("acos")}
+              >ACOS</button>
+              <button
+                className={`btn ${acosMode === "tacos" ? "btn-primary" : "btn-ghost"}`}
+                style={{ fontSize: 10, padding: "2px 8px", height: 22 }}
+                onClick={() => setAcosMode("tacos")}
+                title={t("metrics.tacosTooltip")}
+              >{t("metrics.tacos")}</button>
             </div>
-          );
-        }
+            {acosMode === "acos" && targetAcos && hasData && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                fontSize: 11, color: "var(--tx3)", marginTop: 3 }}>
+                <span>{t("overview.targetAcos", { acos: targetAcos })}</span>
+                <span style={{ color: parseFloat(totals.acos) <= parseFloat(targetAcos) ? "var(--grn)" : "var(--red)", fontWeight: 600 }}>
+                  {parseFloat(totals.acos) <= parseFloat(targetAcos) ? t("overview.onTarget") : t("overview.aboveTarget")}
+                </span>
+              </div>
+            )}
+            {acosMode === "tacos" && !hasTacos && (
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 3 }}>
+                {t("metrics.tacosNoData")}
+              </div>
+            )}
+          </div>
+        );
       }
       return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} loading={sl} extra={extra} />;
     }
@@ -2053,6 +2319,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
 
   return (
     <div className="fade">
+      {showShortcutsHelp && <KeyboardShortcutsHelp onClose={() => setShowShortcutsHelp(false)} />}
       {/* ── Header ── */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div>
@@ -2137,6 +2404,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
             style={{ fontSize: 12, padding: "5px 12px" }}
           >
             {editMode ? <><Check size={13} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("overview.done")}</> : <><Ic icon={LayoutGrid} size={13} /> {t("overview.customize")}</>}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }} onClick={() => setShowShortcutsHelp(true)} title={t("shortcuts.help")}>
+            <HelpCircle size={14} />
           </button>
         </div>
       </div>
@@ -2597,6 +2867,16 @@ const CampaignsPage = ({ workspaceId }) => {
   const { colgroup: campColgroup, resizeHandle: campRH, resetCols: campResetCols } = useResizableColumns(
     "campaigns", [36, 200, 80, 90, 95, 85, 85, 75, 75, 60]
   );
+  const { isVisible: campCV, ColVisDropdown: CampColsBtn } = useColumnVisibility("campaigns", [
+    { key: "name",   label: t("campaigns.colName") },
+    { key: "type",   label: t("campaigns.colType") },
+    { key: "status", label: t("campaigns.colStatus") },
+    { key: "budget", label: t("campaigns.colBudget") },
+    { key: "spend",  label: "Spend" },
+    { key: "sales",  label: "Sales" },
+    { key: "acos",   label: "ACOS" },
+    { key: "roas",   label: "ROAS" },
+  ]);
 
   // S1-7: connections for last-sync timestamp
   const [connections, setConnections] = useState([]);
@@ -2613,6 +2893,13 @@ const CampaignsPage = ({ workspaceId }) => {
           ? c.last_refresh_at : latest
       , null)
     : null;
+
+  // S3-6: keyboard shortcuts
+  useKeyboardShortcuts([
+    { key: "/", handler: () => document.querySelector("[data-search-input]")?.focus() },
+    { key: "r", handler: () => reload() },
+    { key: "R", handler: () => reload() },
+  ]);
 
   // S2-4: open campaign panel + Escape key close
   const openCampaignPanel = async (campaign) => {
@@ -2730,7 +3017,7 @@ const CampaignsPage = ({ workspaceId }) => {
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <input placeholder={t("campaigns.searchPlaceholder")} value={campFilters.search}
-          onChange={e => { setCampFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
+          onChange={e => { setCampFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} data-search-input />
         {[
           { value: "", label: t("filter.all") },
           { value: "enabled",  label: t("common.statusEnabled") },
@@ -2770,13 +3057,14 @@ const CampaignsPage = ({ workspaceId }) => {
           <button onClick={() => { resetCampFilters(); setPage(1); }} className="btn btn-ghost"
             style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}><X size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("filter.reset")}</button>
         )}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} data-refresh-btn onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
           {lastSync && (
             <span className="last-sync-label" style={{ marginLeft: 2 }}>
               · {fmtLastSync(lastSync)}
             </span>
           )}
+          {CampColsBtn}
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={campResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
@@ -2806,14 +3094,14 @@ const CampaignsPage = ({ workspaceId }) => {
                       <th style={{ width: 36 }}>
                         <input type="checkbox" checked={selected.size === campaigns.length && campaigns.length > 0} onChange={toggleAll} />
                       </th>
-                      <SortHeader field="name"    label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(1)} />
-                      <th>{t("campaigns.colType")}{campRH(2)}</th>
-                      <SortHeader field="state"   label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(3)} />
-                      <SortHeader field="budget"  label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(4)} />
-                      <SortHeader field="spend"   label="Spend"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />
-                      <SortHeader field="sales"   label="Sales"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />
-                      <SortHeader field="acos"    label="ACOS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />
-                      <SortHeader field="roas"    label="ROAS"   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />
+                      {campCV("name")   && <SortHeader field="name"   label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(1)} />}
+                      {campCV("type")   && <th>{t("campaigns.colType")}{campRH(2)}</th>}
+                      {campCV("status") && <SortHeader field="state"  label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(3)} />}
+                      {campCV("budget") && <SortHeader field="budget" label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(4)} />}
+                      {campCV("spend")  && <SortHeader field="spend"  label="Spend" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />}
+                      {campCV("sales")  && <SortHeader field="sales"  label="Sales" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />}
+                      {campCV("acos")   && <SortHeader field="acos"   label="ACOS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />}
+                      {campCV("roas")   && <SortHeader field="roas"   label="ROAS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />}
                       <th></th>
                     </tr>
                   </thead>
@@ -2821,7 +3109,7 @@ const CampaignsPage = ({ workspaceId }) => {
                     {campaigns.map(c => (
                       <tr key={c.id} className={`tbl-row${selected.has(c.id) ? ' row-selected' : ''}`}>
                         <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelect(c.id)} /></td>
-                        <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
+                        {campCV("name") && <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
                           <span
                             onClick={(e) => { e.stopPropagation(); openCampaignPanel(c); }}
                             style={{ cursor: 'pointer', color: 'var(--ac2)' }}
@@ -2829,9 +3117,9 @@ const CampaignsPage = ({ workspaceId }) => {
                             onMouseLeave={e => e.target.style.textDecoration = 'none'}
                             title="View campaign details"
                           >{c.name}</span>
-                        </td>
-                        <td><span className="badge bg-bl">{typeLabel(c.campaign_type)}</span></td>
-                        <td>
+                        </td>}
+                        {campCV("type") && <td><span className="badge bg-bl">{typeLabel(c.campaign_type)}</span></td>}
+                        {campCV("status") && <td>
                           {editId === c.id
                             ? (
                               <select value={editState} onChange={e => setEditState(e.target.value)} style={{ fontSize: 11, padding: "3px 6px" }}>
@@ -2851,8 +3139,8 @@ const CampaignsPage = ({ workspaceId }) => {
                               </span>
                             )
                           }
-                        </td>
-                        <td className="num" style={{ textAlign: "right", minWidth: 80 }}>
+                        </td>}
+                        {campCV("budget") && <td className="num" style={{ textAlign: "right", minWidth: 80 }}>
                           {(() => {
                             const pct = budgetUtil(c.spend, c.daily_budget, campFilters.metricsDays || 30);
                             const barColor = pct === null ? null
@@ -2878,15 +3166,15 @@ const CampaignsPage = ({ workspaceId }) => {
                               </Tip>
                             );
                           })()}
-                        </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend || 0).toFixed(0)}</td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
-                        <td className="num" style={{ textAlign: "right", color: acosColor(c.acos) }}>
+                        </td>}
+                        {campCV("spend") && <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend || 0).toFixed(0)}</td>}
+                        {campCV("sales") && <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>}
+                        {campCV("acos") && <td className="num" style={{ textAlign: "right", color: acosColor(c.acos) }}>
                           {c.acos > 0 ? `${parseFloat(c.acos).toFixed(1)}%` : "—"}
-                        </td>
-                        <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
+                        </td>}
+                        {campCV("roas") && <td className="num" style={{ textAlign: "right", color: "var(--pur)" }}>
                           {c.roas > 0 ? `${parseFloat(c.roas).toFixed(2)}×` : "—"}
-                        </td>
+                        </td>}
                         <td className="act-cell">
                           {editId === c.id
                             ? (
@@ -2899,10 +3187,13 @@ const CampaignsPage = ({ workspaceId }) => {
                               </div>
                             )
                             : (
-                              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 8px" }}
-                                onClick={() => { setEditId(c.id); setEditState(c.state); }}>
-                                {t("common.edit")}
-                              </button>
+                              <div style={{ display: "flex", gap: 2, alignItems: "center" }}>
+                                <button className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 8px" }}
+                                  onClick={() => { setEditId(c.id); setEditState(c.state); }}>
+                                  {t("common.edit")}
+                                </button>
+                                <ChangeHistoryBtn entityId={c.id} />
+                              </div>
                             )
                           }
                         </td>
@@ -3740,6 +4031,7 @@ function CampaignMultiSelect({ selectedIds, onChange }) {
 
 // ─── NegativesTab ─────────────────────────────────────────────────────────────
 function NegativesTab({ workspaceId }) {
+  const { t } = useI18n();
   const [negatives, setNegatives]   = useState([]);
   const [loading, setLoading]       = useState(true);
   const [search, setSearch]         = useState('');
@@ -3782,7 +4074,7 @@ function NegativesTab({ workspaceId }) {
       setAdding(false);
       setNewKw({ campaignId: '', keywordText: '', matchType: 'negativeExact' });
       load();
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { alert(t("common.error") + e.message); }
   };
 
   return (
@@ -4018,6 +4310,16 @@ const KeywordsPage = ({ workspaceId }) => {
   const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
     "keywords", [36, 220, 90, 100, 90, 170, 65, 65, 75, 80, 90]
   );
+  const { isVisible: kwCV, ColVisDropdown: KwColsBtn } = useColumnVisibility("keywords", [
+    { key: "match",    label: t("keywords.colMatch") },
+    { key: "status",   label: t("keywords.colStatus") },
+    { key: "bid",      label: t("keywords.colBid") },
+    { key: "campaign", label: t("keywords.colCampaign") },
+    { key: "clicks",   label: t("keywords.colClicks") },
+    { key: "orders",   label: t("keywords.colOrders") },
+    { key: "acos",     label: "ACOS" },
+    { key: "spend",    label: t("keywords.colSpend") },
+  ]);
 
   // S1-7: connections for last-sync timestamp
   const [connections, setConnections] = useState([]);
@@ -4034,6 +4336,13 @@ const KeywordsPage = ({ workspaceId }) => {
           ? c.last_refresh_at : latest
       , null)
     : null;
+
+  // S3-6: keyboard shortcuts (wrap reload in closure — declared later via useAsync)
+  useKeyboardShortcuts([
+    { key: "/", handler: () => document.querySelector("[data-search-input]")?.focus() },
+    { key: "r", handler: () => reload() },
+    { key: "R", handler: () => reload() },
+  ]);
 
   function handleKwSort(field) {
     const isText = ["keyword_text", "match_type", "state", "campaign"].includes(field);
@@ -4415,7 +4724,7 @@ const KeywordsPage = ({ workspaceId }) => {
       {kwTab === 'keywords' && <>
       <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
         <input placeholder={t("keywords.searchPlaceholder")} value={kwFilters.search}
-          onChange={e => { setKwFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} />
+          onChange={e => { setKwFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} data-search-input />
         {[
           { value: "", label: t("filter.all") },
           { value: "enabled",  label: t("common.statusEnabled") },
@@ -4462,13 +4771,14 @@ const KeywordsPage = ({ workspaceId }) => {
           <button onClick={() => { resetKwFilters(); setPage(1); }} className="btn btn-ghost"
             style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}><X size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("filter.reset")}</button>
         )}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <button className="btn btn-ghost" style={{ fontSize: 12 }} data-refresh-btn onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
           {lastSync && (
             <span className="last-sync-label" style={{ marginLeft: 2 }}>
               · {fmtLastSync(lastSync)}
             </span>
           )}
+          {KwColsBtn}
           <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={kwResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
         </div>
       </div>
@@ -4510,14 +4820,14 @@ const KeywordsPage = ({ workspaceId }) => {
                         <input type="checkbox" checked={selected.size === keywords.length && keywords.length > 0} onChange={toggleAll} />
                       </th>
                       <SortHeader field="keyword_text" label={t("keywords.colKeyword")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(1)} />
-                      <SortHeader field="match_type"   label={t("keywords.colMatch")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(2)} />
-                      <SortHeader field="state"        label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(3)} />
-                      <SortHeader field="bid"          label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(4)} />
-                      <SortHeader field="campaign"     label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(5)} />
-                      <SortHeader field="clicks" label={t("keywords.colClicks")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(6)} />
-                      <SortHeader field="orders" label={t("keywords.colOrders")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(7)} />
-                      <SortHeader field="acos"   label="ACOS"                    currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(8)} />
-                      <SortHeader field="spend"  label={t("keywords.colSpend")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(9)} />
+                      {kwCV("match")    && <SortHeader field="match_type" label={t("keywords.colMatch")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(2)} />}
+                      {kwCV("status")   && <SortHeader field="state"      label={t("keywords.colStatus")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(3)} />}
+                      {kwCV("bid")      && <SortHeader field="bid"        label={t("keywords.colBid")}     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(4)} />}
+                      {kwCV("campaign") && <SortHeader field="campaign"   label={t("keywords.colCampaign")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(5)} />}
+                      {kwCV("clicks")   && <SortHeader field="clicks"     label={t("keywords.colClicks")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(6)} />}
+                      {kwCV("orders")   && <SortHeader field="orders"     label={t("keywords.colOrders")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(7)} />}
+                      {kwCV("acos")     && <SortHeader field="acos"       label="ACOS"                     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(8)} />}
+                      {kwCV("spend")    && <SortHeader field="spend"      label={t("keywords.colSpend")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(9)} />}
                       <th>{kwRH(10)}</th>
                     </tr>
                   </thead>
@@ -4526,8 +4836,8 @@ const KeywordsPage = ({ workspaceId }) => {
                       <tr key={kw.id} className={`tbl-row${selected.has(kw.id) ? ' row-selected' : ''}`} onMouseEnter={() => setHoveredKwId(kw.id)} onMouseLeave={() => setHoveredKwId(null)}>
                         <td><input type="checkbox" checked={selected.has(kw.id)} onChange={() => toggleSelect(kw.id)} /></td>
                         <td style={{ fontWeight: 500 }}>{kw.keyword_text}</td>
-                        <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>
-                        <td>
+                        {kwCV("match") && <td><span className={`badge ${matchCls(kw.match_type)}`} style={{ fontSize: 10 }}>{kw.match_type}</span></td>}
+                        {kwCV("status") && <td>
                           <span
                             className={`tag status-clickable ${kw.state === "enabled" ? "tag-on" : kw.state === "paused" ? "tag-pause" : "tag-arch"}`}
                             onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}
@@ -4536,8 +4846,8 @@ const KeywordsPage = ({ workspaceId }) => {
                             <span style={{ width: 5, height: 5, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
                             {kw.state}
                           </span>
-                        </td>
-                        <td className="num" style={{ textAlign: "right" }}>
+                        </td>}
+                        {kwCV("bid") && <td className="num" style={{ textAlign: "right" }}>
                           {editId === kw.id
                             ? (
                               <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
@@ -4552,25 +4862,28 @@ const KeywordsPage = ({ workspaceId }) => {
                               </span>
                             )
                           }
-                        </td>
-                        <td style={{ fontSize: 11, color: "var(--tx3)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kw.campaign_name}</td>
-                        <td className="num" style={{ textAlign: 'right' }}>
+                        </td>}
+                        {kwCV("campaign") && <td style={{ fontSize: 11, color: "var(--tx3)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kw.campaign_name}</td>}
+                        {kwCV("clicks") && <td className="num" style={{ textAlign: 'right' }}>
                           {kw.clicks ? Number(kw.clicks).toLocaleString() : '—'}
-                        </td>
-                        <td className="num" style={{ textAlign: 'right' }}>
+                        </td>}
+                        {kwCV("orders") && <td className="num" style={{ textAlign: 'right' }}>
                           {kw.orders ? Number(kw.orders).toLocaleString() : '—'}
-                        </td>
-                        <td className="num" style={{ textAlign: 'right', color: kw.acos != null && parseFloat(kw.acos) > 0 ? acosColor(parseFloat(kw.acos)) : 'var(--tx3)' }}>
+                        </td>}
+                        {kwCV("acos") && <td className="num" style={{ textAlign: 'right', color: kw.acos != null && parseFloat(kw.acos) > 0 ? acosColor(parseFloat(kw.acos)) : 'var(--tx3)' }}>
                           {kw.acos != null && parseFloat(kw.acos) > 0 ? parseFloat(kw.acos).toFixed(1) + '%' : '—'}
-                        </td>
-                        <td className="num" style={{ textAlign: 'right', color: 'var(--ac2)' }}>
+                        </td>}
+                        {kwCV("spend") && <td className="num" style={{ textAlign: 'right', color: 'var(--ac2)' }}>
                           {kw.spend && parseFloat(kw.spend) > 0 ? '$' + parseFloat(kw.spend).toFixed(2) : '—'}
-                        </td>
+                        </td>}
                         <td className="act-cell" style={{ opacity: (hoveredKwId === kw.id || selected.has(kw.id)) ? 1 : 0, pointerEvents: (hoveredKwId === kw.id || selected.has(kw.id)) ? 'auto' : 'none' }}>
                           {editId !== kw.id && (
-                            <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}>
-                              {t("keywords.editBid")}
-                            </button>
+                            <div style={{ display: "flex", gap: 2, alignItems: "center" }}>
+                              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}>
+                                {t("keywords.editBid")}
+                              </button>
+                              <ChangeHistoryBtn entityId={kw.id} />
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -4774,7 +5087,7 @@ const AnalyticsPage = ({ workspaceId }) => {
       a.click();
       URL.revokeObjectURL(a.href);
     } catch (err) {
-      alert("Error generating report: " + err.message);
+      alert(tr("common.error") + err.message);
     } finally {
       setGenerating(false);
     }
@@ -4798,7 +5111,7 @@ const AnalyticsPage = ({ workspaceId }) => {
       reloadConfig();
       setEditRow(null);
     } catch (e) {
-      alert("Save error: " + e.message);
+      alert(tr("common.error") + e.message);
     }
   };
 
@@ -6036,7 +6349,7 @@ const RulesPage = ({ workspaceId }) => {
       setRunResult(r => ({ ...r, [id]: result }));
       setShowResult(id);
       reload();
-    } catch (e) { alert("Run error: " + e.message); }
+    } catch (e) { alert(t("common.error") + e.message); }
     finally { setRunningId(null); }
   };
 
@@ -6357,6 +6670,439 @@ const RulesPage = ({ workspaceId }) => {
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── Strategies Page ─────────────────────────────────────────────────────────
+const StrategiesPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [strategies, setStrategies] = useState([]);
+  const [rules, setRules] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [editStrategy, setEditStrategy] = useState(null);
+  const [historyStrategy, setHistoryStrategy] = useState(null);
+  const [historyRuns, setHistoryRuns] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [runningId, setRunningId] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg, type = "success") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [strats, ruleList] = await Promise.all([
+        get("/strategies"),
+        get("/rules", { limit: 100 }),
+      ]);
+      setStrategies(strats);
+      setRules(ruleList?.data || ruleList || []);
+    } catch (e) { /* ignore */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openHistory = async (s) => {
+    setHistoryStrategy(s);
+    setHistoryLoading(true);
+    try {
+      const runs = await get(`/strategies/${s.id}/runs`);
+      setHistoryRuns(runs);
+    } catch { setHistoryRuns([]); }
+    setHistoryLoading(false);
+  };
+
+  const runStrategy = async (s, dryRun = false) => {
+    setRunningId(s.id + (dryRun ? "_dry" : ""));
+    try {
+      const result = await post(`/strategies/${s.id}/run`, { dry_run: dryRun });
+      showToast(t("strategies.runSuccess").replace("{n}", result.totalActions));
+      load();
+    } catch (e) {
+      showToast(e.message, "error");
+    }
+    setRunningId(null);
+  };
+
+  const deleteStrategy = async (s) => {
+    if (!confirm(t("strategies.deleteConfirm").replace("{name}", s.name))) return;
+    try {
+      await del(`/strategies/${s.id}`);
+      load();
+    } catch (e) { showToast(e.message, "error"); }
+  };
+
+  const statusColor = (status) => {
+    if (!status || status === "never") return "var(--tx3)";
+    if (status === "completed") return "var(--grn)";
+    return "var(--red)";
+  };
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
+            {t("strategies.title")}
+          </h1>
+          <p style={{ fontSize: 13, color: "var(--tx2)", maxWidth: 560 }}>{t("strategies.subtitle")}</p>
+        </div>
+        <button className="btn btn-primary" style={{ fontSize: 13, padding: "8px 16px" }}
+          onClick={() => { setEditStrategy(null); setShowModal(true); }}>
+          + {t("strategies.new")}
+        </button>
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: "fixed", top: 20, right: 24, zIndex: 9000,
+          background: toast.type === "error" ? "var(--red)" : "var(--grn)",
+          color: "#fff", padding: "10px 18px", borderRadius: 8, fontSize: 13,
+          boxShadow: "0 4px 16px rgba(0,0,0,.3)",
+        }}>{toast.msg}</div>
+      )}
+
+      {/* Loading */}
+      {loading && <div style={{ color: "var(--tx3)", fontSize: 13, padding: 24 }}>{t("common.loading")}</div>}
+
+      {/* Empty */}
+      {!loading && strategies.length === 0 && (
+        <div style={{
+          background: "var(--s1)", border: "1px dashed var(--b2)", borderRadius: 12,
+          padding: "48px 24px", textAlign: "center",
+        }}>
+          <Orbit size={32} color="var(--tx3)" style={{ marginBottom: 12 }} />
+          <div style={{ fontSize: 14, color: "var(--tx2)" }}>{t("strategies.empty")}</div>
+        </div>
+      )}
+
+      {/* Strategy Cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 16 }}>
+        {strategies.map(s => (
+          <div key={s.id} className="card" style={{ padding: 20, borderRadius: 10 }}>
+            {/* Header row */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.name}
+                </div>
+                {s.description && (
+                  <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {s.description}
+                  </div>
+                )}
+              </div>
+              <span style={{
+                fontSize: 10, padding: "2px 7px", borderRadius: 20, marginLeft: 8, flexShrink: 0,
+                background: s.is_active ? "rgba(34,197,94,.15)" : "rgba(100,116,139,.15)",
+                color: s.is_active ? "var(--grn)" : "var(--tx3)",
+              }}>
+                {s.is_active ? "Active" : "Inactive"}
+              </span>
+            </div>
+
+            {/* Rule chips */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 12, minHeight: 24 }}>
+              {(s.rules || []).length === 0
+                ? <span style={{ fontSize: 11, color: "var(--tx3)" }}>{t("strategies.noRules")}</span>
+                : (s.rules || []).map((r, i) => (
+                    <span key={r.id} style={{
+                      fontSize: 11, padding: "2px 8px", borderRadius: 12,
+                      background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx2)",
+                      display: "flex", alignItems: "center", gap: 4,
+                    }}>
+                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)" }}>{i + 1}.</span>
+                      {r.name}
+                    </span>
+                  ))
+              }
+            </div>
+
+            {/* Last run */}
+            <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ color: statusColor(s.last_run_status) }}>●</span>
+              {t("strategies.lastRun")}:{" "}
+              {s.last_run_at
+                ? new Date(s.last_run_at).toLocaleString()
+                : t("strategies.never")}
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button
+                className="btn btn-primary"
+                style={{ fontSize: 11, padding: "4px 12px" }}
+                disabled={runningId === s.id}
+                onClick={() => runStrategy(s, false)}
+              >
+                {runningId === s.id ? t("strategies.running") : t("strategies.run")}
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11, padding: "4px 12px" }}
+                disabled={runningId === s.id + "_dry"}
+                onClick={() => runStrategy(s, true)}
+              >
+                {runningId === s.id + "_dry" ? t("strategies.running") : t("strategies.runDry")}
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11, padding: "4px 10px" }}
+                onClick={() => openHistory(s)}
+              >
+                <History size={12} />
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11, padding: "4px 10px" }}
+                onClick={() => { setEditStrategy(s); setShowModal(true); }}
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11, padding: "4px 10px", color: "var(--red)" }}
+                onClick={() => deleteStrategy(s)}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Create/Edit Modal */}
+      {showModal && createPortal(
+        <StrategyModal
+          strategy={editStrategy}
+          availableRules={rules}
+          onClose={() => setShowModal(false)}
+          onSave={() => { setShowModal(false); load(); }}
+          t={t}
+        />,
+        document.body
+      )}
+
+      {/* History Modal */}
+      {historyStrategy && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+          onClick={() => setHistoryStrategy(null)}>
+          <div style={{ background: "var(--s1)", borderRadius: 12, padding: 24, width: "100%", maxWidth: 600, maxHeight: "80vh", overflow: "auto" }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <span style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
+                {t("strategies.historyTitle")}: {historyStrategy.name}
+              </span>
+              <button className="btn btn-ghost" style={{ padding: "3px 8px" }} onClick={() => setHistoryStrategy(null)}><X size={14} /></button>
+            </div>
+            {historyLoading && <div style={{ color: "var(--tx3)", fontSize: 13 }}>{t("common.loading")}</div>}
+            {!historyLoading && historyRuns.length === 0 && (
+              <div style={{ color: "var(--tx3)", fontSize: 13, textAlign: "center", padding: 24 }}>{t("strategies.historyEmpty")}</div>
+            )}
+            {!historyLoading && historyRuns.length > 0 && (
+              <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--b2)" }}>
+                    <th style={{ textAlign: "left", padding: "6px 8px", color: "var(--tx2)", fontWeight: 500 }}>{t("strategies.colStarted")}</th>
+                    <th style={{ textAlign: "center", padding: "6px 8px", color: "var(--tx2)", fontWeight: 500 }}>{t("strategies.colStatus")}</th>
+                    <th style={{ textAlign: "center", padding: "6px 8px", color: "var(--tx2)", fontWeight: 500 }}>{t("strategies.colRules")}</th>
+                    <th style={{ textAlign: "center", padding: "6px 8px", color: "var(--tx2)", fontWeight: 500 }}>{t("strategies.colActions")}</th>
+                    <th style={{ textAlign: "center", padding: "6px 8px", color: "var(--tx2)", fontWeight: 500 }}>{t("strategies.colDuration")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {historyRuns.map(run => {
+                    const durationMs = run.completed_at
+                      ? new Date(run.completed_at) - new Date(run.started_at)
+                      : null;
+                    return (
+                      <tr key={run.id} style={{ borderBottom: "1px solid var(--b2)" }}>
+                        <td style={{ padding: "7px 8px", color: "var(--tx2)" }}>
+                          {new Date(run.started_at).toLocaleString()}
+                          {run.dry_run && (
+                            <span style={{ marginLeft: 6, fontSize: 10, background: "rgba(167,139,250,.15)", color: "var(--pur)", padding: "1px 6px", borderRadius: 10 }}>
+                              {t("strategies.dryRunBadge")}
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: "7px 8px", textAlign: "center" }}>
+                          <span style={{ color: run.status === "completed" ? "var(--grn)" : "var(--red)", fontSize: 11 }}>
+                            {run.status === "completed" ? t("strategies.statusCompleted") : t("strategies.statusError")}
+                          </span>
+                        </td>
+                        <td style={{ padding: "7px 8px", textAlign: "center", color: "var(--tx)" }}>{run.rules_run}</td>
+                        <td style={{ padding: "7px 8px", textAlign: "center", color: "var(--ac2)", fontWeight: 600 }}>{run.total_actions}</td>
+                        <td style={{ padding: "7px 8px", textAlign: "center", color: "var(--tx3)" }}>
+                          {durationMs != null ? `${(durationMs / 1000).toFixed(1)}s` : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+};
+
+// Strategy Create/Edit Modal
+const StrategyModal = ({ strategy, availableRules, onClose, onSave, t }) => {
+  const [name, setName] = useState(strategy?.name || "");
+  const [description, setDescription] = useState(strategy?.description || "");
+  const [selectedRuleIds, setSelectedRuleIds] = useState(
+    strategy?.rule_ids || strategy?.rules?.map(r => r.id) || []
+  );
+  const [isActive, setIsActive] = useState(strategy?.is_active !== false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const addRule = (ruleId) => {
+    if (!selectedRuleIds.includes(ruleId)) {
+      setSelectedRuleIds(prev => [...prev, ruleId]);
+    }
+  };
+
+  const removeRule = (ruleId) => {
+    setSelectedRuleIds(prev => prev.filter(id => id !== ruleId));
+  };
+
+  const moveRule = (idx, dir) => {
+    setSelectedRuleIds(prev => {
+      const arr = [...prev];
+      const target = idx + dir;
+      if (target < 0 || target >= arr.length) return arr;
+      [arr[idx], arr[target]] = [arr[target], arr[idx]];
+      return arr;
+    });
+  };
+
+  const handleSave = async () => {
+    if (!name.trim()) { setError(t("strategies.name") + " required"); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      const payload = { name: name.trim(), description: description.trim() || null, rule_ids: selectedRuleIds, is_active: isActive };
+      if (strategy?.id) {
+        await patch(`/strategies/${strategy.id}`, payload);
+      } else {
+        await post("/strategies", payload);
+      }
+      onSave();
+    } catch (e) {
+      setError(e.message);
+      setSaving(false);
+    }
+  };
+
+  const availableToAdd = availableRules.filter(r => !selectedRuleIds.includes(r.id));
+  const selectedRulesOrdered = selectedRuleIds
+    .map(id => availableRules.find(r => r.id === id))
+    .filter(Boolean);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 16 }}
+      onClick={onClose}>
+      <div style={{ background: "var(--s1)", borderRadius: 12, padding: 28, width: "100%", maxWidth: 520, maxHeight: "90vh", overflow: "auto" }}
+        onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <span style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
+            {strategy ? t("common.edit") : t("strategies.new")}
+          </span>
+          <button className="btn btn-ghost" style={{ padding: "3px 8px" }} onClick={onClose}><X size={14} /></button>
+        </div>
+
+        {error && <div style={{ background: "rgba(239,68,68,.1)", color: "var(--red)", borderRadius: 6, padding: "8px 12px", fontSize: 12, marginBottom: 12 }}>{error}</div>}
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 12, color: "var(--tx2)", display: "block", marginBottom: 5 }}>{t("strategies.name")} *</label>
+          <input
+            className="inp"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder={t("strategies.name")}
+            style={{ width: "100%" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 12, color: "var(--tx2)", display: "block", marginBottom: 5 }}>{t("strategies.description")}</label>
+          <input
+            className="inp"
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder={t("common.optional")}
+            style={{ width: "100%" }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 12, color: "var(--tx2)", display: "block", marginBottom: 5 }}>{t("strategies.rules")}</label>
+
+          {/* Ordered list of selected rules */}
+          {selectedRulesOrdered.length === 0
+            ? <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{t("strategies.noRules")}</div>
+            : selectedRulesOrdered.map((r, i) => (
+              <div key={r.id} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "var(--s2)", borderRadius: 6, padding: "6px 10px", marginBottom: 5,
+              }}>
+                <span style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)", minWidth: 18 }}>{i + 1}.</span>
+                <span style={{ flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
+                <button className="btn btn-ghost" style={{ padding: "2px 5px" }} onClick={() => moveRule(i, -1)} disabled={i === 0} title="Move up">
+                  <ChevronUp size={11} />
+                </button>
+                <button className="btn btn-ghost" style={{ padding: "2px 5px" }} onClick={() => moveRule(i, 1)} disabled={i === selectedRulesOrdered.length - 1} title="Move down">
+                  <ChevronDown size={11} />
+                </button>
+                <button className="btn btn-ghost" style={{ padding: "2px 5px", color: "var(--red)" }} onClick={() => removeRule(r.id)}>
+                  <X size={11} />
+                </button>
+              </div>
+            ))
+          }
+
+          {/* Add rule dropdown */}
+          {availableToAdd.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <select
+                className="inp"
+                style={{ fontSize: 12, width: "100%" }}
+                value=""
+                onChange={e => { if (e.target.value) addRule(e.target.value); }}
+              >
+                <option value="">{t("strategies.rulesPlaceholder")}</option>
+                {availableToAdd.map(r => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
+          <input type="checkbox" id="strat-active" checked={isActive} onChange={e => setIsActive(e.target.checked)} />
+          <label htmlFor="strat-active" style={{ fontSize: 12, color: "var(--tx2)", cursor: "pointer" }}>Active</label>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button className="btn btn-ghost" onClick={onClose}>{t("common.cancel")}</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? "…" : t("strategies.save")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
@@ -6961,7 +7707,7 @@ function AIPage({ workspaceId }) {
       setSettingsSaved(true);
       setTimeout(() => setSettingsSaved(false), 2000);
     } catch (e) {
-      alert("Save error: " + e.message);
+      alert(t("common.error") + e.message);
     } finally {
       setSettingsSaving(false);
     }
@@ -7454,7 +8200,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     setSaving(true);
     try {
       await post("/settings/members/invite", inviteForm);
-      showToast(t("settings.invite") + " sent!");
+      showToast(t("settings.inviteSent"));
       setShowInvite(false);
       setInviteForm({ email: "", name: "", workspace_role: "analyst" });
       get("/settings/members").then(setMembers);
@@ -7467,7 +8213,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     try {
       await apiFetch(`/settings/members/${userId}/role`, { method: "PATCH", body: JSON.stringify({ role }) });
       get("/settings/members").then(setMembers);
-      showToast("Role updated");
+      showToast(t("settings.roleUpdated"));
     } catch (e) { showToast(e.message, true); }
   }
 
@@ -7476,7 +8222,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     try {
       await apiFetch(`/settings/members/${userId}`, { method: "DELETE" });
       setMembers(m => m.filter(x => x.id !== userId));
-      showToast("Member removed");
+      showToast(t("settings.memberRemoved"));
     } catch (e) { showToast(e.message, true); }
   }
 
@@ -7491,7 +8237,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
     if (deleteConfirm !== wsData?.name) return;
     try {
       await apiFetch("/settings/workspace", { method: "DELETE" });
-      showToast("Workspace deleted");
+      showToast(t("settings.workspaceDeleted"));
       setShowDeleteWs(false);
       setTimeout(() => { localStorage.removeItem("af_token"); window.location.reload(); }, 1500);
     } catch (e) { showToast(e.message, true); }
@@ -7761,10 +8507,10 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
               </button>
             </div>
             <div className="card" style={{ padding: 20 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Current Session</div>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>{t("settings.currentSession")}</div>
               <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 12 }}>{navigator.userAgent.slice(0, 80)}</div>
-              <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => showToast("Feature coming soon")}>
-                Sign out all other sessions
+              <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={() => showToast(t("common.comingSoon"))}>
+                {t("settings.signOutOtherSessions")}
               </button>
             </div>
           </div>
@@ -7938,6 +8684,7 @@ export default function App() {
     reports: <ReportsPage workspaceId={wid} />,
     analytics: <AnalyticsPage workspaceId={wid} />,
     rules: <RulesPage workspaceId={wid} />,
+    strategies: <StrategiesPage workspaceId={wid} />,
     alerts: <AlertsPage workspaceId={wid} />,
     ai: <AIPage workspaceId={wid} />,
     audit: <AuditPage workspaceId={wid} />,

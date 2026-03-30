@@ -191,7 +191,19 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob];
+  // ─── Daily cleanup: delete failed reports older than 2 days ─────────────────
+  const reportCleanupJob = new CronJob("0 4 * * *", async () => {
+    try {
+      const { rowCount } = await query(
+        `DELETE FROM report_requests WHERE status = 'failed' AND created_at < NOW() - INTERVAL '2 days'`
+      );
+      logger.info("Cron: Cleaned up failed reports", { deleted: rowCount });
+    } catch (err) {
+      logger.error("Cron report cleanup failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

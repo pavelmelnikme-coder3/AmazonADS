@@ -1,7 +1,8 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 28 March 2026
-> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 🔄 In Progress (S3-1..S3-4 ✅, S3-5..S3-8 pending) · Production Deployment ✅ · UI Polish ✅
+> Last updated: 30 March 2026
+> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 ✅ Complete · Sprint 4 ✅ Complete (S4-1,S4-2,S4-3,S4-5) · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅
+> S4-4 (SB Keyword-level Reports) blocked by Amazon API — pending GA of Reporting API v3 for SB
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -38,9 +39,7 @@ Deployed to Hetzner server 159.69.222.12. Security audit performed.
 
 ---
 
-## 🔄 Sprint 3 — In Progress (started 25 March 2026)
-
-S3-1..S3-4 delivered. S3-5..S3-8 pending.
+## ✅ Sprint 3 — Complete (30 March 2026)
 
 | Item | Status | Notes |
 |------|--------|-------|
@@ -50,10 +49,10 @@ S3-1..S3-4 delivered. S3-5..S3-8 pending.
 | S3-4 · Negative Keywords | ✅ Done | /negative-keywords CRUD, NegativesTab (3rd tab in Keywords) |
 | Custom Date Range | ✅ Done | DateRangePicker (7/14/30/90d + custom inputs) in Keywords + ST |
 | Multi-Campaign Filter | ✅ Done | CampaignMultiSelect (checkbox dropdown) in Keywords + ST |
-| S3-5 · TACoS Metric | ⏳ Pending | ACOS↕TACoS toggle on Overview KPI card |
-| S3-6 · Keyboard Shortcuts | ⏳ Pending | `/` search, `R` refresh, `Esc` close, `?` help |
-| S3-7 · User-Saved Filters | ⏳ Pending | (partially done — useSavedFilters hook exists) |
-| S3-8 · Column Resize & Visibility | ⏳ Pending | (partially done — useResizableColumns hook exists) |
+| S3-5 · TACoS Metric | ✅ Done | ACOS↕TACoS toggle, sp_orders query, tacosNoData message |
+| S3-6 · Keyboard Shortcuts | ✅ Done | `/` search, `R` refresh, `Esc` close, `?` help overlay |
+| S3-7 · User-Saved Filters | ✅ Done | useSavedFilters hook, localStorage persistence |
+| S3-8 · Column Resize & Visibility | ✅ Done | useResizableColumns + useColumnVisibility, campaigns + keywords |
 
 ---
 
@@ -354,9 +353,9 @@ TACoS = Ad Spend / Total Sales (organic + paid)
 
 ---
 
-## 🗓 Sprint 4 — Architecture (2–4 weeks)
+## ✅ Sprint 4 — Architecture Complete (30 March 2026)
 
-### S4-1 · Write-Back to Amazon API ⭐⭐ CRITICAL
+### ✅ S4-1 · Write-Back to Amazon API ⭐⭐ CRITICAL
 **Source:** Current README limitation — all changes apply to local DB only
 
 Implement:
@@ -367,7 +366,7 @@ Implement:
 
 ---
 
-### S4-2 · Algorithm Stacking / Rule Chains
+### ✅ S4-2 · Algorithm Stacking / Rule Chains
 **Source:** Scale Insights — *"like building LEGOs"* — their main USP
 
 - "Strategy" = a named set of rules executed in sequence
@@ -375,7 +374,7 @@ Implement:
 
 ---
 
-### S4-3 · Per-Row Change History on Hover
+### ✅ S4-3 · Per-Row Change History on Hover
 **Source:** Pacvue — full audit trail per entity
 
 On row hover in Campaigns → `🕐` icon → mini-popup with last 3 changes for that campaign
@@ -389,10 +388,26 @@ After Reporting API v3 GA for SB — add keyword-level metrics for Sponsored Bra
 
 ---
 
-### S4-5 · Negative Keywords Sync
+### ✅ S4-5 · Negative Keywords Sync
 **Source:** README TODO
 
 Migrate to `POST /sp/negativeKeywords/list` for negative keyword sync
+
+---
+
+## ✅ i18n Audit — Complete (30 March 2026)
+
+Full audit and fix of all EN/RU/DE translations — zero language mixing.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Missing keys `campaigns.search`, `common.noData` | ✅ Fixed | Added to all 3 language files |
+| `connect.title` left in English in ru.js | ✅ Fixed | "Подключения Amazon" |
+| New keys for team management toasts | ✅ Added | inviteSent, roleUpdated, memberRemoved, workspaceDeleted |
+| Security section hardcoded strings | ✅ Fixed | currentSession, signOutOtherSessions, comingSoon |
+| Hardcoded English in alert()/showToast() calls | ✅ Fixed | 9 instances replaced with t() calls |
+| NegativesTab missing useI18n() | ✅ Fixed | Added hook, t() now available |
+| Analytics component using wrong t alias | ✅ Fixed | tr() used consistently |
 
 ---
 

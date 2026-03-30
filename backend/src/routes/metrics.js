@@ -75,6 +75,25 @@ router.get("/summary", async (req, res, next) => {
       [req.workspaceId, prevStart.toISOString().split("T")[0], prevEnd.toISOString().split("T")[0]]
     );
 
+    // TACoS via SP-API orders (null when no SP-API data available)
+    let tacos = null;
+    let totalRevenue = null;
+    try {
+      const { rows: [spTotals] } = await query(
+        `SELECT SUM(order_total_amount) AS total_revenue FROM sp_orders
+         WHERE workspace_id = $1 AND purchase_date BETWEEN $2 AND $3
+         AND order_status NOT IN ('Canceled', 'Unfulfillable')`,
+        [req.workspaceId, start, end]
+      );
+      if (spTotals?.total_revenue) {
+        totalRevenue = parseFloat(spTotals.total_revenue);
+        const spend = parseFloat(totals?.spend || 0);
+        if (totalRevenue > 0 && spend > 0) {
+          tacos = (spend / totalRevenue * 100).toFixed(2);
+        }
+      }
+    } catch {}
+
     const calcDelta = (curr, prevVal) => {
       if (!prevVal || prevVal === 0) return null;
       return ((curr - prevVal) / prevVal * 100).toFixed(1);
@@ -92,6 +111,8 @@ router.get("/summary", async (req, res, next) => {
         cpc: parseFloat(totals?.cpc || 0).toFixed(4),
         acos: parseFloat(totals?.acos || 0).toFixed(2),
         roas: parseFloat(totals?.roas || 0).toFixed(2),
+        tacos,
+        totalRevenue: totalRevenue ? totalRevenue.toFixed(2) : null,
       },
       deltas: {
         spend: calcDelta(totals?.spend, prev?.spend),

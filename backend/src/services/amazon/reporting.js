@@ -61,55 +61,53 @@ const REPORT_CONFIGS = {
         "sales1d","sales7d","sales14d","sales30d","date"],
     },
   },
+  // SB uses no time-window suffixes: purchases/sales not purchases14d/sales14d
   SB: {
     campaign: {
       reportType: "sbCampaigns",
       groupBy: ["campaign"],
       metrics: ["campaignId","campaignName","impressions","clicks","cost",
-        "purchases1d","purchases7d","purchases14d","purchases30d",
-        "sales1d","sales7d","sales14d","sales30d","date"],
+        "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
     keyword: {
-      reportType: "sbKeywords",
-      groupBy: ["keyword"],
-      metrics: ["keywordId","keywordText","matchType",
+      // Amazon SB v3 has no direct keyword-level report; sbSearchTerm is the equivalent
+      reportType: "sbSearchTerm",
+      groupBy: ["searchTerm"],
+      metrics: ["searchTerm","keywordId","keywordText","matchType",
         "impressions","clicks","cost",
-        "purchases1d","purchases7d","purchases14d","purchases30d",
-        "sales1d","sales7d","sales14d","sales30d","date"],
+        "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
     ad_group: {
-      reportType: "sbAdGroups",
+      reportType: "sbAdGroup",
       groupBy: ["adGroup"],
       metrics: ["adGroupId","adGroupName","campaignId","campaignName",
         "impressions","clicks","cost",
-        "purchases1d","purchases7d","purchases14d","purchases30d",
-        "sales1d","sales7d","sales14d","sales30d","date"],
+        "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
   },
+  // SD uses different metric naming: no time-window suffixes (purchases/sales, not purchases14d/sales14d)
   SD: {
     campaign: {
       reportType: "sdCampaigns",
       groupBy: ["campaign"],
       metrics: ["campaignId","campaignName","impressions","clicks","cost",
-        "purchases1d","purchases7d","purchases14d","purchases30d",
-        "sales1d","sales7d","sales14d","sales30d","date"],
+        "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
     ad_group: {
-      reportType: "sdAdGroups",
+      reportType: "sdAdGroup",
       groupBy: ["adGroup"],
       metrics: ["adGroupId","adGroupName","campaignId","campaignName",
         "impressions","clicks","cost",
-        "purchases1d","purchases7d","purchases14d","purchases30d",
-        "sales1d","sales7d","sales14d","sales30d","date"],
+        "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
     target: {
       reportType: "sdTargeting",
       groupBy: ["targeting"],
-      metrics: ["targetId","targetingExpression","targetingText","targetingType",
+      // targetId and targetingType are not valid SD columns; use targetingId
+      metrics: ["targetingId","targetingExpression","targetingText",
         "campaignId","campaignName","adGroupId","adGroupName",
         "impressions","clicks","cost",
-        "purchases1d","purchases7d","purchases14d","purchases30d",
-        "sales1d","sales7d","sales14d","sales30d","date"],
+        "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
   },
 };
@@ -128,8 +126,10 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
 
   const accessToken = await getValidAccessToken(connection_id);
 
+  // Unique name per request to avoid Amazon 425 "duplicate" rejections
+  const uniqueSuffix = Date.now().toString(36);
   const body = {
-    name: `${campaignType}-${reportLevel}-${startDate}-${endDate}`,
+    name: `${campaignType}-${reportLevel}-${startDate}-${endDate}-${uniqueSuffix}`,
     startDate,
     endDate,
     configuration: {
@@ -142,35 +142,54 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
     },
   };
 
-  let response;
-  try {
-    response = await axios.post(
-      `${baseUrl}/reporting/reports`,
-      body,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
-          "Amazon-Advertising-API-Scope": String(profile_id),
-          "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
-        },
-        timeout: 15000,
-      }
-    );
-  } catch (err) {
-    logger.error("Amazon Reporting API error response", {
-      status: err.response?.status,
-      data: JSON.stringify(err.response?.data),
-      requestBody: JSON.stringify(body),
-      baseUrl,
-      profileId: profile_id,
-      campaignType,
-      reportLevel,
-    });
-    throw err;
-  }
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+    "Amazon-Advertising-API-Scope": String(profile_id),
+    "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
+  };
 
-  return response.data.reportId;
+  // Retry up to 3 times on 429 throttling with exponential backoff
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let response;
+    try {
+      response = await axios.post(`${baseUrl}/reporting/reports`, body, { headers, timeout: 15000 });
+      return response.data.reportId;
+    } catch (err) {
+      const status = err.response?.status;
+      const detail = err.response?.data?.detail || "";
+
+      // 425: duplicate — reuse the existing reportId Amazon returned
+      if (status === 425) {
+        const match = detail.match(/([0-9a-f-]{36})/i);
+        if (match) {
+          logger.warn("Amazon report duplicate detected, reusing existing reportId", {
+            existingReportId: match[1], campaignType, reportLevel,
+          });
+          return match[1];
+        }
+      }
+
+      // 429: throttled — wait and retry
+      if (status === 429 && attempt < 3) {
+        const delay = attempt * 15000; // 15s, 30s
+        logger.warn("Amazon report API throttled, retrying", { attempt, delayMs: delay, campaignType, reportLevel });
+        await sleep(delay);
+        continue;
+      }
+
+      logger.error("Amazon Reporting API error response", {
+        status,
+        data: JSON.stringify(err.response?.data),
+        requestBody: JSON.stringify(body),
+        baseUrl,
+        profileId: profile_id,
+        campaignType,
+        reportLevel,
+      });
+      throw err;
+    }
+  }
 }
 
 // ─── Poll Report Status ────────────────────────────────────────────────────────
@@ -291,13 +310,13 @@ async function ingestReportData({ reportRequestId, workspaceId, profileDbId, rep
           row.cost || 0,
           row.sales1d || 0,
           row.sales7d || 0,
-          row.sales14d || 0,
+          row.sales14d || row.sales || 0,             // SD uses 'sales' (no window suffix)
           row.sales30d || 0,
           row.purchases1d || 0,
           row.purchases7d || 0,
-          row.purchases14d || 0,
+          row.purchases14d || row.purchases || 0,     // SD uses 'purchases' (no window suffix)
           row.purchases30d || 0,
-          row.unitsSoldClicks14d || 0,
+          row.unitsSoldClicks14d || row.unitsSold || 0,  // SD uses 'unitsSold'
           reportRequestId,
         ]
       );
@@ -351,9 +370,9 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
       [amazonReportId, requestId]
     );
 
-    // 3. Poll until complete (max 10 min)
-    const maxWaitMs = 10 * 60 * 1000;
-    const pollIntervalMs = 10000;
+    // 3. Poll until complete (max 30 min — SD/SB reports can take 15–25 min on Amazon)
+    const maxWaitMs = 30 * 60 * 1000;
+    const pollIntervalMs = 15000;
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitMs) {
@@ -428,12 +447,15 @@ function getBaseUrl(marketplaceId, countryCode) {
 }
 
 function getEntityId(row, level) {
+  if (level === "target") {
+    // spTargeting uses keywordId; sdTargeting uses targetingId
+    return String(row.keywordId || row.targetingId || row.campaignId || "unknown");
+  }
   const idFields = {
     campaign:           "campaignId",
     ad_group:           "adGroupId",
     keyword:            "keywordId",
-    target:             "keywordId",      // spTargeting: use numeric keywordId for resolution
-    advertised_product: "advertisedAsin", // spAdvertisedProduct — no adId in columns
+    advertised_product: "advertisedAsin",
   };
   return String(row[idFields[level]] || row.campaignId || "unknown");
 }

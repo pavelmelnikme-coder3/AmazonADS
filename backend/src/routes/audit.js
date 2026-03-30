@@ -99,6 +99,22 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+// GET /audit/entity/:entityId — last N audit events for a specific entity (for inline history popup)
+router.get("/entity/:entityId", async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const { rows } = await query(
+      `SELECT id, actor_name, actor_type, action, before_data, after_data, diff, source, created_at
+       FROM audit_events
+       WHERE workspace_id = $1 AND entity_id = $2
+       ORDER BY created_at DESC
+       LIMIT $3`,
+      [req.workspaceId, req.params.entityId, limit]
+    );
+    res.json(rows);
+  } catch (err) { next(err); }
+});
+
 // POST /audit/:id/rollback
 router.post("/:id/rollback", async (req, res, next) => {
   try {

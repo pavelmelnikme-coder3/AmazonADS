@@ -11,6 +11,7 @@
 
 const { query } = require("../../db/pool");
 const { put } = require("../amazon/adsClient");
+const { pushKeywordUpdates } = require("../amazon/writeback");
 const logger = require("../../config/logger");
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
@@ -335,7 +336,24 @@ async function tryApiUpdate(entity, updateType, newValue) {
         group:        "campaigns",
       });
     }
-    // Note: keyword bid sync via Amazon API requires keyword-level IDs; local DB update is sufficient for now
+    if (updateType === "keyword_bid") {
+      // Load all enabled keywords for this campaign with their Amazon IDs
+      const { rows: kws } = await query(
+        `SELECT amazon_keyword_id, bid FROM keywords
+         WHERE campaign_id = $1 AND state = 'enabled' AND amazon_keyword_id IS NOT NULL`,
+        [entity.id]
+      );
+      if (!kws.length) return;
+      const kwUpdates = kws.map(k => ({
+        amazonKeywordId: k.amazon_keyword_id,
+        campaignType:    entity.campaign_type,
+        connectionId:    entity.connection_id,
+        profileId:       entity.amazon_profile_id?.toString(),
+        marketplaceId:   entity.marketplace_id,
+        bid:             parseFloat(k.bid),
+      }));
+      await pushKeywordUpdates(kwUpdates);
+    }
   } catch (e) {
     logger.warn("Amazon API update failed (non-fatal, local DB updated)", {
       error: e.message, updateType,
