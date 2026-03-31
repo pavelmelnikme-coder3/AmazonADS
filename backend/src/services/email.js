@@ -35,14 +35,9 @@ async function sendInviteEmail({ to, inviterName, workspaceName, role, inviteUrl
 
         <!-- Header -->
         <tr>
-          <td style="background:linear-gradient(135deg,#3B82F6,#A78BFA);padding:32px;text-align:center;">
-            <div style="width:48px;height:48px;background:rgba(255,255,255,0.2);border-radius:12px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px;">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-              </svg>
-            </div>
-            <div style="color:white;font-size:24px;font-weight:800;letter-spacing:-0.5px;">AdsFlow</div>
-            <div style="color:rgba(255,255,255,0.8);font-size:13px;margin-top:4px;">Amazon Ads Dashboard</div>
+          <td style="background:linear-gradient(135deg,#3B82F6,#A78BFA);padding:36px 32px;text-align:center;">
+            <div style="color:white;font-size:32px;font-weight:900;letter-spacing:-1px;">Ads<span style="opacity:0.85;">Flow</span></div>
+            <div style="color:rgba(255,255,255,0.75);font-size:13px;margin-top:6px;letter-spacing:0.5px;text-transform:uppercase;">Amazon Ads Dashboard</div>
           </td>
         </tr>
 
@@ -129,14 +124,9 @@ async function sendPasswordResetEmail({ to, resetUrl }) {
 
         <!-- Header -->
         <tr>
-          <td style="background:linear-gradient(135deg,#3B82F6,#A78BFA);padding:32px;text-align:center;">
-            <div style="width:48px;height:48px;background:rgba(255,255,255,0.2);border-radius:12px;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px;">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-              </svg>
-            </div>
-            <div style="color:white;font-size:24px;font-weight:800;letter-spacing:-0.5px;">AdsFlow</div>
-            <div style="color:rgba(255,255,255,0.8);font-size:13px;margin-top:4px;">Password Reset</div>
+          <td style="background:linear-gradient(135deg,#3B82F6,#A78BFA);padding:36px 32px;text-align:center;">
+            <div style="color:white;font-size:32px;font-weight:900;letter-spacing:-1px;">Ads<span style="opacity:0.85;">Flow</span></div>
+            <div style="color:rgba(255,255,255,0.75);font-size:13px;margin-top:6px;letter-spacing:0.5px;text-transform:uppercase;">Password Reset</div>
           </td>
         </tr>
 

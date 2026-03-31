@@ -35,6 +35,8 @@ const spRoutes = require("./routes/sp");
 const analyticsReportRouter = require("./routes/analyticsReport");
 const searchTermsRoutes = require("./routes/searchTerms");
 const negativeKeywordsRoutes = require("./routes/negativeKeywords");
+const negativeAsinsRoutes = require("./routes/negativeAsins");
+const keywordRanksRoutes  = require("./routes/keywordRanks");
 const strategiesRoutes = require("./routes/strategies");
 
 const app = express();
@@ -109,6 +111,8 @@ app.use(`${API}/sp`, spRoutes);
 app.use(`${API}/analytics-report`, analyticsReportRouter);
 app.use(`${API}/search-terms`, searchTermsRoutes);
 app.use(`${API}/negative-keywords`, negativeKeywordsRoutes);
+app.use(`${API}/negative-asins`, negativeAsinsRoutes);
+app.use(`${API}/keyword-ranks`, keywordRanksRoutes);
 app.use(`${API}/strategies`, strategiesRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────

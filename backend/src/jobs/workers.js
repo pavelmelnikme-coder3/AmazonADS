@@ -4,7 +4,7 @@
  */
 
 const { Queue, Worker, QueueEvents } = require("bullmq");
-const { createRedisConnection } = require("../config/redis");
+const { createRedisConnection, getRedis } = require("../config/redis");
 const logger = require("../config/logger");
 const {
   fetchCampaigns, syncCampaigns,
@@ -32,6 +32,7 @@ const QUEUES = {
   METRICS_BACKFILL: "metrics-backfill",
   AI_ANALYSIS:      "ai-analysis",
   SP_SYNC:          "sp-sync",
+  RANK_CHECK:       "rank-check",
 };
 
 const defaultJobOptions = {
@@ -86,7 +87,16 @@ async function queueRuleEngine(workspaceId) {
 
 async function queueRuleExecution(workspaceId, ruleId = null) {
   const queue = getQueue(QUEUES.RULE_EXECUTION);
-  return queue.add("execute", { workspaceId, ruleId });
+  // jobId deduplication: if a job for this workspace is already pending/active,
+  // BullMQ will not enqueue a second one — preventing race conditions between cron ticks.
+  const jobId = ruleId ? `rule_${ruleId}_${workspaceId}` : `workspace_${workspaceId}`;
+  return queue.add("execute", { workspaceId, ruleId }, { jobId });
+}
+
+async function queueRankCheck(workspaceId) {
+  const queue = getQueue(QUEUES.RANK_CHECK);
+  const jobId = `rank_${workspaceId}`;
+  return queue.add("check", { workspaceId }, { jobId });
 }
 
 async function queueBulkOperation(workspaceId, operationType, items) {
@@ -328,12 +338,37 @@ async function startWorkers() {
     QUEUES.RULE_EXECUTION,
     async (job) => {
       const { workspaceId, ruleId } = job.data;
-      logger.info("Rule execution started", { workspaceId, ruleId });
-      const result = await executeRules(workspaceId, ruleId || null);
-      logger.info("Rule execution completed", { workspaceId, ruleId, ...result });
-      return result;
+
+      // Distributed lock — prevents two simultaneous runs for the same workspace
+      // even if BullMQ lets a second job start while the first is still active.
+      const redis   = getRedis();
+      const lockKey = `rule_exec_lock:${workspaceId}`;
+      const lockTTL = 300; // 5 min safety TTL — auto-released if process crashes
+
+      const acquired = await redis.set(lockKey, job.id, "NX", "EX", lockTTL);
+      if (!acquired) {
+        logger.info("Rule execution skipped — another run is active for this workspace", {
+          workspaceId, ruleId,
+        });
+        return { skipped: true, reason: "concurrent_run" };
+      }
+
+      try {
+        logger.info("Rule execution started", { workspaceId, ruleId });
+        const result = await executeRules(workspaceId, ruleId || null);
+        logger.info("Rule execution completed", { workspaceId, ruleId, ...result });
+        return result;
+      } finally {
+        // Release lock only if we still own it (guards against TTL expiry edge case)
+        const current = await redis.get(lockKey);
+        if (current === String(job.id)) {
+          await redis.del(lockKey);
+        }
+      }
     },
-    { connection: createRedisConnection(), concurrency: 2 }
+    // concurrency: 1 — rules within a workspace run sequentially to prevent
+    // simultaneous modifications to the same entity from different jobs.
+    { connection: createRedisConnection(), concurrency: 1 }
   );
 
   ruleExecutionWorker.on("failed", (job, err) => {
@@ -412,7 +447,25 @@ async function startWorkers() {
     logger.error("SP sync worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker];
+  const { scrapeWorkspaceRanks } = require("../services/amazon/rankScraper");
+  const rankCheckWorker = new Worker(
+    QUEUES.RANK_CHECK,
+    async (job) => {
+      const { workspaceId } = job.data;
+      logger.info("Rank check started", { workspaceId });
+      const results = await scrapeWorkspaceRanks(workspaceId, { query });
+      const found = results.filter(r => r.found).length;
+      const blocked = results.filter(r => r.blocked).length;
+      logger.info("Rank check complete", { workspaceId, total: results.length, found, blocked });
+      return { workspaceId, total: results.length, found, blocked };
+    },
+    { connection: createRedisConnection(), concurrency: 1, limiter: { max: 1, duration: 3600000 } }
+  );
+  rankCheckWorker.on("failed", (job, err) => {
+    logger.error("Rank check worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 }
 
@@ -431,6 +484,7 @@ module.exports = {
   queueRuleExecution,
   queueAiAnalysis,
   queueSpSync,
+  queueRankCheck,
   startWorkers,
   stopWorkers,
   QUEUES,

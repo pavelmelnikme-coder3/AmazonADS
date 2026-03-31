@@ -373,24 +373,39 @@ async function ingestSearchTermData({ workspaceId, profileDbId, rows, startDate,
             [amazonKeywordId, workspaceId]))?.rows?.[0]?.id || null
         : null;
 
+      const amazonCampId = amazonCampaignId || null;
+      const amazonAgId   = amazonAdGroupId  || null;
+
+      // Two separate conflict targets depending on whether campaign was resolved:
+      // - campaign known  → conflict on (workspace_id, campaign_id, query, date_start, date_end)
+      // - campaign unknown → conflict on the partial unique index idx_stm_null_campaign_unique
+      const conflictClause = campaignUuid
+        ? `ON CONFLICT (workspace_id, campaign_id, query, date_start, date_end)
+           WHERE campaign_id IS NOT NULL`
+        : `ON CONFLICT (workspace_id, query, COALESCE(keyword_text,''), COALESCE(match_type,''), date_start, date_end)
+           WHERE campaign_id IS NULL`;
+
       await query(
         `INSERT INTO search_term_metrics
            (workspace_id, profile_id, campaign_id, ad_group_id, campaign_name, ad_group_name,
             query, keyword_id, keyword_text, match_type,
             impressions, clicks, spend, orders, sales,
-            date_start, date_end)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-         ON CONFLICT (workspace_id, campaign_id, query, date_start, date_end)
-         WHERE campaign_id IS NOT NULL
+            date_start, date_end,
+            amazon_campaign_id, amazon_ad_group_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         ${conflictClause}
          DO UPDATE SET
-           impressions  = EXCLUDED.impressions,
-           clicks       = EXCLUDED.clicks,
-           spend        = EXCLUDED.spend,
-           orders       = EXCLUDED.orders,
-           sales        = EXCLUDED.sales,
-           keyword_id   = COALESCE(EXCLUDED.keyword_id, search_term_metrics.keyword_id),
-           keyword_text = COALESCE(EXCLUDED.keyword_text, search_term_metrics.keyword_text),
-           updated_at   = NOW()`,
+           impressions        = EXCLUDED.impressions,
+           clicks             = EXCLUDED.clicks,
+           spend              = EXCLUDED.spend,
+           orders             = EXCLUDED.orders,
+           sales              = EXCLUDED.sales,
+           campaign_name      = COALESCE(EXCLUDED.campaign_name, search_term_metrics.campaign_name),
+           keyword_id         = COALESCE(EXCLUDED.keyword_id, search_term_metrics.keyword_id),
+           keyword_text       = COALESCE(EXCLUDED.keyword_text, search_term_metrics.keyword_text),
+           amazon_campaign_id = COALESCE(EXCLUDED.amazon_campaign_id, search_term_metrics.amazon_campaign_id),
+           amazon_ad_group_id = COALESCE(EXCLUDED.amazon_ad_group_id, search_term_metrics.amazon_ad_group_id),
+           updated_at         = NOW()`,
         [
           workspaceId,
           profileDbId,
@@ -409,6 +424,8 @@ async function ingestSearchTermData({ workspaceId, profileDbId, rows, startDate,
           row.sales14d     || row.sales     || 0,
           date,
           date,
+          amazonCampId,
+          amazonAgId,
         ]
       );
       processed++;

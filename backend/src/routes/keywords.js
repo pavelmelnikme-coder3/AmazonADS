@@ -63,8 +63,10 @@ router.get("/", async (req, res, next) => {
     if (!isNaN(kwAcosMax))   { conditions.push(`m.acos_14d <= $${pi++}`);               params.push(kwAcosMax); }
     if (!isNaN(kwClicksMin)) { conditions.push(`COALESCE(m.clicks,0) >= $${pi++}`);     params.push(kwClicksMin); }
     if (!isNaN(kwOrdersMin)) { conditions.push(`COALESCE(m.orders_14d,0) >= $${pi++}`); params.push(kwOrdersMin); }
-    if (req.query.noSales === "true")   { conditions.push(`COALESCE(m.orders_14d,0) = 0`); }
-    if (req.query.hasClicks === "true") { conditions.push(`COALESCE(m.clicks,0) > 0`); }
+    if (req.query.noSales === "true")               { conditions.push(`COALESCE(m.orders_14d,0) = 0`); }
+    if (req.query.hasClicks === "true")             { conditions.push(`COALESCE(m.clicks,0) > 0`); }
+    if (req.query.excludePaused === "true")         { conditions.push(`k.state != 'paused'`); }
+    if (req.query.excludeDisabledCampaigns === "true") { conditions.push(`c.state = 'enabled'`); }
 
     const where = "WHERE " + conditions.join(" AND ");
 

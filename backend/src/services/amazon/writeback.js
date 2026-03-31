@@ -187,4 +187,65 @@ function groupBy(arr, key) {
   return map.entries();
 }
 
-module.exports = { pushKeywordUpdates, pushNegativeKeyword, loadKeywordContext };
+/**
+ * Push a negative ASIN (target) to Amazon SP API, then update the DB record
+ * with the real Amazon-assigned ID.
+ *
+ * @param {object} params
+ * @param {string} params.localId           - UUID in negative_targets table
+ * @param {string} params.connectionId
+ * @param {string} params.profileId         - Amazon numeric profile ID
+ * @param {string} params.marketplaceId
+ * @param {string} params.campaignType      - "sponsoredProducts" | "sponsoredBrands"
+ * @param {string} params.amazonCampaignId
+ * @param {string} params.amazonAdGroupId   - null for campaign-level
+ * @param {string} params.asinValue         - e.g. "B00XXXXX"
+ * @param {string} params.level             - "campaign" | "ad_group"
+ */
+async function pushNegativeAsin({
+  localId, connectionId, profileId, marketplaceId, campaignType,
+  amazonCampaignId, amazonAdGroupId, asinValue, level,
+}) {
+  if (!connectionId || !profileId) return;
+
+  try {
+    const expression = [{ type: "asinSameAs", value: asinValue }];
+    const payload = {
+      expression,
+      expressionType: "manual",
+      state: "enabled",
+      campaignId: amazonCampaignId,
+    };
+    if (level === "ad_group" && amazonAdGroupId) {
+      payload.adGroupId = amazonAdGroupId;
+    }
+
+    // SP negative targets endpoint; SD uses /sd/negativeTargets but rare for manual adds
+    const path = "/sp/negativeTargets";
+
+    const result = await post({
+      connectionId,
+      profileId: profileId.toString(),
+      marketplace: marketplaceId,
+      path,
+      data: { negativeTargetingClauses: [payload] },
+      group: "keywords",
+    });
+
+    const created = result?.negativeTargetingClauses?.[0] || result?.[0];
+    const realId = created?.targetId || created?.negativeTargetId;
+
+    if (realId && localId) {
+      await query(
+        "UPDATE negative_targets SET amazon_neg_target_id = $1 WHERE id = $2",
+        [String(realId), localId]
+      );
+    }
+
+    logger.info("Negative ASIN write-back ok", { profileId, path, realId });
+  } catch (e) {
+    logger.warn("Negative ASIN write-back failed (non-fatal)", { profileId, error: e.message });
+  }
+}
+
+module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext };

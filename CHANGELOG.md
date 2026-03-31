@@ -6,6 +6,92 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-03-31
+
+### Added — Keyword Rank Tracker (new section)
+
+- **Migration `016_keyword_rank_tracking.sql`** — two new tables:
+  - `tracked_keywords (id, workspace_id, asin, keyword, marketplace_id, is_active)` — unique per workspace+asin+keyword+marketplace.
+  - `keyword_rank_snapshots (id, tracked_keyword_id, position, page, found, blocked, captured_at)` — one row per check per keyword.
+- **`rankScraper.js`** (new service) — scrapes Amazon search results for organic keyword positions.
+  Scans up to 3 pages (~48 results), skips sponsored slots (`data-component-type="s-sponsored-result"`),
+  rotates 7 User-Agent strings, random 5-12 s delay between pages, 20-50 s between keywords,
+  detects CAPTCHA / 503 / 429 → stops batch immediately and marks snapshot `blocked=true`.
+  Supports 6 marketplaces: DE, US, UK, FR, IT, ES.
+- **`routes/keywordRanks.js`** (new) — REST endpoints:
+  - `GET /keyword-ranks` — list with LATERAL JOIN for latest + previous positions (delta calculation).
+  - `POST /keyword-ranks` — add keyword (asin + keyword + marketplaceId), ON CONFLICT upsert.
+  - `DELETE /keyword-ranks/:id` — soft delete (`is_active = false`).
+  - `GET /keyword-ranks/:id/history?days=7|30` — snapshot history for chart (up to 90 days).
+  - `POST /keyword-ranks/:id/check` — manual single-keyword scrape.
+  - `POST /keyword-ranks/check-all` — queues full workspace rank check (async, responds immediately).
+- **BullMQ `rank-check` queue** — `queueRankCheck(workspaceId)` with `jobId` deduplication
+  (one job per workspace), concurrency 1, 1-hour rate limiter.
+- **Scheduler** — `rankCheckJob` cron `0 3 * * *` (daily 03:00 UTC) queues rank checks for all
+  workspaces with active tracked keywords.
+- **Frontend `RankTrackerPage`** — new standalone section "Позиции" / "Rank Tracker" / "Rankings":
+  - Add form: ASIN + keyword text input, Enter support.
+  - List grouped by ASIN. Each keyword row: colour-coded position badge (#1-3 gold, #4-10 green,
+    #11-20 teal, #21-48 amber, >48 red), delta arrow (↑↑↓ vs prev snapshot), last-checked timestamp.
+  - Expandable history: bar chart with week / month toggle (7 / 30 days).
+  - "Check now" button per keyword (real-time scrape), "Check all" workspace button.
+  - SVG sparkline + HistoryBars components, no external chart library needed.
+- **NAV** — new entry `{ id: "rankings", icon: LineChartIcon }` between Keywords and Reports.
+- **i18n** — `rankings.*` keys added to `en.js` / `ru.js` / `de.js`.
+
+### Added — Keyword Filters: Exclude Paused & Disabled Campaigns
+
+- **Backend `keywords.js`** — two new query params:
+  - `excludePaused=true` → adds `k.state != 'paused'` condition.
+  - `excludeDisabledCampaigns=true` → adds `c.state = 'enabled'` condition.
+- **Frontend** — two toggle buttons in Keywords filter bar: "Без паузы" / "Только акт. кампании".
+  State stored in `useSavedFilters` (persists across sessions). Active buttons highlighted in primary colour.
+- **`KEYWORD_DEFAULT_FILTERS`** — extended with `excludePaused: false, excludeDisabledCampaigns: false`.
+- **i18n** — `keywords.excludePaused` / `keywords.excludeDisabledCampaigns` in all three locales.
+
+### Added — Negative ASINs Feature
+
+- **Migration (in `010_sp_api.sql`)** — `negative_targets` table with `expression JSONB` column
+  storing `[{type:"asinSameAs",value:"B00XXX"}]`.
+- **`routes/negativeAsins.js`** (new) — CRUD:
+  - `GET /negative-asins` — paginated list with campaign name via LEFT JOIN.
+  - `POST /negative-asins` — add single ASIN to campaign.
+  - `POST /negative-asins/bulk` — add multiple ASINs × multiple campaigns.
+  - `DELETE /negative-asins/:id` — single delete.
+  - `DELETE /negative-asins/bulk` — bulk delete by `{ ids }` array.
+- **`writeback.js`** — `pushNegativeAsin()` — posts `{expression, expressionType:"manual", state:"enabled"}`
+  to SP-API `/sp/negativeTargets`, updates local DB with real Amazon negative target ID.
+- **Rule engine** — new action type `add_negative_asin`: pre-checks for duplicate expression,
+  inserts `negative_targets` row, calls `pushNegativeAsin()` async; respects `dry_run` flag.
+- **Frontend** — `NegativesTab` split into sub-tabs: "Neg. Keywords" | "Neg. ASINs".
+  `NegativeAsinsTab`: table with ASIN column (monospace), campaign name, level badge;
+  single-add modal; bulk-add modal with campaign picker; bulk delete.
+- **Rule builder** — `add_negative_asin` action added to `ACT_TYPES` with ASIN unit label.
+- **Tests** — `test_negative_asins.js`: 8 tests, 24 assertions — all passing.
+
+### Added — Search Terms: Campaign Name Resolution
+
+- **Migration `014_search_term_amazon_campaign_id.sql`** — adds `amazon_campaign_id TEXT` and
+  `amazon_ad_group_id TEXT` columns to `search_term_metrics`. Back-fills from campaigns table
+  (pass 1: by UUID, pass 2: by keyword text+match_type where unique).
+- **Migration `015_search_term_dedup.sql`** — removes duplicate rows for `campaign_id IS NULL`
+  (kept row with max impressions per group). Adds partial unique index
+  `idx_stm_null_campaign_unique` to prevent future duplicates. Result: 7 787 → 1 961 rows.
+- **`reporting.js`** — dynamic `ON CONFLICT` clause: uses `campaign_id`-based index when UUID
+  resolved, `(workspace_id, query, keyword_text, match_type, date_start, date_end)` partial
+  index when `campaign_id IS NULL`. Stores `amazon_campaign_id` text on every ingestion.
+- **`searchTerms.js` route** — upgraded JOIN strategy for `campaign_name` resolution:
+  `COALESCE(c1.name, c2.name, stm.campaign_name, kw_c.campaign_name)` where `kw_c` is a
+  keyword-based subquery matching `keyword_text + match_type` case-insensitively.
+
+### Fixed — Security: axios pinned to safe version
+
+- `axios` pinned from `^1.7.2` to `1.14.0` (exact) in both `backend/package.json` and
+  `frontend/package.json` following supply-chain attack on `1.14.1` / `0.30.4`
+  (malicious `plain-crypto-js` dependency, RAT dropper, March 2026).
+
+---
+
 ## [Unreleased] — 2026-03-30
 
 ### Added — Search Terms Pipeline

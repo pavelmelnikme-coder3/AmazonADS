@@ -22,7 +22,8 @@ import {
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
-  HelpCircle, LogOut, Plus, Sun, Moon, Copy
+  HelpCircle, LogOut, Plus, Sun, Moon, Copy,
+  LineChart as LineChartIcon
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -404,19 +405,20 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 const NAV = [
-  { id: "overview",  icon: Activity  },
-  { id: "campaigns", icon: Megaphone },
-  { id: "products",  icon: Package   },
-  { id: "keywords",  icon: Tag       },
-  { id: "reports",   icon: Newspaper },
-  { id: "analytics", icon: Layers    },
-  { id: "rules",      icon: Workflow  },
-  { id: "strategies", icon: Orbit    },
-  { id: "alerts",     icon: Bell     },
-  { id: "ai",        icon: Sparkles  },
-  { id: "audit",     icon: History   },
-  { id: "connect",   icon: Cable     },
-  { id: "settings",  icon: Cog       },
+  { id: "overview",  icon: Activity       },
+  { id: "campaigns", icon: Megaphone      },
+  { id: "products",  icon: Package        },
+  { id: "keywords",  icon: Tag            },
+  { id: "rankings",  icon: LineChartIcon  },
+  { id: "reports",   icon: Newspaper      },
+  { id: "analytics", icon: Layers         },
+  { id: "rules",      icon: Workflow      },
+  { id: "strategies", icon: Orbit         },
+  { id: "alerts",     icon: Bell          },
+  { id: "ai",        icon: Sparkles       },
+  { id: "audit",     icon: History        },
+  { id: "connect",   icon: Cable          },
+  { id: "settings",  icon: Cog            },
 ];
 
 const SIDEBAR_W = 220;
@@ -1340,6 +1342,337 @@ const DEFAULT_LAYOUT = [
 ];
 
 // ─── Overview Page (real data) ────────────────────────────────────────────────
+// ─── Rank Tracker Page ────────────────────────────────────────────────────────
+const RANK_DAYS = [7, 30];
+
+function positionBadge(position, found) {
+  if (!found || position === null) return { label: "—", bg: "var(--s2)", color: "var(--tx3)", border: "var(--b2)" };
+  if (position <= 3)  return { label: `#${position}`, bg: "rgba(234,179,8,.15)",  color: "#ca8a04", border: "rgba(234,179,8,.4)" };
+  if (position <= 10) return { label: `#${position}`, bg: "rgba(34,197,94,.15)",  color: "var(--grn)", border: "rgba(34,197,94,.4)" };
+  if (position <= 20) return { label: `#${position}`, bg: "rgba(20,184,166,.12)", color: "#0d9488", border: "rgba(20,184,166,.35)" };
+  if (position <= 48) return { label: `#${position}`, bg: "rgba(245,158,11,.12)", color: "var(--amb)", border: "rgba(245,158,11,.35)" };
+  return { label: `#${position}`, bg: "rgba(239,68,68,.1)", color: "var(--red)", border: "rgba(239,68,68,.3)" };
+}
+
+function rankDelta(current, prev) {
+  if (current === null || prev === null) return null;
+  const d = prev - current; // positive = improved (moved up)
+  return d;
+}
+
+const RankTrackerPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [tick, setTick]           = useState(0);
+  const [newAsin, setNewAsin]     = useState("");
+  const [newKw, setNewKw]         = useState("");
+  const [adding, setAdding]       = useState(false);
+  const [addError, setAddError]   = useState(null);
+  const [checking, setChecking]   = useState(false);
+  const [checkingId, setCheckingId] = useState(null);
+  const [expanded, setExpanded]   = useState(null);  // tracked_keyword id
+  const [histDays, setHistDays]   = useState(30);
+  const [histData, setHistData]   = useState({});   // id → snapshots[]
+  const [toast, setToast]         = useState(null);
+
+  const { data: keywords, loading } = useAsync(
+    () => workspaceId ? get("/keyword-ranks") : Promise.resolve([]),
+    [workspaceId, tick]
+  );
+
+  const reload = () => setTick(t => t + 1);
+  const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); };
+
+  // Group by ASIN
+  const grouped = React.useMemo(() => {
+    if (!keywords) return {};
+    return keywords.reduce((acc, kw) => {
+      if (!acc[kw.asin]) acc[kw.asin] = [];
+      acc[kw.asin].push(kw);
+      return acc;
+    }, {});
+  }, [keywords]);
+
+  const handleAdd = async () => {
+    const cleanAsin = newAsin.trim().toUpperCase();
+    const cleanKw   = newKw.trim().toLowerCase();
+    if (!cleanAsin || cleanAsin.length !== 10) return setAddError(t("rankings.errorAsin"));
+    if (!cleanKw || cleanKw.length < 2)        return setAddError(t("rankings.errorKeyword"));
+    setAdding(true); setAddError(null);
+    try {
+      await post("/keyword-ranks", { asin: cleanAsin, keyword: cleanKw });
+      setNewAsin(""); setNewKw(""); reload();
+      showToast(t("rankings.added"));
+    } catch (e) { setAddError(e.message); }
+    finally { setAdding(false); }
+  };
+
+  const handleDelete = async (id) => {
+    await del(`/keyword-ranks/${id}`);
+    if (expanded === id) setExpanded(null);
+    reload();
+  };
+
+  const handleCheckOne = async (id) => {
+    setCheckingId(id);
+    try {
+      await post(`/keyword-ranks/${id}/check`);
+      // reload history if expanded
+      if (expanded === id) await loadHistory(id, histDays, true);
+      reload();
+      showToast(t("rankings.checkDone"));
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setCheckingId(null); }
+  };
+
+  const handleCheckAll = async () => {
+    setChecking(true);
+    try {
+      await post("/keyword-ranks/check-all");
+      showToast(t("rankings.checkAllStarted"));
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setChecking(false); }
+  };
+
+  const loadHistory = async (id, days, force = false) => {
+    const key = `${id}_${days}`;
+    if (!force && histData[key]) return;
+    try {
+      const data = await get(`/keyword-ranks/${id}/history?days=${days}`);
+      setHistData(h => ({ ...h, [key]: data }));
+    } catch {}
+  };
+
+  const toggleExpand = async (id) => {
+    if (expanded === id) { setExpanded(null); return; }
+    setExpanded(id);
+    await loadHistory(id, histDays);
+  };
+
+  const switchDays = async (days) => {
+    setHistDays(days);
+    if (expanded) await loadHistory(expanded, days);
+  };
+
+  const currentHist = expanded ? (histData[`${expanded}_${histDays}`] || []) : [];
+
+  // Simple SVG sparkline for history
+  const Sparkline = ({ data, width = 200, height = 48 }) => {
+    const pts = data.filter(d => d.position !== null && d.found);
+    if (pts.length < 2) return <span style={{ fontSize: 11, color: "var(--tx3)" }}>{t("rankings.notEnoughData")}</span>;
+    const positions = pts.map(d => d.position);
+    const minP = Math.min(...positions);
+    const maxP = Math.max(...positions);
+    const range = maxP - minP || 1;
+    const pad = 6;
+    const W = width - pad * 2;
+    const H = height - pad * 2;
+    const cx = (i) => pad + (i / (pts.length - 1)) * W;
+    // Y inverted: lower rank number (better) = higher on chart
+    const cy = (p) => pad + ((p - minP) / range) * H;
+    const pathD = pts.map((d, i) => `${i === 0 ? "M" : "L"}${cx(i).toFixed(1)},${cy(d.position).toFixed(1)}`).join(" ");
+    const last = pts[pts.length - 1];
+    return (
+      <svg width={width} height={height} style={{ overflow: "visible" }}>
+        <path d={pathD} fill="none" stroke="var(--ac2)" strokeWidth={2} strokeLinejoin="round" />
+        <circle cx={cx(pts.length - 1)} cy={cy(last.position)} r={3} fill="var(--ac2)" />
+      </svg>
+    );
+  };
+
+  // Recharts-style bar history (reuses the pattern from BSR page)
+  const HistoryBars = ({ data }) => {
+    const pts = data.filter(d => d.found && d.position !== null);
+    if (!pts.length) return <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("rankings.noHistory")}</div>;
+    const positions = pts.map(d => d.position);
+    const minP = Math.min(...positions);
+    const maxP = Math.max(...positions);
+    const H = 60;
+    return (
+      <div>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: H }}>
+          {data.map((snap, i) => {
+            if (!snap.found || snap.position === null) {
+              return <div key={i} style={{ flex: 1, height: 4, background: "var(--b2)", borderRadius: 2, alignSelf: "flex-end" }} title="Not found" />;
+            }
+            // Better rank = taller bar (inverted)
+            const ratio = maxP > minP ? (maxP - snap.position) / (maxP - minP) : 1;
+            const h = Math.max(ratio * (H - 8) + 8, 4);
+            const badge = positionBadge(snap.position, snap.found);
+            const date = new Date(snap.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" });
+            return (
+              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}
+                title={`#${snap.position} · ${date}`}>
+                <div style={{ width: "100%", height: h,
+                  background: `linear-gradient(to top, ${badge.color}99, ${badge.color}44)`,
+                  border: `1px solid ${badge.border}`,
+                  borderRadius: "3px 3px 0 0" }} />
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
+          <span>{new Date(data[0]?.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" })}</span>
+          <span>Best: #{minP}</span>
+          <span>{new Date(data[data.length - 1]?.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" })}</span>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="fade">
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
+        <div>
+          <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
+            {t("rankings.title")}
+          </h1>
+          <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("rankings.subtitle")}</div>
+        </div>
+        <button onClick={handleCheckAll} disabled={checking || loading || !keywords?.length}
+          className="btn btn-ghost" style={{ fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+          <Ic icon={RefreshCw} size={13} />
+          {checking ? t("rankings.checking") : t("rankings.checkAll")}
+        </button>
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 24, right: 24, zIndex: 9999,
+          background: toast.type === "err" ? "rgba(239,68,68,.9)" : "rgba(34,197,94,.9)",
+          color: "#fff", borderRadius: 10, padding: "10px 18px", fontSize: 13,
+          boxShadow: "0 4px 20px rgba(0,0,0,.3)", animation: "fadeIn .2s",
+        }}>{toast.msg}</div>
+      )}
+
+      {/* Add form */}
+      <div className="card" style={{ padding: "14px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--tx2)", marginBottom: 10 }}>{t("rankings.addTitle")}</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>ASIN</div>
+            <input value={newAsin} onChange={e => setNewAsin(e.target.value.toUpperCase())}
+              onKeyDown={e => e.key === "Enter" && handleAdd()}
+              placeholder="B0XXXXXXXXXX" maxLength={10}
+              style={{ width: 140, fontFamily: "var(--mono)", letterSpacing: ".05em", fontSize: 13 }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>{t("rankings.keywordLabel")}</div>
+            <input value={newKw} onChange={e => setNewKw(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleAdd()}
+              placeholder={t("rankings.keywordPlaceholder")}
+              style={{ width: "100%", fontSize: 13 }} />
+          </div>
+          <button onClick={handleAdd} disabled={adding} className="btn btn-primary"
+            style={{ fontSize: 12, padding: "6px 16px", alignSelf: "flex-end" }}>
+            {adding ? "…" : t("rankings.addBtn")}
+          </button>
+        </div>
+        {addError && <div style={{ fontSize: 12, color: "var(--red)", marginTop: 8 }}>{addError}</div>}
+      </div>
+
+      {/* List */}
+      {loading ? (
+        <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      ) : !keywords?.length ? (
+        <div className="card" style={{ padding: "60px 32px", textAlign: "center" }}>
+          <Ic icon={LineChartIcon} size={48} style={{ color: "var(--tx3)", opacity: 0.3, display: "block", margin: "0 auto 16px" }} />
+          <p style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>{t("rankings.empty")}</p>
+          <p style={{ fontSize: 13, color: "var(--tx3)", maxWidth: 340, margin: "0 auto" }}>{t("rankings.emptyDesc")}</p>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {Object.entries(grouped).map(([asin, kws]) => (
+            <div key={asin} className="card" style={{ padding: "14px 16px" }}>
+              {/* ASIN header */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
+                <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)" }}>{asin}</span>
+                <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
+              </div>
+
+              {/* Keyword rows */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                {kws.map(kw => {
+                  const badge  = positionBadge(kw.position, kw.found);
+                  const delta  = rankDelta(kw.position, kw.prev_position);
+                  const isExp  = expanded === kw.id;
+                  const isChk  = checkingId === kw.id;
+                  const checkedAt = kw.checked_at
+                    ? new Date(kw.checked_at).toLocaleString("de", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                    : null;
+
+                  return (
+                    <div key={kw.id}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+                        borderBottom: isExp ? "none" : "1px solid var(--b1)" }}>
+                        {/* Position badge */}
+                        <div style={{
+                          minWidth: 52, padding: "3px 8px", borderRadius: 20, textAlign: "center",
+                          background: badge.bg, border: `1px solid ${badge.border}`,
+                          fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: badge.color,
+                        }}>{badge.label}</div>
+
+                        {/* Delta */}
+                        <div style={{ width: 36, fontSize: 11, fontWeight: 600, textAlign: "center" }}>
+                          {delta === null ? <span style={{ color: "var(--tx3)" }}>—</span>
+                            : delta > 0 ? <span style={{ color: "var(--grn)" }}>↑{delta}</span>
+                            : delta < 0 ? <span style={{ color: "var(--red)" }}>↓{Math.abs(delta)}</span>
+                            : <span style={{ color: "var(--tx3)" }}>=</span>}
+                        </div>
+
+                        {/* Keyword text */}
+                        <div style={{ flex: 1, fontSize: 13, color: "var(--tx)" }}>{kw.keyword}</div>
+
+                        {/* Last checked */}
+                        {checkedAt && (
+                          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{checkedAt}</div>
+                        )}
+
+                        {/* Actions */}
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button onClick={() => toggleExpand(kw.id)} className="btn btn-ghost"
+                            style={{ fontSize: 11, padding: "3px 8px" }}>
+                            <Ic icon={isExp ? ChevronUp : ChevronDown} size={12} />
+                          </button>
+                          <button onClick={() => handleCheckOne(kw.id)} disabled={isChk} className="btn btn-ghost"
+                            style={{ fontSize: 11, padding: "3px 8px" }} title={t("rankings.checkNow")}>
+                            {isChk ? <span className="loader" style={{ width: 10, height: 10 }} /> : <Ic icon={RefreshCw} size={12} />}
+                          </button>
+                          <button onClick={() => handleDelete(kw.id)} className="btn btn-ghost"
+                            style={{ fontSize: 11, padding: "3px 8px", color: "var(--red)" }} title={t("rankings.remove")}>
+                            <Ic icon={X} size={12} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Expanded history */}
+                      {isExp && (
+                        <div style={{ padding: "12px 0 8px", borderBottom: "1px solid var(--b1)" }}>
+                          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                            {RANK_DAYS.map(d => (
+                              <button key={d} onClick={() => switchDays(d)}
+                                className={`btn ${histDays === d ? "btn-primary" : "btn-ghost"}`}
+                                style={{ fontSize: 11, padding: "3px 10px" }}>
+                                {d === 7 ? t("rankings.week") : t("rankings.month")}
+                              </button>
+                            ))}
+                          </div>
+                          <HistoryBars data={currentHist} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Products / BSR Page ──────────────────────────────────────────────────────
 const ProductsPage = ({ workspaceId }) => {
   const { t: tr } = useI18n();
@@ -4036,8 +4369,8 @@ function CampaignMultiSelect({ selectedIds, onChange }) {
   );
 }
 
-// ─── NegativesTab ─────────────────────────────────────────────────────────────
-function NegativesTab({ workspaceId }) {
+// ─── NegativeKeywordsTab ──────────────────────────────────────────────────────
+function NegativeKeywordsTab({ workspaceId }) {
   const [negatives, setNegatives]   = useState([]);
   const [total, setTotal]           = useState(0);
   const [loading, setLoading]       = useState(true);
@@ -4627,6 +4960,375 @@ function NegativesTab({ workspaceId }) {
   );
 }
 
+// ─── NegativeAsinsTab ─────────────────────────────────────────────────────────
+function NegativeAsinsTab({ workspaceId }) {
+  const [items, setItems]   = useState([]);
+  const [total, setTotal]   = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage]     = useState(1);
+  const PAGE_SIZE = 100;
+
+  const [search, setSearch]         = useState('');
+  const [filterCampaignType, setFilterCampaignType] = useState('');
+  const [sortBy, setSortBy]         = useState('created_at');
+  const [sortDir, setSortDir]       = useState('desc');
+  const [selected, setSelected]     = useState(new Set());
+  const [toast, setToast]           = useState(null);
+
+  // Add single modal
+  const [showAdd, setShowAdd]       = useState(false);
+  const [showBulkAdd, setShowBulkAdd] = useState(false);
+  const [newAsin, setNewAsin]       = useState({ campaignId: '', asin: '' });
+  const [addSaving, setAddSaving]   = useState(false);
+  const [bulkText, setBulkText]     = useState('');
+  const [bulkCampaigns, setBulkCampaigns] = useState([]);
+  const [bulkCampSearch, setBulkCampSearch] = useState('');
+  const [bulkAdding, setBulkAdding] = useState(false);
+
+  const [campaigns, setCampaigns]   = useState([]);
+  useEffect(() => {
+    apiFetch('/campaigns?limit=500')
+      .then(d => setCampaigns(d.data || []))
+      .catch(() => {});
+  }, [workspaceId]);
+
+  const showToast = (msg, ms = 3500) => { setToast(msg); setTimeout(() => setToast(null), ms); };
+
+  const load = useCallback(() => {
+    setLoading(true);
+    const p = new URLSearchParams({ limit: PAGE_SIZE, page, sortBy, sortDir });
+    if (search) p.set('search', search);
+    if (filterCampaignType) p.set('campaignType', filterCampaignType);
+    apiFetch(`/negative-asins?${p}`)
+      .then(d => { setItems(d.data || []); setTotal(d.pagination?.total || 0); setSelected(new Set()); })
+      .catch(() => setItems([]))
+      .finally(() => setLoading(false));
+  }, [search, filterCampaignType, sortBy, sortDir, page, workspaceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleSort = (col) => {
+    if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(col); setSortDir('asc'); }
+  };
+  const SortIcon = ({ col }) => sortBy === col ? <span style={{ marginLeft: 3 }}>{sortDir === 'asc' ? '↑' : '↓'}</span> : null;
+
+  const toggleSelect = (id) => { const s = new Set(selected); s.has(id) ? s.delete(id) : s.add(id); setSelected(s); };
+  const toggleAll = () => selected.size === items.length ? setSelected(new Set()) : setSelected(new Set(items.map(n => n.id)));
+
+  const remove = async (id) => {
+    await apiFetch(`/negative-asins/${id}`, { method: 'DELETE' });
+    setItems(n => n.filter(x => x.id !== id));
+    setTotal(t => t - 1);
+    setSelected(s => { const ns = new Set(s); ns.delete(id); return ns; });
+  };
+
+  const bulkDelete = async () => {
+    if (!selected.size) return;
+    if (!window.confirm(`Delete ${selected.size} negative ASIN(s)?`)) return;
+    const ids = Array.from(selected);
+    await apiFetch('/negative-asins/bulk', { method: 'DELETE', body: JSON.stringify({ ids }) });
+    setItems(n => n.filter(x => !ids.includes(x.id)));
+    setTotal(t => t - ids.length);
+    setSelected(new Set());
+    showToast(`Deleted ${ids.length} negative ASIN(s)`);
+  };
+
+  const addSingle = async () => {
+    if (!newAsin.campaignId || !newAsin.asin.trim()) return;
+    setAddSaving(true);
+    try {
+      await apiFetch('/negative-asins', {
+        method: 'POST',
+        body: JSON.stringify({ campaignId: newAsin.campaignId, asin: newAsin.asin }),
+      });
+      setShowAdd(false);
+      setNewAsin({ campaignId: '', asin: '' });
+      load();
+      showToast('Negative ASIN added');
+    } catch (e) { showToast('Error: ' + e.message); }
+    setAddSaving(false);
+  };
+
+  const submitBulk = async () => {
+    const lines = bulkText.split('\n').map(l => l.trim()).filter(Boolean);
+    if (!lines.length || !bulkCampaigns.length) return;
+    setBulkAdding(true);
+    try {
+      const r = await apiFetch('/negative-asins/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ asins: lines, campaignIds: bulkCampaigns }),
+      });
+      showToast(`Added ${r.added}, skipped ${r.skipped} (duplicates)`);
+      setShowBulkAdd(false);
+      setBulkText(''); setBulkCampaigns([]);
+      load();
+    } catch (e) { showToast('Error: ' + e.message); }
+    setBulkAdding(false);
+  };
+
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+
+  return (
+    <div>
+      {toast && createPortal(
+        <div style={{ position: 'fixed', top: 20, right: 20, zIndex: 9999, background: 'var(--grn)', color: '#fff',
+          padding: '10px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, boxShadow: '0 4px 20px rgba(0,0,0,.3)' }}>
+          {toast}
+        </div>, document.body
+      )}
+
+      {/* Toolbar */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input placeholder="Search ASIN…" value={search}
+          onChange={e => { setSearch(e.target.value); setPage(1); }}
+          style={{ width: 180, padding: '5px 10px', fontSize: 12,
+            background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }} />
+        {[{ v: '', l: 'All' }, { v: 'SP', l: 'SP' }, { v: 'SB', l: 'SB' }, { v: 'SD', l: 'SD' }].map(f => (
+          <button key={f.v} onClick={() => { setFilterCampaignType(f.v); setPage(1); }}
+            className={`btn ${filterCampaignType === f.v ? 'btn-primary' : 'btn-ghost'}`}
+            style={{ fontSize: 11, padding: '4px 8px' }}>{f.l}</button>
+        ))}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={{ color: 'var(--tx3)', fontSize: 12 }}>{total.toLocaleString()} negatives</span>
+          <button onClick={() => setShowBulkAdd(true)} className="btn btn-ghost"
+            style={{ fontSize: 11, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Plus size={12} strokeWidth={1.75} /> Bulk add
+          </button>
+          <button onClick={() => setShowAdd(true)} className="btn btn-primary"
+            style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Plus size={12} strokeWidth={1.75} /> Add ASIN
+          </button>
+        </div>
+      </div>
+
+      {selected.size > 0 && (
+        <div className="card fade" style={{ padding: '10px 16px', marginBottom: 12, display: 'flex', gap: 10,
+          alignItems: 'center', flexWrap: 'wrap', borderColor: 'rgba(59,130,246,.4)', background: 'rgba(59,130,246,.05)' }}>
+          <span style={{ fontSize: 13, color: 'var(--ac2)', fontWeight: 500 }}>{selected.size} selected</span>
+          <button className="btn btn-ghost" onClick={bulkDelete}
+            style={{ fontSize: 12, padding: '5px 12px', color: 'var(--red)', display: 'flex', alignItems: 'center', gap: 5 }}>
+            <Trash2 size={11} strokeWidth={1.75} /> Delete selected
+          </button>
+          <button className="btn btn-ghost" onClick={() => setSelected(new Set())} style={{ fontSize: 12, padding: '5px 10px' }}>Cancel</button>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
+      ) : (
+        <div className="card" style={{ overflow: 'hidden' }}>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: 'var(--s2)' }}>
+                  <th style={{ width: 36, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>
+                    <input type="checkbox"
+                      checked={items.length > 0 && selected.size === items.length}
+                      onChange={toggleAll} />
+                  </th>
+                  {[
+                    { col: 'asin',       label: 'ASIN' },
+                    { col: 'level',      label: 'Level' },
+                    { col: 'campaign',   label: 'Campaign' },
+                    { col: 'created_at', label: 'Added' },
+                  ].map(h => (
+                    <th key={h.col} onClick={() => handleSort(h.col)}
+                      style={{ padding: '8px 12px', textAlign: 'left', cursor: 'pointer',
+                        color: 'var(--tx3)', fontWeight: 500, fontSize: 11, borderBottom: '2px solid var(--b1)',
+                        whiteSpace: 'nowrap' }}>
+                      {h.label}<SortIcon col={h.col} />
+                    </th>
+                  ))}
+                  <th style={{ width: 60, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }} />
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 ? (
+                  <tr><td colSpan={6} style={{ padding: 40, textAlign: 'center', color: 'var(--tx2)' }}>
+                    No negative ASINs
+                  </td></tr>
+                ) : items.map(n => (
+                  <tr key={n.id} style={{
+                    borderBottom: '1px solid var(--b1)',
+                    background: selected.has(n.id) ? 'rgba(59,130,246,0.06)' : 'transparent',
+                  }}>
+                    <td style={{ padding: '8px 12px' }}>
+                      <input type="checkbox" checked={selected.has(n.id)} onChange={() => toggleSelect(n.id)} />
+                    </td>
+                    <td style={{ padding: '8px 12px', fontWeight: 600, fontFamily: 'monospace', fontSize: 13 }}>
+                      {n.asin || '—'}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx3)' }}>
+                      {n.level || 'campaign'}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx2)', maxWidth: 260 }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {n.campaign_name || '—'}
+                      </div>
+                      {n.ad_group_name && (
+                        <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 1 }}>{n.ad_group_name}</div>
+                      )}
+                    </td>
+                    <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--tx3)', whiteSpace: 'nowrap' }}>
+                      {n.created_at ? new Date(n.created_at).toLocaleDateString() : '—'}
+                    </td>
+                    <td style={{ padding: '8px 12px' }}>
+                      <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
+                        <button onClick={() => remove(n.id)} title="Delete"
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--tx3)', padding: 4 }}>
+                          <Trash2 size={13} strokeWidth={1.75} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8,
+              padding: '12px 16px', borderTop: '1px solid var(--b1)' }}>
+              <button className="btn btn-ghost" onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1} style={{ fontSize: 12, padding: '4px 10px' }}>← Prev</button>
+              <span style={{ fontSize: 12, color: 'var(--tx2)' }}>
+                Page {page} of {totalPages} · {total.toLocaleString()} total
+              </span>
+              <button className="btn btn-ghost" onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages} style={{ fontSize: 12, padding: '4px 10px' }}>Next →</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Add single modal */}
+      {showAdd && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 9000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowAdd(false); }}>
+          <div className="card" style={{ width: 420, padding: 28, borderRadius: 12 }}>
+            <h3 style={{ fontFamily: 'var(--disp)', fontSize: 16, fontWeight: 700, marginBottom: 20 }}>Add Negative ASIN</h3>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>ASIN *</div>
+              <input value={newAsin.asin} onChange={e => setNewAsin(n => ({ ...n, asin: e.target.value }))}
+                placeholder="e.g. B00XXXXXXX" autoFocus
+                style={{ width: '100%', padding: '8px 10px', fontSize: 13, boxSizing: 'border-box',
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)',
+                  fontFamily: 'monospace' }} />
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Campaign *</div>
+              <select value={newAsin.campaignId} onChange={e => setNewAsin(n => ({ ...n, campaignId: e.target.value }))}
+                style={{ width: '100%', padding: '7px 10px', fontSize: 12, boxSizing: 'border-box',
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }}>
+                <option value="">Select campaign…</option>
+                {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={() => setShowAdd(false)} style={{ fontSize: 13 }}>Cancel</button>
+              <button className="btn btn-primary" onClick={addSingle}
+                disabled={addSaving || !newAsin.campaignId || !newAsin.asin.trim()}
+                style={{ fontSize: 13, minWidth: 100 }}>{addSaving ? 'Saving…' : 'Add ASIN'}</button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+
+      {/* Bulk add modal */}
+      {showBulkAdd && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 9000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          onClick={e => { if (e.target === e.currentTarget) setShowBulkAdd(false); }}>
+          <div className="card" style={{ width: 540, padding: 28, borderRadius: 12 }}>
+            <h3 style={{ fontFamily: 'var(--disp)', fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Bulk Add Negative ASINs</h3>
+            <p style={{ fontSize: 12, color: 'var(--tx2)', marginBottom: 16 }}>One ASIN per line. Will be added to all selected campaigns.</p>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>ASINs (one per line)</div>
+              <textarea value={bulkText} onChange={e => setBulkText(e.target.value)}
+                rows={7} placeholder={"B00AAAAAAA\nB00BBBBBBB\nB00CCCCCCC"}
+                style={{ width: '100%', padding: '8px 10px', fontSize: 12, boxSizing: 'border-box', resize: 'vertical',
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)',
+                  fontFamily: 'monospace' }} />
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 4 }}>
+                {bulkText.split('\n').filter(l => l.trim()).length} ASINs
+              </div>
+            </div>
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginBottom: 5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Target Campaigns</div>
+              <input placeholder="Search campaigns…" value={bulkCampSearch}
+                onChange={e => setBulkCampSearch(e.target.value)}
+                style={{ width: '100%', padding: '6px 10px', fontSize: 12, boxSizing: 'border-box', marginBottom: 6,
+                  background: 'var(--s2)', border: '1px solid var(--b2)', borderRadius: 6, color: 'var(--tx)' }} />
+              <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--b2)', borderRadius: 6 }}>
+                {campaigns.filter(c => !bulkCampSearch || c.name.toLowerCase().includes(bulkCampSearch.toLowerCase()))
+                  .map(c => (
+                  <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', cursor: 'pointer',
+                    background: bulkCampaigns.includes(c.id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
+                    <input type="checkbox" checked={bulkCampaigns.includes(c.id)}
+                      onChange={() => setBulkCampaigns(ids => ids.includes(c.id) ? ids.filter(x => x !== c.id) : [...ids, c.id])}
+                      style={{ accentColor: 'var(--ac)' }} />
+                    <span style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                    <span style={{ fontSize: 10, color: 'var(--tx3)' }}>
+                      {c.campaign_type === 'sponsoredProducts' ? 'SP' : c.campaign_type === 'sponsoredBrands' ? 'SB' : 'SD'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 4 }}>
+                {bulkCampaigns.length} campaigns selected
+                {bulkCampaigns.length > 0 && (
+                  <button onClick={() => setBulkCampaigns([])}
+                    style={{ marginLeft: 8, background: 'none', border: 'none', color: 'var(--ac)', cursor: 'pointer', fontSize: 11 }}>
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-ghost" onClick={() => setShowBulkAdd(false)} style={{ fontSize: 13 }}>Cancel</button>
+              <button className="btn btn-primary" onClick={submitBulk}
+                disabled={bulkAdding || !bulkText.trim() || !bulkCampaigns.length}
+                style={{ fontSize: 13, minWidth: 120 }}>
+                {bulkAdding ? 'Adding…' : `Add to ${bulkCampaigns.length} campaign(s)`}
+              </button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+    </div>
+  );
+}
+
+// ─── NegativesTab (wrapper with Keywords / ASINs sub-tabs) ────────────────────
+function NegativesTab({ workspaceId }) {
+  const [subTab, setSubTab] = useState('keywords');
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid var(--b1)', paddingBottom: 0 }}>
+        {[
+          { id: 'keywords', label: 'Neg. Keywords' },
+          { id: 'asins',    label: 'Neg. ASINs' },
+        ].map(tab => (
+          <button key={tab.id} onClick={() => setSubTab(tab.id)}
+            style={{
+              padding: '7px 14px', fontSize: 12, fontWeight: subTab === tab.id ? 600 : 400,
+              background: 'none', border: 'none', cursor: 'pointer',
+              color: subTab === tab.id ? 'var(--ac)' : 'var(--tx3)',
+              borderBottom: `2px solid ${subTab === tab.id ? 'var(--ac)' : 'transparent'}`,
+              marginBottom: -1, transition: 'color 150ms, border-color 150ms',
+            }}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {subTab === 'keywords' && <NegativeKeywordsTab workspaceId={workspaceId} />}
+      {subTab === 'asins'    && <NegativeAsinsTab workspaceId={workspaceId} />}
+    </div>
+  );
+}
+
 // ─── RuleHistoryModal ─────────────────────────────────────────────────────────
 function RuleHistoryModal({ rule, onClose }) {
   const [runs, setRuns]     = useState([]);
@@ -4715,6 +5417,7 @@ const KEYWORD_DEFAULT_FILTERS = {
   acosMin: "", acosMax: "",
   clicksMin: "", ordersMin: "",
   noSales: false, hasClicks: false,
+  excludePaused: false, excludeDisabledCampaigns: false,
   metricsDays: 30,
 };
 
@@ -4947,6 +5650,8 @@ const KeywordsPage = ({ workspaceId }) => {
       if (kwFilters.ordersMin)    p.set('ordersMin', kwFilters.ordersMin);
       if (kwFilters.noSales)      p.set('noSales', 'true');
       if (kwFilters.hasClicks)    p.set('hasClicks', 'true');
+      if (kwFilters.excludePaused) p.set('excludePaused', 'true');
+      if (kwFilters.excludeDisabledCampaigns) p.set('excludeDisabledCampaigns', 'true');
       if (kwDateFrom && kwDateTo) {
         p.set('dateFrom', kwDateFrom);
         p.set('dateTo', kwDateTo);
@@ -5499,6 +6204,20 @@ const KeywordsPage = ({ workspaceId }) => {
             className={`btn ${kwFilters.matchType === m.value ? "btn-primary" : "btn-ghost"}`}
             style={{ fontSize: 11, padding: "4px 8px" }}>{m.label}</button>
         ))}
+        <button
+          onClick={() => { setKwFilter("excludePaused", !kwFilters.excludePaused); setPage(1); }}
+          className={`btn ${kwFilters.excludePaused ? "btn-primary" : "btn-ghost"}`}
+          style={{ fontSize: 11, padding: "4px 8px" }}
+          title="Скрыть приостановленные ключи">
+          {t("keywords.excludePaused") || "Без паузы"}
+        </button>
+        <button
+          onClick={() => { setKwFilter("excludeDisabledCampaigns", !kwFilters.excludeDisabledCampaigns); setPage(1); }}
+          className={`btn ${kwFilters.excludeDisabledCampaigns ? "btn-primary" : "btn-ghost"}`}
+          style={{ fontSize: 11, padding: "4px 8px" }}
+          title="Скрыть ключи из отключённых/архивных кампаний">
+          {t("keywords.excludeDisabledCampaigns") || "Активные кампании"}
+        </button>
         <DateRangePicker
           dateFrom={kwDateFrom} dateTo={kwDateTo} metricsDays={kwMetricsDays}
           onChange={({ dateFrom, dateTo, metricsDays }) => {
@@ -5765,8 +6484,9 @@ const ACT_TYPES = [
   { value: "set_bid",        label: "Set Bid",        hasValue: true,  unit: "$" },
   { value: "adjust_budget",  label: "Adjust Budget",  hasValue: true,  unit: "%" },
   { value: "set_budget",     label: "Set Budget",     hasValue: true,  unit: "$" },
-  { value: "pause_campaign",  label: "Pause Campaign",  hasValue: false },
-  { value: "enable_campaign", label: "Enable Campaign", hasValue: false },
+  { value: "pause_campaign",    label: "Pause Campaign",    hasValue: false },
+  { value: "enable_campaign",   label: "Enable Campaign",   hasValue: false },
+  { value: "add_negative_asin", label: "Add Negative ASIN", hasValue: true, unit: "ASIN" },
 ];
 
 function relTime(ts) {
@@ -9588,6 +10308,7 @@ export default function App() {
     campaigns: <CampaignsPage workspaceId={wid} />,
     products: <ProductsPage workspaceId={wid} />,
     keywords: <KeywordsPage workspaceId={wid} />,
+    rankings: <RankTrackerPage workspaceId={wid} />,
     reports: <ReportsPage workspaceId={wid} />,
     analytics: <AnalyticsPage workspaceId={wid} />,
     rules: <RulesPage workspaceId={wid} />,

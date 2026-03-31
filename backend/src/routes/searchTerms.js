@@ -93,11 +93,37 @@ router.get("/", async (req, res, next) => {
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(
         `SELECT stm.*,
+           COALESCE(
+             c1.name,
+             c2.name,
+             stm.campaign_name,
+             kw_c.campaign_name
+           ) AS campaign_name,
            CASE WHEN stm.sales > 0
                 THEN ROUND((stm.spend / stm.sales * 100)::numeric, 2)
                 ELSE NULL
            END AS acos
          FROM search_term_metrics stm
+         LEFT JOIN campaigns c1
+           ON c1.id = stm.campaign_id
+         LEFT JOIN campaigns c2
+           ON c2.amazon_campaign_id = stm.amazon_campaign_id
+          AND c2.workspace_id = stm.workspace_id
+          AND stm.campaign_id IS NULL
+         LEFT JOIN (
+           SELECT k.workspace_id,
+                  LOWER(k.keyword_text) AS kw,
+                  LOWER(k.match_type)   AS mt,
+                  MIN(c.name)           AS campaign_name
+           FROM keywords k
+           JOIN campaigns c ON c.id = k.campaign_id
+           GROUP BY k.workspace_id, LOWER(k.keyword_text), LOWER(k.match_type)
+         ) kw_c
+           ON kw_c.workspace_id = stm.workspace_id
+          AND kw_c.kw = LOWER(stm.keyword_text)
+          AND kw_c.mt = LOWER(stm.match_type)
+          AND stm.campaign_id IS NULL
+          AND stm.keyword_text IS NOT NULL
          WHERE ${where}
          ORDER BY ${orderField} ${orderDir} NULLS LAST
          LIMIT $${pi} OFFSET $${pi + 1}`,

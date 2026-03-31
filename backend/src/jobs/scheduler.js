@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 
@@ -204,7 +204,22 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob];
+  // ─── Keyword rank check: daily at 03:00 UTC ──────────────────────────────────
+  const rankCheckJob = new CronJob("0 3 * * *", async () => {
+    try {
+      const { rows } = await query(
+        `SELECT DISTINCT workspace_id FROM tracked_keywords WHERE is_active = TRUE`
+      );
+      for (const { workspace_id } of rows) {
+        await queueRankCheck(workspace_id);
+      }
+      logger.info("Cron: Rank check queued", { workspaces: rows.length });
+    } catch (err) {
+      logger.error("Cron rank check failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

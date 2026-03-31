@@ -7,12 +7,85 @@
  *
  * Action DSL: { type, value? }
  *   Types: adjust_bid, set_bid, adjust_budget, set_budget, pause_campaign, enable_campaign
+ *
+ * Conflict-prevention layers:
+ *   1. Priority — rules sorted by priority DESC; higher-priority rule claims the entity first.
+ *   2. Within-run lock — once a rule claims entity+category in this execution cycle,
+ *      subsequent lower-priority rules skip that entity+category.
+ *   3. Cross-run cooldown (DB) — after a change is applied, the entity+category is locked
+ *      for a cooldown window based on Amazon's propagation times:
+ *        bid          → 1 h  (bids are auction-instant but data needs time to settle)
+ *        budget       → 2 h  (Amazon propagates in 1-2 h)
+ *        state_change → 2 h  (pause/enable)
  */
 
 const { query } = require("../../db/pool");
 const { put } = require("../amazon/adsClient");
-const { pushKeywordUpdates } = require("../amazon/writeback");
+const { pushKeywordUpdates, pushNegativeAsin } = require("../amazon/writeback");
 const logger = require("../../config/logger");
+
+// ─── Cooldown windows (seconds) ───────────────────────────────────────────────
+const COOLDOWN_SECONDS = {
+  bid:          3600,  // 1 hour
+  budget:       7200,  // 2 hours
+  state_change: 7200,  // 2 hours
+};
+
+// Maps action type → category used for locking
+function getActionCategory(actionType) {
+  switch (actionType) {
+    case "adjust_bid":
+    case "set_bid":
+      return "bid";
+    case "adjust_budget":
+    case "set_budget":
+      return "budget";
+    case "pause_campaign":
+    case "enable_campaign":
+      return "state_change";
+    case "add_negative_asin":
+      return "other"; // Deduplication handled by DB pre-check; no cooldown lock needed
+    default:
+      return "other";
+  }
+}
+
+// ─── Load active cooldowns for a workspace ────────────────────────────────────
+async function loadCooldowns(workspaceId) {
+  const { rows } = await query(
+    `SELECT entity_id, action_category, locked_until, applied_by_rule_name
+     FROM rule_entity_cooldowns
+     WHERE workspace_id = $1 AND locked_until > NOW()`,
+    [workspaceId]
+  );
+  // Map key: `${entityId}:${category}`
+  const map = new Map();
+  for (const row of rows) {
+    map.set(`${row.entity_id}:${row.action_category}`, {
+      lockedUntil: row.locked_until,
+      byRule: row.applied_by_rule_name,
+    });
+  }
+  return map;
+}
+
+// ─── Persist cooldown after applying a change ─────────────────────────────────
+async function setCooldown(workspaceId, entityId, category, ruleId, ruleName) {
+  const seconds = COOLDOWN_SECONDS[category] ?? 3600;
+  await query(
+    `INSERT INTO rule_entity_cooldowns
+       (workspace_id, entity_id, entity_type, action_category, locked_until,
+        applied_by_rule_id, applied_by_rule_name)
+     VALUES ($1, $2, 'campaign', $3, NOW() + ($4 || ' seconds')::interval, $5, $6)
+     ON CONFLICT (workspace_id, entity_id, action_category)
+     DO UPDATE SET
+       locked_until         = EXCLUDED.locked_until,
+       applied_by_rule_id   = EXCLUDED.applied_by_rule_id,
+       applied_by_rule_name = EXCLUDED.applied_by_rule_name,
+       created_at           = NOW()`,
+    [workspaceId, entityId, category, seconds, ruleId, ruleName]
+  );
+}
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 /**
@@ -25,11 +98,12 @@ const logger = require("../../config/logger");
 async function executeRules(workspaceId, specificRuleId = null, options = {}) {
   const { forceDryRun = false, saveExecution = true } = options;
 
-  // a) Load active rules
+  // a) Load active rules — sorted by priority DESC so higher-priority rules claim entities first
   const { rows: rules } = await query(
     `SELECT r.* FROM rules r
      WHERE r.workspace_id = $1 AND r.is_active = true
-     AND ($2::uuid IS NULL OR r.id = $2)`,
+     AND ($2::uuid IS NULL OR r.id = $2)
+     ORDER BY r.priority DESC, r.created_at ASC`,
     [workspaceId, specificRuleId]
   );
 
@@ -37,7 +111,7 @@ async function executeRules(workspaceId, specificRuleId = null, options = {}) {
 
   // b) Fetch entities (campaigns) with 7-day rolling metrics
   const { rows: entities } = await query(
-    `SELECT c.id, c.amazon_campaign_id, c.name, c.state, c.daily_budget,
+    `SELECT c.id, c.workspace_id, c.amazon_campaign_id, c.name, c.state, c.daily_budget,
        c.campaign_type, c.profile_id,
        p.profile_id  AS amazon_profile_id,
        p.marketplace_id,
@@ -58,6 +132,15 @@ async function executeRules(workspaceId, specificRuleId = null, options = {}) {
      GROUP BY c.id, p.profile_id, p.marketplace_id, p.connection_id`,
     [workspaceId]
   );
+
+  // Layer 3: load cross-run cooldowns from DB (skip only in forceDryRun / preview mode)
+  const cooldowns = forceDryRun
+    ? new Map()
+    : await loadCooldowns(workspaceId);
+
+  // Layer 2: within-run lock — tracks entity+category claimed in this cycle
+  // key: `${entityId}:${category}` → { ruleId, ruleName }
+  const claimedThisRun = new Map();
 
   const results = [];
 
@@ -93,6 +176,47 @@ async function executeRules(workspaceId, specificRuleId = null, options = {}) {
       // d/e) Apply actions to matched entities
       for (const entity of matched) {
         for (const action of actArr) {
+          const category = getActionCategory(action.type);
+          const lockKey  = `${entity.id}:${category}`;
+
+          // ── Layer 3: cross-run cooldown check ─────────────────────────────
+          if (!isDryRun) {
+            const cooldown = cooldowns.get(lockKey);
+            if (cooldown) {
+              const remaining = Math.ceil((new Date(cooldown.lockedUntil) - Date.now()) / 60000);
+              logger.info("Rule action skipped — entity on cooldown", {
+                ruleId: rule.id, entityId: entity.id, entityName: entity.name,
+                category, lockedByRule: cooldown.byRule,
+                remainingMinutes: remaining,
+              });
+              summary.push({
+                entityName: entity.name, entityId: entity.id,
+                action: action.type, applied: false,
+                skipped: true,
+                reason: `on cooldown (${remaining}m remaining, set by "${cooldown.byRule}")`,
+              });
+              continue;
+            }
+          }
+
+          // ── Layer 2: within-run conflict check ────────────────────────────
+          if (!isDryRun) {
+            const claim = claimedThisRun.get(lockKey);
+            if (claim) {
+              logger.info("Rule action skipped — entity already claimed this run", {
+                ruleId: rule.id, entityId: entity.id, entityName: entity.name,
+                category, claimedByRule: claim.ruleName,
+              });
+              summary.push({
+                entityName: entity.name, entityId: entity.id,
+                action: action.type, applied: false,
+                skipped: true,
+                reason: `already modified this cycle by higher-priority rule "${claim.ruleName}"`,
+              });
+              continue;
+            }
+          }
+
           try {
             const result = await applyAction(action, entity, safety, isDryRun);
             summary.push({
@@ -103,9 +227,18 @@ async function executeRules(workspaceId, specificRuleId = null, options = {}) {
               newValue:   result.newValue,
               applied:    result.applied,
             });
-            if (result.applied) actionsTaken++;
+            if (result.applied) {
+              actionsTaken++;
 
-            // f) Audit log for each applied change
+              // ── Layer 2: claim entity+category for this run ───────────────
+              claimedThisRun.set(lockKey, { ruleId: rule.id, ruleName: rule.name });
+
+              // ── Layer 3: persist cooldown ─────────────────────────────────
+              await setCooldown(workspaceId, entity.id, category, rule.id, rule.name)
+                .catch(err => logger.warn("Failed to set cooldown", { error: err.message }));
+            }
+
+            // Audit log for each applied change
             if (result.applied && !isDryRun) {
               await query(
                 `INSERT INTO audit_events
@@ -164,11 +297,15 @@ async function executeRules(workspaceId, specificRuleId = null, options = {}) {
 
       const ruleResult = {
         ruleId: rule.id, name: rule.name,
+        priority: rule.priority ?? 50,
         entitiesEvaluated: entities.length,
         matched: matched.length, actionsTaken, actionsFailed, isDryRun, summary,
       };
       results.push(ruleResult);
-      logger.info("Rule executed", { ruleId: rule.id, matched: matched.length, actionsTaken, isDryRun });
+      logger.info("Rule executed", {
+        ruleId: rule.id, priority: rule.priority ?? 50,
+        matched: matched.length, actionsTaken, isDryRun,
+      });
     } catch (e) {
       logger.error("Rule execution failed", { ruleId: rule.id, error: e.message });
 
@@ -305,6 +442,50 @@ async function applyAction(action, entity, safety, isDryRun) {
       break;
     }
 
+    case "add_negative_asin": {
+      const asinValue = String(action.value || "").trim().toUpperCase();
+      if (!asinValue) throw new Error("add_negative_asin: missing ASIN value");
+      oldValue = null;
+      newValue = asinValue;
+
+      if (!isDryRun) {
+        // Pre-check: skip if this ASIN is already negated for this campaign
+        const { rows: existing } = await query(
+          `SELECT id FROM negative_targets WHERE campaign_id = $1 AND expression::text LIKE $2`,
+          [entity.id, `%${asinValue}%`]
+        );
+        if (existing.length > 0) {
+          return { oldValue: null, newValue: asinValue, applied: false };
+        }
+
+        const expression = JSON.stringify([{ type: "asinSameAs", value: asinValue }]);
+        const fakeId = `rule_${entity.id.replace(/-/g, "").slice(0, 8)}_${asinValue}_${Date.now()}`;
+        const { rows: [ins] } = await query(
+          `INSERT INTO negative_targets
+             (workspace_id, profile_id, campaign_id, amazon_neg_target_id,
+              ad_type, expression, expression_type, level)
+           VALUES ($1,$2,$3,$4,'SP',$5,'manual','campaign')
+           ON CONFLICT (profile_id, amazon_neg_target_id) DO NOTHING
+           RETURNING id`,
+          [entity.workspace_id, entity.profile_id, entity.id, fakeId, expression]
+        );
+        if (ins) {
+          pushNegativeAsin({
+            localId: ins.id,
+            connectionId: entity.connection_id,
+            profileId: entity.amazon_profile_id?.toString(),
+            marketplaceId: entity.marketplace_id,
+            campaignType: entity.campaign_type,
+            amazonCampaignId: entity.amazon_campaign_id,
+            amazonAdGroupId: null,
+            asinValue,
+            level: "campaign",
+          }).catch(err => logger.warn("Negative ASIN write-back (rule) failed", { error: err.message }));
+        }
+      }
+      break;
+    }
+
     default:
       throw new Error(`Unknown action type: ${action.type}`);
   }
@@ -337,7 +518,6 @@ async function tryApiUpdate(entity, updateType, newValue) {
       });
     }
     if (updateType === "keyword_bid") {
-      // Load all enabled keywords for this campaign with their Amazon IDs
       const { rows: kws } = await query(
         `SELECT amazon_keyword_id, bid FROM keywords
          WHERE campaign_id = $1 AND state = 'enabled' AND amazon_keyword_id IS NOT NULL`,
