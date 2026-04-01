@@ -72,15 +72,16 @@ const limiter = rateLimit({
 app.use("/api/", limiter);
 
 // Stricter limit for auth endpoints (brute-force protection)
+// 5 attempts per 15 minutes per IP
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,
+  windowMs: 15 * 60 * 1000,
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many attempts. Please try again in 15 minutes." },
+  skipSuccessfulRequests: true, // only count failed attempts
+  message: { error: "Too many failed attempts. Please try again in 15 minutes." },
 });
 app.use("/api/v1/auth/login", authLimiter);
-app.use("/api/v1/auth/register", authLimiter);
 app.use("/api/v1/auth/accept-invite", authLimiter);
 
 // ─── Health check ──────────────────────────────────────────────────────────────

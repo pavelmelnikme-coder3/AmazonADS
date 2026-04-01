@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
@@ -916,6 +916,9 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
   const [msg, setMsg] = useState(null);
   const [region, setRegion] = useState("EU"); // NA, EU, FE
   const [rowState, setRowState] = useState({}); // { [id]: { loading: 'reconnect'|'sync'|null, error: null|string, success: null|'reconnect'|'sync' } }
+  const { colgroup: connColgroup, resizeHandle: connRH } = useResizableColumns(
+    "connect", [200, 80, 100, 140, 140, 130]
+  );
 
   const REGIONS = [
     { value: "NA", label: "🇺🇸 North America", desc: "US, Canada, Mexico" },
@@ -1095,8 +1098,16 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
         <>
           {connections.length > 0 && (
             <div className="card" style={{ marginBottom: 20, overflow: "hidden" }}>
-              <table>
-                <thead><tr><th>{t("connect.colAccount")}</th><th>{t("connect.colProfiles")}</th><th>{t("connect.colStatus")}</th><th>{t("connect.schedule")}</th><th>{t("connect.colUpdated")}</th><th></th></tr></thead>
+              <table className="resizable">
+                {connColgroup}
+                <thead><tr>
+                  <th>{t("connect.colAccount")}{connRH(0)}</th>
+                  <th>{t("connect.colProfiles")}{connRH(1)}</th>
+                  <th>{t("connect.colStatus")}{connRH(2)}</th>
+                  <th>{t("connect.schedule")}{connRH(3)}</th>
+                  <th>{t("connect.colUpdated")}{connRH(4)}</th>
+                  <th>{connRH(5)}</th>
+                </tr></thead>
                 <tbody>
                   {connections.map(c => {
                     const rs = rowState[c.id] || {};
@@ -1394,14 +1405,14 @@ const RankTrackerPage = ({ workspaceId }) => {
 
   const handleAdd = async () => {
     const cleanAsin = newAsin.trim().toUpperCase();
-    const cleanKw   = newKw.trim().toLowerCase();
+    const keywords  = newKw.split("\n").map(k => k.trim().toLowerCase()).filter(k => k.length >= 2);
     if (!cleanAsin || cleanAsin.length !== 10) return setAddError(t("rankings.errorAsin"));
-    if (!cleanKw || cleanKw.length < 2)        return setAddError(t("rankings.errorKeyword"));
+    if (!keywords.length) return setAddError(t("rankings.errorKeyword"));
     setAdding(true); setAddError(null);
     try {
-      await post("/keyword-ranks", { asin: cleanAsin, keyword: cleanKw });
-      setNewAsin(""); setNewKw(""); reload();
-      showToast(t("rankings.added"));
+      await Promise.all(keywords.map(kw => post("/keyword-ranks", { asin: cleanAsin, keyword: kw })));
+      setNewKw(""); reload();
+      showToast(keywords.length > 1 ? `${keywords.length} ${t("rankings.keywordsAdded")}` : t("rankings.added"));
     } catch (e) { setAddError(e.message); }
     finally { setAdding(false); }
   };
@@ -1558,11 +1569,15 @@ const RankTrackerPage = ({ workspaceId }) => {
               style={{ width: 140, fontFamily: "var(--mono)", letterSpacing: ".05em", fontSize: 13 }} />
           </div>
           <div style={{ flex: 1, minWidth: 200 }}>
-            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>{t("rankings.keywordLabel")}</div>
-            <input value={newKw} onChange={e => setNewKw(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && handleAdd()}
-              placeholder={t("rankings.keywordPlaceholder")}
-              style={{ width: "100%", fontSize: 13 }} />
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>
+              {t("rankings.keywordLabel")}
+              <span style={{ color: "var(--tx3)", marginLeft: 6 }}>({t("rankings.keywordHint")})</span>
+            </div>
+            <textarea value={newKw} onChange={e => setNewKw(e.target.value)}
+              placeholder={t("rankings.keywordPlaceholderMulti")}
+              rows={3}
+              style={{ width: "100%", fontSize: 13, resize: "vertical", minHeight: 64,
+                fontFamily: "var(--ui)", lineHeight: 1.6 }} />
           </div>
           <button onClick={handleAdd} disabled={adding} className="btn btn-primary"
             style={{ fontSize: 12, padding: "6px 16px", alignSelf: "flex-end" }}>
@@ -1683,13 +1698,50 @@ const ProductsPage = ({ workspaceId }) => {
   const [history, setHistory] = useState({});
   const [error, setError] = useState(null);
   const [tick, setTick] = useState(0);
+  const [search, setSearch] = useState("");
+  const [filterBrand, setFilterBrand] = useState("all");
+  const [sortBy, setSortBy] = useState("bsr");
 
-  const { data: products, loading } = useAsync(
+  const { data: products, loading, mutate } = useAsync(
     () => workspaceId ? get("/products") : Promise.resolve([]),
     [workspaceId, tick]
   );
 
   const reload = () => setTick(t => t + 1);
+
+  const brands = useMemo(() => {
+    const b = new Set((products || []).map(p => p.brand).filter(Boolean));
+    return [...b].sort();
+  }, [products]);
+
+  const filteredProducts = useMemo(() => {
+    let list = products || [];
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(p =>
+        p.asin.toLowerCase().includes(q) ||
+        (p.title || "").toLowerCase().includes(q) ||
+        (p.brand || "").toLowerCase().includes(q)
+      );
+    }
+    if (filterBrand !== "all") {
+      list = list.filter(p => p.brand === filterBrand);
+    }
+    list = [...list].sort((a, b) => {
+      if (sortBy === "bsr") {
+        const ra = [...(a.classification_ranks||[]),...(a.display_group_ranks||[])];
+        const rb = [...(b.classification_ranks||[]),...(b.display_group_ranks||[])];
+        const ar = ra.length ? Math.min(...ra.map(r => r.rank)) : Infinity;
+        const br = rb.length ? Math.min(...rb.map(r => r.rank)) : Infinity;
+        return ar - br;
+      }
+      if (sortBy === "asin") return a.asin.localeCompare(b.asin);
+      if (sortBy === "updated") return new Date(b.bsr_updated_at || 0) - new Date(a.bsr_updated_at || 0);
+      if (sortBy === "title") return (a.title || "").localeCompare(b.title || "");
+      return 0;
+    });
+    return list;
+  }, [products, search, filterBrand, sortBy]);
 
   const handleAdd = async () => {
     if (!newAsin.trim()) return;
@@ -1706,8 +1758,18 @@ const ProductsPage = ({ workspaceId }) => {
   const handleRefresh = async (id) => {
     setRefreshingId(id); setError(null);
     try {
-      await post(`/products/${id}/refresh`);
-      reload();
+      const { product, snapshot } = await post(`/products/${id}/refresh`);
+      mutate(list => (list || []).map(p => p.id === id ? {
+        ...p,
+        title: product.title ?? p.title,
+        brand: product.brand ?? p.brand,
+        image_url: product.image_url ?? p.image_url,
+        best_rank: snapshot?.best_rank ?? p.best_rank,
+        best_category: snapshot?.best_category ?? p.best_category,
+        classification_ranks: snapshot?.classification_ranks ?? p.classification_ranks,
+        display_group_ranks: snapshot?.display_group_ranks ?? p.display_group_ranks,
+        bsr_updated_at: snapshot?.captured_at ?? p.bsr_updated_at,
+      } : p));
     } catch (e) {
       setError(e.message);
     } finally { setRefreshingId(null); }
@@ -1726,7 +1788,7 @@ const ProductsPage = ({ workspaceId }) => {
 
   const handleDelete = async (id) => {
     await del(`/products/${id}`);
-    reload();
+    mutate(list => (list || []).filter(p => p.id !== id));
   };
 
   return (
@@ -1774,6 +1836,56 @@ const ProductsPage = ({ workspaceId }) => {
         </div>
       )}
 
+      {!loading && products?.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ position: "relative", flex: "1 1 200px" }}>
+            <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search ASIN, title, brand…"
+              style={{
+                width: "100%", boxSizing: "border-box",
+                padding: "6px 12px 6px 30px", borderRadius: 7, fontSize: 12,
+                background: "var(--s2)", border: "1px solid var(--b2)",
+                color: "var(--tx)", outline: "none",
+              }}
+            />
+            {search && (
+              <button onClick={() => setSearch("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", padding: 0, color: "var(--tx3)" }}>
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {brands.length > 1 && (
+            <select
+              value={filterBrand}
+              onChange={e => setFilterBrand(e.target.value)}
+              style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", cursor: "pointer" }}
+            >
+              <option value="all">All brands ({brands.length})</option>
+              {brands.map(b => <option key={b} value={b}>{b}</option>)}
+            </select>
+          )}
+
+          <select
+            value={sortBy}
+            onChange={e => setSortBy(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", cursor: "pointer" }}
+          >
+            <option value="bsr">Sort: BSR rank</option>
+            <option value="title">Sort: Title</option>
+            <option value="asin">Sort: ASIN</option>
+            <option value="updated">Sort: Last updated</option>
+          </select>
+
+          <span style={{ fontSize: 12, color: "var(--tx3)", whiteSpace: "nowrap" }}>
+            {filteredProducts.length}{filteredProducts.length !== products.length ? ` / ${products.length}` : ""} products
+          </span>
+        </div>
+      )}
+
       {loading ? (
         <div style={{ color: "var(--tx3)", fontSize: 13 }}>Loading…</div>
       ) : (!products?.length) ? (
@@ -1802,9 +1914,16 @@ const ProductsPage = ({ workspaceId }) => {
             Enter a 10-character ASIN (e.g. B09XXXXX) in the field above
           </p>
         </div>
+      ) : filteredProducts.length === 0 ? (
+        <div className="card" style={{ padding: "32px 24px", textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: "var(--tx3)" }}>No products match your filter</div>
+          <button onClick={() => { setSearch(""); setFilterBrand("all"); }} style={{ marginTop: 10, fontSize: 12, color: "var(--ac2)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
+            Clear filters
+          </button>
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {products.map(p => {
+          {filteredProducts.map(p => {
             const allRanks = [
               ...(p.classification_ranks || []),
               ...(p.display_group_ranks || []),
@@ -4406,6 +4525,9 @@ function NegativeKeywordsTab({ workspaceId }) {
   const [bulkAddCampSearch, setBulkAddCampSearch] = useState('');
   const [bulkAdding, setBulkAdding]       = useState(false);
   const [toast, setToast]                 = useState(null);
+  const { colgroup: negKwColgroup, resizeHandle: negKwRH } = useResizableColumns(
+    "neg-keywords", [36, 200, 90, 80, 220, 110, 80]
+  );
 
   // Add single form
   const [newKw, setNewKw] = useState({ campaignId: '', adGroupId: '', keywordText: '', matchType: 'negativeExact' });
@@ -4649,29 +4771,30 @@ function NegativeKeywordsTab({ workspaceId }) {
       ) : (
         <div className="card" style={{ overflow: 'hidden' }}>
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <table className="resizable" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              {negKwColgroup}
               <thead>
                 <tr style={{ background: 'var(--s2)' }}>
-                  <th style={{ width: 36, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>
+                  <th style={{ padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>
                     <input type="checkbox"
                       checked={negatives.length > 0 && selected.size === negatives.length}
                       onChange={toggleAll} />
                   </th>
                   {[
-                    { col: 'keyword_text', label: 'Keyword' },
-                    { col: 'match_type',   label: 'Type' },
-                    { col: 'level',        label: 'Level' },
-                    { col: 'campaign',     label: 'Campaign / Ad Group' },
-                    { col: 'created_at',   label: 'Added' },
+                    { col: 'keyword_text', label: 'Keyword',            rhIdx: 1 },
+                    { col: 'match_type',   label: 'Type',               rhIdx: 2 },
+                    { col: 'level',        label: 'Level',              rhIdx: 3 },
+                    { col: 'campaign',     label: 'Campaign / Ad Group', rhIdx: 4 },
+                    { col: 'created_at',   label: 'Added',              rhIdx: 5 },
                   ].map(h => (
                     <th key={h.col} onClick={() => handleSort(h.col)}
                       style={{ padding: '8px 12px', textAlign: 'left', cursor: 'pointer',
                         color: 'var(--tx3)', fontWeight: 500, fontSize: 11, borderBottom: '2px solid var(--b1)',
                         whiteSpace: 'nowrap' }}>
-                      {h.label}<SortIcon col={h.col} />
+                      {h.label}<SortIcon col={h.col} />{negKwRH(h.rhIdx)}
                     </th>
                   ))}
-                  <th style={{ width: 80, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }} />
+                  <th style={{ padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>{negKwRH(6)}</th>
                 </tr>
               </thead>
               <tbody>
@@ -4688,7 +4811,7 @@ function NegativeKeywordsTab({ workspaceId }) {
                       <input type="checkbox" checked={selected.has(n.id)} onChange={() => toggleSelect(n.id)} />
                     </td>
                     {/* Keyword text — inline edit */}
-                    <td style={{ padding: '8px 12px', fontWeight: 500, minWidth: 180 }}>
+                    <td style={{ padding: '8px 12px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {editId === n.id ? (
                         <input autoFocus value={editText} onChange={e => setEditText(e.target.value)}
                           onKeyDown={e => { if (e.key === 'Enter') saveEdit(); if (e.key === 'Escape') cancelEdit(); }}
@@ -4721,7 +4844,7 @@ function NegativeKeywordsTab({ workspaceId }) {
                     <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx3)' }}>
                       {n.level || 'ad_group'}
                     </td>
-                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx2)', maxWidth: 260 }}>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx2)', overflow: 'hidden' }}>
                       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {n.campaign_name || '—'}
                       </div>
@@ -4984,6 +5107,9 @@ function NegativeAsinsTab({ workspaceId }) {
   const [bulkCampaigns, setBulkCampaigns] = useState([]);
   const [bulkCampSearch, setBulkCampSearch] = useState('');
   const [bulkAdding, setBulkAdding] = useState(false);
+  const { colgroup: negAsinColgroup, resizeHandle: negAsinRH } = useResizableColumns(
+    "neg-asins", [36, 120, 80, 260, 110, 60]
+  );
 
   const [campaigns, setCampaigns]   = useState([]);
   useEffect(() => {
@@ -5119,28 +5245,29 @@ function NegativeAsinsTab({ workspaceId }) {
       ) : (
         <div className="card" style={{ overflow: 'hidden' }}>
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <table className="resizable" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              {negAsinColgroup}
               <thead>
                 <tr style={{ background: 'var(--s2)' }}>
-                  <th style={{ width: 36, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>
+                  <th style={{ padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>
                     <input type="checkbox"
                       checked={items.length > 0 && selected.size === items.length}
                       onChange={toggleAll} />
                   </th>
                   {[
-                    { col: 'asin',       label: 'ASIN' },
-                    { col: 'level',      label: 'Level' },
-                    { col: 'campaign',   label: 'Campaign' },
-                    { col: 'created_at', label: 'Added' },
+                    { col: 'asin',       label: 'ASIN',     rhIdx: 1 },
+                    { col: 'level',      label: 'Level',    rhIdx: 2 },
+                    { col: 'campaign',   label: 'Campaign', rhIdx: 3 },
+                    { col: 'created_at', label: 'Added',    rhIdx: 4 },
                   ].map(h => (
                     <th key={h.col} onClick={() => handleSort(h.col)}
                       style={{ padding: '8px 12px', textAlign: 'left', cursor: 'pointer',
                         color: 'var(--tx3)', fontWeight: 500, fontSize: 11, borderBottom: '2px solid var(--b1)',
                         whiteSpace: 'nowrap' }}>
-                      {h.label}<SortIcon col={h.col} />
+                      {h.label}<SortIcon col={h.col} />{negAsinRH(h.rhIdx)}
                     </th>
                   ))}
-                  <th style={{ width: 60, padding: '8px 12px', borderBottom: '2px solid var(--b1)' }} />
+                  <th style={{ padding: '8px 12px', borderBottom: '2px solid var(--b1)' }}>{negAsinRH(5)}</th>
                 </tr>
               </thead>
               <tbody>
@@ -5162,7 +5289,7 @@ function NegativeAsinsTab({ workspaceId }) {
                     <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx3)' }}>
                       {n.level || 'campaign'}
                     </td>
-                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx2)', maxWidth: 260 }}>
+                    <td style={{ padding: '8px 12px', fontSize: 12, color: 'var(--tx2)', overflow: 'hidden' }}>
                       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {n.campaign_name || '—'}
                       </div>
@@ -5417,7 +5544,7 @@ const KEYWORD_DEFAULT_FILTERS = {
   acosMin: "", acosMax: "",
   clicksMin: "", ordersMin: "",
   noSales: false, hasClicks: false,
-  excludePaused: false, excludeDisabledCampaigns: false,
+  excludePaused: false, excludeDisabledCampaigns: false, campaignState: "",
   metricsDays: 30,
 };
 
@@ -5442,7 +5569,8 @@ const KeywordsPage = ({ workspaceId }) => {
   const [hoveredKwId, setHoveredKwId] = useState(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
-  const [kwTab, setKwTab] = useState('keywords'); // 'keywords' | 'searchterms' | 'negatives'
+  const [kwTab, setKwTab] = useState(() => localStorage.getItem("af_kw_tab") || 'keywords'); // 'keywords' | 'searchterms' | 'negatives'
+  const kwScrollRestoredRef = useRef(false);
 
   // Keywords date range + campaign filter
   const [kwDateFrom, setKwDateFrom]     = useState(null);
@@ -5472,6 +5600,9 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stHarvestSelCampaign, setStHarvestSelCampaign] = useState('');
   const [stHarvestSelAdGroup, setStHarvestSelAdGroup] = useState('');
   const [stHarvestMatchType, setStHarvestMatchType] = useState('exact');
+  const { colgroup: stColgroup, resizeHandle: stRH } = useResizableColumns(
+    "searchterms", [36, 220, 200, 70, 65, 65, 80, 70, 100, 160]
+  );
   const [stHarvestBid, setStHarvestBid] = useState('0.50');
   const [stHarvestCampaignSearch, setStHarvestCampaignSearch] = useState('');
   const [stHarvestSaving, setStHarvestSaving] = useState(false);
@@ -5652,6 +5783,7 @@ const KeywordsPage = ({ workspaceId }) => {
       if (kwFilters.hasClicks)    p.set('hasClicks', 'true');
       if (kwFilters.excludePaused) p.set('excludePaused', 'true');
       if (kwFilters.excludeDisabledCampaigns) p.set('excludeDisabledCampaigns', 'true');
+      if (kwFilters.campaignState) p.set('campaignState', kwFilters.campaignState);
       if (kwDateFrom && kwDateTo) {
         p.set('dateFrom', kwDateFrom);
         p.set('dateTo', kwDateTo);
@@ -5667,6 +5799,39 @@ const KeywordsPage = ({ workspaceId }) => {
   const keywords = kwResponse?.data ?? [];
   const kwTotal = kwResponse?.pagination?.total ?? 0;
   const totalPages = kwResponse?.pagination?.pages ?? 1;
+
+  // Persist tab across reloads
+  useEffect(() => { localStorage.setItem("af_kw_tab", kwTab); }, [kwTab]);
+
+  // Continuously save scroll position via scroll event (most reliable)
+  useEffect(() => {
+    const el = document.querySelector('main');
+    if (!el) return;
+    const save = () => sessionStorage.setItem('af_kw_scroll_' + kwTab, String(Math.round(el.scrollTop)));
+    el.addEventListener('scroll', save, { passive: true });
+    return () => el.removeEventListener('scroll', save);
+  }, [kwTab]);
+
+  // Restore scroll after data is ready — use setTimeout to let React finish rendering rows
+  useEffect(() => { kwScrollRestoredRef.current = false; }, [kwTab]);
+  useEffect(() => {
+    if (kwScrollRestoredRef.current) return;
+    if (kwTab === 'keywords' && loading) return;
+    if (kwTab === 'searchterms' && stLoading) return;
+    kwScrollRestoredRef.current = true;
+    const saved = parseInt(sessionStorage.getItem('af_kw_scroll_' + kwTab) || '0', 10);
+    if (saved > 0) {
+      // Two-step: first RAF to let React commit DOM, then a short timeout for layout
+      requestAnimationFrame(() => {
+        const el = document.querySelector('main');
+        if (el) {
+          el.scrollTop = saved;
+          // Retry once after layout in case content wasn't fully measured yet
+          setTimeout(() => { el.scrollTop = saved; }, 150);
+        }
+      });
+    }
+  }, [loading, stLoading, kwTab]);
 
   function toggleSelect(id) {
     const s = new Set(selected);
@@ -5763,7 +5928,11 @@ const KeywordsPage = ({ workspaceId }) => {
           { id: 'searchterms', label: "Search Terms" },
           { id: 'negatives',   label: "Negatives" },
         ].map(tab => (
-          <button key={tab.id} onClick={() => setKwTab(tab.id)}
+          <button key={tab.id} onClick={() => {
+              const el = document.querySelector('main');
+              if (el) sessionStorage.setItem('af_kw_scroll_' + kwTab, String(Math.round(el.scrollTop)));
+              setKwTab(tab.id);
+            }}
             style={{
               padding: "8px 16px", fontSize: 13, fontWeight: kwTab === tab.id ? 600 : 400,
               background: "none", border: "none", cursor: "pointer",
@@ -6026,7 +6195,8 @@ const KeywordsPage = ({ workspaceId }) => {
           ) : (
             <div className="card" style={{ overflow: "hidden" }}>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <table className="resizable" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  {stColgroup}
                   <thead>
                     <tr>
                       <th style={{ width: 36, padding: "8px 10px", background: "var(--s2)", borderBottom: "2px solid var(--b1)" }}>
@@ -6038,15 +6208,15 @@ const KeywordsPage = ({ workspaceId }) => {
                         />
                       </th>
                       {[
-                        { col: "query",       label: "Query",      align: "left",   width: 220 },
-                        { col: "campaign",    label: "Campaign",   align: "left",   width: 150, noSort: true },
-                        { col: "impressions", label: "Impr.",      align: "right",  width: 70 },
-                        { col: "clicks",      label: "Clicks",     align: "right",  width: 65 },
-                        { col: "orders",      label: "Orders",     align: "right",  width: 65 },
-                        { col: "spend",       label: "Spend",      align: "right",  width: 80 },
-                        { col: "acos",        label: "ACOS",       align: "right",  width: 70, noSort: true },
-                        { col: "rec",         label: "Suggestion", align: "center", width: 100, noSort: true },
-                        { col: "actions",     label: "",           align: "center", width: 160, noSort: true },
+                        { col: "query",       label: "Query",      align: "left",   rhIdx: 1 },
+                        { col: "campaign",    label: "Campaign",   align: "left",   rhIdx: 2, noSort: true },
+                        { col: "impressions", label: "Impr.",      align: "right",  rhIdx: 3 },
+                        { col: "clicks",      label: "Clicks",     align: "right",  rhIdx: 4 },
+                        { col: "orders",      label: "Orders",     align: "right",  rhIdx: 5 },
+                        { col: "spend",       label: "Spend",      align: "right",  rhIdx: 6 },
+                        { col: "acos",        label: "ACOS",       align: "right",  rhIdx: 7, noSort: true },
+                        { col: "rec",         label: "Suggestion", align: "center", rhIdx: 8, noSort: true },
+                        { col: "actions",     label: "",           align: "center", rhIdx: 9, noSort: true },
                       ].map(h => (
                         <th key={h.col}
                           onClick={!h.noSort ? () => {
@@ -6058,13 +6228,14 @@ const KeywordsPage = ({ workspaceId }) => {
                             color: "var(--tx3)", fontWeight: 500, fontSize: 11,
                             borderBottom: "2px solid var(--b1)",
                             cursor: h.noSort ? "default" : "pointer",
-                            whiteSpace: "nowrap", width: h.width,
+                            whiteSpace: "nowrap",
                             background: "var(--s2)",
                           }}>
                           {h.label}
                           {!h.noSort && stSortCol === h.col && (
                             <span style={{ marginLeft: 4 }}>{stSortDir === "asc" ? "↑" : "↓"}</span>
                           )}
+                          {stRH(h.rhIdx)}
                         </th>
                       ))}
                     </tr>
@@ -6096,9 +6267,9 @@ const KeywordsPage = ({ workspaceId }) => {
                                 setStSelected(s);
                               }} />
                           </td>
-                          <td style={{ padding: "7px 10px", fontWeight: 500 }}>
+                          <td style={{ padding: "7px 10px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             <span title={term.query} style={{
-                              display: "block", maxWidth: 210,
+                              display: "block",
                               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                             }}>{term.query}</span>
                             {term.match_type && (
@@ -6108,7 +6279,7 @@ const KeywordsPage = ({ workspaceId }) => {
                             )}
                           </td>
                           <td style={{ padding: "7px 10px", fontSize: 11, color: "var(--tx2)",
-                            maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                             title={term.campaign_name}>
                             {term.campaign_name || "—"}
                           </td>
@@ -6181,43 +6352,59 @@ const KeywordsPage = ({ workspaceId }) => {
       )}
 
       {kwTab === 'keywords' && <>
-      <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+      {/* ── Row 1: Identity filters + toolbar actions (never wraps) ── */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 6, alignItems: "center" }}>
         <input placeholder={t("keywords.searchPlaceholder")} value={kwFilters.search}
-          onChange={e => { setKwFilter("search", e.target.value); setPage(1); }} style={{ width: 200 }} data-search-input />
-        {[
-          { value: "", label: t("filter.all") },
-          { value: "enabled",  label: t("common.statusEnabled") },
-          { value: "paused",   label: t("common.statusPaused") },
-          { value: "archived", label: t("common.statusArchived") },
-        ].map(s => (
-          <button key={s.value} onClick={() => { setKwFilter("state", s.value); setPage(1); }}
-            className={`btn ${kwFilters.state === s.value ? "btn-primary" : "btn-ghost"}`}
-            style={{ fontSize: 11, padding: "4px 8px" }}>{s.label}</button>
-        ))}
-        {[
-          { value: "", label: t("keywords.matchAll") },
-          { value: "exact",  label: t("keywords.matchExact") },
-          { value: "phrase", label: t("keywords.matchPhrase") },
-          { value: "broad",  label: t("keywords.matchBroad") },
-        ].map(m => (
-          <button key={m.value} onClick={() => { setKwFilter("matchType", m.value); setPage(1); }}
-            className={`btn ${kwFilters.matchType === m.value ? "btn-primary" : "btn-ghost"}`}
-            style={{ fontSize: 11, padding: "4px 8px" }}>{m.label}</button>
-        ))}
-        <button
-          onClick={() => { setKwFilter("excludePaused", !kwFilters.excludePaused); setPage(1); }}
-          className={`btn ${kwFilters.excludePaused ? "btn-primary" : "btn-ghost"}`}
-          style={{ fontSize: 11, padding: "4px 8px" }}
-          title="Скрыть приостановленные ключи">
-          {t("keywords.excludePaused") || "Без паузы"}
+          onChange={e => { setKwFilter("search", e.target.value); setPage(1); }}
+          style={{ width: 180, flexShrink: 0, padding: "6px 10px", fontSize: 12,
+            background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)" }}
+          data-search-input />
+
+        <select value={kwFilters.state} onChange={e => { setKwFilter("state", e.target.value); setPage(1); }}
+          style={{ flexShrink: 0, fontSize: 12, padding: "5px 8px", background: "var(--s2)",
+            border: `1px solid ${kwFilters.state ? "var(--ac)" : "var(--b2)"}`,
+            borderRadius: 6, color: "var(--tx)", cursor: "pointer", fontWeight: kwFilters.state ? 600 : 400 }}>
+          <option value="">Все статусы</option>
+          <option value="enabled">{t("common.statusEnabled")}</option>
+          <option value="paused">{t("common.statusPaused")}</option>
+          <option value="archived">{t("common.statusArchived")}</option>
+        </select>
+
+        <select value={kwFilters.matchType} onChange={e => { setKwFilter("matchType", e.target.value); setPage(1); }}
+          style={{ flexShrink: 0, fontSize: 12, padding: "5px 8px", background: "var(--s2)",
+            border: `1px solid ${kwFilters.matchType ? "var(--ac)" : "var(--b2)"}`,
+            borderRadius: 6, color: "var(--tx)", cursor: "pointer", fontWeight: kwFilters.matchType ? 600 : 400 }}>
+          <option value="">Все типы</option>
+          <option value="exact">{t("keywords.matchExact")}</option>
+          <option value="phrase">{t("keywords.matchPhrase")}</option>
+          <option value="broad">{t("keywords.matchBroad")}</option>
+        </select>
+
+        <select value={kwFilters.campaignState} onChange={e => { setKwFilter("campaignState", e.target.value); setPage(1); }}
+          style={{ flexShrink: 0, fontSize: 12, padding: "5px 8px", background: "var(--s2)",
+            border: `1px solid ${kwFilters.campaignState ? "var(--ac)" : "var(--b2)"}`,
+            borderRadius: 6, color: "var(--tx)", cursor: "pointer", fontWeight: kwFilters.campaignState ? 600 : 400 }}>
+          <option value="">Статус кампании</option>
+          <option value="enabled">Кампания активна</option>
+          <option value="paused">Кампания на паузе</option>
+          <option value="archived">Кампания в архиве</option>
+        </select>
+
+        {/* Spacer pushes toolbar actions to the right */}
+        <div style={{ flex: 1 }} />
+
+        <button className="btn btn-ghost" style={{ fontSize: 12, flexShrink: 0 }} data-refresh-btn onClick={reload}>
+          <Ic icon={RefreshCw} size={13} /> {t("common.refresh")}
         </button>
-        <button
-          onClick={() => { setKwFilter("excludeDisabledCampaigns", !kwFilters.excludeDisabledCampaigns); setPage(1); }}
-          className={`btn ${kwFilters.excludeDisabledCampaigns ? "btn-primary" : "btn-ghost"}`}
-          style={{ fontSize: 11, padding: "4px 8px" }}
-          title="Скрыть ключи из отключённых/архивных кампаний">
-          {t("keywords.excludeDisabledCampaigns") || "Активные кампании"}
+        {lastSync && <span className="last-sync-label" style={{ flexShrink: 0 }}>· {fmtLastSync(lastSync)}</span>}
+        {KwColsBtn}
+        <button className="btn btn-ghost" style={{ fontSize: 12, flexShrink: 0 }} onClick={kwResetCols} title="Reset column widths">
+          <Ic icon={Minus} size={13} />
         </button>
+      </div>
+
+      {/* ── Row 2: Scope / time filters + quick toggles ── */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
         <DateRangePicker
           dateFrom={kwDateFrom} dateTo={kwDateTo} metricsDays={kwMetricsDays}
           onChange={({ dateFrom, dateTo, metricsDays }) => {
@@ -6227,33 +6414,48 @@ const KeywordsPage = ({ workspaceId }) => {
             setPage(1);
           }}
         />
-        <CampaignMultiSelect
-          selectedIds={kwCampaignIds}
-          onChange={(ids) => { setKwCampaignIds(ids); setPage(1); }}
-        />
+        <CampaignMultiSelect selectedIds={kwCampaignIds} onChange={(ids) => { setKwCampaignIds(ids); setPage(1); }} />
+
+        <div style={{ width: 1, height: 20, background: "var(--b2)", flexShrink: 0 }} />
+
         <button onClick={() => setShowKwFilters(true)}
           className={`btn ${kwActiveCount > 0 ? "btn-primary" : "btn-ghost"}`}
-          style={{ fontSize: 12, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}>
-          <Ic icon={Filter} size={13} /> {t("filter.filters")}
+          style={{ fontSize: 12, padding: "5px 10px", display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+          <Ic icon={Filter} size={12} /> {t("filter.filters")}
           {kwActiveCount > 0 && (
-            <span style={{ background: "var(--red)", color: "#fff", borderRadius: 8,
-              fontSize: 9, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>{kwActiveCount}</span>
+            <span style={{ background: "var(--red)", color: "#fff", borderRadius: 8, fontSize: 9, padding: "1px 5px", minWidth: 14, textAlign: "center" }}>{kwActiveCount}</span>
           )}
         </button>
-        {kwActiveCount > 0 && (
-          <button onClick={() => { resetKwFilters(); setPage(1); }} className="btn btn-ghost"
-            style={{ fontSize: 11, padding: "4px 10px", color: "var(--tx3)" }}><X size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> {t("filter.reset")}</button>
+
+        {/* Quick-toggle chips */}
+        {[
+          { key: "excludePaused",            label: t("keywords.excludePaused") || "Скрыть паузу" },
+          { key: "excludeDisabledCampaigns", label: t("keywords.excludeDisabledCampaigns") || "Акт. кампании" },
+        ].map(({ key, label }) => (
+          <button key={key} onClick={() => { setKwFilter(key, !kwFilters[key]); setPage(1); }}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11,
+              padding: "4px 10px 4px 8px", borderRadius: 6, cursor: "pointer", transition: "all 150ms", flexShrink: 0,
+              background: kwFilters[key] ? "rgba(59,130,246,.12)" : "transparent",
+              color: kwFilters[key] ? "var(--ac2)" : "var(--tx3)",
+              border: `1px solid ${kwFilters[key] ? "rgba(59,130,246,.35)" : "var(--b2)"}`,
+              fontWeight: kwFilters[key] ? 600 : 400,
+            }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+              background: kwFilters[key] ? "var(--ac)" : "var(--b2)", transition: "background 150ms" }} />
+            {label}
+          </button>
+        ))}
+
+        {/* Reset — only when something is active */}
+        {(kwActiveCount > 0 || kwFilters.state || kwFilters.matchType || kwFilters.campaignState ||
+          kwFilters.excludePaused || kwFilters.excludeDisabledCampaigns || kwCampaignIds.length > 0) && (
+          <button onClick={() => { resetKwFilters(); setKwCampaignIds([]); setPage(1); }}
+            className="btn btn-ghost"
+            style={{ fontSize: 11, padding: "4px 8px", color: "var(--tx3)", display: "flex", alignItems: "center", gap: 3 }}>
+            <X size={11} strokeWidth={1.75} /> {t("filter.reset")}
+          </button>
         )}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} data-refresh-btn onClick={reload}><Ic icon={RefreshCw} size={13} /> {t("common.refresh")}</button>
-          {lastSync && (
-            <span className="last-sync-label" style={{ marginLeft: 2 }}>
-              · {fmtLastSync(lastSync)}
-            </span>
-          )}
-          {KwColsBtn}
-          <button className="btn btn-ghost" style={{ fontSize: 12 }} onClick={kwResetCols} title="Reset column widths"><Ic icon={Minus} size={13} /></button>
-        </div>
       </div>
 
       {selected.size > 0 && (
@@ -6532,6 +6734,9 @@ const AnalyticsPage = ({ workspaceId }) => {
   const [editRow, setEditRow] = useState(null);
   const [saveMsg, setSaveMsg] = useState(null);
   const [tick, setTick] = useState(0);
+  const { colgroup: prodColgroup, resizeHandle: prodRH } = useResizableColumns(
+    "products-config", [100, 80, 70, 140, 80, 80, 65, 55, 85, 80, 55]
+  );
 
   const endDate   = rangeMode !== "custom" ? new Date().toISOString().split("T")[0] : customEnd;
   const startDate = rangeMode !== "custom"
@@ -6695,19 +6900,20 @@ const AnalyticsPage = ({ workspaceId }) => {
         {showConfig && (
           <>
             <div style={{ overflowX:"auto" }}>
-              <table style={{ minWidth:900 }}>
+              <table className="resizable">
+                {prodColgroup}
                 <thead><tr>
-                  <th>ASIN</th>
-                  <th>SKU</th>
-                  <th style={{ textAlign:"center" }}>Label</th>
-                  <th>Name</th>
-                  <th style={{ textAlign:"right" }}>COGS/unit</th>
-                  <th style={{ textAlign:"right" }}>Ship/unit</th>
-                  <th style={{ textAlign:"right" }}>Amz fee</th>
-                  <th style={{ textAlign:"right" }}>VAT</th>
-                  <th style={{ textAlign:"right" }}>Google€/wk</th>
-                  <th style={{ textAlign:"right" }}>FB€/wk</th>
-                  <th></th>
+                  <th>ASIN{prodRH(0)}</th>
+                  <th>SKU{prodRH(1)}</th>
+                  <th style={{ textAlign:"center" }}>Label{prodRH(2)}</th>
+                  <th>Name{prodRH(3)}</th>
+                  <th style={{ textAlign:"right" }}>COGS/unit{prodRH(4)}</th>
+                  <th style={{ textAlign:"right" }}>Ship/unit{prodRH(5)}</th>
+                  <th style={{ textAlign:"right" }}>Amz fee{prodRH(6)}</th>
+                  <th style={{ textAlign:"right" }}>VAT{prodRH(7)}</th>
+                  <th style={{ textAlign:"right" }}>Google€/wk{prodRH(8)}</th>
+                  <th style={{ textAlign:"right" }}>FB€/wk{prodRH(9)}</th>
+                  <th>{prodRH(10)}</th>
                 </tr></thead>
                 <tbody>
                   {cfgLoading ? (
@@ -6740,7 +6946,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                         <td style={{ fontFamily:"var(--mono)", fontSize:11 }}>{row.asin}</td>
                         <td style={{ fontSize:11 }}>{row.sku}</td>
                         <td style={{ textAlign:"center", fontSize:11 }}>{row.label}</td>
-                        <td style={{ fontSize:11, maxWidth:140, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        <td style={{ fontSize:11, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                           {row.product_name}
                         </td>
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.cogs_per_unit).toFixed(2)}</td>
@@ -8599,6 +8805,12 @@ const AlertsPage = ({ workspaceId }) => {
   const [editConfig, setEditConfig] = useState(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24 });
+  const { colgroup: alertCfgColgroup, resizeHandle: alertCfgRH } = useResizableColumns(
+    "alerts-configs", [160, 100, 90, 120, 90, 70, 100]
+  );
+  const { colgroup: alertInstColgroup, resizeHandle: alertInstRH } = useResizableColumns(
+    "alerts-instances", [140, 180, 80, 160, 80, 100]
+  );
 
   const [configPage, setConfigPage] = useState(1);
   const [configPageSize, setConfigPageSize] = useState(25);
@@ -8696,13 +8908,14 @@ const AlertsPage = ({ workspaceId }) => {
               : !configs.length
                 ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noAlerts")}</div>
                 : (
-                  <table>
+                  <table className="resizable">
+                    {alertCfgColgroup}
                     <thead>
                       <tr>
-                        <th>{t("alerts.colName")}</th>
-                        <th>{t("alerts.colMetric")}</th>
-                        <th>{t("alerts.colThreshold")}</th>
-                        <th>{t("alerts.colChannels")}</th>
+                        <th>{t("alerts.colName")}{alertCfgRH(0)}</th>
+                        <th>{t("alerts.colMetric")}{alertCfgRH(1)}</th>
+                        <th>{t("alerts.colThreshold")}{alertCfgRH(2)}</th>
+                        <th>{t("alerts.colChannels")}{alertCfgRH(3)}</th>
                         <th>
                           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                             {t("alerts.colCooldown")}
@@ -8710,9 +8923,10 @@ const AlertsPage = ({ workspaceId }) => {
                               <Ic icon={HelpCircle} size={11} style={{ color: 'var(--tx3)', cursor: 'help' }} />
                             </Tip>
                           </span>
+                          {alertCfgRH(4)}
                         </th>
-                        <th>{t("alerts.colActive")}</th>
-                        <th></th>
+                        <th>{t("alerts.colActive")}{alertCfgRH(5)}</th>
+                        <th>{alertCfgRH(6)}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -8789,15 +9003,16 @@ const AlertsPage = ({ workspaceId }) => {
               : !instances.length
                 ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("alerts.noInstances")}</div>
                 : (
-                  <table>
+                  <table className="resizable">
+                    {alertInstColgroup}
                     <thead>
                       <tr>
-                        <th>{t("alerts.colTime")}</th>
-                        <th>{t("alerts.colAlert")}</th>
-                        <th>{t("alerts.colSeverity")}</th>
-                        <th>{t("alerts.colEntity")}</th>
-                        <th>{t("alerts.colStatus")}</th>
-                        <th></th>
+                        <th>{t("alerts.colTime")}{alertInstRH(0)}</th>
+                        <th>{t("alerts.colAlert")}{alertInstRH(1)}</th>
+                        <th>{t("alerts.colSeverity")}{alertInstRH(2)}</th>
+                        <th>{t("alerts.colEntity")}{alertInstRH(3)}</th>
+                        <th>{t("alerts.colStatus")}{alertInstRH(4)}</th>
+                        <th>{alertInstRH(5)}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -9120,49 +9335,26 @@ const LoginPage = ({ onLogin }) => {
       <div style={{ width: 380, padding: "36px 32px", background: "var(--s1)", borderRadius: 14, border: "1px solid var(--b1)" }}>
         {logoBlock}
 
-        <div style={{ display: "flex", gap: 0, marginBottom: 20, background: "var(--s2)", borderRadius: 8, padding: 3 }}>
-          {["login", "register"].map(tabId => (
-            <button key={tabId} onClick={() => setTab(tabId)} style={{
-              flex: 1, padding: "7px", borderRadius: 6, border: "none", cursor: "pointer",
-              background: tab === tabId ? "var(--s3)" : "transparent",
-              color: tab === tabId ? "var(--tx)" : "var(--tx3)", fontSize: 13, fontFamily: "var(--ui)",
-              transition: "all .15s"
-            }}>
-              {tabId === "login" ? t("login.login") : t("login.register")}
-            </button>
-          ))}
-        </div>
-
         {error && <div style={{ marginBottom: 14, padding: "10px 14px", background: "rgba(239,68,68,.08)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 8, color: "var(--red)", fontSize: 12 }}>{error}</div>}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {tab === "register" && (
-            <>
-              <input placeholder={t("login.namePlaceholder")} {...f("name")} />
-              <input placeholder={t("login.orgPlaceholder")} {...f("orgName")} />
-            </>
-          )}
           <input placeholder={t("login.emailPlaceholder")} type="email" {...f("email")} />
           <input placeholder={t("login.passwordPlaceholder")} type="password" {...f("password")}
             onKeyDown={e => e.key === "Enter" && submit()} />
-          {tab === "login" && (
-            <div style={{ textAlign: "right", marginTop: -4 }}>
-              <button style={{ background: "none", border: "none", color: "var(--ac)", fontSize: 12, cursor: "pointer", padding: 0 }}
-                onClick={() => { setShowForgot(true); setForgotEmail(form.email); }}>
-                {t("login.forgotPassword")}
-              </button>
-            </div>
-          )}
+          <div style={{ textAlign: "right", marginTop: -4 }}>
+            <button style={{ background: "none", border: "none", color: "var(--ac)", fontSize: 12, cursor: "pointer", padding: 0 }}
+              onClick={() => { setShowForgot(true); setForgotEmail(form.email); }}>
+              {t("login.forgotPassword")}
+            </button>
+          </div>
           <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center", padding: "10px" }} onClick={submit} disabled={loading}>
-            {loading ? <span className="loader" /> : tab === "login" ? t("login.login") : t("login.createAccount")}
+            {loading ? <span className="loader" /> : t("login.login")}
           </button>
         </div>
 
-        {tab === "login" && (
-          <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.12)", borderRadius: 8, fontSize: 11, color: "var(--tx3)" }}>
-            {t("login.demoHint")}
-          </div>
-        )}
+        <div style={{ marginTop: 16, padding: "10px 14px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.12)", borderRadius: 8, fontSize: 11, color: "var(--tx3)", textAlign: "center" }}>
+          Access by invitation only. Contact an administrator to get access.
+        </div>
       </div>
     </div>
   );

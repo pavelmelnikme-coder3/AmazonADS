@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-04-01
+
+### Added — Products & BSR Page
+
+- **118 ASINs auto-populated** from `fact_metrics_daily` (entity_type=`advertised_product`) — no manual entry needed.
+- **Client-side search** — filters by ASIN, title, or brand in real time.
+- **Brand filter dropdown** — shows all unique brands (EVOCAMP, Björn&Schiller, WEST & EAST, farosun); hidden when only one brand present.
+- **Sort options**: BSR rank (best rank first), Title (A→Z), ASIN (A→Z), Last updated (newest first).
+- **Product count badge** — shows `X / total` when filter is active.
+- **"No matches" empty state** with "Clear filters" shortcut.
+- **In-place refresh** — clicking ⟳ on a product card updates only that row via `mutate()` (no full-list reload, scroll position and filters preserved).
+- **In-place delete** — removes row from list via `mutate()` without reload.
+
+### Added — BSR Sync: Rate-limit Recovery
+
+- `spSync.js` `syncBsr` — on SP-API 429 (rate limit) pauses 10 s then continues remaining ASINs instead of skipping them silently.
+  Inter-request delay increased from 200 ms → 600 ms to reduce rate-limit frequency.
+
+### Security — Invite-only Access & Brute-force Protection
+
+- **Registration disabled** — `POST /auth/register` returns `403` with invite message; open sign-up removed from UI.
+  New users can only join via email invitation sent by an owner or admin (Settings → Members).
+- **Login brute-force limit tightened** — reduced from 20 → **5 failed attempts per IP per 15 minutes** (`skipSuccessfulRequests: true` so legitimate logins don't consume quota).
+  6th attempt returns HTTP 429.
+- **Login page** — registration tab removed; replaced with "Access by invitation only" notice.
+
+### Security — Infrastructure Hardening
+
+- **Redis (6379) and PostgreSQL (5432) removed from public port bindings** on production server.
+  Both services are now reachable only within the internal Docker bridge network; no external exposure.
+  Backend connects via Docker service names (`redis:6379`, `postgres:5432`).
+
+---
+
 ## [Unreleased] — 2026-03-31
 
 ### Added — Keyword Rank Tracker (new section)

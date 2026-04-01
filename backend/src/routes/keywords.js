@@ -67,6 +67,13 @@ router.get("/", async (req, res, next) => {
     if (req.query.hasClicks === "true")             { conditions.push(`COALESCE(m.clicks,0) > 0`); }
     if (req.query.excludePaused === "true")         { conditions.push(`k.state != 'paused'`); }
     if (req.query.excludeDisabledCampaigns === "true") { conditions.push(`c.state = 'enabled'`); }
+    if (req.query.campaignState && req.query.campaignState !== "all") {
+      const VALID_CAMP_STATES = ["enabled", "paused", "archived"];
+      if (VALID_CAMP_STATES.includes(req.query.campaignState)) {
+        conditions.push(`c.state = $${pi++}`);
+        params.push(req.query.campaignState);
+      }
+    }
 
     const where = "WHERE " + conditions.join(" AND ");
 

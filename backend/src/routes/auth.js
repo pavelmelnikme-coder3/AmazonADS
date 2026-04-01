@@ -19,59 +19,10 @@ function generateTokens(userId) {
   return { accessToken };
 }
 
-// POST /auth/register
-router.post(
-  "/register",
-  [
-    body("email").isEmail().normalizeEmail(),
-    body("password").isLength({ min: 8 }),
-    body("name").trim().isLength({ min: 2 }),
-    body("orgName").trim().isLength({ min: 2 }),
-  ],
-  async (req, res, next) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-
-    try {
-      const { email, password, name, orgName } = req.body;
-
-      // Check existing user
-      const existing = await query("SELECT id FROM users WHERE email = $1", [email]);
-      if (existing.rows.length) {
-        return res.status(409).json({ error: "Email already registered" });
-      }
-
-      const passwordHash = await bcrypt.hash(password, 12);
-      const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + Date.now().toString(36);
-
-      // Create org, user, default workspace in one transaction
-      const { rows: [org] } = await query(
-        "INSERT INTO organizations(name, slug, plan) VALUES($1, $2, 'trial') RETURNING id",
-        [orgName, slug]
-      );
-
-      const { rows: [user] } = await query(
-        "INSERT INTO users(org_id, email, password_hash, name, role) VALUES($1,$2,$3,$4,'owner') RETURNING id, email, name, role, org_id",
-        [org.id, email, passwordHash, name]
-      );
-
-      const { rows: [workspace] } = await query(
-        "INSERT INTO workspaces(org_id, name, created_by) VALUES($1, $2, $3) RETURNING id, name",
-        [org.id, `${orgName} - Main`, user.id]
-      );
-
-      await query(
-        "INSERT INTO workspace_members(workspace_id, user_id, role) VALUES($1,$2,'owner')",
-        [workspace.id, user.id]
-      );
-
-      const tokens = generateTokens(user.id);
-      res.status(201).json({ ...tokens, user, workspace });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
+// POST /auth/register — disabled, invite-only
+router.post("/register", (req, res) => {
+  res.status(403).json({ error: "Registration is closed. Contact an administrator to receive an invitation." });
+});
 
 // POST /auth/login
 router.post(

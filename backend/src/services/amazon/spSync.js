@@ -53,9 +53,14 @@ async function syncBsr(workspaceId, marketplaceId, refreshToken) {
            bestRank?.rank || null, bestRank?.category || null, JSON.stringify(data.rawData || {})]
         );
         upserted++;
-        await _sleep(200);
+        await _sleep(600);
       } catch (err) {
-        logger.warn(`BSR sync failed for ASIN ${product.asin}`, { error: err.message });
+        if (err.message?.includes("rate limit")) {
+          logger.warn(`BSR sync rate-limited, pausing 10s`, { asin: product.asin });
+          await _sleep(10000);
+        } else {
+          logger.warn(`BSR sync failed for ASIN ${product.asin}`, { error: err.message });
+        }
       }
     }
     await _finishLog(logId, "success", { fetched, upserted });
