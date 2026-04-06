@@ -15,6 +15,8 @@ const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { writeAudit } = require("./audit");
+const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates } = require("../services/amazon/writeback");
+const { put } = require("../services/amazon/adsClient");
 const logger  = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
@@ -111,9 +113,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     const { rows } = await query(
       `SELECT
          k.id, k.keyword_text, k.match_type, k.state, k.bid,
+         k.amazon_keyword_id,
          k.campaign_id, k.ad_group_id,
-         c.name  AS campaign_name, c.campaign_type,
-         ag.name AS ad_group_name,
+         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id,
+         ag.name AS ad_group_name, ag.amazon_ag_id AS amazon_ad_group_id,
+         p.id    AS profile_db_id,
+         p.profile_id  AS amazon_profile_id,
+         p.connection_id,
+         p.marketplace_id,
          COALESCE(SUM(m.clicks), 0)      AS clicks,
          COALESCE(SUM(m.cost),   0)      AS spend,
          COALESCE(SUM(m.sales_14d), 0)   AS sales,
@@ -130,13 +137,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
        FROM keywords k
        JOIN campaigns  c  ON c.id  = k.campaign_id
        JOIN ad_groups  ag ON ag.id = k.ad_group_id
+       JOIN amazon_profiles p ON p.id = c.profile_id
        LEFT JOIN fact_metrics_daily m
          ON m.amazon_id = k.amazon_keyword_id
          AND m.entity_type = 'keyword'
          AND m.date BETWEEN $${pi++} AND $${pi++}
        WHERE ${kConds.join(" AND ")}
        GROUP BY k.id, k.keyword_text, k.match_type, k.state, k.bid,
-                k.campaign_id, k.ad_group_id, c.name, c.campaign_type, ag.name`,
+                k.amazon_keyword_id, k.campaign_id, k.ad_group_id,
+                c.name, c.campaign_type, c.amazon_campaign_id,
+                ag.name, ag.amazon_ag_id,
+                p.id, p.profile_id, p.connection_id, p.marketplace_id`,
       [...kParams, startDate, endDate]
     );
     keywords = rows.map(r => ({ ...r, entity_type: "keyword" }));
@@ -181,8 +192,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       `SELECT
          t.id, t.amazon_target_id, t.expression, t.expression_type,
          t.state, t.bid, t.campaign_id, t.ad_group_id, t.profile_id,
-         c.name  AS campaign_name, c.campaign_type,
-         ag.name AS ad_group_name,
+         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id,
+         ag.name AS ad_group_name, ag.amazon_ag_id AS amazon_ad_group_id,
+         p.profile_id  AS amazon_profile_id,
+         p.connection_id,
+         p.marketplace_id,
          COALESCE(SUM(m.clicks), 0)      AS clicks,
          COALESCE(SUM(m.cost),   0)      AS spend,
          COALESCE(SUM(m.sales_14d), 0)   AS sales,
@@ -198,6 +212,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               THEN SUM(m.cost)/SUM(m.clicks) END          AS cpc
        FROM targets t
        JOIN campaigns  c  ON c.id  = t.campaign_id
+       JOIN amazon_profiles p ON p.id = t.profile_id
        LEFT JOIN ad_groups ag ON ag.id = t.ad_group_id
        LEFT JOIN fact_metrics_daily m
          ON m.amazon_id = t.amazon_target_id
@@ -206,7 +221,9 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
        WHERE ${tConds.join(" AND ")}
        GROUP BY t.id, t.amazon_target_id, t.expression, t.expression_type,
                 t.state, t.bid, t.campaign_id, t.ad_group_id, t.profile_id,
-                c.name, c.campaign_type, ag.name`,
+                c.name, c.campaign_type, c.amazon_campaign_id,
+                ag.name, ag.amazon_ag_id,
+                p.profile_id, p.connection_id, p.marketplace_id`,
       [...tParams, startDate, endDate]
     );
     targets = rows.map(r => ({ ...r, entity_type: "target" }));
@@ -233,6 +250,16 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
             });
+            if (entity.amazon_keyword_id && entity.connection_id) {
+              pushKeywordUpdates([{
+                amazonKeywordId: entity.amazon_keyword_id,
+                campaignType: entity.campaign_type,
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplaceId: entity.marketplace_id,
+                state: "paused",
+              }]).catch(e => logger.warn("Rule keyword pause write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, keyword_text: entity.keyword_text,
@@ -253,6 +280,16 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
             });
+            if (entity.amazon_keyword_id && entity.connection_id) {
+              pushKeywordUpdates([{
+                amazonKeywordId: entity.amazon_keyword_id,
+                campaignType: entity.campaign_type,
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplaceId: entity.marketplace_id,
+                state: "enabled",
+              }]).catch(e => logger.warn("Rule keyword enable write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, keyword_text: entity.keyword_text,
@@ -277,6 +314,16 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
             });
+            if (entity.amazon_keyword_id && entity.connection_id) {
+              pushKeywordUpdates([{
+                amazonKeywordId: entity.amazon_keyword_id,
+                campaignType: entity.campaign_type,
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplaceId: entity.marketplace_id,
+                bid: newBid,
+              }]).catch(e => logger.warn("Rule keyword bid write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, keyword_text: entity.keyword_text,
@@ -288,20 +335,34 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // ── set_bid (keyword) ───────────────────────────────────────────────
         } else if (action.type === "set_bid") {
           if (entity.entity_type !== "keyword") continue;
-          const newBid = parseFloat(action.value || 0.10);
+          const newBid     = parseFloat(action.value || 0.10);
+          const currentBid = parseFloat(entity.bid || 0);
+          const minBid     = parseFloat(safety.min_bid || 0.02);
+          const maxBid     = parseFloat(safety.max_bid || 50);
+          const clampedBid = Math.round(Math.max(minBid, Math.min(maxBid, newBid)) * 100) / 100;
           if (!dryRun) {
-            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, entity.id]);
+            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [clampedBid, entity.id]);
             await writeAudit({
               workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.set_bid", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
-              beforeData: { bid: parseFloat(entity.bid || 0) }, afterData: { bid: newBid }, source: "rule",
+              beforeData: { bid: currentBid }, afterData: { bid: clampedBid }, source: "rule",
             });
+            if (entity.amazon_keyword_id && entity.connection_id) {
+              pushKeywordUpdates([{
+                amazonKeywordId: entity.amazon_keyword_id,
+                campaignType: entity.campaign_type,
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplaceId: entity.marketplace_id,
+                bid: clampedBid,
+              }]).catch(e => logger.warn("Rule keyword set_bid write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, keyword_text: entity.keyword_text,
             campaign_name: entity.campaign_name, action: "set_bid",
-            previous_bid: entity.bid, new_bid: newBid,
+            previous_bid: currentBid, new_bid: clampedBid,
           });
 
         // ── pause_target ────────────────────────────────────────────────────
@@ -316,6 +377,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
             });
+            if (entity.amazon_target_id && entity.connection_id) {
+              const tPath = entity.campaign_type === "sponsoredDisplay" ? "/sd/targets" : "/sp/targets";
+              put({
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplace: entity.marketplace_id,
+                path: tPath,
+                data: { targets: [{ targetId: entity.amazon_target_id, state: "PAUSED" }] },
+                group: "keywords",
+              }).catch(e => logger.warn("Rule target pause write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, expression: entity.expression,
@@ -336,6 +408,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
             });
+            if (entity.amazon_target_id && entity.connection_id) {
+              const tPath = entity.campaign_type === "sponsoredDisplay" ? "/sd/targets" : "/sp/targets";
+              put({
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplace: entity.marketplace_id,
+                path: tPath,
+                data: { targets: [{ targetId: entity.amazon_target_id, state: "ENABLED" }] },
+                group: "keywords",
+              }).catch(e => logger.warn("Rule target enable write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, expression: entity.expression,
@@ -360,6 +443,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
             });
+            if (entity.amazon_target_id && entity.connection_id) {
+              const tPath = entity.campaign_type === "sponsoredDisplay" ? "/sd/targets" : "/sp/targets";
+              put({
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplace: entity.marketplace_id,
+                path: tPath,
+                data: { targets: [{ targetId: entity.amazon_target_id, bid: newBid }] },
+                group: "keywords",
+              }).catch(e => logger.warn("Rule target bid write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, expression: entity.expression,
@@ -370,34 +464,36 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── add_negative_keyword ────────────────────────────────────────────
         // action.value: "exact" | "phrase" | "both" (default: "exact")
+        // Amazon requires "negativeExact" / "negativePhrase" format
         } else if (action.type === "add_negative_keyword") {
           if (entity.entity_type !== "keyword") continue;
-          const negMatchTypes = action.value === "phrase" ? ["phrase"]
-            : action.value === "both" ? ["exact", "phrase"] : ["exact"];
+          const negMatchTypes = action.value === "phrase" ? ["negativePhrase"]
+            : action.value === "both" ? ["negativeExact", "negativePhrase"] : ["negativeExact"];
 
           for (const matchType of negMatchTypes) {
             const { rows: existing } = await query(
               `SELECT id FROM negative_keywords
                WHERE workspace_id=$1 AND campaign_id=$2
-               AND keyword_text=$3 AND match_type=$4 AND ad_group_id=$5`,
-              [workspaceId, entity.campaign_id, entity.keyword_text, matchType, entity.ad_group_id]
+               AND LOWER(keyword_text)=LOWER($3) AND match_type=$4`,
+              [workspaceId, entity.campaign_id, entity.keyword_text, matchType]
             );
             if (existing.length > 0) continue;
 
+            let insertedId = null;
             if (!dryRun) {
-              await query(
+              const { rows: insRows } = await query(
                 `INSERT INTO negative_keywords
                    (workspace_id, profile_id, campaign_id, ad_group_id,
-                    amazon_neg_keyword_id, keyword_text, match_type, level, raw_data, synced_at)
-                 VALUES ($1,
-                   (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
-                   $2, $3, $4, $5, $6, $7, $8, NOW())
-                 ON CONFLICT DO NOTHING`,
-                [workspaceId, entity.campaign_id, entity.ad_group_id,
+                    amazon_neg_keyword_id, keyword_text, match_type, level)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'ad_group')
+                 ON CONFLICT (profile_id, amazon_neg_keyword_id) DO NOTHING
+                 RETURNING id`,
+                [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
                   `rule-${entity.id}-${matchType}`,
-                  entity.keyword_text, matchType, "ad_group",
-                  JSON.stringify({ source: "rule", ruleId: rule.id })]
+                  entity.keyword_text, matchType]
               );
+              insertedId = insRows[0]?.id || null;
+
               await writeAudit({
                 workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "keyword.add_negative", entityType: "keyword",
@@ -405,6 +501,21 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 beforeData: {}, afterData: { match_type: matchType, level: "ad_group", added_as_negative: true },
                 source: "rule",
               });
+
+              if (insertedId && entity.connection_id) {
+                pushNegativeKeyword({
+                  localId: insertedId,
+                  connectionId: entity.connection_id,
+                  profileId: String(entity.amazon_profile_id),
+                  marketplaceId: entity.marketplace_id,
+                  campaignType: entity.campaign_type,
+                  amazonCampaignId: entity.amazon_campaign_id,
+                  amazonAdGroupId: entity.amazon_ad_group_id || null,
+                  keywordText: entity.keyword_text,
+                  matchType,
+                  level: "ad_group",
+                }).catch(e => logger.warn("Rule add_negative_keyword write-back failed", { error: e.message }));
+              }
             }
             applied.push({
               entity_id: entity.id, keyword_text: entity.keyword_text,
@@ -427,25 +538,59 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           );
           if (existing.length > 0) continue;
 
+          let insertedNtId = null;
           if (!dryRun) {
-            await query(
+            const { rows: ntRows } = await query(
               `INSERT INTO negative_targets
                  (workspace_id, profile_id, campaign_id, ad_group_id,
                   amazon_neg_target_id, expression, expression_type, level)
                VALUES ($1,
                  (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
                  $2, $3, $4, $5::jsonb, $6, $7)
-               ON CONFLICT DO NOTHING`,
+               ON CONFLICT DO NOTHING
+               RETURNING id`,
               [workspaceId, entity.campaign_id, entity.ad_group_id,
                 `rule-neg-${entity.id}`,
                 exprJson, entity.expression_type || "asinSameAs", "ad_group"]
             );
+            insertedNtId = ntRows[0]?.id || null;
+
             await writeAudit({
               workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "target.add_negative", entityType: "target",
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: {}, afterData: { added_as_negative: true }, source: "rule",
             });
+
+            if (insertedNtId && entity.connection_id) {
+              const targetExpr = typeof entity.expression === "string"
+                ? JSON.parse(entity.expression) : entity.expression;
+              const ntPath = entity.campaign_type === "sponsoredDisplay"
+                ? "/sd/negativeTargets" : "/sp/negativeTargets";
+              put({
+                connectionId: entity.connection_id,
+                profileId: String(entity.amazon_profile_id),
+                marketplace: entity.marketplace_id,
+                path: ntPath,
+                data: { negativeTargetingClauses: [{
+                  expression: targetExpr,
+                  expressionType: "manual",
+                  state: "enabled",
+                  campaignId: entity.amazon_campaign_id,
+                  ...(entity.amazon_ad_group_id ? { adGroupId: entity.amazon_ad_group_id } : {}),
+                }] },
+                group: "keywords",
+              }).then(result => {
+                const created = result?.negativeTargetingClauses?.success?.[0]
+                  || result?.negativeTargetingClauses?.[0]
+                  || result?.[0];
+                const realId = created?.negativeTargetId || created?.targetId;
+                if (realId && insertedNtId) {
+                  query("UPDATE negative_targets SET amazon_neg_target_id = $1 WHERE id = $2",
+                    [String(realId), insertedNtId]).catch(() => {});
+                }
+              }).catch(e => logger.warn("Rule add_negative_target write-back failed", { error: e.message }));
+            }
           }
           applied.push({
             entity_id: entity.id, expression: entity.expression,

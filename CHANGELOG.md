@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-04-06
+
+### Added — Keyword Research (new section)
+
+- **Amazon URL → ASIN parser** — paste any `amazon.*/dp/B0XXXXXXXX` URL; ASIN, TLD, marketplace profile, and target language are auto-detected and filled.
+- **Multi-source discovery pipeline**: Amazon Ads keyword recommendations · Claude AI seed generation (native language) · Jungle Scout ASIN reverse lookup + AI-seed expansion.
+- **Relevance scoring** — Claude AI scores and filters every keyword (threshold ≥ 50); result sorted by relevance + source priority.
+- **Floating action bar** — appears when ≥1 keyword selected; supports per-row match-type override, bulk bid input, and one-click "Add to ad group".
+- **Add-to-ad-group write-back** — deduplicates by `keyword_text + match_type` before INSERT, then pushes to Amazon Ads API asynchronously (non-blocking).
+- **Jungle Scout not connected** notice shown in footer when `JUNGLE_SCOUT_API_KEY` absent.
+- New backend routes: `POST /keyword-research/discover`, `POST /keyword-research/add-to-adgroup`.
+- New services: `services/ai/keywordResearch.js`, `services/amazon/keywordRecommendations.js`.
+
+### Added — KW Research i18n (EN / RU / DE)
+
+- 50+ new translation keys under `kwr.*` namespace added to all three language files.
+- Zero language mixing — every visible string in the section goes through `t("kwr.*")`.
+- German typographic quotes (`„…"`) encoded as Unicode escapes to avoid JS parse errors.
+
+### Changed — Keyword Research UX Redesign
+
+- Sectioned card layout: **Product** (URL + ASINs + title) · **Settings** (profile / ad group / language) · **Sources + action**.
+- Source pills with toggle on/off (Amazon Ads · Claude AI · Jungle Scout), tooltip descriptions.
+- Results table with relevance progress bar, match-type badge switcher, search volume and suggested bid columns.
+- `slideInFromBottom` animation on floating action bar.
+
+### Fixed — Backend (reporting, workers, search terms)
+
+- **SB keyword report field** — `"keyword"` → `"keywordText"` (Amazon Reporting API v3 schema; was causing 400 on all Sponsored Brands keyword-level reports).
+- **Backfill deduplication** — `queueMetricsBackfillJobs` now checks `report_requests` for already-active records and skips duplicates.
+- **Report worker concurrency** — reduced 2 → 1 to avoid Amazon 429 throttle cascades.
+- **Stale report cleanup** — on worker startup, records stuck in `processing`/`requested` for >2 h are marked `failed`.
+- **Search terms pagination** — `parseInt(page)` could yield negative offset on bad input; now clamped to `Math.max(1, …)`.
+- **Search terms workspace filter** — keywords subquery was missing `WHERE k.workspace_id = $1`; could surface keywords from other workspaces in campaign-name resolution.
+- **Search terms `metricsDays` NaN guard** — `isNaN()` check prevents `INTERVAL 'NaN days'` SQL error.
+- **Add-negative ASIN routing** — `POST /search-terms/add-negative` now detects `B0[A-Z0-9]{8}` pattern and routes to `negative_targets` (ASIN) vs `negative_keywords` (text) automatically.
+- **`applyParsedUrl` variable shadow** — `setProductTitle(t => …)` callback parameter renamed to `prev` to avoid shadowing the i18n `t` function.
+
+---
+
 ## [Unreleased] — 2026-04-01
 
 ### Added — Products & BSR Page

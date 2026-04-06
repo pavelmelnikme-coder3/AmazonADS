@@ -79,9 +79,10 @@ const REPORT_CONFIGS = {
     },
     keyword: {
       // Amazon SB v3 has no direct keyword-level report; sbSearchTerm is the equivalent
+      // NOTE: SB API still uses "keywordText" (not "keyword" like SP)
       reportType: "sbSearchTerm",
       groupBy: ["searchTerm"],
-      metrics: ["searchTerm","keywordId","keyword","matchType",
+      metrics: ["searchTerm","keywordId","keywordText","matchType",
         "impressions","clicks","cost",
         "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
@@ -643,10 +644,36 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
     chunkStart.setDate(chunkStart.getDate() + 1);
   }
 
+  // Fetch already-active report records to avoid queuing duplicates
+  const { rows: activeReports } = await query(
+    `SELECT profile_id, campaign_type, report_type, date_start::text, date_end::text
+     FROM report_requests
+     WHERE workspace_id = $1 AND status IN ('pending', 'requested', 'processing')`,
+    [workspaceId]
+  );
+  const activeKey = (profileId, ct, rt, from, to) => `${profileId}|${ct}|${rt}|${from}|${to}`;
+  const activeSet = new Set(activeReports.map(r => activeKey(r.profile_id, r.campaign_type, r.report_type, r.date_start, r.date_end)));
+
+  const REPORT_TYPE_MAP = {
+    campaign: { SP: "spCampaigns", SB: "sbCampaigns", SD: "sdCampaigns" },
+    keyword:  { SP: "spKeyword",   SB: "sbSearchTerm", SD: null },
+    searchTerm: { SP: "spSearchTerm", SB: null, SD: null },
+    target:   { SP: "spTargeting", SB: null, SD: "sdTargeting" },
+    advertised_product: { SP: "spAdvertisedProduct", SB: null, SD: null },
+    ad_group: { SB: "sbAdGroup", SD: "sdAdGroup", SP: null },
+  };
+
   let jobsQueued = 0;
+  let jobsSkipped = 0;
   for (const { id: profileId } of profiles) {
     for (const [campaignType, reportLevel] of reportTypes) {
       for (const [chunkFrom, chunkTo] of dateChunks) {
+        const reportType = REPORT_TYPE_MAP[reportLevel]?.[campaignType];
+        if (reportType && activeSet.has(activeKey(profileId, campaignType, reportType, chunkFrom, chunkTo))) {
+          logger.info("Skipping duplicate report job (already active)", { profileId, campaignType, reportLevel, chunkFrom, chunkTo });
+          jobsSkipped++;
+          continue;
+        }
         await queueReportPipelineFn(profileId, campaignType, reportLevel, chunkFrom, chunkTo);
         logger.info("Queued metrics report job", { profileId, campaignType, reportLevel, chunkFrom, chunkTo });
         jobsQueued++;
@@ -654,8 +681,8 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
     }
   }
 
-  logger.info("Metrics backfill queued", { workspaceId, profileCount: profiles.length, jobsQueued, chunks: dateChunks.length, fromDate, toDate });
-  return { profileCount: profiles.length, jobsQueued, dateFrom: fromDate, dateTo: toDate };
+  logger.info("Metrics backfill queued", { workspaceId, profileCount: profiles.length, jobsQueued, jobsSkipped, chunks: dateChunks.length, fromDate, toDate });
+  return { profileCount: profiles.length, jobsQueued, jobsSkipped, dateFrom: fromDate, dateTo: toDate };
 }
 
 module.exports = {

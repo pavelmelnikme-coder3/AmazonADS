@@ -2,6 +2,7 @@ const express = require('express');
 const { query } = require('../db/pool');
 const { requireAuth, requireWorkspace } = require('../middleware/auth');
 const { pushNegativeAsin } = require('../services/amazon/writeback');
+const { writeAudit } = require('./audit');
 const logger = require('../config/logger');
 
 const router = express.Router();
@@ -198,10 +199,33 @@ router.delete('/bulk', async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!ids?.length) return res.status(400).json({ error: 'ids required' });
+
+    // Fetch before deleting for audit
+    const { rows: targets } = await query(
+      `SELECT nt.id, nt.expression, c.name AS campaign_name
+       FROM negative_targets nt
+       LEFT JOIN campaigns c ON c.id = nt.campaign_id
+       WHERE nt.id = ANY($1::uuid[]) AND nt.workspace_id = $2`,
+      [ids, req.workspaceId]
+    );
+
     const { rowCount } = await query(
       'DELETE FROM negative_targets WHERE id = ANY($1::uuid[]) AND workspace_id = $2',
       [ids, req.workspaceId]
     );
+
+    for (const t of targets) {
+      const asin = t.expression?.[0]?.value || null;
+      await writeAudit({
+        orgId: req.orgId, workspaceId: req.workspaceId,
+        actorId: req.user.id, actorName: req.user.name,
+        action: 'negative_target.deleted', entityType: 'negative_target',
+        entityId: t.id, entityName: asin || t.id,
+        beforeData: { asin, campaign: t.campaign_name },
+        source: 'ui',
+      });
+    }
+
     res.json({ success: true, deleted: rowCount });
   } catch (err) { next(err); }
 });
@@ -209,8 +233,30 @@ router.delete('/bulk', async (req, res, next) => {
 // ─── DELETE /api/v1/negative-asins/:id ───────────────────────────────────────
 router.delete('/:id', async (req, res, next) => {
   try {
+    // Fetch before deleting for audit
+    const { rows: [t] } = await query(
+      `SELECT nt.expression, c.name AS campaign_name
+       FROM negative_targets nt
+       LEFT JOIN campaigns c ON c.id = nt.campaign_id
+       WHERE nt.id = $1 AND nt.workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+
     await query('DELETE FROM negative_targets WHERE id = $1 AND workspace_id = $2',
       [req.params.id, req.workspaceId]);
+
+    if (t) {
+      const asin = t.expression?.[0]?.value || null;
+      await writeAudit({
+        orgId: req.orgId, workspaceId: req.workspaceId,
+        actorId: req.user.id, actorName: req.user.name,
+        action: 'negative_target.deleted', entityType: 'negative_target',
+        entityId: req.params.id, entityName: asin || req.params.id,
+        beforeData: { asin, campaign: t.campaign_name },
+        source: 'ui',
+      });
+    }
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });

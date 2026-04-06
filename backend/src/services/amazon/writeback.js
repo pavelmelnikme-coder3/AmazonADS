@@ -138,9 +138,11 @@ async function pushNegativeKeyword({
       group: "keywords",
     });
 
-    // Try to extract real Amazon ID from response
-    const created = result?.negativeKeywords?.[0] || result?.[0];
-    const realId = created?.keywordId || created?.negativeKeywordId;
+    // v3 API returns { negativeKeywords: { success: [...], error: [...] } }
+    const created = result?.negativeKeywords?.success?.[0]
+      || result?.negativeKeywords?.[0]
+      || result?.[0];
+    const realId = created?.negativeKeywordId || created?.keywordId;
 
     if (realId && localId) {
       await query(
@@ -232,8 +234,11 @@ async function pushNegativeAsin({
       group: "keywords",
     });
 
-    const created = result?.negativeTargetingClauses?.[0] || result?.[0];
-    const realId = created?.targetId || created?.negativeTargetId;
+    // v3 API returns { negativeTargetingClauses: { success: [...], error: [...] } }
+    const created = result?.negativeTargetingClauses?.success?.[0]
+      || result?.negativeTargetingClauses?.[0]
+      || result?.[0];
+    const realId = created?.negativeTargetId || created?.targetId;
 
     if (realId && localId) {
       await query(
@@ -248,4 +253,71 @@ async function pushNegativeAsin({
   }
 }
 
-module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext };
+/**
+ * Create new keywords in Amazon Ads API (SP only for now).
+ * Called after inserting keywords locally — updates local DB with real Amazon keyword IDs.
+ *
+ * @param {Array<{localId, connectionId, profileId, marketplaceId, campaignType,
+ *                amazonCampaignId, amazonAdGroupId, keywordText, matchType, bid}>} keywords
+ */
+async function pushNewKeywords(keywords) {
+  if (!keywords?.length) return;
+
+  const sp = keywords.filter(k =>
+    k.campaignType === "sponsoredProducts" || k.campaignType === "SP"
+  );
+  // SB keyword creation uses different schema — skip for now (add later if needed)
+
+  for (const [profileId, group] of groupBy(sp, "profileId")) {
+    const first = group[0];
+    if (!first.connectionId || !first.profileId) continue;
+
+    for (let i = 0; i < group.length; i += BATCH_SIZE) {
+      const batch = group.slice(i, i + BATCH_SIZE);
+      const payload = batch.map(k => ({
+        campaignId:  k.amazonCampaignId,
+        adGroupId:   k.amazonAdGroupId,
+        keywordText: k.keywordText,
+        matchType:   (k.matchType || "BROAD").toUpperCase(), // Amazon v3: EXACT/PHRASE/BROAD
+        state:       "ENABLED",
+        bid:         parseFloat(k.bid) || 0.50,
+      }));
+
+      try {
+        const result = await post({
+          connectionId: first.connectionId,
+          profileId:    first.profileId.toString(),
+          marketplace:  first.marketplaceId,
+          path:         "/sp/keywords",
+          data:         { keywords: payload },
+          group:        "keywords",
+        });
+
+        // Update local DB records with real Amazon keyword IDs
+        const successArr = result?.keywords?.success || [];
+        for (const created of successArr) {
+          const realId  = created?.keywordId;
+          const kwText  = (created?.keywordText || "").toLowerCase();
+          if (!realId) continue;
+          const localKw = batch.find(k => k.keywordText.toLowerCase() === kwText);
+          if (localKw?.localId) {
+            await query(
+              "UPDATE keywords SET amazon_keyword_id = $1 WHERE id = $2",
+              [String(realId), localKw.localId]
+            ).catch(() => {});
+          }
+        }
+
+        const errors = result?.keywords?.error ?? [];
+        if (errors.length) {
+          logger.warn("SP keyword create partial errors", { profileId, errors });
+        }
+        logger.info("SP keyword create ok", { profileId, count: batch.length, rejected: errors.length });
+      } catch (e) {
+        logger.warn("SP keyword create failed (non-fatal)", { profileId, error: e.message });
+      }
+    }
+  }
+}
+
+module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext, pushNewKeywords };

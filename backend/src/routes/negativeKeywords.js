@@ -264,10 +264,30 @@ router.delete('/bulk', async (req, res, next) => {
     const { ids } = req.body;
     if (!ids?.length) return res.status(400).json({ error: 'ids required' });
 
+    // Fetch before deleting so we can write audit entries
+    const { rows: kws } = await query(
+      `SELECT nk.id, nk.keyword_text, nk.match_type, nk.level, c.name AS campaign_name
+       FROM negative_keywords nk
+       LEFT JOIN campaigns c ON c.id = nk.campaign_id
+       WHERE nk.id = ANY($1::uuid[]) AND nk.workspace_id = $2`,
+      [ids, req.workspaceId]
+    );
+
     const { rowCount } = await query(
       'DELETE FROM negative_keywords WHERE id = ANY($1::uuid[]) AND workspace_id = $2',
       [ids, req.workspaceId]
     );
+
+    for (const kw of kws) {
+      await writeAudit({
+        orgId: req.orgId, workspaceId: req.workspaceId,
+        actorId: req.user.id, actorName: req.user.name,
+        action: 'negative_keyword.deleted', entityType: 'negative_keyword',
+        entityId: kw.id, entityName: kw.keyword_text,
+        beforeData: { keyword_text: kw.keyword_text, match_type: kw.match_type, level: kw.level, campaign: kw.campaign_name },
+        source: 'ui',
+      });
+    }
 
     res.json({ success: true, deleted: rowCount });
   } catch (err) { next(err); }
@@ -276,8 +296,29 @@ router.delete('/bulk', async (req, res, next) => {
 // ─── DELETE /api/v1/negative-keywords/:id ────────────────────────────────────
 router.delete('/:id', async (req, res, next) => {
   try {
+    // Fetch before deleting for audit
+    const { rows: [kw] } = await query(
+      `SELECT nk.keyword_text, nk.match_type, nk.level, c.name AS campaign_name
+       FROM negative_keywords nk
+       LEFT JOIN campaigns c ON c.id = nk.campaign_id
+       WHERE nk.id = $1 AND nk.workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+
     await query('DELETE FROM negative_keywords WHERE id = $1 AND workspace_id = $2',
       [req.params.id, req.workspaceId]);
+
+    if (kw) {
+      await writeAudit({
+        orgId: req.orgId, workspaceId: req.workspaceId,
+        actorId: req.user.id, actorName: req.user.name,
+        action: 'negative_keyword.deleted', entityType: 'negative_keyword',
+        entityId: req.params.id, entityName: kw.keyword_text,
+        beforeData: { keyword_text: kw.keyword_text, match_type: kw.match_type, level: kw.level, campaign: kw.campaign_name },
+        source: 'ui',
+      });
+    }
+
     res.json({ success: true });
   } catch (err) { next(err); }
 });

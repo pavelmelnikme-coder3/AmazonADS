@@ -3,6 +3,7 @@ const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit } = require("./audit");
 const { queueMetricsBackfill } = require("../jobs/workers");
+const { pushNegativeKeyword, pushNegativeAsin } = require("../services/amazon/writeback");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -28,7 +29,8 @@ router.get("/", async (req, res, next) => {
 
     const VALID_LIMITS = [25, 50, 100, 200, 500];
     const limit = VALID_LIMITS.includes(parseInt(rawLimit)) ? parseInt(rawLimit) : 100;
-    const offset = (parseInt(page) - 1) * limit;
+    const safePage = Math.max(1, parseInt(page) || 1);
+    const offset = (safePage - 1) * limit;
 
     const conditions = ["stm.workspace_id = $1"];
     const params = [req.workspaceId];
@@ -62,7 +64,8 @@ router.get("/", async (req, res, next) => {
       conditions.push(`stm.date_start >= $${pi++}::date AND stm.date_end <= $${pi++}::date`);
       params.push(dateFrom, dateTo);
     } else {
-      const days = Math.min(Math.max(parseInt(metricsDays) || 30, 1), 365);
+      const parsedDays = parseInt(metricsDays);
+      const days = Math.min(Math.max(isNaN(parsedDays) ? 30 : parsedDays, 1), 365);
       conditions.push(`stm.date_start >= (NOW() - INTERVAL '${days} days')::date`);
     }
 
@@ -99,6 +102,7 @@ router.get("/", async (req, res, next) => {
              stm.campaign_name,
              kw_c.campaign_name
            ) AS campaign_name,
+           COALESCE(stm.campaign_id, c2.id) AS resolved_campaign_id,
            CASE WHEN stm.sales > 0
                 THEN ROUND((stm.spend / stm.sales * 100)::numeric, 2)
                 ELSE NULL
@@ -117,6 +121,7 @@ router.get("/", async (req, res, next) => {
                   MIN(c.name)           AS campaign_name
            FROM keywords k
            JOIN campaigns c ON c.id = k.campaign_id
+           WHERE k.workspace_id = $1
            GROUP BY k.workspace_id, LOWER(k.keyword_text), LOWER(k.match_type)
          ) kw_c
            ON kw_c.workspace_id = stm.workspace_id
@@ -262,11 +267,23 @@ router.post("/add-keyword", async (req, res, next) => {
 });
 
 // POST /search-terms/add-negative
-// Supports single campaign OR bulk (campaignIds array for account-level add)
+// Supports single campaign OR bulk (campaignIds array for account-level add).
+// Automatically detects ASIN queries (B0XXXXXXXX) and routes to negative_targets;
+// all other queries go to negative_keywords.
 router.post("/add-negative", async (req, res, next) => {
   try {
-    const { query: searchQuery, campaignId, campaignIds, adGroupId, matchType = "exact", level = "campaign" } = req.body;
+    const { query: searchQuery, campaignId, campaignIds, adGroupId, matchType = "exact" } = req.body;
     if (!searchQuery) return res.status(400).json({ error: "query is required" });
+
+    // Detect ASIN: Amazon standard 10-char format B0[A-Z0-9]{8}
+    const ASIN_RE = /^B0[A-Z0-9]{8}$/i;
+    const isAsin = ASIN_RE.test(searchQuery.trim());
+    const asinClean = isAsin ? searchQuery.trim().toUpperCase() : null;
+
+    // Amazon only supports negativeExact / negativePhrase for keywords (no broad)
+    const amazonMatchType = isAsin ? null : (matchType === "phrase" ? "negativePhrase" : "negativeExact");
+    // level: "ad_group" when adGroupId provided, otherwise "campaign"
+    const level = adGroupId ? "ad_group" : "campaign";
 
     let targets = [];
     if (campaignIds && Array.isArray(campaignIds) && campaignIds.length > 0) {
@@ -279,47 +296,130 @@ router.post("/add-negative", async (req, res, next) => {
 
     const results = [];
     for (const target of targets) {
+      // Get campaign + profile + connection info in one query
       const { rows: campRows } = await query(
-        "SELECT profile_id FROM campaigns WHERE id = $1 AND workspace_id = $2",
+        `SELECT c.profile_id AS profile_db_id, c.amazon_campaign_id, c.campaign_type,
+                p.connection_id, p.profile_id AS amazon_profile_id, p.marketplace_id
+         FROM campaigns c
+         JOIN amazon_profiles p ON p.id = c.profile_id
+         WHERE c.id = $1 AND c.workspace_id = $2`,
         [target.campaignId, req.workspaceId]
       );
-      const profileId = campRows[0]?.profile_id;
-      if (!profileId) { results.push({ campaignId: target.campaignId, error: "Campaign not found" }); continue; }
+      const camp = campRows[0];
+      if (!camp) { results.push({ campaignId: target.campaignId, error: "Campaign not found" }); continue; }
 
-      const { rows: agRows } = await query(
-        "SELECT id FROM ad_groups WHERE campaign_id = $1 ORDER BY created_at ASC LIMIT 1",
-        [target.campaignId]
-      );
-      const resolvedAdGroupId = target.adGroupId || agRows[0]?.id;
-      if (!resolvedAdGroupId) { results.push({ campaignId: target.campaignId, error: "No ad group" }); continue; }
-
-      const { rows: existing } = await query(
-        `SELECT id FROM keywords
-         WHERE campaign_id = $1 AND LOWER(keyword_text) = LOWER($2) AND match_type = $3 AND state = 'negative'`,
-        [target.campaignId, searchQuery, matchType]
-      );
-      if (existing.length > 0) {
-        results.push({ campaignId: target.campaignId, skipped: true, reason: "already_exists" });
-        continue;
+      // Resolve ad group (use first ag as FK anchor for campaign-level negatives)
+      let resolvedAdGroupId = target.adGroupId;
+      let amazonAgId = null;
+      if (resolvedAdGroupId) {
+        const { rows: agRows } = await query(
+          "SELECT amazon_ag_id FROM ad_groups WHERE id = $1",
+          [resolvedAdGroupId]
+        );
+        amazonAgId = agRows[0]?.amazon_ag_id || null;
+      } else {
+        const { rows: agRows } = await query(
+          "SELECT id, amazon_ag_id FROM ad_groups WHERE campaign_id = $1 ORDER BY created_at ASC LIMIT 1",
+          [target.campaignId]
+        );
+        resolvedAdGroupId = agRows[0]?.id || null;
+        amazonAgId = agRows[0]?.amazon_ag_id || null;
       }
 
-      const { rows: [kw] } = await query(
-        `INSERT INTO keywords
-           (workspace_id, profile_id, campaign_id, ad_group_id, amazon_keyword_id,
-            keyword_text, match_type, state, bid, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'harvest_neg_' || gen_random_uuid(), $5, $6, 'negative', 0, NOW(), NOW())
-         RETURNING id`,
-        [req.workspaceId, profileId, target.campaignId, resolvedAdGroupId, searchQuery, matchType]
-      );
+      if (isAsin) {
+        // ── ASIN → negative_targets ──────────────────────────────────────────
+        const expression = [{ type: "asinSameAs", value: asinClean }];
 
-      await writeAudit({
-        orgId: req.orgId, workspaceId: req.workspaceId,
-        actorId: req.user.id, actorName: req.user.name,
-        action: "keyword.negative_added", entityType: "keyword", entityId: kw.id, entityName: searchQuery,
-        afterData: { keyword_text: searchQuery, match_type: matchType, source: "search_term_harvest" },
-        source: "ui",
-      });
-      results.push({ campaignId: target.campaignId, success: true, keywordId: kw.id });
+        // Dedup: check if this ASIN already exists as a negative target for this campaign
+        const { rows: existing } = await query(
+          `SELECT id FROM negative_targets
+           WHERE campaign_id = $1 AND expression @> $2::jsonb`,
+          [target.campaignId, JSON.stringify(expression)]
+        );
+        if (existing.length > 0) {
+          results.push({ campaignId: target.campaignId, skipped: true, reason: "already_exists" });
+          continue;
+        }
+
+        const fakeId = `harvest_neg_asin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const { rows: [neg] } = await query(
+          `INSERT INTO negative_targets
+             (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_target_id,
+              ad_type, expression, expression_type, level)
+           VALUES ($1, $2, $3, $4, $5, 'SP', $6, 'manual', $7)
+           ON CONFLICT (profile_id, amazon_neg_target_id) DO NOTHING
+           RETURNING id`,
+          [req.workspaceId, camp.profile_db_id, target.campaignId,
+           level === "ad_group" ? resolvedAdGroupId : null,
+           fakeId, JSON.stringify(expression), level]
+        );
+        if (!neg) { results.push({ campaignId: target.campaignId, skipped: true, reason: "already_exists" }); continue; }
+
+        pushNegativeAsin({
+          localId:          neg.id,
+          connectionId:     camp.connection_id,
+          profileId:        camp.amazon_profile_id,
+          marketplaceId:    camp.marketplace_id,
+          campaignType:     camp.campaign_type,
+          amazonCampaignId: camp.amazon_campaign_id,
+          amazonAdGroupId:  level === "ad_group" ? amazonAgId : null,
+          asinValue:        asinClean,
+          level,
+        }).catch(() => {});
+
+        await writeAudit({
+          orgId: req.orgId, workspaceId: req.workspaceId,
+          actorId: req.user.id, actorName: req.user.name,
+          action: "keyword.negative_added", entityType: "negative_target", entityId: neg.id, entityName: asinClean,
+          afterData: { asin: asinClean, level, source: "search_term_harvest" },
+          source: "ui",
+        });
+        results.push({ campaignId: target.campaignId, success: true, negativeTargetId: neg.id });
+
+      } else {
+        // ── Keyword → negative_keywords ──────────────────────────────────────
+        const { rows: existing } = await query(
+          `SELECT id FROM negative_keywords
+           WHERE campaign_id = $1 AND LOWER(keyword_text) = LOWER($2) AND match_type = $3`,
+          [target.campaignId, searchQuery, amazonMatchType]
+        );
+        if (existing.length > 0) {
+          results.push({ campaignId: target.campaignId, skipped: true, reason: "already_exists" });
+          continue;
+        }
+
+        const { rows: [neg] } = await query(
+          `INSERT INTO negative_keywords
+             (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_keyword_id,
+              keyword_text, match_type, level, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'harvest_neg_' || gen_random_uuid(), $5, $6, $7, NOW(), NOW())
+           RETURNING id`,
+          [req.workspaceId, camp.profile_db_id, target.campaignId, resolvedAdGroupId,
+           searchQuery, amazonMatchType, level]
+        );
+
+        pushNegativeKeyword({
+          localId:          neg.id,
+          connectionId:     camp.connection_id,
+          profileId:        camp.amazon_profile_id,
+          marketplaceId:    camp.marketplace_id,
+          campaignType:     camp.campaign_type,
+          amazonCampaignId: camp.amazon_campaign_id,
+          amazonAdGroupId:  level === "ad_group" ? amazonAgId : null,
+          keywordText:      searchQuery,
+          matchType:        amazonMatchType,
+          level,
+        }).catch(() => {});
+
+        await writeAudit({
+          orgId: req.orgId, workspaceId: req.workspaceId,
+          actorId: req.user.id, actorName: req.user.name,
+          action: "keyword.negative_added", entityType: "negative_keyword", entityId: neg.id, entityName: searchQuery,
+          afterData: { keyword_text: searchQuery, match_type: amazonMatchType, level, source: "search_term_harvest" },
+          source: "ui",
+        });
+        results.push({ campaignId: target.campaignId, success: true, negativeKeywordId: neg.id });
+      }
     }
 
     const added = results.filter(r => r.success).length;

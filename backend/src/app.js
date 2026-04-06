@@ -38,6 +38,7 @@ const negativeKeywordsRoutes = require("./routes/negativeKeywords");
 const negativeAsinsRoutes = require("./routes/negativeAsins");
 const keywordRanksRoutes  = require("./routes/keywordRanks");
 const strategiesRoutes = require("./routes/strategies");
+const keywordResearchRoutes = require("./routes/keywordResearch");
 
 const app = express();
 
@@ -115,6 +116,7 @@ app.use(`${API}/negative-keywords`, negativeKeywordsRoutes);
 app.use(`${API}/negative-asins`, negativeAsinsRoutes);
 app.use(`${API}/keyword-ranks`, keywordRanksRoutes);
 app.use(`${API}/strategies`, strategiesRoutes);
+app.use(`${API}/keyword-research`, keywordResearchRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

@@ -23,7 +23,8 @@ import {
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
   HelpCircle, LogOut, Plus, Sun, Moon, Copy,
-  LineChart as LineChartIcon
+  LineChart as LineChartIcon,
+  FlaskConical,
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -80,6 +81,7 @@ const Styles = () => (
     @keyframes syncProgress{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
     @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
     @keyframes slideInRight{from{transform:translateX(100%);opacity:0}to{transform:none;opacity:1}}
+    @keyframes slideInFromBottom{from{transform:translateX(-50%) translateY(16px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
     svg[class*="lucide"]{display:inline-block;vertical-align:middle;flex-shrink:0;}
     .fade{animation:fadeIn .3s ease both}
     .card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;transition:border-color .2s}
@@ -408,8 +410,9 @@ const NAV = [
   { id: "overview",  icon: Activity       },
   { id: "campaigns", icon: Megaphone      },
   { id: "products",  icon: Package        },
-  { id: "keywords",  icon: Tag            },
-  { id: "rankings",  icon: LineChartIcon  },
+  { id: "keywords",          icon: Tag            },
+  { id: "keyword-research",  icon: FlaskConical   },
+  { id: "rankings",          icon: LineChartIcon  },
   { id: "reports",   icon: Newspaper      },
   { id: "analytics", icon: Layers         },
   { id: "rules",      icon: Workflow      },
@@ -5601,7 +5604,7 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stHarvestSelAdGroup, setStHarvestSelAdGroup] = useState('');
   const [stHarvestMatchType, setStHarvestMatchType] = useState('exact');
   const { colgroup: stColgroup, resizeHandle: stRH } = useResizableColumns(
-    "searchterms", [36, 220, 200, 70, 65, 65, 80, 70, 100, 160]
+    "searchterms2", [36, 220, 180, 130, 70, 65, 65, 80, 70, 100, 140]
   );
   const [stHarvestBid, setStHarvestBid] = useState('0.50');
   const [stHarvestCampaignSearch, setStHarvestCampaignSearch] = useState('');
@@ -5682,6 +5685,8 @@ const KeywordsPage = ({ workspaceId }) => {
     return 'neutral';
   };
 
+  const isAsinQuery = q => /^B0[A-Z0-9]{8}$/i.test((q || '').trim());
+
   const openHarvestModal = async (termsOrTerm, mode) => {
     const terms = Array.isArray(termsOrTerm) ? termsOrTerm : [termsOrTerm];
     setStHarvestModal({ terms, mode });
@@ -5689,9 +5694,10 @@ const KeywordsPage = ({ workspaceId }) => {
     setStHarvestMatchType('exact');
     setStHarvestBid('0.50');
     setStHarvestCampaignSearch('');
-    // Pre-fill campaign if all selected terms share the same campaign
-    const sharedCampaign = terms.every(t => t.campaign_id && t.campaign_id === terms[0].campaign_id)
-      ? terms[0].campaign_id : '';
+    // Pre-fill campaign — prefer resolved_campaign_id (handles terms where campaign_id is null in metrics)
+    const getCid = t => t.resolved_campaign_id || t.campaign_id;
+    const sharedCampaign = terms.every(t => getCid(t) && getCid(t) === getCid(terms[0]))
+      ? getCid(terms[0]) : '';
     setStHarvestSelCampaign(sharedCampaign);
     setStHarvestSelAdGroup(sharedCampaign && terms.length === 1 ? (terms[0].ad_group_id || '') : '');
     setStHarvestSaving(false);
@@ -6051,29 +6057,46 @@ const KeywordsPage = ({ workspaceId }) => {
             )}
 
             {/* Match type + bid */}
-            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Match Type</div>
-                <div style={{ display: "flex", gap: 4 }}>
-                  {['exact', 'phrase', 'broad'].map(mt => (
-                    <button key={mt} onClick={() => setStHarvestMatchType(mt)}
-                      className={`btn ${stHarvestMatchType === mt ? 'btn-primary' : 'btn-ghost'}`}
-                      style={{ fontSize: 11, padding: "4px 10px", textTransform: "capitalize" }}>
-                      {mt}
-                    </button>
-                  ))}
+            {(() => {
+              const allAsin = stHarvestModal.mode === 'negative' &&
+                stHarvestModal.terms.every(t => isAsinQuery(t.query));
+              // For negatives: only exact/phrase (Amazon doesn't support negative broad)
+              const matchTypes = stHarvestModal.mode === 'keyword'
+                ? ['exact', 'phrase', 'broad']
+                : ['exact', 'phrase'];
+              return (
+                <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+                  {allAsin ? (
+                    <div style={{ flex: 1, padding: "8px 12px", background: "rgba(239,68,68,0.07)",
+                      border: "1px solid rgba(239,68,68,0.25)", borderRadius: 8, fontSize: 12, color: "var(--tx2)" }}>
+                      ASIN negative target — будет добавлен как negative targeting clause
+                    </div>
+                  ) : (
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Match Type</div>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        {matchTypes.map(mt => (
+                          <button key={mt} onClick={() => setStHarvestMatchType(mt)}
+                            className={`btn ${stHarvestMatchType === mt ? 'btn-primary' : 'btn-ghost'}`}
+                            style={{ fontSize: 11, padding: "4px 10px", textTransform: "capitalize" }}>
+                            {mt}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {stHarvestModal.mode === 'keyword' && (
+                    <div>
+                      <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Bid $</div>
+                      <input type="number" step="0.01" min="0.02" value={stHarvestBid}
+                        onChange={e => setStHarvestBid(e.target.value)}
+                        style={{ width: 90, padding: "6px 10px", fontSize: 13,
+                          background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)" }} />
+                    </div>
+                  )}
                 </div>
-              </div>
-              {stHarvestModal.mode === 'keyword' && (
-                <div>
-                  <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Bid $</div>
-                  <input type="number" step="0.01" min="0.02" value={stHarvestBid}
-                    onChange={e => setStHarvestBid(e.target.value)}
-                    style={{ width: 90, padding: "6px 10px", fontSize: 13,
-                      background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)" }} />
-                </div>
-              )}
-            </div>
+              );
+            })()}
 
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button className="btn btn-ghost" onClick={() => setStHarvestModal(null)}
@@ -6208,15 +6231,16 @@ const KeywordsPage = ({ workspaceId }) => {
                         />
                       </th>
                       {[
-                        { col: "query",       label: "Query",      align: "left",   rhIdx: 1 },
-                        { col: "campaign",    label: "Campaign",   align: "left",   rhIdx: 2, noSort: true },
-                        { col: "impressions", label: "Impr.",      align: "right",  rhIdx: 3 },
-                        { col: "clicks",      label: "Clicks",     align: "right",  rhIdx: 4 },
-                        { col: "orders",      label: "Orders",     align: "right",  rhIdx: 5 },
-                        { col: "spend",       label: "Spend",      align: "right",  rhIdx: 6 },
-                        { col: "acos",        label: "ACOS",       align: "right",  rhIdx: 7, noSort: true },
-                        { col: "rec",         label: "Suggestion", align: "center", rhIdx: 8, noSort: true },
-                        { col: "actions",     label: "",           align: "center", rhIdx: 9, noSort: true },
+                        { col: "query",        label: "Query",      align: "left",   rhIdx: 1 },
+                        { col: "campaign",     label: "Campaign",   align: "left",   rhIdx: 2, noSort: true },
+                        { col: "keyword_text", label: "Keyword",    align: "left",   rhIdx: 3, noSort: true },
+                        { col: "impressions",  label: "Impr.",      align: "right",  rhIdx: 4 },
+                        { col: "clicks",       label: "Clicks",     align: "right",  rhIdx: 5 },
+                        { col: "orders",       label: "Orders",     align: "right",  rhIdx: 6 },
+                        { col: "spend",        label: "Spend",      align: "right",  rhIdx: 7 },
+                        { col: "acos",         label: "ACOS",       align: "right",  rhIdx: 8, noSort: true },
+                        { col: "rec",          label: "Suggestion", align: "center", rhIdx: 9, noSort: true },
+                        { col: "actions",      label: "",           align: "center", rhIdx: 10, noSort: true },
                       ].map(h => (
                         <th key={h.col}
                           onClick={!h.noSort ? () => {
@@ -6274,7 +6298,7 @@ const KeywordsPage = ({ workspaceId }) => {
                             }}>{term.query}</span>
                             {term.match_type && (
                               <span style={{ fontSize: 10, color: "var(--tx3)", marginTop: 1, display: "block" }}>
-                                via {term.keyword_text || "—"} · {term.match_type}
+                                {term.match_type}
                               </span>
                             )}
                           </td>
@@ -6282,6 +6306,11 @@ const KeywordsPage = ({ workspaceId }) => {
                             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                             title={term.campaign_name}>
                             {term.campaign_name || "—"}
+                          </td>
+                          <td style={{ padding: "7px 10px", fontSize: 11, color: "var(--tx2)",
+                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                            title={term.keyword_text || ""}>
+                            {term.keyword_text || <span style={{ color: "var(--tx3)", opacity: 0.4 }}>—</span>}
                           </td>
                           <td style={{ padding: "7px 10px", textAlign: "right", color: "var(--tx2)" }}>
                             {parseInt(term.impressions || 0).toLocaleString()}
@@ -7941,6 +7970,611 @@ const RuleWizardModal = ({
           )}
         </div>
       </div>
+    </div>
+  );
+};
+
+// ─── Keyword Research Page ────────────────────────────────────────────────────
+const LOCALES = [
+  { code: "en", label: "English" }, { code: "de", label: "Deutsch" },
+  { code: "fr", label: "Français" }, { code: "es", label: "Español" },
+  { code: "it", label: "Italiano" }, { code: "ja", label: "日本語" },
+  { code: "zh", label: "中文" }, { code: "pt", label: "Português" },
+  { code: "nl", label: "Nederlands" }, { code: "pl", label: "Polski" },
+  { code: "sv", label: "Svenska" }, { code: "tr", label: "Türkçe" },
+  { code: "ar", label: "العربية" }, { code: "ko", label: "한국어" },
+];
+
+const SOURCE_LABELS = {
+  amazon_ads: "Amazon",
+  jungle_scout_asin: "JS·ASIN",
+  "jungle_scout_asin+ai_generated": "JS·ASIN+AI",
+  jungle_scout_expand: "JS·Expand",
+  ai_generated: "AI",
+  "amazon_ads+ai_generated": "Amazon+AI",
+};
+
+function sourceLabel(src) {
+  if (!src) return "—";
+  if (src.includes("amazon_ads") && src.includes("ai")) return "Amazon+AI";
+  if (src.includes("amazon_ads")) return "Amazon";
+  if (src.includes("jungle_scout") && src.includes("ai")) return "JS+AI";
+  if (src.includes("jungle_scout")) return "JS";
+  if (src.includes("ai")) return "AI";
+  return src;
+}
+
+const MATCH_BADGE = { exact: "#2563eb", phrase: "#7c3aed", broad: "#059669" };
+
+const AMAZON_TLD_TO_MARKETPLACE = {
+  "com":    "ATVPDKIKX0DER", // US
+  "ca":     "A2EUQ1WTGCTBG2",
+  "com.mx": "A1AM78C64UM0Y8",
+  "co.uk":  "A1F83G8C2ARO7P",
+  "de":     "A1PA6795UKMFR9",
+  "it":     "APJ6JRA9NG5V4",
+  "fr":     "A13V1IB3VIYZZH",
+  "es":     "A1RKKUPIHCS9HS",
+  "nl":     "A1MNDV6DTONNN6",
+  "se":     "A2NODRKZP88ZB9",
+  "pl":     "A1C3SOZRARQ6R3",
+  "tr":     "A33AVAJ2PDY3EV",
+  "com.sa": "A17E79C6D8DWNP",
+  "ae":     "A2VIGQ35RCS4UG",
+  "com.au": "A39IBJ37TRP1C6",
+  "co.jp":  "A1VC38T7YXB528",
+  "in":     "A21TJRUUN4KGV",
+  "sg":     "A19VAU5U5O7RUS",
+};
+
+const TLD_TO_LOCALE = {
+  "com": "en", "ca": "en", "co.uk": "en", "com.au": "en", "in": "en", "sg": "en",
+  "de": "de", "fr": "fr", "it": "it", "es": "es", "nl": "nl",
+  "co.jp": "ja", "com.mx": "es", "se": "sv", "pl": "pl", "tr": "tr",
+  "com.sa": "ar", "ae": "ar",
+};
+
+function parseAmazonUrl(raw) {
+  try {
+    const url = new URL(raw.trim());
+    if (!url.hostname.includes("amazon.")) return null;
+    const asinMatch = url.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
+    const asin = asinMatch ? asinMatch[1].toUpperCase() : null;
+    const tldMatch = url.hostname.match(/amazon\.(.+)$/);
+    const tld = tldMatch ? tldMatch[1] : null;
+    const slugMatch = url.pathname.match(/^\/(.+?)\/dp\//i);
+    const titleHint = slugMatch
+      ? decodeURIComponent(slugMatch[1]).replace(/-/g, " ").slice(0, 100)
+      : null;
+    return { asin, tld, titleHint };
+  } catch {
+    return null;
+  }
+}
+
+const KeywordResearchPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [profiles, setProfiles]         = useState([]);
+  const [profileId, setProfileId]       = useState("");
+  const [adGroups, setAdGroups]         = useState([]);
+  const [adGroupId, setAdGroupId]       = useState("");
+  const [urlInput, setUrlInput]         = useState("");
+  const [urlParsed, setUrlParsed]       = useState(null); // { asin, tld, titleHint }
+  const [asins, setAsins]               = useState("");
+  const [productTitle, setProductTitle] = useState("");
+  const [locale, setLocale]             = useState("en");
+  const [sources, setSources]           = useState({ amazon: true, ai: true, jungle_scout: false });
+  const [loading, setLoading]           = useState(false);
+  const [results, setResults]           = useState(null); // { keywords, product_title, sources_used, jungle_scout_available }
+  const [selected, setSelected]         = useState(new Set());
+  const [matchOverrides, setMatchOverrides] = useState({}); // idx → match_type
+  const [defaultBid, setDefaultBid]     = useState("0.50");
+  const [adding, setAdding]             = useState(false);
+  const [addResult, setAddResult]       = useState(null);
+  const [error, setError]               = useState("");
+
+  // Localised source label helper (inside component so it can use t())
+  const srcLabel = (src) => {
+    if (!src) return "—";
+    if (src.includes("amazon_ads") && src.includes("ai")) return t("kwr.srcLabelAmazonAI");
+    if (src.includes("amazon_ads")) return t("kwr.srcLabelAmazon");
+    if (src.includes("jungle_scout") && src.includes("ai")) return t("kwr.srcLabelJSAI");
+    if (src.includes("jungle_scout")) return t("kwr.srcLabelJS");
+    if (src.includes("ai")) return t("kwr.srcLabelAI");
+    return src;
+  };
+
+  const applyParsedUrl = (parsed, profs) => {
+    if (!parsed) return;
+    if (parsed.asin) setAsins(a => {
+      const existing = a.trim().split(/[\s,\n]+/).filter(Boolean).map(s => s.toUpperCase());
+      if (!existing.includes(parsed.asin)) return existing.concat(parsed.asin).join("\n");
+      return a;
+    });
+    if (parsed.titleHint) setProductTitle(prev => prev || parsed.titleHint);
+    if (parsed.tld) {
+      const detectedLocale = TLD_TO_LOCALE[parsed.tld];
+      if (detectedLocale) setLocale(detectedLocale);
+      const mktId = AMAZON_TLD_TO_MARKETPLACE[parsed.tld];
+      if (mktId && profs) {
+        const match = profs.find(p => p.marketplace_id === mktId);
+        if (match) setProfileId(match.id);
+      }
+    }
+  };
+
+  useEffect(() => {
+    apiFetch("/profiles").then(data => {
+      const attached = (data || []).filter(p => p.is_attached);
+      setProfiles(attached);
+      if (attached.length === 1) setProfileId(attached[0].id);
+      // If URL was already pasted before profiles loaded, apply profile matching now
+      setUrlParsed(p => { if (p) applyParsedUrl(p, attached); return p; });
+    }).catch(() => {});
+  }, [workspaceId]);
+
+  const handleUrlChange = (val) => {
+    setUrlInput(val);
+    const parsed = parseAmazonUrl(val);
+    setUrlParsed(parsed);
+    if (parsed) applyParsedUrl(parsed, profiles);
+  };
+
+  useEffect(() => {
+    if (!profileId) { setAdGroups([]); return; }
+    apiFetch("/rules/ad-groups").then(data => setAdGroups(data || [])).catch(() => {});
+  }, [profileId]);
+
+  // Auto-fill title from products table when ASIN entered
+  useEffect(() => {
+    const first = asins.trim().split(/[\s,\n]+/)[0]?.toUpperCase();
+    if (!first || productTitle) return;
+    apiFetch(`/products?search=${first}&limit=5`).then(data => {
+      const match = (data?.data || []).find(p => p.asin === first);
+      if (match?.title) setProductTitle(match.title);
+    }).catch(() => {});
+  }, [asins]);
+
+  const discover = async () => {
+    if (!profileId) { setError(t("kwr.errNoProfile")); return; }
+    const asinList = asins.trim()
+      ? asins.split(/[\s,\n]+/).map(s => s.trim().toUpperCase()).filter(Boolean)
+      : [];
+    if (!asinList.length && !productTitle) { setError(t("kwr.errNoInput")); return; }
+
+    setLoading(true);
+    setError("");
+    setResults(null);
+    setSelected(new Set());
+    setMatchOverrides({});
+    setAddResult(null);
+
+    try {
+      const activeSources = Object.entries(sources)
+        .filter(([, v]) => v).map(([k]) => k);
+      const body = { profileId, locale, sources: activeSources };
+      if (asinList.length) body.asins = asinList;
+      if (productTitle)    body.productTitle = productTitle;
+      if (adGroupId)       body.adGroupId = adGroupId;
+
+      const data = await apiFetch("/keyword-research/discover", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setResults(data);
+    } catch (e) {
+      setError(e.message || t("kwr.errDiscovery"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleAll = (checked) => {
+    if (!results) return;
+    setSelected(checked ? new Set(results.keywords.map((_, i) => i)) : new Set());
+  };
+
+  const addSelected = async () => {
+    if (!adGroupId) { setError(t("kwr.errNoAdGroup")); return; }
+    if (!selected.size) { setError(t("kwr.errNoSelection")); return; }
+    setAdding(true);
+    setError("");
+    setAddResult(null);
+    try {
+      const keywords = results.keywords
+        .filter((_, i) => selected.has(i))
+        .map((kw, origIdx) => {
+          const idx = results.keywords.indexOf(kw);
+          return {
+            ...kw,
+            match_type: matchOverrides[idx] || kw.match_type || "broad",
+            bid: parseFloat(defaultBid) || 0.50,
+          };
+        });
+
+      const data = await apiFetch("/keyword-research/add-to-adgroup", {
+        method: "POST",
+        body: JSON.stringify({ keywords, adGroupId, defaultBid: parseFloat(defaultBid) }),
+      });
+      setAddResult(data);
+      setSelected(new Set());
+    } catch (e) {
+      setError(e.message || t("kwr.errAdd"));
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const toggleSource = (src) => setSources(s => ({ ...s, [src]: !s[src] }));
+
+  const srcConfig = [
+    { key: "amazon",       label: t("kwr.srcAmazonLabel"), icon: "🛒", desc: t("kwr.srcAmazonDesc") },
+    { key: "ai",           label: t("kwr.srcAILabel"),     icon: "✦",  desc: t("kwr.srcAIDesc") },
+    { key: "jungle_scout", label: t("kwr.srcJSLabel"),     icon: "🌿", desc: t("kwr.srcJSDesc") },
+  ];
+
+  const relColor = (s) => s >= 80 ? "var(--grn)" : s >= 60 ? "var(--amb)" : "var(--red)";
+  const relBg    = (s) => s >= 80 ? "rgba(34,197,94,.1)" : s >= 60 ? "rgba(245,158,11,.1)" : "rgba(239,68,68,.1)";
+
+  return (
+    <div style={{ padding: "24px 28px", maxWidth: 1100, position: "relative" }}>
+
+      {/* ── Page header ── */}
+      <div style={{ marginBottom: 24, display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "-.3px" }}>{t("kwr.title")}</h2>
+          <p style={{ margin: "5px 0 0", color: "var(--tx2)", fontSize: 13 }}>{t("kwr.subtitle")}</p>
+        </div>
+      </div>
+
+      {/* ── Input card ── */}
+      <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, marginBottom: 20, overflow: "hidden" }}>
+
+        {/* Product input section */}
+        <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--b1)" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 14 }}>{t("kwr.sectionProduct")}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {/* URL input */}
+            <div style={{ gridColumn: "1 / -1" }}>
+              <div style={{ position: "relative" }}>
+                <div style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", color: "var(--tx3)" }}>
+                  <Link size={14} />
+                </div>
+                <input
+                  value={urlInput}
+                  onChange={e => handleUrlChange(e.target.value)}
+                  placeholder={t("kwr.urlPlaceholder")}
+                  style={{ width: "100%", boxSizing: "border-box", fontSize: 13,
+                    background: urlParsed?.asin ? "rgba(34,197,94,.05)" : "var(--s2)",
+                    border: `1.5px solid ${urlInput && !urlParsed ? "var(--red)" : urlParsed?.asin ? "var(--grn)" : "var(--b2)"}`,
+                    borderRadius: 8, padding: "9px 36px 9px 34px", color: "var(--tx)",
+                    transition: "border-color .15s" }}
+                />
+                {urlInput && (
+                  <button onClick={() => { setUrlInput(""); setUrlParsed(null); }}
+                    style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                      background: "none", border: "none", cursor: "pointer", color: "var(--tx3)",
+                      width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center",
+                      borderRadius: 4, padding: 0 }}>
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+              {urlParsed?.asin && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, color: "var(--grn)" }}>
+                  <Check size={12} />
+                  <span dangerouslySetInnerHTML={{ __html: urlParsed.tld
+                    ? t("kwr.asinExtractedTld", { asin: urlParsed.asin, tld: urlParsed.tld }).replace(urlParsed.asin, `<strong>${urlParsed.asin}</strong>`)
+                    : t("kwr.asinExtracted", { asin: urlParsed.asin }).replace(urlParsed.asin, `<strong>${urlParsed.asin}</strong>`) }} />
+                </div>
+              )}
+            </div>
+
+            {/* ASINs */}
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>
+                {t("kwr.asinLabel")}
+                <span style={{ fontWeight: 400, color: "var(--tx3)", marginLeft: 6 }}>{t("kwr.asinHint")}</span>
+              </label>
+              <textarea
+                value={asins}
+                onChange={e => setAsins(e.target.value)}
+                placeholder={"B08XXXXXX\nB09XXXXXX"}
+                rows={3}
+                style={{ width: "100%", boxSizing: "border-box", resize: "none", fontSize: 12,
+                  background: "var(--s2)", border: "1.5px solid var(--b2)", borderRadius: 8,
+                  padding: "8px 12px", color: "var(--tx)", fontFamily: "var(--mono)",
+                  lineHeight: 1.6, transition: "border-color .15s" }}
+              />
+            </div>
+
+            {/* Title */}
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>
+                {t("kwr.titleLabel")}
+                <span style={{ fontWeight: 400, color: "var(--tx3)", marginLeft: 6 }}>{t("kwr.titleHint")}</span>
+              </label>
+              <textarea
+                value={productTitle}
+                onChange={e => setProductTitle(e.target.value)}
+                placeholder={t("kwr.titlePlaceholder")}
+                rows={3}
+                style={{ width: "100%", boxSizing: "border-box", resize: "none", fontSize: 13,
+                  background: "var(--s2)", border: "1.5px solid var(--b2)", borderRadius: 8,
+                  padding: "8px 12px", color: "var(--tx)", lineHeight: 1.6,
+                  transition: "border-color .15s" }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Settings section */}
+        <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--b1)" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 14 }}>{t("kwr.sectionSettings")}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>{t("kwr.profileLabel")}</label>
+              <select value={profileId} onChange={e => setProfileId(e.target.value)}
+                style={{ width: "100%", fontSize: 13, padding: "8px 12px", borderRadius: 8,
+                  background: "var(--s2)", border: "1.5px solid var(--b2)", color: profileId ? "var(--tx)" : "var(--tx3)" }}>
+                <option value="">{t("kwr.profilePlaceholder")}</option>
+                {profiles.map(p => (
+                  <option key={p.id} value={p.id}>{p.name || p.profile_id}{p.marketplace_id ? ` · ${p.marketplace_id}` : ""}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>
+                {t("kwr.adGroupLabel")}
+                <span style={{ fontWeight: 400, color: "var(--tx3)", marginLeft: 4 }}>{t("kwr.adGroupOptional")}</span>
+              </label>
+              <select value={adGroupId} onChange={e => setAdGroupId(e.target.value)}
+                style={{ width: "100%", fontSize: 13, padding: "8px 12px", borderRadius: 8,
+                  background: "var(--s2)", border: "1.5px solid var(--b2)", color: adGroupId ? "var(--tx)" : "var(--tx3)" }}>
+                <option value="">{t("kwr.adGroupPlaceholder")}</option>
+                {adGroups.map(ag => (
+                  <option key={ag.id} value={ag.id}>{ag.campaign_name} / {ag.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>{t("kwr.langLabel")}</label>
+              <select value={locale} onChange={e => setLocale(e.target.value)}
+                style={{ width: "100%", fontSize: 13, padding: "8px 12px", borderRadius: 8,
+                  background: "var(--s2)", border: "1.5px solid var(--b2)", color: "var(--tx)" }}>
+                {LOCALES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* Sources + action */}
+        <div style={{ padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: "var(--tx3)", marginRight: 4 }}>{t("kwr.sourcesLabel")}</span>
+            {srcConfig.map(({ key, label, icon, desc }) => {
+              const on = !!sources[key];
+              return (
+                <button key={key} onClick={() => toggleSource(key)}
+                  title={desc}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20,
+                    fontSize: 12, fontWeight: 500, cursor: "pointer",
+                    border: `1.5px solid ${on ? "var(--ac)" : "var(--b2)"}`,
+                    background: on ? "rgba(59,130,246,.1)" : "transparent",
+                    color: on ? "var(--ac2)" : "var(--tx3)",
+                    transition: "all .15s" }}>
+                  <span style={{ fontSize: 13 }}>{icon}</span>
+                  {label}
+                  {on && <Check size={11} />}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {error && (
+              <span style={{ fontSize: 12, color: "var(--red)", display: "flex", alignItems: "center", gap: 5 }}>
+                <AlertCircle size={13} /> {error}
+              </span>
+            )}
+            <button onClick={discover}
+              disabled={loading || (!asins.trim() && !productTitle)}
+              className="btn btn-primary"
+              style={{ padding: "9px 20px", fontSize: 13, gap: 7, minWidth: 160 }}>
+              {loading
+                ? <><RefreshCw size={14} className="spin" /> {t("kwr.searching")}</>
+                : <><Search size={14} /> {t("kwr.discoverBtn")}</>}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Loading skeleton ── */}
+      {loading && (
+        <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, padding: "40px 24px", textAlign: "center" }}>
+          <RefreshCw size={28} className="spin" style={{ color: "var(--ac)", marginBottom: 12 }} />
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--tx)", marginBottom: 4 }}>{t("kwr.loadingTitle")}</div>
+          <div style={{ fontSize: 12, color: "var(--tx3)" }}>
+            {sources.ai ? t("kwr.loadingAI") : ""}
+            {sources.amazon ? t("kwr.loadingAmazon") : ""}
+            {t("kwr.loadingHint")}
+          </div>
+        </div>
+      )}
+
+      {/* ── Results ── */}
+      {!loading && results && (
+        <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
+
+          {/* Results header */}
+          <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--b1)",
+            display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>{results.total}</span>
+            <span style={{ fontSize: 13, color: "var(--tx2)" }}>{t("kwr.keywordsFound")}</span>
+            {results.product_title && (
+              <span style={{ fontSize: 12, color: "var(--tx3)", fontStyle: "italic" }}>
+                {t("kwr.forProduct", { title: results.product_title.slice(0, 55) + (results.product_title.length > 55 ? "…" : "") })}
+              </span>
+            )}
+            <div style={{ flex: 1 }} />
+            {results.sources_used?.map(s => (
+              <span key={s} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20,
+                background: "var(--s3)", color: "var(--tx2)", fontWeight: 500 }}>
+                {srcLabel(s)}
+              </span>
+            ))}
+            <button onClick={() => toggleAll(selected.size < results.keywords.length)}
+              style={{ fontSize: 12, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--b2)",
+                background: "transparent", color: "var(--tx2)", cursor: "pointer" }}>
+              {selected.size === results.keywords.length ? t("kwr.deselectAll") : t("kwr.selectAll")}
+            </button>
+          </div>
+
+          {/* Table */}
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ background: "var(--s2)", borderBottom: "1px solid var(--b1)" }}>
+                  <th style={{ width: 40, padding: "9px 0 9px 16px" }}>
+                    <input type="checkbox"
+                      checked={selected.size === results.keywords.length && results.keywords.length > 0}
+                      onChange={e => toggleAll(e.target.checked)}
+                      style={{ accentColor: "var(--ac)", width: 14, height: 14 }} />
+                  </th>
+                  <th style={{ padding: "9px 12px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase" }}>{t("kwr.colKeyword")}</th>
+                  <th style={{ padding: "9px 12px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 100 }}>{t("kwr.colSource")}</th>
+                  <th style={{ padding: "9px 12px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 160 }}>{t("kwr.colMatchType")}</th>
+                  <th style={{ padding: "9px 12px", textAlign: "center", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 100 }}>{t("kwr.colRelevance")}</th>
+                  <th style={{ padding: "9px 12px", textAlign: "right", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 100 }}>{t("kwr.colSearches")}</th>
+                  <th style={{ padding: "9px 12px", textAlign: "right", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 90 }}>{t("kwr.colBid")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.keywords.map((kw, idx) => {
+                  const isSelected = selected.has(idx);
+                  const currentMatch = matchOverrides[idx] || kw.match_type || "broad";
+                  const score = kw.relevance_score;
+                  return (
+                    <tr key={idx} className="tbl-row"
+                      style={{ borderBottom: "1px solid var(--b1)", cursor: "pointer",
+                        background: isSelected ? "rgba(59,130,246,.06)" : undefined,
+                        transition: "background .1s" }}
+                      onClick={() => setSelected(s => { const n = new Set(s); n.has(idx) ? n.delete(idx) : n.add(idx); return n; })}>
+
+                      <td style={{ padding: "10px 0 10px 16px" }} onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={isSelected}
+                          onChange={() => setSelected(s => { const n = new Set(s); n.has(idx) ? n.delete(idx) : n.add(idx); return n; })}
+                          style={{ accentColor: "var(--ac)", width: 14, height: 14 }} />
+                      </td>
+
+                      <td style={{ padding: "10px 12px", fontWeight: isSelected ? 600 : 400, color: "var(--tx)" }}>
+                        {kw.keyword_text}
+                      </td>
+
+                      <td style={{ padding: "10px 12px" }}>
+                        <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10,
+                          background: "var(--s3)", color: "var(--tx3)", fontWeight: 500, whiteSpace: "nowrap" }}>
+                          {srcLabel(kw.source)}
+                        </span>
+                      </td>
+
+                      <td style={{ padding: "10px 12px" }} onClick={e => e.stopPropagation()}>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          {(kw.suggested_match_types?.length ? kw.suggested_match_types : [currentMatch]).map(mt => (
+                            <button key={mt} onClick={() => setMatchOverrides(m => ({ ...m, [idx]: mt }))}
+                              style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, cursor: "pointer", fontWeight: 600,
+                                border: `1.5px solid ${currentMatch === mt ? MATCH_BADGE[mt] || "var(--b2)" : "var(--b2)"}`,
+                                background: currentMatch === mt ? (MATCH_BADGE[mt] || "#64748b") + "18" : "transparent",
+                                color: currentMatch === mt ? MATCH_BADGE[mt] || "var(--tx)" : "var(--tx3)",
+                                transition: "all .1s", lineHeight: 1.4 }}>
+                              {mt}
+                            </button>
+                          ))}
+                        </div>
+                      </td>
+
+                      <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                        {score != null ? (
+                          <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 52 }}>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: relColor(score), fontFamily: "var(--mono)" }}>
+                              {score}
+                            </span>
+                            <div style={{ width: 40, height: 3, borderRadius: 2, background: "var(--b1)", overflow: "hidden" }}>
+                              <div style={{ width: `${score}%`, height: "100%", background: relColor(score), borderRadius: 2 }} />
+                            </div>
+                          </div>
+                        ) : <span style={{ color: "var(--tx3)" }}>—</span>}
+                      </td>
+
+                      <td style={{ padding: "10px 12px", textAlign: "right", color: "var(--tx2)", fontFamily: "var(--mono)", fontSize: 12 }}>
+                        {kw.monthly_search_volume ? kw.monthly_search_volume.toLocaleString() : <span style={{ color: "var(--tx3)" }}>—</span>}
+                      </td>
+
+                      <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 12, color: "var(--tx2)" }}>
+                        {kw.bid_suggested ? `$${parseFloat(kw.bid_suggested).toFixed(2)}` : <span style={{ color: "var(--tx3)" }}>—</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {!results.jungle_scout_available && (
+            <div style={{ padding: "10px 20px", borderTop: "1px solid var(--b1)", fontSize: 11, color: "var(--tx3)", display: "flex", alignItems: "center", gap: 6 }}>
+              <AlertCircle size={11} />
+              {t("kwr.jsNotConnected")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Floating action bar ── */}
+      {selected.size > 0 && results && (
+        <div style={{
+          position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
+          background: "var(--s1)", border: "1px solid var(--b2)",
+          borderRadius: 14, padding: "12px 20px",
+          display: "flex", alignItems: "center", gap: 16,
+          boxShadow: "0 8px 32px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.2)",
+          zIndex: 100, animation: "slideInFromBottom .2s ease",
+          whiteSpace: "nowrap",
+        }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)" }}>
+            {selected.size !== 1 ? t("kwr.selectedPlural", { n: selected.size }) : t("kwr.selected", { n: selected.size })}
+          </span>
+          <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
+          <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8, color: "var(--tx2)" }}>
+            {t("kwr.bidLabel")}
+            <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+              <span style={{ position: "absolute", left: 9, fontSize: 12, color: "var(--tx3)", pointerEvents: "none" }}>$</span>
+              <input type="number" value={defaultBid} onChange={e => setDefaultBid(e.target.value)}
+                step="0.01" min="0.02" max="99"
+                style={{ width: 72, fontSize: 13, padding: "5px 8px 5px 20px", borderRadius: 7,
+                  background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", fontFamily: "var(--mono)" }} />
+            </div>
+          </label>
+          {!adGroupId && (
+            <span style={{ fontSize: 12, color: "var(--amb)", display: "flex", alignItems: "center", gap: 5 }}>
+              <AlertCircle size={12} /> {t("kwr.adGroupWarning")}
+            </span>
+          )}
+          {addResult && !adding && (
+            <span style={{ fontSize: 13, color: "var(--grn)", fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+              <Check size={13} /> {addResult.skipped ? t("kwr.addedSkipped", { n: addResult.added, skipped: addResult.skipped }) : t("kwr.addedSuccess", { n: addResult.added })}
+            </span>
+          )}
+          <button onClick={addSelected} disabled={adding || !adGroupId}
+            className="btn btn-primary"
+            style={{ padding: "8px 18px", fontSize: 13, gap: 7, opacity: (!adGroupId || adding) ? 0.5 : 1 }}>
+            {adding ? <><RefreshCw size={13} className="spin" /> {t("kwr.adding")}</> : <><Plus size={13} /> {t("kwr.addBtn")}</>}
+          </button>
+          <button onClick={() => setSelected(new Set())}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: 4, display: "flex" }}>
+            <X size={14} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };
@@ -10500,6 +11134,7 @@ export default function App() {
     campaigns: <CampaignsPage workspaceId={wid} />,
     products: <ProductsPage workspaceId={wid} />,
     keywords: <KeywordsPage workspaceId={wid} />,
+    "keyword-research": <KeywordResearchPage workspaceId={wid} />,
     rankings: <RankTrackerPage workspaceId={wid} />,
     reports: <ReportsPage workspaceId={wid} />,
     analytics: <AnalyticsPage workspaceId={wid} />,

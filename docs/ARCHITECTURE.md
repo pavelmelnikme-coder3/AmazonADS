@@ -6,8 +6,9 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  Browser (React SPA)                                            │
 │  Login → Connect → Overview → Campaigns → Keywords →           │
-│  Reports → Rules → Alerts → AI → Audit → Connections           │
-│                    i18n: RU / EN                                │
+│  Search Terms → Products → KW Research → Rank Tracker →        │
+│  Reports → Rules → Strategies → Alerts → AI → Audit            │
+│                    i18n: EN / RU / DE                           │
 └────────────────────────┬────────────────────────────────────────┘
                          │ REST API  /api/v1
                          │ HTTP + JWT Bearer token
@@ -110,6 +111,7 @@ profiles          id, connection_id, workspace_id, amazon_profile_id, marketplac
 campaigns         id, workspace_id, profile_id, amazon_campaign_id, name, state, budget, type
 ad_groups         id, campaign_id, amazon_ad_group_id, name, state, default_bid
 keywords          id, ad_group_id, amazon_keyword_id, keyword_text, match_type, bid, state
+report_requests   id, workspace_id, profile_id, campaign_type, report_type, date_start, date_end, status, error_message
 reports           id, workspace_id, type, date_range, status, s3_url
 rules             id, workspace_id, name, conditions(jsonb), actions(jsonb), schedule_type, is_active, dry_run
 alert_configs     id, workspace_id, name, metric, operator, threshold, channels(jsonb), cooldown_hours, last_triggered_at
@@ -127,7 +129,44 @@ audit_logs        id, workspace_id, user_id, entity_type, entity_id, action, old
 | CSRF | `state` param in OAuth flow validated on callback |
 | SQL injection | Parameterized queries only (`$1, $2`) |
 | XSS | Helmet.js, React DOM escaping |
-| Brute force | Rate limiting 300 req/min per IP |
+| Brute force | Rate limiting 300 req/min per IP; 5 failed logins/15 min on auth routes |
 | Privilege escalation | RBAC checked on every protected route |
 | Audit tampering | PostgreSQL trigger blocks UPDATE/DELETE on audit_logs |
 | Secret leakage | `.env` in `.gitignore`, secrets never logged |
+
+---
+
+## Data Flow: Keyword Research
+
+```
+POST /keyword-research/discover
+  Input: profileId, asins[], productTitle, locale, sources[]
+
+  1. [amazon]       getAmazonKeywordRecommendations()
+                    → Amazon Ads API v3 keyword recommendations for ASIN + ad group
+  2. [jungle_scout] getKeywordsByAsin()
+                    → Jungle Scout ASIN reverse-lookup (requires JUNGLE_SCOUT_API_KEY)
+  3. [ai]           generateSeedKeywords()
+                    → Claude AI generates seed keywords in target language
+  4. [js + ai]      getKeywordsByKeyword() for top AI seeds (relevance ≥ 80)
+                    → Jungle Scout expansion of best AI seeds
+  5. scoreAndFilterKeywords()
+                    → Claude AI scores all collected keywords (0–100), filters < 50
+
+  Merge: keyword_text.lower deduplicated — higher relevance wins, sources concatenated
+  Sort: amazon_ads source boosted +15 pts, then by relevance desc
+
+POST /keyword-research/add-to-adgroup
+  1. Dedup check: skip if keyword_text + match_type already in ad group
+  2. INSERT into keywords table
+  3. pushNewKeywords() → Amazon Ads API (non-blocking, errors logged only)
+  4. writeAudit() → audit_events
+```
+
+## New Routes & Services (added April 2026)
+
+| File | Purpose |
+|------|---------|
+| `routes/keywordResearch.js` | `/keyword-research/discover` + `/add-to-adgroup` |
+| `services/ai/keywordResearch.js` | Claude AI seed generation + relevance scoring |
+| `services/amazon/keywordRecommendations.js` | Amazon Ads API v3 keyword recommendations |

@@ -108,13 +108,17 @@ function recordSuccess(profileId) {
 // ─── Versioned Accept headers for SP v3 endpoints ─────────────────────────────
 // Amazon Ads API v3 requires content-type versioning for SP sub-resources
 function getAcceptHeader(path) {
-  if (path.includes("/sp/adGroups"))           return "application/vnd.spAdGroup.v3+json";
-  if (path.includes("/sp/keywords"))           return "application/vnd.spKeyword.v3+json";
-  if (path.includes("/sp/productAds"))         return "application/vnd.spProductAd.v3+json";
-  if (path.includes("/sp/negativeKeywords"))   return "application/vnd.spNegativeKeyword.v3+json";
-  if (path.includes("/sp/negativeTargets"))    return "application/vnd.spNegativeTargetingClause.v3+json";
-  if (path.includes("/sp/targets"))            return "application/vnd.spTargetingClause.v3+json";
-  if (path.includes("/sp/campaigns"))          return "application/vnd.spCampaign.v3+json";
+  if (path.includes("/sp/adGroups"))                    return "application/vnd.spAdGroup.v3+json";
+  // Keyword recommendations — must be checked before /sp/targets (more specific)
+  if (path.includes("/sp/targets/keywords/recommendations")) return "application/json";
+  // campaignNegativeKeywords must be checked before negativeKeywords (more specific)
+  if (path.includes("/sp/campaignNegativeKeywords"))    return "application/vnd.spCampaignNegativeKeyword.v3+json";
+  if (path.includes("/sp/keywords"))                    return "application/vnd.spKeyword.v3+json";
+  if (path.includes("/sp/productAds"))                  return "application/vnd.spProductAd.v3+json";
+  if (path.includes("/sp/negativeKeywords"))            return "application/vnd.spNegativeKeyword.v3+json";
+  if (path.includes("/sp/negativeTargets"))             return "application/vnd.spNegativeTargetingClause.v3+json";
+  if (path.includes("/sp/targets"))                     return "application/vnd.spTargetingClause.v3+json";
+  if (path.includes("/sp/campaigns"))                   return "application/vnd.spCampaign.v3+json";
   return "application/json";
 }
 

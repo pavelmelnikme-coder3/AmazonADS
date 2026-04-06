@@ -449,10 +449,11 @@ async function applyAction(action, entity, safety, isDryRun) {
       newValue = asinValue;
 
       if (!isDryRun) {
-        // Pre-check: skip if this ASIN is already negated for this campaign
+        // Pre-check: skip if this ASIN is already negated for this campaign (JSONB containment)
+        const exprCheck = JSON.stringify([{ type: "asinSameAs", value: asinValue }]);
         const { rows: existing } = await query(
-          `SELECT id FROM negative_targets WHERE campaign_id = $1 AND expression::text LIKE $2`,
-          [entity.id, `%${asinValue}%`]
+          `SELECT id FROM negative_targets WHERE campaign_id = $1 AND expression @> $2::jsonb`,
+          [entity.id, exprCheck]
         );
         if (existing.length > 0) {
           return { oldValue: null, newValue: asinValue, applied: false };
@@ -481,6 +482,18 @@ async function applyAction(action, entity, safety, isDryRun) {
             asinValue,
             level: "campaign",
           }).catch(err => logger.warn("Negative ASIN write-back (rule) failed", { error: err.message }));
+
+          // Audit log
+          await query(
+            `INSERT INTO audit_events
+               (org_id, workspace_id, actor_type, actor_name, action,
+                entity_type, entity_id, entity_name, before_data, after_data, source)
+             SELECT w.org_id, $1, 'system', 'rule-engine', $2,
+                    'campaign', $3, $4, NULL, $5::jsonb, 'system'
+             FROM workspaces w WHERE w.id = $1`,
+            [workspaceId, "rule.add_negative_asin", entity.id, entity.name,
+             JSON.stringify({ asin: asinValue })]
+          ).catch(e => logger.warn("Failed to write audit for add_negative_asin", { error: e.message }));
         }
       }
       break;

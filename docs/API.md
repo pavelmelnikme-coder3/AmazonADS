@@ -263,6 +263,59 @@ Query: ?entityType=campaign&action=status_change&page=1&limit=50
 
 ---
 
+## Keyword Research
+
+### POST /keyword-research/discover
+Discover keywords from multiple sources for a given product.
+```json
+// Request
+{
+  "profileId": "uuid",
+  "asins": ["B08XXXXXX"],
+  "productTitle": "Stainless Steel Water Bottle 1L",
+  "locale": "de",
+  "sources": ["amazon", "ai", "jungle_scout"]
+}
+
+// Response 200
+{
+  "keywords": [
+    {
+      "keyword_text": "Edelstahl Trinkflasche",
+      "source": "amazon_ads+ai_generated",
+      "match_type": "broad",
+      "suggested_match_types": ["broad", "phrase"],
+      "relevance_score": 92,
+      "monthly_search_volume": 18000,
+      "bid_suggested": 0.45
+    }
+  ],
+  "total": 48,
+  "sources_used": ["amazon_ads", "ai_generated"],
+  "product_title": "Stainless Steel Water Bottle 1L",
+  "jungle_scout_available": false
+}
+```
+
+### POST /keyword-research/add-to-adgroup
+Add selected keywords to an ad group (deduplicates, then pushes to Amazon).
+```json
+// Request
+{
+  "adGroupId": "uuid",
+  "defaultBid": 0.50,
+  "keywords": [
+    { "keyword_text": "Edelstahl Trinkflasche", "match_type": "broad", "bid": 0.45 }
+  ]
+}
+
+// Response 200
+{ "success": true, "added": 5, "skipped": 2 }
+```
+`skipped` = duplicates already present in the ad group.
+
+---
+
 ## Error Responses
 
 All errors follow this format:

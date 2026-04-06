@@ -290,7 +290,9 @@ async function startWorkers() {
         endDate,
       });
     },
-    { connection: createRedisConnection(), concurrency: 2 }
+    // concurrency: 1 — Amazon Ads API throttles heavily when multiple report-create
+    // requests fire simultaneously; sequential processing avoids 429 retries (15s+30s)
+    { connection: createRedisConnection(), concurrency: 1 }
   );
 
   reportWorker.on("failed", (job, err) => {
@@ -467,6 +469,12 @@ async function startWorkers() {
 
   workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
+
+  // Mark stale processing/requested DB records as failed (left over from previous restarts)
+  await query(
+    `UPDATE report_requests SET status = 'failed', error_message = 'Stale: interrupted by server restart', updated_at = NOW()
+     WHERE status IN ('processing', 'requested') AND updated_at < NOW() - INTERVAL '2 hours'`
+  ).catch(e => logger.warn("Stale report cleanup failed", { error: e.message }));
 }
 
 async function stopWorkers() {

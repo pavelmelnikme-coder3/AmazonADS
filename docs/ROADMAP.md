@@ -1,8 +1,8 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 30 March 2026
-> Sprint 1 ✅ Complete · Sprint 2 ✅ Complete · Sprint 3 ✅ Complete · Sprint 4 ✅ Complete (S4-1,S4-2,S4-3,S4-5) · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅
-> S4-4 (SB Keyword-level Reports) blocked by Amazon API — pending GA of Reporting API v3 for SB
+> Last updated: 6 April 2026
+> Sprint 1 ✅ · Sprint 2 ✅ · Sprint 3 ✅ · Sprint 4 ✅ (S4-1,S4-2,S4-3,S4-5) · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅ · Keyword Research ✅
+> S4-4 (SB Keyword-level Reports) — SB `keywordText` field fix deployed; full keyword-level metrics pending Amazon Reporting API v3 GA for SB
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -395,7 +395,24 @@ Migrate to `POST /sp/negativeKeywords/list` for negative keyword sync
 
 ---
 
-## ✅ i18n Audit — Complete (30 March 2026)
+## ✅ Keyword Research — Complete (6 April 2026)
+
+New section for multi-source keyword discovery with Amazon URL parsing and ad group write-back.
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Amazon URL → ASIN auto-parser | ✅ Done | TLD → marketplace + language detection |
+| Amazon Ads keyword recommendations | ✅ Done | SP/SB API v3, ad-group scoped |
+| Claude AI seed generation | ✅ Done | Native language, locale-aware |
+| Jungle Scout ASIN reverse lookup | ✅ Done | Optional, requires API key |
+| AI relevance scoring + filter | ✅ Done | Claude scores 0–100, threshold ≥ 50 |
+| Results table with match-type switcher | ✅ Done | Per-row override, relevance progress bar |
+| Floating action bar + bulk add | ✅ Done | Bid input, dedup, Amazon write-back |
+| Full EN/RU/DE i18n (`kwr.*` namespace) | ✅ Done | 50+ keys, zero language mixing |
+
+---
+
+## ✅ i18n Audit — Complete (30 March 2026, updated 6 April 2026)
 
 Full audit and fix of all EN/RU/DE translations — zero language mixing.
 
@@ -408,6 +425,7 @@ Full audit and fix of all EN/RU/DE translations — zero language mixing.
 | Hardcoded English in alert()/showToast() calls | ✅ Fixed | 9 instances replaced with t() calls |
 | NegativesTab missing useI18n() | ✅ Fixed | Added hook, t() now available |
 | Analytics component using wrong t alias | ✅ Fixed | tr() used consistently |
+| KW Research section fully translated | ✅ Done | 50+ keys in `kwr.*` namespace, all 3 languages |
 
 ---
 
