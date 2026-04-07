@@ -29,6 +29,15 @@ profilesRouter.get("/", async (req, res, next) => {
 // POST /profiles/:id/sync — manual sync trigger
 profilesRouter.post("/:id/sync", async (req, res, next) => {
   try {
+    // Validate ownership: profile must belong to a connection in this org
+    const { rows: [profile] } = await query(
+      `SELECT p.id FROM amazon_profiles p
+       JOIN amazon_connections c ON c.id = p.connection_id
+       WHERE p.id = $1 AND c.org_id = $2`,
+      [req.params.id, req.orgId]
+    );
+    if (!profile) return res.status(404).json({ error: "Profile not found" });
+
     const { queueEntitySync } = require("../jobs/workers");
     await queueEntitySync(req.params.id, ["campaigns", "ad_groups", "keywords"], 1);
     await query("UPDATE amazon_profiles SET sync_status = 'pending', updated_at = NOW() WHERE id = $1", [req.params.id]);

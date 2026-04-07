@@ -708,7 +708,7 @@ export default {
     colSource: "Source",
     colMatchType: "Match type",
     colRelevance: "Relevance",
-    colSearches: "Searches",
+    colSearches: "Popularity",
     colBid: "Bid",
     srcLabelAmazon: "Amazon",
     srcLabelAmazonAI: "Amazon+AI",

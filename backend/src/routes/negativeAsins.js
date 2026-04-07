@@ -2,7 +2,7 @@ const express = require('express');
 const { query } = require('../db/pool');
 const { requireAuth, requireWorkspace } = require('../middleware/auth');
 const { pushNegativeAsin } = require('../services/amazon/writeback');
-const { writeAudit } = require('./audit');
+const { writeAudit, updateAuditStatus } = require('./audit');
 const logger = require('../config/logger');
 
 const router = express.Router();
@@ -100,10 +100,13 @@ router.post('/', async (req, res, next) => {
     const { rows: campRows } = await query(
       `SELECT c.profile_id, c.campaign_type, c.amazon_campaign_id,
               p.profile_id AS amazon_profile_id, p.marketplace_id, p.connection_id,
-              ag.amazon_ag_id AS amazon_ad_group_id
+              COALESCE(ag.amazon_ag_id, first_ag.amazon_ag_id) AS amazon_ad_group_id
        FROM campaigns c
        JOIN amazon_profiles p ON p.id = c.profile_id
        LEFT JOIN ad_groups ag ON ag.id = $3::uuid AND ag.campaign_id = c.id
+       LEFT JOIN LATERAL (
+         SELECT amazon_ag_id FROM ad_groups WHERE campaign_id = c.id ORDER BY created_at ASC LIMIT 1
+       ) first_ag ON true
        WHERE c.id = $1 AND c.workspace_id = $2`,
       [campaignId, req.workspaceId, adGroupId || null]
     );
@@ -111,7 +114,7 @@ router.post('/', async (req, res, next) => {
     const camp = campRows[0];
 
     const level = adGroupId ? 'ad_group' : 'campaign';
-    const expression = [{ type: 'asinSameAs', value: asinClean }];
+    const expression = [{ type: 'ASIN_SAME_AS', value: asinClean }];
     const fakeId = `manual_neg_asin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const { rows } = await query(
@@ -127,13 +130,21 @@ router.post('/', async (req, res, next) => {
     const inserted = rows[0] || null;
 
     if (inserted) {
+      const auditId = await writeAudit({
+        orgId: req.orgId, workspaceId: req.workspaceId,
+        actorId: req.user.id, actorName: req.user.name,
+        action: 'keyword.negative_added', entityType: 'negative_target',
+        entityId: inserted.id, entityName: asinClean,
+        afterData: { asin: asinClean, level, source: 'manual' },
+        source: 'ui', amazonStatus: 'pending',
+      });
       pushNegativeAsin({
         localId: inserted.id, connectionId: camp.connection_id,
         profileId: camp.amazon_profile_id?.toString(), marketplaceId: camp.marketplace_id,
         campaignType: camp.campaign_type, amazonCampaignId: camp.amazon_campaign_id,
         amazonAdGroupId: camp.amazon_ad_group_id || null,
         asinValue: asinClean, level,
-      }).catch(e => logger.warn('negative ASIN write-back error', { error: e.message }));
+      }).then(r => updateAuditStatus(auditId, r.ok ? 'success' : 'error', r.error)).catch(() => {});
     }
 
     res.json({ data: inserted ? { ...inserted, asin: asinClean } : null });
@@ -154,8 +165,13 @@ router.post('/bulk', async (req, res, next) => {
     for (const campId of campaignIds) {
       const { rows: campRows } = await query(
         `SELECT c.profile_id, c.campaign_type, c.amazon_campaign_id,
-                p.profile_id AS amazon_profile_id, p.marketplace_id, p.connection_id
-         FROM campaigns c JOIN amazon_profiles p ON p.id = c.profile_id
+                p.profile_id AS amazon_profile_id, p.marketplace_id, p.connection_id,
+                first_ag.amazon_ag_id AS amazon_ad_group_id
+         FROM campaigns c
+         JOIN amazon_profiles p ON p.id = c.profile_id
+         LEFT JOIN LATERAL (
+           SELECT amazon_ag_id FROM ad_groups WHERE campaign_id = c.id ORDER BY created_at ASC LIMIT 1
+         ) first_ag ON true
          WHERE c.id = $1 AND c.workspace_id = $2`,
         [campId, req.workspaceId]
       );
@@ -166,7 +182,7 @@ router.post('/bulk', async (req, res, next) => {
         const asinClean = (typeof asin === 'string' ? asin : asin?.value || '').trim().toUpperCase();
         if (!asinClean) continue;
 
-        const expression = [{ type: 'asinSameAs', value: asinClean }];
+        const expression = [{ type: 'ASIN_SAME_AS', value: asinClean }];
         const fakeId = `manual_neg_asin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
         const { rows } = await query(
@@ -184,7 +200,7 @@ router.post('/bulk', async (req, res, next) => {
             localId: rows[0].id, connectionId: camp.connection_id,
             profileId: camp.amazon_profile_id?.toString(), marketplaceId: camp.marketplace_id,
             campaignType: camp.campaign_type, amazonCampaignId: camp.amazon_campaign_id,
-            amazonAdGroupId: null, asinValue: asinClean, level: 'campaign',
+            amazonAdGroupId: camp.amazon_ad_group_id || null, asinValue: asinClean, level: 'campaign',
           }).catch(() => {});
         } else { skipped++; }
       }

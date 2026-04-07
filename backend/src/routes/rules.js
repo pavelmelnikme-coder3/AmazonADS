@@ -632,10 +632,12 @@ router.get("/campaigns", async (req, res, next) => {
 // ── GET /rules/ad-groups — MUST be before /:id ────────────────────────────────
 router.get("/ad-groups", async (req, res, next) => {
   try {
-    const { campaignId } = req.query;
+    const { campaignId, profileId: filterProfileId } = req.query;
     const cond   = ["ag.workspace_id = $1"];
     const params = [req.workspaceId];
-    if (campaignId) { cond.push("ag.campaign_id = $2"); params.push(campaignId); }
+    let pi = 2;
+    if (campaignId)      { cond.push(`ag.campaign_id = $${pi++}`);  params.push(campaignId); }
+    if (filterProfileId) { cond.push(`c.profile_id = $${pi++}`);    params.push(filterProfileId); }
     const { rows } = await query(
       `SELECT ag.id, ag.name, ag.campaign_id, c.name AS campaign_name
        FROM ad_groups ag JOIN campaigns c ON c.id = ag.campaign_id

@@ -138,10 +138,12 @@ async function refreshAccessToken(connectionId) {
 /**
  * Get a valid access token for a connection.
  * Automatically refreshes if expired or expiring within 5 minutes.
+ * If the connection is in 'revoked' or 'expired' state but a refresh_token
+ * still exists, attempts an automatic recovery refresh before failing.
  */
 async function getValidAccessToken(connectionId) {
   const { rows } = await query(
-    `SELECT access_token_enc, token_expires_at, status
+    `SELECT access_token_enc, refresh_token_enc, token_expires_at, status
      FROM amazon_connections WHERE id = $1`,
     [connectionId]
   );
@@ -149,7 +151,29 @@ async function getValidAccessToken(connectionId) {
   if (!rows.length) throw Object.assign(new Error("Connection not found"), { status: 404 });
 
   const conn = rows[0];
-  if (conn.status === "revoked") throw Object.assign(new Error("Connection has been revoked"), { status: 403 });
+
+  // If revoked/expired but refresh_token still present — attempt silent recovery
+  if (conn.status === "revoked" || conn.status === "expired") {
+    let refreshToken = null;
+    try { refreshToken = decrypt(conn.refresh_token_enc); } catch {}
+    if (refreshToken) {
+      logger.warn("Connection is revoked/expired — attempting silent token refresh", { connectionId, status: conn.status });
+      try {
+        // Temporarily lift the status so refreshAccessToken's query will match
+        await query(
+          "UPDATE amazon_connections SET status = 'error', updated_at = NOW() WHERE id = $1 AND status = ANY(ARRAY['revoked','expired'])",
+          [connectionId]
+        );
+        const refreshed = await refreshAccessToken(connectionId);
+        logger.info("Silent token refresh succeeded — connection restored", { connectionId });
+        return refreshed.accessToken;
+      } catch (refreshErr) {
+        logger.warn("Silent token refresh failed", { connectionId, error: refreshErr.message });
+        throw Object.assign(new Error("Connection has been revoked and could not be automatically restored. Please reconnect."), { status: 403 });
+      }
+    }
+    throw Object.assign(new Error("Connection has been revoked"), { status: 403 });
+  }
 
   const expiresAt = new Date(conn.token_expires_at);
   const fiveMinutes = 5 * 60 * 1000;

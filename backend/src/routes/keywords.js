@@ -1,7 +1,7 @@
 const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
-const { writeAudit } = require("./audit");
+const { writeAudit, updateAuditStatus } = require("./audit");
 const { pushKeywordUpdates, loadKeywordContext } = require("../services/amazon/writeback");
 const logger = require("../config/logger");
 
@@ -162,6 +162,7 @@ router.patch("/bulk", async (req, res, next) => {
     if (!updates?.length) return res.status(400).json({ error: "updates required" });
     let updated = 0;
     const updatedIds = [];
+    const auditIds = [];
     for (const { id, bid, state } of updates) {
       const { rows: [kw] } = await query(
         "SELECT id, keyword_text, bid, state FROM keywords WHERE id = $1 AND workspace_id = $2",
@@ -185,7 +186,7 @@ router.patch("/bulk", async (req, res, next) => {
       if (bid   !== undefined) { beforeData.bid   = parseFloat(kw.bid);   afterData.bid   = parseFloat(bid); }
       if (state !== undefined) { beforeData.state = kw.state;             afterData.state = state; }
 
-      await writeAudit({
+      const auditId = await writeAudit({
         orgId:       req.orgId,
         workspaceId: req.workspaceId,
         actorId:     req.user.id,
@@ -197,9 +198,11 @@ router.patch("/bulk", async (req, res, next) => {
         beforeData,
         afterData,
         source: "ui",
+        amazonStatus: "pending",
       });
       updated++;
       updatedIds.push(id);
+      auditIds.push(auditId);
     }
 
     // Amazon write-back (non-fatal)
@@ -217,9 +220,9 @@ router.patch("/bulk", async (req, res, next) => {
           ...(upd?.state !== undefined ? { state: upd.state } : {}),
         };
       });
-      pushKeywordUpdates(writebackUpdates).catch(e =>
-        logger.warn("bulk keyword write-back error", { error: e.message })
-      );
+      pushKeywordUpdates(writebackUpdates)
+        .then(r => Promise.all(auditIds.map(id => updateAuditStatus(id, r.ok ? "success" : "error", r.error))))
+        .catch(() => {});
     }
 
     res.json({ updated });

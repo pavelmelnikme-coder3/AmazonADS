@@ -12,7 +12,7 @@
  */
 
 const axios = require("axios");
-const { getValidAccessToken } = require("./lwa");
+const { getValidAccessToken, refreshAccessToken } = require("./lwa");
 const logger = require("../../config/logger");
 const { getRedis } = require("../../config/redis");
 
@@ -110,7 +110,7 @@ function recordSuccess(profileId) {
 function getAcceptHeader(path) {
   if (path.includes("/sp/adGroups"))                    return "application/vnd.spAdGroup.v3+json";
   // Keyword recommendations — must be checked before /sp/targets (more specific)
-  if (path.includes("/sp/targets/keywords/recommendations")) return "application/json";
+  if (path.includes("/sp/targets/keywords/recommendations")) return "application/vnd.spkeywordsrecommendation.v4+json";
   // campaignNegativeKeywords must be checked before negativeKeywords (more specific)
   if (path.includes("/sp/campaignNegativeKeywords"))    return "application/vnd.spCampaignNegativeKeyword.v3+json";
   if (path.includes("/sp/keywords"))                    return "application/vnd.spKeyword.v3+json";
@@ -200,6 +200,18 @@ async function adsRequest({
       if (response.status >= 200 && response.status < 300) {
         recordSuccess(profileId);
         return response.data;
+      }
+
+      // Unauthorized — token may have been silently revoked by Amazon; try refresh + retry once
+      if (response.status === 401 && attempt === 0) {
+        logger.warn("Amazon API 401 — refreshing token and retrying", { connectionId, profileId, path });
+        try {
+          await refreshAccessToken(connectionId);
+        } catch (refreshErr) {
+          logger.error("Token refresh after 401 failed", { connectionId, error: refreshErr.message });
+          throw Object.assign(new Error("Amazon authorization expired. Please reconnect your account."), { status: 401 });
+        }
+        continue; // retry the request with the new token
       }
 
       // Rate limited

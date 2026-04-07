@@ -14,7 +14,7 @@ const { getAmazonKeywordRecommendations } = require("../services/amazon/keywordR
 const { getKeywordsByAsin, getKeywordsByKeyword, isConfigured: jsConfigured } = require("../services/junglescout/client");
 const { generateSeedKeywords, scoreAndFilterKeywords } = require("../services/ai/keywordResearch");
 const { pushNewKeywords } = require("../services/amazon/writeback");
-const { writeAudit } = require("./audit");
+const { writeAudit, updateAuditStatus } = require("./audit");
 
 router.use(requireAuth, requireWorkspace);
 
@@ -50,13 +50,16 @@ router.post("/discover", async (req, res, next) => {
     if (!profile) return res.status(404).json({ error: "Profile not found" });
 
     // Load ad group + campaign Amazon IDs if provided
+    // Also validate that the ad group belongs to the selected profile to avoid using
+    // wrong credentials with wrong campaign/adgroup IDs in Amazon API calls
     let agContext = null;
     if (adGroupId) {
       const { rows: [ag] } = await query(
         `SELECT ag.amazon_ag_id, c.amazon_campaign_id
-         FROM ad_groups ag JOIN campaigns c ON c.id = ag.campaign_id
-         WHERE ag.id = $1 AND ag.workspace_id = $2`,
-        [adGroupId, req.workspaceId]
+         FROM ad_groups ag
+         JOIN campaigns c ON c.id = ag.campaign_id
+         WHERE ag.id = $1 AND ag.workspace_id = $2 AND c.profile_id = $3`,
+        [adGroupId, req.workspaceId, profileId]
       );
       agContext = ag || null;
     }
@@ -204,6 +207,53 @@ router.post("/discover", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── POST /keyword-research/check-duplicates ──────────────────────────────────
+// Returns which of the supplied keywords already exist in the profile (and/or target ad group)
+router.post("/check-duplicates", async (req, res, next) => {
+  try {
+    const { profileId, adGroupId, keywords } = req.body;
+    if (!keywords?.length || !profileId) return res.json({ duplicates: {} });
+
+    const kwTexts = [...new Set(keywords.map(k => (k.keyword_text || "").trim().toLowerCase()).filter(Boolean))];
+    if (!kwTexts.length) return res.json({ duplicates: {} });
+
+    // Validate profile belongs to this workspace
+    const { rows: profRows } = await query(
+      `SELECT id FROM amazon_profiles WHERE id = $1 AND workspace_id = $2`,
+      [profileId, req.workspaceId]
+    );
+    if (!profRows.length) return res.status(403).json({ error: "Profile not found" });
+
+    const { rows } = await query(
+      `SELECT LOWER(k.keyword_text) AS kw, k.match_type,
+              k.ad_group_id,
+              ag.name AS ag_name, c.name AS campaign_name
+       FROM keywords k
+       JOIN ad_groups ag ON ag.id = k.ad_group_id
+       JOIN campaigns  c ON c.id = k.campaign_id
+       WHERE c.profile_id = $1 AND c.workspace_id = $2 AND k.state != 'archived'
+         AND LOWER(k.keyword_text) = ANY($3::text[])`,
+      [profileId, req.workspaceId, kwTexts]
+    );
+
+    const duplicates = {};
+    for (const kw of keywords) {
+      const kwLower = (kw.keyword_text || "").trim().toLowerCase();
+      const mt      = (kw.match_type || "broad").toLowerCase();
+      const key     = `${kwLower}|${mt}`;
+      const matches = rows.filter(r => r.kw === kwLower && r.match_type === mt);
+      if (!matches.length) continue;
+      duplicates[key] = {
+        in_adgroup: adGroupId ? matches.some(m => m.ad_group_id === adGroupId) : false,
+        in_profile: true,
+        locations:  matches.slice(0, 5).map(m => ({ campaign: m.campaign_name, ad_group: m.ag_name })),
+      };
+    }
+
+    res.json({ duplicates });
+  } catch (err) { next(err); }
+});
+
 // ── POST /keyword-research/add-to-adgroup ────────────────────────────────────
 router.post("/add-to-adgroup", async (req, res, next) => {
   try {
@@ -228,6 +278,7 @@ router.post("/add-to-adgroup", async (req, res, next) => {
 
     let added = 0, skipped = 0;
     const toSync = []; // keywords to push to Amazon API
+    const syncAuditIds = [];
 
     for (const kw of keywords) {
       const kwText   = (kw.keyword_text || kw.text || "").trim();
@@ -270,13 +321,15 @@ router.post("/add-to-adgroup", async (req, res, next) => {
           bid,
         });
 
-        await writeAudit({
+        const auditId = await writeAudit({
           orgId: req.orgId, workspaceId: req.workspaceId, actorId: req.user.id, actorName: req.user.name,
           action: "keyword.added", entityType: "keyword",
           entityId: ins.id, entityName: kwText,
           afterData: { keyword_text: kwText, match_type: matchType, bid, ad_group_id: adGroupId },
           source: "ui",
+          amazonStatus: "pending",
         });
+        syncAuditIds.push(auditId);
       } else {
         skipped++;
       }
@@ -284,9 +337,9 @@ router.post("/add-to-adgroup", async (req, res, next) => {
 
     // Push to Amazon in background (non-fatal)
     if (toSync.length) {
-      pushNewKeywords(toSync).catch(e =>
-        logger.warn("Keyword research add-to-adgroup write-back failed", { error: e.message })
-      );
+      pushNewKeywords(toSync)
+        .then(r => Promise.all(syncAuditIds.map(id => updateAuditStatus(id, r.ok ? "success" : "error", r.error))))
+        .catch(() => {});
     }
 
     logger.info("Keyword research: keywords added", {

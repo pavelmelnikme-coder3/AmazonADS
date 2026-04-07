@@ -1,6 +1,7 @@
 const express = require("express");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
+const logger = require("../config/logger");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -11,7 +12,7 @@ router.use(requireAuth, requireWorkspace);
 async function writeAudit({
   orgId, workspaceId, actorId, actorType = "user", actorName,
   action, entityType, entityId, entityName,
-  beforeData, afterData, source = "ui", requestId
+  beforeData, afterData, source = "ui", requestId, amazonStatus = null,
 }) {
   let diff = null;
   if (beforeData && afterData) {
@@ -24,20 +25,34 @@ async function writeAudit({
     }
   }
 
-  await query(
+  const { rows } = await query(
     `INSERT INTO audit_events
        (org_id, workspace_id, actor_id, actor_type, actor_name, action,
-        entity_type, entity_id, entity_name, before_data, after_data, diff, source, request_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        entity_type, entity_id, entity_name, before_data, after_data, diff, source, request_id, amazon_status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     RETURNING id`,
     [
       orgId, workspaceId || null, actorId || null, actorType, actorName || null,
       action, entityType || null, entityId ? String(entityId) : null, entityName || null,
       beforeData ? JSON.stringify(beforeData) : null,
       afterData ? JSON.stringify(afterData) : null,
       diff ? JSON.stringify(diff) : null,
-      source, requestId || null,
+      source, requestId || null, amazonStatus,
     ]
   );
+  return rows[0].id;
+}
+
+async function updateAuditStatus(auditId, status, error = null) {
+  if (!auditId) return;
+  try {
+    await query(
+      "UPDATE audit_events SET amazon_status = $1, amazon_error = $2 WHERE id = $3",
+      [status, error ? String(error).slice(0, 500) : null, auditId]
+    );
+  } catch (e) {
+    logger.warn("Failed to update audit amazon_status", { auditId, status, error: e.message });
+  }
 }
 
 // GET /audit
@@ -84,7 +99,7 @@ router.get("/", async (req, res, next) => {
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(
         `SELECT id, actor_id, actor_name, actor_type, action, entity_type, entity_id, entity_name,
-                before_data, after_data, diff, source, created_at
+                before_data, after_data, diff, source, created_at, amazon_status, amazon_error
          FROM audit_events ${where}
          ORDER BY ${orderField} ${orderDir}
          LIMIT $${pi} OFFSET $${pi + 1}`,
@@ -108,7 +123,7 @@ router.get("/entity/:entityId", async (req, res, next) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 10, 50);
     const { rows } = await query(
-      `SELECT id, actor_name, actor_type, action, before_data, after_data, diff, source, created_at
+      `SELECT id, actor_name, actor_type, action, before_data, after_data, diff, source, created_at, amazon_status, amazon_error
        FROM audit_events
        WHERE workspace_id = $1 AND entity_id = $2
        ORDER BY created_at DESC
@@ -339,3 +354,4 @@ router.post("/:id/rollback", async (req, res, next) => {
 
 module.exports = router;
 module.exports.writeAudit = writeAudit;
+module.exports.updateAuditStatus = updateAuditStatus;

@@ -1000,8 +1000,10 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
 
   async function revokeConnection(id) {
     if (!confirm(t("connect.disconnectConfirm"))) return;
-    await del(`/connections/${id}`);
-    setConnections(c => c.filter(x => x.id !== id));
+    try {
+      await del(`/connections/${id}`);
+      setConnections(c => c.filter(x => x.id !== id));
+    } catch (e) { showToast(e.message, "error"); }
   }
 
   function setRow(id, patch) {
@@ -1421,9 +1423,11 @@ const RankTrackerPage = ({ workspaceId }) => {
   };
 
   const handleDelete = async (id) => {
-    await del(`/keyword-ranks/${id}`);
-    if (expanded === id) setExpanded(null);
-    reload();
+    try {
+      await del(`/keyword-ranks/${id}`);
+      if (expanded === id) setExpanded(null);
+      reload();
+    } catch (e) { showToast(e.message, "error"); }
   };
 
   const handleCheckOne = async (id) => {
@@ -1525,9 +1529,9 @@ const RankTrackerPage = ({ workspaceId }) => {
           })}
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
-          <span>{new Date(data[0]?.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" })}</span>
+          <span>{pts[0]?.captured_at ? new Date(pts[0].captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" }) : ""}</span>
           <span>Best: #{minP}</span>
-          <span>{new Date(data[data.length - 1]?.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" })}</span>
+          <span>{pts[pts.length - 1]?.captured_at ? new Date(pts[pts.length - 1].captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" }) : ""}</span>
         </div>
       </div>
     );
@@ -1790,8 +1794,10 @@ const ProductsPage = ({ workspaceId }) => {
   };
 
   const handleDelete = async (id) => {
-    await del(`/products/${id}`);
-    mutate(list => (list || []).filter(p => p.id !== id));
+    try {
+      await del(`/products/${id}`);
+      mutate(list => (list || []).filter(p => p.id !== id));
+    } catch (e) { showToast(e.message, "error"); }
   };
 
   return (
@@ -4028,8 +4034,9 @@ const AuditPage = ({ workspaceId }) => {
   const [limit,    setLimit]    = useState(50);
   const [rollingBack,  setRollingBack]  = useState(null);
   const [rollbackMsg,  setRollbackMsg]  = useState({});
+  const [errorTooltip, setErrorTooltip] = useState(null); // { text, x, y }
   const { colgroup: auditColgroup, resizeHandle: auditRH, resetCols: auditResetCols } = useResizableColumns(
-    "audit", [130, 130, 160, 190, 220, 110]
+    "audit", [130, 130, 160, 190, 80, 220, 110]
   );
 
   useEffect(() => { setPage(1); }, [filterAction, filterEntity, filterSource, filterActor, filterDateFrom, filterDateTo, onlyRollback, sortBy, sortDir]);
@@ -4082,12 +4089,15 @@ const AuditPage = ({ workspaceId }) => {
     } finally { setRollingBack(null); }
   };
 
-  const canRollback = (event) =>
-    event.before_data &&
-    !event.action?.endsWith(".rollback") &&
-    ["keyword", "campaign"].includes(event.entity_type) &&
-    ["keyword.bid_change","keyword.pause_keyword","keyword.enable_keyword",
-     "keyword.adjust_bid_pct","keyword.set_bid","keyword.state_change","campaign.update"].includes(event.action);
+  const canRollback = (event) => {
+    if (event.action?.endsWith(".rollback")) return false;
+    if (event.action === "keyword.negative_added" &&
+        ["negative_keyword", "negative_target"].includes(event.entity_type)) return true;
+    return !!(event.before_data &&
+      ["keyword", "campaign"].includes(event.entity_type) &&
+      ["keyword.bid_change","keyword.pause_keyword","keyword.enable_keyword",
+       "keyword.adjust_bid_pct","keyword.set_bid","keyword.state_change","campaign.update"].includes(event.action));
+  };
 
   const INP = { fontSize: 12, padding: "6px 10px", borderRadius: 6,
     background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" };
@@ -4191,8 +4201,9 @@ const AuditPage = ({ workspaceId }) => {
                 <th onClick={() => handleSort("entity_type")} style={{ cursor: "pointer", userSelect: "none" }}>
                   {t("audit.colEntity")} <SortIcon field="entity_type" />{auditRH(3)}
                 </th>
-                <th>{t("audit.diff")}{auditRH(4)}</th>
-                <th style={{ textAlign: "right" }}>{t("audit.rollback")}{auditRH(5)}</th>
+                <th style={{ textAlign: "center" }}>Amazon{auditRH(4)}</th>
+                <th>{t("audit.diff")}{auditRH(5)}</th>
+                <th style={{ textAlign: "right" }}>{t("audit.rollback")}{auditRH(6)}</th>
               </tr>
             </thead>
             <tbody>
@@ -4215,7 +4226,7 @@ const AuditPage = ({ workspaceId }) => {
                   <React.Fragment key={event.id}>
                     {isNewDay && (
                       <tr className="audit-date-group">
-                        <td colSpan={6}>{formatDateGroup(event.created_at)}</td>
+                        <td colSpan={7}>{formatDateGroup(event.created_at)}</td>
                       </tr>
                     )}
                   <tr>
@@ -4242,6 +4253,31 @@ const AuditPage = ({ workspaceId }) => {
                         textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block" }}>
                         {entityDisplay}
                       </span>
+                    </td>
+                    <td style={{ textAlign: "center" }}>
+                      {event.amazon_status === "success" && (
+                        <span title="Applied to Amazon" style={{ color: "var(--grn)", display: "inline-flex", alignItems: "center" }}>
+                          <Check size={13} strokeWidth={2} />
+                        </span>
+                      )}
+                      {event.amazon_status === "error" && (() => {
+                        const codeMatch = event.amazon_error?.match(/(\d{3})/);
+                        const code = codeMatch ? codeMatch[1] : "err";
+                        return (
+                          <span
+                            style={{ color: "var(--red)", display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, cursor: "help" }}
+                            onMouseEnter={e => setErrorTooltip({ text: event.amazon_error || "Amazon error", x: e.clientX, y: e.clientY })}
+                            onMouseMove={e => setErrorTooltip(t => t ? { ...t, x: e.clientX, y: e.clientY } : null)}
+                            onMouseLeave={() => setErrorTooltip(null)}
+                          >
+                            <X size={13} strokeWidth={2} />
+                            <span style={{ fontSize: 10, fontFamily: "var(--mono)" }}>{code}</span>
+                          </span>
+                        );
+                      })()}
+                      {event.amazon_status === "pending" && (
+                        <span title="Sending to Amazon…" style={{ color: "var(--tx3)", fontSize: 10 }}>…</span>
+                      )}
                     </td>
                     <td style={{ fontSize: 11, fontFamily: "var(--mono)" }}>
                       {diff ? (
@@ -4301,6 +4337,21 @@ const AuditPage = ({ workspaceId }) => {
             <button onClick={() => setPage(p => Math.min(pagination.pages, p + 1))} disabled={page === pagination.pages}
               className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}>→</button>
           </div>
+        </div>
+      )}
+
+      {errorTooltip && (
+        <div style={{
+          position: "fixed", zIndex: 9999,
+          left: Math.min(errorTooltip.x + 12, window.innerWidth - 340),
+          top: errorTooltip.y + 16,
+          background: "var(--s1)", border: "1px solid var(--b2)",
+          borderRadius: 8, padding: "10px 14px",
+          maxWidth: 320, fontSize: 11, fontFamily: "var(--mono)",
+          color: "var(--tx)", boxShadow: "0 4px 16px rgba(0,0,0,.18)",
+          lineHeight: 1.6, wordBreak: "break-word", pointerEvents: "none",
+        }}>
+          {errorTooltip.text}
         </div>
       )}
     </div>
@@ -5690,7 +5741,6 @@ const KeywordsPage = ({ workspaceId }) => {
   const openHarvestModal = async (termsOrTerm, mode) => {
     const terms = Array.isArray(termsOrTerm) ? termsOrTerm : [termsOrTerm];
     setStHarvestModal({ terms, mode });
-    setStHarvestLevel('campaign');
     setStHarvestMatchType('exact');
     setStHarvestBid('0.50');
     setStHarvestCampaignSearch('');
@@ -5698,8 +5748,12 @@ const KeywordsPage = ({ workspaceId }) => {
     const getCid = t => t.resolved_campaign_id || t.campaign_id;
     const sharedCampaign = terms.every(t => getCid(t) && getCid(t) === getCid(terms[0]))
       ? getCid(terms[0]) : '';
+    const sharedAdGroup = sharedCampaign && terms.every(t => t.ad_group_id && t.ad_group_id === terms[0].ad_group_id)
+      ? (terms[0].ad_group_id || '') : '';
     setStHarvestSelCampaign(sharedCampaign);
-    setStHarvestSelAdGroup(sharedCampaign && terms.length === 1 ? (terms[0].ad_group_id || '') : '');
+    setStHarvestSelAdGroup(sharedAdGroup);
+    // Default to adgroup level; fall back to campaign if no shared campaign found
+    setStHarvestLevel(sharedCampaign ? 'adgroup' : 'campaign');
     setStHarvestSaving(false);
     try {
       const camps = await apiFetch('/search-terms/campaigns');
@@ -5995,6 +6049,19 @@ const KeywordsPage = ({ workspaceId }) => {
             {(stHarvestLevel === 'campaign' || stHarvestLevel === 'adgroup') && (
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Campaign</div>
+                {stHarvestSelCampaign && (() => {
+                  const selCamp = stHarvestCampaigns.find(c => c.id === stHarvestSelCampaign);
+                  return selCamp ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6,
+                      padding: "5px 10px", background: "rgba(96,165,250,0.12)",
+                      border: "1px solid rgba(96,165,250,0.35)", borderRadius: 6, fontSize: 12 }}>
+                      <span style={{ fontSize: 10, opacity: 0.7, flexShrink: 0 }}>
+                        {selCamp.campaign_type === 'sponsoredProducts' ? 'SP' : selCamp.campaign_type === 'sponsoredBrands' ? 'SB' : 'SD'}
+                      </span>
+                      <span style={{ color: "var(--tx)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selCamp.name}</span>
+                    </div>
+                  ) : null;
+                })()}
                 <input
                   placeholder="Search campaigns…"
                   value={stHarvestCampaignSearch}
@@ -6040,7 +6107,9 @@ const KeywordsPage = ({ workspaceId }) => {
                       </div>
                     ))}
                     {adGroups.length === 0 && (
-                      <div style={{ padding: "12px", fontSize: 12, color: "var(--tx3)" }}>No ad groups</div>
+                      <div style={{ padding: "12px", fontSize: 12, color: "var(--tx3)" }}>
+                        {stHarvestCampaigns.length === 0 ? 'Loading…' : 'No ad groups'}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -6103,7 +6172,8 @@ const KeywordsPage = ({ workspaceId }) => {
                 style={{ fontSize: 13 }}>Cancel</button>
               <button className="btn btn-primary" onClick={submitHarvest} disabled={stHarvestSaving ||
                 ((stHarvestLevel === 'campaign' || stHarvestLevel === 'adgroup') && !stHarvestSelCampaign) ||
-                (stHarvestLevel === 'adgroup' && !stHarvestSelAdGroup)}
+                (stHarvestLevel === 'adgroup' && !stHarvestSelAdGroup) ||
+                (stHarvestLevel === 'account' && stHarvestCampaigns.length === 0)}
                 style={{ fontSize: 13, minWidth: 100 }}>
                 {stHarvestSaving ? "Saving…" : stHarvestModal.mode === 'keyword' ? 'Add Keyword' : 'Add Negative'}
               </button>
@@ -8072,6 +8142,22 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [adding, setAdding]             = useState(false);
   const [addResult, setAddResult]       = useState(null);
   const [error, setError]               = useState("");
+  const [sortBy, setSortBy]             = useState("relevance_score");
+  const [sortDir, setSortDir]           = useState("desc");
+  const [filterText, setFilterText]     = useState("");
+  const [filterMatch, setFilterMatch]   = useState("");
+  const [filterMinRel, setFilterMinRel] = useState(0);
+  const [bulkMatch, setBulkMatch]       = useState("");
+  const [colWidths, setColWidths]       = useState({ keyword_text: 230, source: 100, match_type: 180, relevance_score: 110, impressions_share: 115, bid_suggested: 135, _actions: 40 });
+  const [targetCampaignId, setTargetCampaignId] = useState("");
+  const [targetAdGroupId, setTargetAdGroupId]   = useState("");
+  const [editModal, setEditModal]       = useState(null); // null | [{ keyword_text, match_type, bid }]
+  const [dupInfo, setDupInfo]           = useState({}); // "kw|mt" → { in_adgroup, in_profile, locations }
+  const [expandTrigger, setExpandTrigger] = useState(null); // kwText to expand, null = idle
+  const [checkingDups, setCheckingDups] = useState(false);
+  const [campSearch, setCampSearch]     = useState("");
+  const [agSearch, setAgSearch]         = useState("");
+  const resizingRef = useRef(null);
 
   // Localised source label helper (inside component so it can use t())
   const srcLabel = (src) => {
@@ -8122,7 +8208,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
   useEffect(() => {
     if (!profileId) { setAdGroups([]); return; }
-    apiFetch("/rules/ad-groups").then(data => setAdGroups(data || [])).catch(() => {});
+    apiFetch(`/rules/ad-groups?profileId=${profileId}`).then(data => setAdGroups(data || [])).catch(() => {});
   }, [profileId]);
 
   // Auto-fill title from products table when ASIN entered
@@ -8148,6 +8234,8 @@ const KeywordResearchPage = ({ workspaceId }) => {
     setSelected(new Set());
     setMatchOverrides({});
     setAddResult(null);
+    setFilterText(""); setFilterMatch(""); setFilterMinRel(0);
+    setSortBy("relevance_score"); setSortDir("desc"); setBulkMatch("");
 
     try {
       const activeSources = Object.entries(sources)
@@ -8171,33 +8259,60 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
   const toggleAll = (checked) => {
     if (!results) return;
-    setSelected(checked ? new Set(results.keywords.map((_, i) => i)) : new Set());
+    setSelected(checked ? new Set(displayedKws.map(({ origIdx }) => origIdx)) : new Set());
   };
 
-  const addSelected = async () => {
-    if (!adGroupId) { setError(t("kwr.errNoAdGroup")); return; }
+  const checkDuplicates = async (kws, adgId, profId) => {
+    if (!kws?.length || !profId) return;
+    setCheckingDups(true);
+    try {
+      const data = await apiFetch("/keyword-research/check-duplicates", {
+        method: "POST",
+        body: JSON.stringify({ profileId: profId, adGroupId: adgId || undefined, keywords: kws }),
+      });
+      setDupInfo(data.duplicates || {});
+    } catch {}
+    finally { setCheckingDups(false); }
+  };
+
+  const openEditModal = () => {
     if (!selected.size) { setError(t("kwr.errNoSelection")); return; }
+    const kws = [...selected].map(idx => ({
+      origIdx: idx,
+      keyword_text: results.keywords[idx].keyword_text,
+      match_type: matchOverrides[idx] || results.keywords[idx].match_type || "broad",
+      bid: defaultBid,
+    }));
+    setDupInfo({});
+    setCampSearch(""); setAgSearch("");
+    setEditModal(kws);
+    checkDuplicates(kws, targetAdGroupId, profileId);
+  };
+
+  // Re-check duplicates when target ad group changes while modal is open
+  useEffect(() => {
+    if (editModal && profileId) checkDuplicates(editModal, targetAdGroupId, profileId);
+  }, [targetAdGroupId]);
+
+  const confirmAdd = async (kws, agId) => {
+    const adgId = agId || targetAdGroupId;
+    if (!adgId) { setError(t("kwr.errNoAdGroup")); return; }
     setAdding(true);
     setError("");
     setAddResult(null);
     try {
-      const keywords = results.keywords
-        .filter((_, i) => selected.has(i))
-        .map((kw, origIdx) => {
-          const idx = results.keywords.indexOf(kw);
-          return {
-            ...kw,
-            match_type: matchOverrides[idx] || kw.match_type || "broad",
-            bid: parseFloat(defaultBid) || 0.50,
-          };
-        });
-
+      const keywords = kws.map(k => ({
+        keyword_text: k.keyword_text,
+        match_type: k.match_type || "broad",
+        bid: parseFloat(k.bid) || 0.50,
+      }));
       const data = await apiFetch("/keyword-research/add-to-adgroup", {
         method: "POST",
-        body: JSON.stringify({ keywords, adGroupId, defaultBid: parseFloat(defaultBid) }),
+        body: JSON.stringify({ keywords, adGroupId: adgId, defaultBid: parseFloat(defaultBid) }),
       });
       setAddResult(data);
       setSelected(new Set());
+      setEditModal(null);
     } catch (e) {
       setError(e.message || t("kwr.errAdd"));
     } finally {
@@ -8215,6 +8330,131 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
   const relColor = (s) => s >= 80 ? "var(--grn)" : s >= 60 ? "var(--amb)" : "var(--red)";
   const relBg    = (s) => s >= 80 ? "rgba(34,197,94,.1)" : s >= 60 ? "rgba(245,158,11,.1)" : "rgba(239,68,68,.1)";
+
+  // Filtered + sorted keyword list (preserves original index for selection/overrides)
+  const displayedKws = useMemo(() => {
+    if (!results?.keywords) return [];
+    let list = results.keywords.map((kw, origIdx) => ({ kw, origIdx }));
+    if (filterText.trim()) {
+      const q = filterText.toLowerCase();
+      list = list.filter(({ kw }) => kw.keyword_text?.toLowerCase().includes(q));
+    }
+    if (filterMatch) {
+      list = list.filter(({ kw }) => (kw.match_type || "broad") === filterMatch);
+    }
+    if (filterMinRel > 0) {
+      list = list.filter(({ kw }) => (kw.relevance_score ?? 0) >= filterMinRel);
+    }
+    if (sortBy) {
+      list.sort((a, b) => {
+        const va = a.kw[sortBy] ?? -Infinity;
+        const vb = b.kw[sortBy] ?? -Infinity;
+        if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
+        return sortDir === "asc" ? va - vb : vb - va;
+      });
+    }
+    return list;
+  }, [results, filterText, filterMatch, filterMinRel, sortBy, sortDir]);
+
+  const handleSort = (col) => {
+    if (sortBy === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortBy(col); setSortDir("desc"); }
+  };
+
+  const SortIcon = ({ col }) => {
+    if (sortBy !== col) return <span style={{ opacity: 0.3, fontSize: 9 }}>↕</span>;
+    return <span style={{ fontSize: 9, color: "var(--ac)" }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
+  };
+
+  const exportCSV = () => {
+    const rows = selected.size > 0
+      ? displayedKws.filter(({ origIdx }) => selected.has(origIdx))
+      : displayedKws;
+    const header = ["Keyword", "Source", "Match Type", "Relevance", "Bid Suggested", "Bid Low", "Bid High", "Impressions Share"];
+    const lines = [header.join(","), ...rows.map(({ kw, origIdx }) => [
+      `"${(kw.keyword_text || "").replace(/"/g, '""')}"`,
+      kw.source || "",
+      matchOverrides[origIdx] || kw.match_type || "broad",
+      kw.relevance_score ?? "",
+      kw.bid_suggested ?? "",
+      kw.bid_range_low ?? "",
+      kw.bid_range_high ?? "",
+      kw.impressions_share ?? "",
+    ].join(","))];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "keywords.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const expandKeyword = (kwText) => {
+    setProductTitle(kwText);
+    setAsins("");
+    setUrlInput(""); setUrlParsed(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    setExpandTrigger(kwText);
+  };
+
+  // Runs after state from expandKeyword is committed — discover() sees new productTitle
+  useEffect(() => {
+    if (!expandTrigger) return;
+    setExpandTrigger(null);
+    discover();
+  }, [expandTrigger]);
+
+  const applyBulkMatch = (mt) => {
+    const overrides = {};
+    selected.forEach(idx => { overrides[idx] = mt; });
+    setMatchOverrides(m => ({ ...m, ...overrides }));
+    setBulkMatch(mt);
+  };
+
+  // Derive unique campaigns from loaded ad groups
+  const campaigns = useMemo(() => {
+    const seen = new Map();
+    adGroups.forEach(ag => {
+      if (ag.campaign_id && !seen.has(ag.campaign_id))
+        seen.set(ag.campaign_id, { id: ag.campaign_id, name: ag.campaign_name });
+    });
+    return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [adGroups]);
+
+  const filteredAdGroups = useMemo(() => {
+    if (!targetCampaignId) return adGroups;
+    return adGroups.filter(ag => ag.campaign_id === targetCampaignId);
+  }, [adGroups, targetCampaignId]);
+
+  const modalCampaigns = useMemo(() => {
+    if (!campSearch.trim()) return campaigns;
+    const q = campSearch.toLowerCase();
+    return campaigns.filter(c => c.name.toLowerCase().includes(q));
+  }, [campaigns, campSearch]);
+
+  const modalAdGroups = useMemo(() => {
+    const base = targetCampaignId ? adGroups.filter(ag => ag.campaign_id === targetCampaignId) : adGroups;
+    if (!agSearch.trim()) return base;
+    const q = agSearch.toLowerCase();
+    return base.filter(ag => ag.name.toLowerCase().includes(q));
+  }, [adGroups, targetCampaignId, agSearch]);
+
+  const startResize = (colKey, e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startW = colWidths[colKey] || 100;
+    resizingRef.current = { colKey, startX, startW };
+    const onMove = (me) => {
+      const delta = me.clientX - startX;
+      setColWidths(w => ({ ...w, [colKey]: Math.max(50, startW + delta) }));
+    };
+    const onUp = () => {
+      resizingRef.current = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   return (
     <div style={{ padding: "24px 28px", maxWidth: 1100, position: "relative" }}>
@@ -8319,7 +8559,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   background: "var(--s2)", border: "1.5px solid var(--b2)", color: profileId ? "var(--tx)" : "var(--tx3)" }}>
                 <option value="">{t("kwr.profilePlaceholder")}</option>
                 {profiles.map(p => (
-                  <option key={p.id} value={p.id}>{p.name || p.profile_id}{p.marketplace_id ? ` · ${p.marketplace_id}` : ""}</option>
+                  <option key={p.id} value={p.id}>{p.account_name || p.profile_id}{p.marketplace ? ` · ${p.marketplace}` : ""}</option>
                 ))}
               </select>
             </div>
@@ -8409,11 +8649,14 @@ const KeywordResearchPage = ({ workspaceId }) => {
           {/* Results header */}
           <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--b1)",
             display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 15, fontWeight: 700 }}>{results.total}</span>
+            <span style={{ fontSize: 15, fontWeight: 700 }}>{displayedKws.length}</span>
+            {displayedKws.length !== results.total && (
+              <span style={{ fontSize: 12, color: "var(--tx3)" }}>из {results.total}</span>
+            )}
             <span style={{ fontSize: 13, color: "var(--tx2)" }}>{t("kwr.keywordsFound")}</span>
             {results.product_title && (
               <span style={{ fontSize: 12, color: "var(--tx3)", fontStyle: "italic" }}>
-                {t("kwr.forProduct", { title: results.product_title.slice(0, 55) + (results.product_title.length > 55 ? "…" : "") })}
+                {t("kwr.forProduct", { title: results.product_title.slice(0, 45) + (results.product_title.length > 45 ? "…" : "") })}
               </span>
             )}
             <div style={{ flex: 1 }} />
@@ -8423,51 +8666,123 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 {srcLabel(s)}
               </span>
             ))}
-            <button onClick={() => toggleAll(selected.size < results.keywords.length)}
+            <button onClick={exportCSV} title="Экспорт в CSV"
+              style={{ fontSize: 12, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--b2)",
+                background: "transparent", color: "var(--tx2)", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+              ↓ CSV
+            </button>
+            <button onClick={() => toggleAll(selected.size < displayedKws.length)}
               style={{ fontSize: 12, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--b2)",
                 background: "transparent", color: "var(--tx2)", cursor: "pointer" }}>
-              {selected.size === results.keywords.length ? t("kwr.deselectAll") : t("kwr.selectAll")}
+              {selected.size === displayedKws.length && displayedKws.length > 0 ? t("kwr.deselectAll") : t("kwr.selectAll")}
             </button>
+          </div>
+
+          {/* Filter bar */}
+          <div style={{ padding: "10px 20px", borderBottom: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--s2)" }}>
+            <div style={{ position: "relative" }}>
+              <Search size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+              <input value={filterText} onChange={e => setFilterText(e.target.value)}
+                placeholder="Поиск по ключевому слову…"
+                style={{ fontSize: 12, padding: "5px 10px 5px 28px", borderRadius: 6, border: "1px solid var(--b2)",
+                  background: "var(--s1)", color: "var(--tx)", width: 200 }} />
+            </div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {["", "broad", "phrase", "exact"].map(mt => (
+                <button key={mt} onClick={() => setFilterMatch(mt)}
+                  style={{ fontSize: 11, padding: "4px 10px", borderRadius: 20, cursor: "pointer", fontWeight: 500,
+                    border: `1.5px solid ${filterMatch === mt ? "var(--ac)" : "var(--b2)"}`,
+                    background: filterMatch === mt ? "rgba(59,130,246,.12)" : "transparent",
+                    color: filterMatch === mt ? "var(--ac2)" : "var(--tx3)" }}>
+                  {mt || "Все типы"}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--tx3)" }}>
+              Мин. релевантность:
+              <input type="range" min={0} max={90} step={10} value={filterMinRel}
+                onChange={e => setFilterMinRel(Number(e.target.value))}
+                style={{ width: 80, accentColor: "var(--ac)" }} />
+              <span style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 24 }}>{filterMinRel || "—"}</span>
+            </div>
+            {(filterText || filterMatch || filterMinRel > 0) && (
+              <button onClick={() => { setFilterText(""); setFilterMatch(""); setFilterMinRel(0); }}
+                style={{ fontSize: 11, color: "var(--tx3)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
+                Сбросить
+              </button>
+            )}
           </div>
 
           {/* Table */}
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
+              <colgroup>
+                <col style={{ width: 40 }} />
+                {[
+                  { key: "keyword_text" }, { key: "source" }, { key: "match_type" },
+                  { key: "relevance_score" }, { key: "impressions_share" }, { key: "bid_suggested" }, { key: "_actions" },
+                ].map(col => <col key={col.key} style={{ width: colWidths[col.key] }} />)}
+              </colgroup>
               <thead>
                 <tr style={{ background: "var(--s2)", borderBottom: "1px solid var(--b1)" }}>
                   <th style={{ width: 40, padding: "9px 0 9px 16px" }}>
                     <input type="checkbox"
-                      checked={selected.size === results.keywords.length && results.keywords.length > 0}
+                      checked={selected.size === displayedKws.length && displayedKws.length > 0}
                       onChange={e => toggleAll(e.target.checked)}
                       style={{ accentColor: "var(--ac)", width: 14, height: 14 }} />
                   </th>
-                  <th style={{ padding: "9px 12px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase" }}>{t("kwr.colKeyword")}</th>
-                  <th style={{ padding: "9px 12px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 100 }}>{t("kwr.colSource")}</th>
-                  <th style={{ padding: "9px 12px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 160 }}>{t("kwr.colMatchType")}</th>
-                  <th style={{ padding: "9px 12px", textAlign: "center", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 100 }}>{t("kwr.colRelevance")}</th>
-                  <th style={{ padding: "9px 12px", textAlign: "right", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 100 }}>{t("kwr.colSearches")}</th>
-                  <th style={{ padding: "9px 12px", textAlign: "right", color: "var(--tx3)", fontWeight: 600, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", width: 90 }}>{t("kwr.colBid")}</th>
+                  {[
+                    { key: "keyword_text",    label: t("kwr.colKeyword"),   align: "left",   sortable: true },
+                    { key: "source",          label: t("kwr.colSource"),    align: "left",   sortable: false },
+                    { key: "match_type",      label: t("kwr.colMatchType"), align: "left",   sortable: false },
+                    { key: "relevance_score", label: t("kwr.colRelevance"), align: "center", sortable: true },
+                    { key: "impressions_share", label: t("kwr.colSearches"), align: "right", sortable: true },
+                    { key: "bid_suggested",   label: t("kwr.colBid"),       align: "right",  sortable: true },
+                    { key: "_actions",        label: "",                    align: "right",  sortable: false },
+                  ].map(col => (
+                    <th key={col.key}
+                      style={{ padding: "9px 12px", textAlign: col.align, color: "var(--tx3)", fontWeight: 600,
+                        fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase",
+                        position: "relative", cursor: col.sortable ? "pointer" : "default",
+                        userSelect: "none", whiteSpace: "nowrap", overflow: "hidden" }}
+                      onClick={() => col.sortable && handleSort(col.key)}>
+                      {col.label} {col.sortable && <SortIcon col={col.key} />}
+                      {col.key !== "_actions" && (
+                        <div
+                          onMouseDown={e => startResize(col.key, e)}
+                          onClick={e => e.stopPropagation()}
+                          style={{ position: "absolute", right: 0, top: "20%", bottom: "20%", width: 9,
+                            cursor: "col-resize", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}
+                          onMouseEnter={e => e.currentTarget.querySelector("span").style.background = "var(--ac)"}
+                          onMouseLeave={e => e.currentTarget.querySelector("span").style.background = "var(--b2)"}>
+                          <span style={{ display: "block", width: 2, height: "100%", borderRadius: 2,
+                            background: "var(--b2)", transition: "background .15s, width .15s", pointerEvents: "none" }} />
+                        </div>
+                      )}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {results.keywords.map((kw, idx) => {
-                  const isSelected = selected.has(idx);
-                  const currentMatch = matchOverrides[idx] || kw.match_type || "broad";
+                {displayedKws.map(({ kw, origIdx }) => {
+                  const isSelected = selected.has(origIdx);
+                  const currentMatch = matchOverrides[origIdx] || kw.match_type || "broad";
                   const score = kw.relevance_score;
                   return (
-                    <tr key={idx} className="tbl-row"
+                    <tr key={origIdx} className="tbl-row"
                       style={{ borderBottom: "1px solid var(--b1)", cursor: "pointer",
                         background: isSelected ? "rgba(59,130,246,.06)" : undefined,
                         transition: "background .1s" }}
-                      onClick={() => setSelected(s => { const n = new Set(s); n.has(idx) ? n.delete(idx) : n.add(idx); return n; })}>
+                      onClick={() => setSelected(s => { const n = new Set(s); n.has(origIdx) ? n.delete(origIdx) : n.add(origIdx); return n; })}>
 
                       <td style={{ padding: "10px 0 10px 16px" }} onClick={e => e.stopPropagation()}>
                         <input type="checkbox" checked={isSelected}
-                          onChange={() => setSelected(s => { const n = new Set(s); n.has(idx) ? n.delete(idx) : n.add(idx); return n; })}
+                          onChange={() => setSelected(s => { const n = new Set(s); n.has(origIdx) ? n.delete(origIdx) : n.add(origIdx); return n; })}
                           style={{ accentColor: "var(--ac)", width: 14, height: 14 }} />
                       </td>
 
-                      <td style={{ padding: "10px 12px", fontWeight: isSelected ? 600 : 400, color: "var(--tx)" }}>
+                      <td style={{ padding: "10px 12px", fontWeight: isSelected ? 600 : 400, color: "var(--tx)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        title={kw.keyword_text}>
                         {kw.keyword_text}
                       </td>
 
@@ -8481,7 +8796,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                       <td style={{ padding: "10px 12px" }} onClick={e => e.stopPropagation()}>
                         <div style={{ display: "flex", gap: 4 }}>
                           {(kw.suggested_match_types?.length ? kw.suggested_match_types : [currentMatch]).map(mt => (
-                            <button key={mt} onClick={() => setMatchOverrides(m => ({ ...m, [idx]: mt }))}
+                            <button key={mt} onClick={() => setMatchOverrides(m => ({ ...m, [origIdx]: mt }))}
                               style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, cursor: "pointer", fontWeight: 600,
                                 border: `1.5px solid ${currentMatch === mt ? MATCH_BADGE[mt] || "var(--b2)" : "var(--b2)"}`,
                                 background: currentMatch === mt ? (MATCH_BADGE[mt] || "#64748b") + "18" : "transparent",
@@ -8496,9 +8811,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                       <td style={{ padding: "10px 12px", textAlign: "center" }}>
                         {score != null ? (
                           <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 52 }}>
-                            <span style={{ fontSize: 13, fontWeight: 700, color: relColor(score), fontFamily: "var(--mono)" }}>
-                              {score}
-                            </span>
+                            <span style={{ fontSize: 13, fontWeight: 700, color: relColor(score), fontFamily: "var(--mono)" }}>{score}</span>
                             <div style={{ width: 40, height: 3, borderRadius: 2, background: "var(--b1)", overflow: "hidden" }}>
                               <div style={{ width: `${score}%`, height: "100%", background: relColor(score), borderRadius: 2 }} />
                             </div>
@@ -8507,15 +8820,45 @@ const KeywordResearchPage = ({ workspaceId }) => {
                       </td>
 
                       <td style={{ padding: "10px 12px", textAlign: "right", color: "var(--tx2)", fontFamily: "var(--mono)", fontSize: 12 }}>
-                        {kw.monthly_search_volume ? kw.monthly_search_volume.toLocaleString() : <span style={{ color: "var(--tx3)" }}>—</span>}
+                        {kw.impressions_share != null
+                          ? <span title="Индекс популярности запроса (Amazon)">{kw.impressions_share >= 1 ? Math.round(kw.impressions_share).toLocaleString() : kw.impressions_share.toFixed(2)}</span>
+                          : kw.monthly_search_volume
+                            ? kw.monthly_search_volume.toLocaleString()
+                            : <span style={{ color: "var(--tx3)" }}>—</span>}
                       </td>
 
                       <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 12, color: "var(--tx2)" }}>
-                        {kw.bid_suggested ? `$${parseFloat(kw.bid_suggested).toFixed(2)}` : <span style={{ color: "var(--tx3)" }}>—</span>}
+                        {kw.bid_suggested ? (
+                          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
+                            <span style={{ fontWeight: 600 }}>${parseFloat(kw.bid_suggested).toFixed(2)}</span>
+                            {kw.bid_range_low != null && kw.bid_range_high != null && (
+                              <span style={{ fontSize: 10, color: "var(--tx3)" }}>
+                                ${parseFloat(kw.bid_range_low).toFixed(2)}–${parseFloat(kw.bid_range_high).toFixed(2)}
+                              </span>
+                            )}
+                          </div>
+                        ) : <span style={{ color: "var(--tx3)" }}>—</span>}
+                      </td>
+
+                      <td style={{ padding: "10px 8px", textAlign: "right" }} onClick={e => e.stopPropagation()}>
+                        <button onClick={() => expandKeyword(kw.keyword_text)}
+                          title="Найти похожие ключи"
+                          style={{ background: "none", border: "1px solid var(--b2)", borderRadius: 5, cursor: "pointer",
+                            color: "var(--tx3)", padding: "3px 6px", fontSize: 11, lineHeight: 1,
+                            transition: "all .15s" }}
+                          onMouseEnter={e => { e.currentTarget.style.color = "var(--ac2)"; e.currentTarget.style.borderColor = "var(--ac)"; }}
+                          onMouseLeave={e => { e.currentTarget.style.color = "var(--tx3)"; e.currentTarget.style.borderColor = "var(--b2)"; }}>
+                          ↗
+                        </button>
                       </td>
                     </tr>
                   );
                 })}
+                {displayedKws.length === 0 && (
+                  <tr><td colSpan={8} style={{ padding: "32px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
+                    Ничего не найдено по фильтрам
+                  </td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -8535,7 +8878,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
           position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
           background: "var(--s1)", border: "1px solid var(--b2)",
           borderRadius: 14, padding: "12px 20px",
-          display: "flex", alignItems: "center", gap: 16,
+          display: "flex", alignItems: "center", gap: 14,
           boxShadow: "0 8px 32px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.2)",
           zIndex: 100, animation: "slideInFromBottom .2s ease",
           whiteSpace: "nowrap",
@@ -8544,30 +8887,54 @@ const KeywordResearchPage = ({ workspaceId }) => {
             {selected.size !== 1 ? t("kwr.selectedPlural", { n: selected.size }) : t("kwr.selected", { n: selected.size })}
           </span>
           <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
-          <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 8, color: "var(--tx2)" }}>
+          {/* Bulk match type */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--tx3)" }}>
+            {["broad", "phrase", "exact"].map(mt => (
+              <button key={mt} onClick={() => applyBulkMatch(mt)}
+                style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, cursor: "pointer", fontWeight: 600,
+                  border: `1.5px solid ${bulkMatch === mt ? MATCH_BADGE[mt] || "var(--b2)" : "var(--b2)"}`,
+                  background: bulkMatch === mt ? (MATCH_BADGE[mt] || "#64748b") + "18" : "transparent",
+                  color: bulkMatch === mt ? MATCH_BADGE[mt] || "var(--tx)" : "var(--tx3)" }}>
+                {mt}
+              </button>
+            ))}
+          </div>
+          <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
+          {/* Default bid */}
+          <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 7, color: "var(--tx2)" }}>
             {t("kwr.bidLabel")}
             <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
               <span style={{ position: "absolute", left: 9, fontSize: 12, color: "var(--tx3)", pointerEvents: "none" }}>$</span>
               <input type="number" value={defaultBid} onChange={e => setDefaultBid(e.target.value)}
                 step="0.01" min="0.02" max="99"
-                style={{ width: 72, fontSize: 13, padding: "5px 8px 5px 20px", borderRadius: 7,
+                style={{ width: 80, fontSize: 13, padding: "5px 22px 5px 20px", borderRadius: 7,
                   background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", fontFamily: "var(--mono)" }} />
             </div>
           </label>
-          {!adGroupId && (
-            <span style={{ fontSize: 12, color: "var(--amb)", display: "flex", alignItems: "center", gap: 5 }}>
-              <AlertCircle size={12} /> {t("kwr.adGroupWarning")}
-            </span>
-          )}
+          <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
+          {/* Campaign → Ad group cascade */}
+          <select value={targetCampaignId} onChange={e => { setTargetCampaignId(e.target.value); setTargetAdGroupId(""); }}
+            style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid var(--b2)",
+              background: "var(--s2)", color: targetCampaignId ? "var(--tx)" : "var(--tx3)", maxWidth: 160, cursor: "pointer" }}>
+            <option value="">— Кампания —</option>
+            {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <select value={targetAdGroupId} onChange={e => setTargetAdGroupId(e.target.value)}
+            disabled={filteredAdGroups.length === 0}
+            style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: `1px solid ${targetAdGroupId ? "var(--ac)" : "var(--b2)"}`,
+              background: "var(--s2)", color: targetAdGroupId ? "var(--tx)" : "var(--tx3)", maxWidth: 160, cursor: "pointer" }}>
+            <option value="">— Группа объявлений —</option>
+            {filteredAdGroups.map(ag => <option key={ag.id} value={ag.id}>{ag.name}</option>)}
+          </select>
           {addResult && !adding && (
             <span style={{ fontSize: 13, color: "var(--grn)", fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
               <Check size={13} /> {addResult.skipped ? t("kwr.addedSkipped", { n: addResult.added, skipped: addResult.skipped }) : t("kwr.addedSuccess", { n: addResult.added })}
             </span>
           )}
-          <button onClick={addSelected} disabled={adding || !adGroupId}
+          <button onClick={openEditModal} disabled={adding}
             className="btn btn-primary"
-            style={{ padding: "8px 18px", fontSize: 13, gap: 7, opacity: (!adGroupId || adding) ? 0.5 : 1 }}>
-            {adding ? <><RefreshCw size={13} className="spin" /> {t("kwr.adding")}</> : <><Plus size={13} /> {t("kwr.addBtn")}</>}
+            style={{ padding: "8px 18px", fontSize: 13, gap: 7 }}>
+            <Plus size={13} /> {t("kwr.addBtn")}
           </button>
           <button onClick={() => setSelected(new Set())}
             style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: 4, display: "flex" }}>
@@ -8575,6 +8942,234 @@ const KeywordResearchPage = ({ workspaceId }) => {
           </button>
         </div>
       )}
+
+      {/* ── Edit keywords modal ── */}
+      {editModal && (() => {
+        const dupCount     = editModal.filter(kw => dupInfo[`${kw.keyword_text.toLowerCase()}|${kw.match_type}`]?.in_adgroup).length;
+        const profileCount = editModal.filter(kw => { const d = dupInfo[`${kw.keyword_text.toLowerCase()}|${kw.match_type}`]; return d?.in_profile && !d?.in_adgroup; }).length;
+        const addableCount = editModal.length - dupCount;
+        return (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 200,
+          display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" }}
+          onClick={e => { if (e.target === e.currentTarget) setEditModal(null); }}>
+          <div style={{ background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 14,
+            width: "100%", maxWidth: 900, height: "90vh", display: "flex", flexDirection: "column",
+            boxShadow: "0 24px 64px rgba(0,0,0,.5)" }}>
+
+            {/* ── Header ── */}
+            <div style={{ padding: "18px 24px", borderBottom: "1px solid var(--b1)", flexShrink: 0,
+              display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>Добавить ключевые слова</div>
+                <div style={{ fontSize: 12, color: "var(--tx3)", marginTop: 3, display: "flex", gap: 12 }}>
+                  <span>{editModal.length} ключей</span>
+                  {dupCount > 0 && <span style={{ color: "var(--red)" }}>· {dupCount} уже в группе (пропустятся)</span>}
+                  {profileCount > 0 && <span style={{ color: "var(--amb)" }}>· {profileCount} есть в аккаунте</span>}
+                  {checkingDups && <span style={{ color: "var(--tx3)" }}>· проверка дублей…</span>}
+                </div>
+              </div>
+              <button onClick={() => setEditModal(null)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: 6 }}>
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* ── Body: two-panel layout ── */}
+            <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+
+              {/* Left panel — campaign + ad group picker */}
+              <div style={{ width: 280, flexShrink: 0, borderRight: "1px solid var(--b1)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+                {/* Campaign section */}
+                <div style={{ padding: "12px 14px 6px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 8 }}>Кампания</div>
+                  <div style={{ position: "relative" }}>
+                    <Search size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+                    <input value={campSearch} onChange={e => setCampSearch(e.target.value)}
+                      placeholder="Поиск кампании…"
+                      style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "6px 8px 6px 28px",
+                        borderRadius: 7, border: "1px solid var(--b2)", background: "var(--s2)", color: "var(--tx)" }} />
+                  </div>
+                </div>
+                <div style={{ overflowY: "auto", flex: "0 1 220px", borderBottom: "1px solid var(--b1)" }}>
+                  {!targetCampaignId && (
+                    <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--tx3)", fontStyle: "italic" }}>
+                      Выберите кампанию
+                    </div>
+                  )}
+                  {modalCampaigns.map(c => (
+                    <div key={c.id} onClick={() => { setTargetCampaignId(c.id); setTargetAdGroupId(""); setAgSearch(""); }}
+                      style={{ padding: "8px 14px", fontSize: 12, cursor: "pointer", borderRadius: 0,
+                        background: targetCampaignId === c.id ? "rgba(59,130,246,.12)" : "transparent",
+                        color: targetCampaignId === c.id ? "var(--ac2)" : "var(--tx)",
+                        fontWeight: targetCampaignId === c.id ? 600 : 400,
+                        borderLeft: `3px solid ${targetCampaignId === c.id ? "var(--ac)" : "transparent"}`,
+                        transition: "background .1s" }}
+                      onMouseEnter={e => { if (targetCampaignId !== c.id) e.currentTarget.style.background = "var(--s2)"; }}
+                      onMouseLeave={e => { if (targetCampaignId !== c.id) e.currentTarget.style.background = "transparent"; }}>
+                      {c.name}
+                    </div>
+                  ))}
+                  {modalCampaigns.length === 0 && (
+                    <div style={{ padding: "10px 14px", fontSize: 12, color: "var(--tx3)" }}>Не найдено</div>
+                  )}
+                </div>
+
+                {/* Ad group section */}
+                <div style={{ padding: "12px 14px 6px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
+                  <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 8 }}>Группа объявлений</div>
+                  <div style={{ position: "relative" }}>
+                    <Search size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+                    <input value={agSearch} onChange={e => setAgSearch(e.target.value)}
+                      placeholder="Поиск группы…"
+                      style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "6px 8px 6px 28px",
+                        borderRadius: 7, border: "1px solid var(--b2)", background: "var(--s2)", color: "var(--tx)" }} />
+                  </div>
+                </div>
+                <div style={{ overflowY: "auto", flex: 1 }}>
+                  {!targetCampaignId && (
+                    <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--tx3)", fontStyle: "italic" }}>
+                      Сначала выберите кампанию
+                    </div>
+                  )}
+                  {modalAdGroups.map(ag => (
+                    <div key={ag.id} onClick={() => setTargetAdGroupId(ag.id)}
+                      style={{ padding: "8px 14px", fontSize: 12, cursor: "pointer",
+                        background: targetAdGroupId === ag.id ? "rgba(59,130,246,.12)" : "transparent",
+                        color: targetAdGroupId === ag.id ? "var(--ac2)" : "var(--tx)",
+                        fontWeight: targetAdGroupId === ag.id ? 600 : 400,
+                        borderLeft: `3px solid ${targetAdGroupId === ag.id ? "var(--ac)" : "transparent"}`,
+                        transition: "background .1s" }}
+                      onMouseEnter={e => { if (targetAdGroupId !== ag.id) e.currentTarget.style.background = "var(--s2)"; }}
+                      onMouseLeave={e => { if (targetAdGroupId !== ag.id) e.currentTarget.style.background = "transparent"; }}>
+                      {ag.name}
+                    </div>
+                  ))}
+                  {targetCampaignId && modalAdGroups.length === 0 && (
+                    <div style={{ padding: "10px 14px", fontSize: 12, color: "var(--tx3)" }}>Не найдено</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Right panel — keyword list */}
+              <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+                {/* Column headers */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 16px",
+                  borderBottom: "1px solid var(--b1)", background: "var(--s2)", flexShrink: 0,
+                  fontSize: 10, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)" }}>
+                  <span style={{ flex: 1 }}>Ключевое слово</span>
+                  <span style={{ width: 168 }}>Тип совпадения</span>
+                  <span style={{ width: 80, textAlign: "right" }}>Ставка</span>
+                  <span style={{ width: 90, textAlign: "center" }}>Статус</span>
+                  <span style={{ width: 24 }} />
+                </div>
+
+                {editModal.map((kw, i) => {
+                  const dupKey  = `${kw.keyword_text.toLowerCase()}|${kw.match_type}`;
+                  const dup     = dupInfo[dupKey];
+                  const inGroup = dup?.in_adgroup;
+                  const inAcct  = dup?.in_profile && !inGroup;
+                  return (
+                    <div key={kw.origIdx ?? i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 16px",
+                      borderBottom: "1px solid var(--b1)",
+                      background: inGroup ? "rgba(239,68,68,.04)" : "transparent",
+                      transition: "background .1s" }}>
+                      {/* Keyword text */}
+                      <input value={kw.keyword_text}
+                        onChange={e => setEditModal(m => m.map((k, j) => j === i ? { ...k, keyword_text: e.target.value } : k))}
+                        style={{ flex: 1, fontSize: 12, padding: "5px 9px", borderRadius: 6, minWidth: 0,
+                          border: `1px solid ${inGroup ? "rgba(239,68,68,.3)" : "var(--b2)"}`,
+                          background: "var(--s2)", color: inGroup ? "var(--tx3)" : "var(--tx)", fontFamily: "var(--mono)" }} />
+                      {/* Match type */}
+                      <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
+                        {["broad", "phrase", "exact"].map(mt => (
+                          <button key={mt} onClick={() => setEditModal(m => m.map((k, j) => j === i ? { ...k, match_type: mt } : k))}
+                            style={{ fontSize: 10, padding: "3px 7px", borderRadius: 20, cursor: "pointer", fontWeight: 600,
+                              border: `1.5px solid ${kw.match_type === mt ? MATCH_BADGE[mt] || "var(--b2)" : "var(--b2)"}`,
+                              background: kw.match_type === mt ? (MATCH_BADGE[mt] || "#64748b") + "18" : "transparent",
+                              color: kw.match_type === mt ? MATCH_BADGE[mt] || "var(--tx)" : "var(--tx3)" }}>
+                            {mt}
+                          </button>
+                        ))}
+                      </div>
+                      {/* Bid */}
+                      <div style={{ position: "relative", display: "flex", alignItems: "center", flexShrink: 0 }}>
+                        <span style={{ position: "absolute", left: 7, fontSize: 11, color: "var(--tx3)", pointerEvents: "none" }}>$</span>
+                        <input type="number" value={kw.bid}
+                          onChange={e => setEditModal(m => m.map((k, j) => j === i ? { ...k, bid: e.target.value } : k))}
+                          step="0.01" min="0.02" max="99"
+                          style={{ width: 72, fontSize: 12, padding: "5px 8px 5px 18px", borderRadius: 6,
+                            border: "1px solid var(--b2)", background: "var(--s2)", color: "var(--tx)", fontFamily: "var(--mono)" }} />
+                      </div>
+                      {/* Status badge */}
+                      <div style={{ width: 90, textAlign: "center", flexShrink: 0 }}>
+                        {inGroup && (
+                          <span title="Уже есть в этой группе — будет пропущен"
+                            style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 600,
+                              background: "rgba(239,68,68,.12)", color: "var(--red)" }}>
+                            В группе
+                          </span>
+                        )}
+                        {inAcct && (
+                          <span title={dup.locations?.map(l => `${l.campaign} / ${l.ad_group}`).join("\n")}
+                            style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 600,
+                              background: "rgba(245,158,11,.12)", color: "var(--amb)", cursor: "help" }}>
+                            В аккаунте
+                          </span>
+                        )}
+                        {!dup && targetAdGroupId && !checkingDups && (
+                          <span style={{ fontSize: 10, color: "var(--grn)" }}>✓</span>
+                        )}
+                      </div>
+                      {/* Remove */}
+                      <button onClick={() => setEditModal(m => m.filter((_, j) => j !== i))}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: 2, flexShrink: 0 }}>
+                        <X size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
+                {editModal.length === 0 && (
+                  <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
+                    Все ключи удалены
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Footer ── */}
+            <div style={{ padding: "14px 24px", borderTop: "1px solid var(--b1)", flexShrink: 0,
+              display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 12, color: "var(--tx3)", display: "flex", gap: 16 }}>
+                <span>{addableCount} будет добавлено</span>
+                {dupCount > 0 && <span style={{ color: "var(--red)" }}>{dupCount} пропустится (дубль)</span>}
+                {profileCount > 0 && <span style={{ color: "var(--amb)" }}>{profileCount} есть в др. группах</span>}
+              </div>
+              {error && <span style={{ fontSize: 12, color: "var(--red)", display: "flex", alignItems: "center", gap: 5 }}><AlertCircle size={12} />{error}</span>}
+              {!targetAdGroupId && (
+                <span style={{ fontSize: 12, color: "var(--amb)", display: "flex", alignItems: "center", gap: 5 }}>
+                  <AlertCircle size={12} /> Выберите группу объявлений
+                </span>
+              )}
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={() => setEditModal(null)}
+                  style={{ fontSize: 13, padding: "8px 16px", borderRadius: 8, border: "1px solid var(--b2)",
+                    background: "transparent", color: "var(--tx2)", cursor: "pointer" }}>
+                  Отмена
+                </button>
+                <button onClick={() => confirmAdd(editModal, targetAdGroupId)} disabled={adding || !targetAdGroupId || addableCount === 0}
+                  className="btn btn-primary"
+                  style={{ padding: "8px 20px", fontSize: 13, gap: 7, opacity: (!targetAdGroupId || adding || addableCount === 0) ? 0.5 : 1 }}>
+                  {adding
+                    ? <><RefreshCw size={13} className="spin" /> {t("kwr.adding")}</>
+                    : <><Plus size={13} /> Добавить {addableCount} ключей</>}
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 };
@@ -11041,6 +11636,9 @@ const PlaceholderPage = ({ title, desc }) => {
   );
 };
 
+// Pages that preserve state when navigating away (keep-alive)
+const KEEP_ALIVE = new Set(["keyword-research", "campaigns", "keywords", "analytics", "reports"]);
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const { t } = useI18n();
@@ -11129,7 +11727,11 @@ export default function App() {
     setUser(u => ({ ...u, settings: { ...(u?.settings || {}), ...newSettings } }));
   };
 
-  const pages = {
+  // Pages that preserve state when navigating away (keep-alive)
+  const [mountedPages, setMountedPages] = useState(() => new Set([active]));
+  useEffect(() => { setMountedPages(p => new Set([...p, active])); }, [active]);
+
+  const allPages = {
     overview: <OverviewPage workspaceId={wid} user={user} onSettingsUpdate={handleSettingsUpdate} onNavigate={setActive} />,
     campaigns: <CampaignsPage workspaceId={wid} />,
     products: <ProductsPage workspaceId={wid} />,
@@ -11180,7 +11782,18 @@ export default function App() {
         </button>
 
         <main style={{ marginLeft: sidebarCollapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W, flex: 1, padding: "26px 30px", minHeight: "100vh", overflow: "auto", transition: "margin-left 220ms cubic-bezier(0.4,0,0.2,1)" }}>
-          {pages[active]}
+          {Object.entries(allPages).map(([key, page]) => {
+            const isActive = key === active;
+            const isMounted = mountedPages.has(key);
+            const keepAlive = KEEP_ALIVE.has(key);
+            if (!isMounted) return null;
+            if (!keepAlive && !isActive) return null;
+            return (
+              <div key={key} style={{ display: isActive ? "block" : "none" }}>
+                {page}
+              </div>
+            );
+          })}
         </main>
       </div>
       <SyncStatusToast triggerShow={syncTrigger} />

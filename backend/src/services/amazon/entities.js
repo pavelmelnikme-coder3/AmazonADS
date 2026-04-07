@@ -80,13 +80,49 @@ async function fetchProfiles(connectionId) {
 async function upsertProfiles(connectionId, profiles) {
   const saved = [];
   for (const p of profiles) {
-    const { rows } = await query(
+    const values = [
+      connectionId,
+      p.profileId,
+      p.marketplaceStringId || p.marketplace || (p.countryCode === "US" ? "ATVPDKIKX0DER" : ""),
+      p.countryCode,
+      p.countryCode,
+      p.currencyCode || "USD",
+      p.timezone || "UTC",
+      p.accountInfo?.name || null,
+      p.accountInfo?.type || null,
+    ];
+
+    // First try to update an existing profile with the same profile_id (any connection).
+    // This handles re-connections: same Amazon profile, new connection → update connection_id
+    // so the profile's campaigns/keywords data is preserved.
+    const { rows: updated } = await query(
+      `UPDATE amazon_profiles SET
+         connection_id = $1,
+         marketplace_id = $3,
+         marketplace = $4,
+         country_code = $5,
+         currency_code = $6,
+         timezone = $7,
+         account_name = $8,
+         account_type = $9,
+         updated_at = NOW()
+       WHERE profile_id = $2
+       RETURNING *`,
+      values
+    );
+
+    if (updated.length > 0) {
+      saved.push(updated[0]);
+      continue;
+    }
+
+    // No existing profile — insert fresh
+    const { rows: inserted } = await query(
       `INSERT INTO amazon_profiles
          (connection_id, profile_id, marketplace_id, marketplace, country_code, currency_code,
           timezone, account_name, account_type)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (connection_id, profile_id)
-       DO UPDATE SET
+       ON CONFLICT (connection_id, profile_id) DO UPDATE SET
          marketplace_id = EXCLUDED.marketplace_id,
          marketplace = EXCLUDED.marketplace,
          country_code = EXCLUDED.country_code,
@@ -96,19 +132,9 @@ async function upsertProfiles(connectionId, profiles) {
          account_type = EXCLUDED.account_type,
          updated_at = NOW()
        RETURNING *`,
-      [
-        connectionId,
-        p.profileId,
-        p.countryCode === "US" ? "ATVPDKIKX0DER" : p.marketplaceStringId || "",
-        p.countryCode,
-        p.countryCode,
-        p.currencyCode || "USD",
-        p.timezone || "UTC",
-        p.accountInfo?.name || null,
-        p.accountInfo?.type || null,
-      ]
+      values
     );
-    saved.push(rows[0]);
+    saved.push(inserted[0]);
   }
   return saved;
 }

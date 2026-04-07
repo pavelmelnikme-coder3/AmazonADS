@@ -19,8 +19,9 @@ const BATCH_SIZE = 500;
  * @param {Array<{amazonKeywordId, campaignType, connectionId, profileId, marketplaceId, bid?, state?}>} updates
  */
 async function pushKeywordUpdates(updates) {
-  if (!updates?.length) return;
+  if (!updates?.length) return { ok: true };
 
+  let anyError = null;
   // Partition by campaign type (SP vs SB have different endpoints)
   const sp = updates.filter(u => u.campaignType === "sponsoredProducts" || u.campaignType === "SP");
   const sb = updates.filter(u => u.campaignType === "sponsoredBrands"   || u.campaignType === "SB");
@@ -53,6 +54,7 @@ async function pushKeywordUpdates(updates) {
         logger.info("SP keyword write-back ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
         logger.warn("SP keyword write-back failed (non-fatal)", { profileId, error: e.message });
+        anyError = e.message;
       }
     }
   }
@@ -84,9 +86,11 @@ async function pushKeywordUpdates(updates) {
         logger.info("SB keyword write-back ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
         logger.warn("SB keyword write-back failed (non-fatal)", { profileId, error: e.message });
+        anyError = e.message;
       }
     }
   }
+  return anyError ? { ok: false, error: anyError } : { ok: true };
 }
 
 /**
@@ -109,13 +113,22 @@ async function pushNegativeKeyword({
   localId, connectionId, profileId, marketplaceId, campaignType,
   amazonCampaignId, amazonAdGroupId, keywordText, matchType, level,
 }) {
-  if (!connectionId || !profileId) return;
+  if (!connectionId || !profileId) return { ok: false, error: "No Amazon connection" };
 
   try {
+    // SP v3 API requires SCREAMING_SNAKE_CASE enums for both endpoints
+    const MT_MAP = {
+      negativeExact:  "NEGATIVE_EXACT",
+      negativePhrase: "NEGATIVE_PHRASE",
+      NEGATIVE_EXACT:  "NEGATIVE_EXACT",
+      NEGATIVE_PHRASE: "NEGATIVE_PHRASE",
+    };
+    const amazonMatchType = MT_MAP[matchType] || matchType.toUpperCase();
+
     const payload = {
       keywordText,
-      matchType,
-      state: "enabled",
+      matchType: amazonMatchType,
+      state: "ENABLED",
       campaignId: amazonCampaignId,
     };
     if (level === "ad_group" && amazonAdGroupId) {
@@ -123,10 +136,18 @@ async function pushNegativeKeyword({
     }
 
     let path;
+    let dataKey;
     if (campaignType === "sponsoredProducts" || campaignType === "SP") {
-      path = level === "ad_group" ? "/sp/negativeKeywords" : "/sp/campaignNegativeKeywords";
+      if (level === "ad_group") {
+        path = "/sp/negativeKeywords";
+        dataKey = "negativeKeywords";
+      } else {
+        path = "/sp/campaignNegativeKeywords";
+        dataKey = "campaignNegativeKeywords";
+      }
     } else {
       path = "/sb/negativeKeywords";
+      dataKey = "negativeKeywords";
     }
 
     const result = await post({
@@ -134,15 +155,15 @@ async function pushNegativeKeyword({
       profileId: profileId.toString(),
       marketplace: marketplaceId,
       path,
-      data: { negativeKeywords: [payload] },
+      data: { [dataKey]: [payload] },
       group: "keywords",
     });
 
-    // v3 API returns { negativeKeywords: { success: [...], error: [...] } }
-    const created = result?.negativeKeywords?.success?.[0]
-      || result?.negativeKeywords?.[0]
+    // v3 API returns { <dataKey>: { success: [...], error: [...] } }
+    const created = result?.[dataKey]?.success?.[0]
+      || result?.[dataKey]?.[0]
       || result?.[0];
-    const realId = created?.negativeKeywordId || created?.keywordId;
+    const realId = created?.negativeKeywordId || created?.campaignNegativeKeywordId || created?.keywordId;
 
     if (realId && localId) {
       await query(
@@ -152,8 +173,10 @@ async function pushNegativeKeyword({
     }
 
     logger.info("Negative keyword write-back ok", { profileId, path, realId });
+    return { ok: true };
   } catch (e) {
     logger.warn("Negative keyword write-back failed (non-fatal)", { profileId, error: e.message });
+    return { ok: false, error: e.message };
   }
 }
 
@@ -208,17 +231,19 @@ async function pushNegativeAsin({
   localId, connectionId, profileId, marketplaceId, campaignType,
   amazonCampaignId, amazonAdGroupId, asinValue, level,
 }) {
-  if (!connectionId || !profileId) return;
+  if (!connectionId || !profileId) return { ok: false, error: "No Amazon connection" };
 
   try {
-    const expression = [{ type: "asinSameAs", value: asinValue }];
+    // SP v3 API requires SCREAMING_SNAKE_CASE for expression type and UPPERCASE state
+    const expression = [{ type: "ASIN_SAME_AS", value: asinValue }];
     const payload = {
       expression,
       expressionType: "manual",
-      state: "enabled",
+      state: "ENABLED",
       campaignId: amazonCampaignId,
     };
-    if (level === "ad_group" && amazonAdGroupId) {
+    // sp/negativeTargets always requires adGroupId (campaign-level negatives not supported via this endpoint)
+    if (amazonAdGroupId) {
       payload.adGroupId = amazonAdGroupId;
     }
 
@@ -248,8 +273,10 @@ async function pushNegativeAsin({
     }
 
     logger.info("Negative ASIN write-back ok", { profileId, path, realId });
+    return { ok: true };
   } catch (e) {
     logger.warn("Negative ASIN write-back failed (non-fatal)", { profileId, error: e.message });
+    return { ok: false, error: e.message };
   }
 }
 
@@ -261,7 +288,8 @@ async function pushNegativeAsin({
  *                amazonCampaignId, amazonAdGroupId, keywordText, matchType, bid}>} keywords
  */
 async function pushNewKeywords(keywords) {
-  if (!keywords?.length) return;
+  if (!keywords?.length) return { ok: true };
+  let anyError = null;
 
   const sp = keywords.filter(k =>
     k.campaignType === "sponsoredProducts" || k.campaignType === "SP"
@@ -315,9 +343,11 @@ async function pushNewKeywords(keywords) {
         logger.info("SP keyword create ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
         logger.warn("SP keyword create failed (non-fatal)", { profileId, error: e.message });
+        anyError = e.message;
       }
     }
   }
+  return anyError ? { ok: false, error: anyError } : { ok: true };
 }
 
 module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext, pushNewKeywords };

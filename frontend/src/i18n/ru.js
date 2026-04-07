@@ -708,7 +708,7 @@ export default {
     colSource: "Источник",
     colMatchType: "Тип совпадения",
     colRelevance: "Релевантность",
-    colSearches: "Запросы",
+    colSearches: "Популярность",
     colBid: "Ставка",
     srcLabelAmazon: "Amazon",
     srcLabelAmazonAI: "Amazon+ИИ",
