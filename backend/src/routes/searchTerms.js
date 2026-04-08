@@ -47,6 +47,19 @@ router.get("/", async (req, res, next) => {
       params.push(campaignIds);
     }
 
+    // Portfolio filter
+    const rawPortfolioIds = req.query['portfolioIds[]'] || req.query.portfolioIds;
+    const portfolioIds = rawPortfolioIds
+      ? (Array.isArray(rawPortfolioIds) ? rawPortfolioIds : rawPortfolioIds.split(','))
+          .filter(id => id && id.trim())
+      : null;
+    if (portfolioIds && portfolioIds.length > 0) {
+      conditions.push(
+        `stm.campaign_id IN (SELECT id FROM campaigns WHERE workspace_id = $1 AND amazon_portfolio_id = ANY($${pi++}))`
+      );
+      params.push(portfolioIds);
+    }
+
     // Campaign type filter — join campaigns table
     const VALID_CAMPAIGN_TYPES = ["SP", "SB", "SD", "sponsoredProducts", "sponsoredBrands", "sponsoredDisplay"];
     if (campaignType && VALID_CAMPAIGN_TYPES.includes(campaignType)) {

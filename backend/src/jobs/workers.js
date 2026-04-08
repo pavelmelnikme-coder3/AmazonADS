@@ -450,15 +450,52 @@ async function startWorkers() {
   });
 
   const { scrapeWorkspaceRanks } = require("../services/amazon/rankScraper");
+  const { getRanksByAsin, isConfigured: jsConfigured } = require("../services/junglescout/client");
+
+  async function jsCheckWorkspaceRanks(workspaceId) {
+    const { rows: keywords } = await query(
+      `SELECT id, asin, keyword, marketplace_id FROM tracked_keywords WHERE workspace_id = $1 AND is_active = TRUE`,
+      [workspaceId]
+    );
+    if (!keywords.length) return { total: 0, found: 0 };
+
+    const groups = {};
+    for (const kw of keywords) {
+      const key = `${kw.asin}|${kw.marketplace_id}`;
+      if (!groups[key]) groups[key] = { asin: kw.asin, marketplaceId: kw.marketplace_id, keywords: [] };
+      groups[key].keywords.push(kw);
+    }
+
+    let found = 0;
+    for (const group of Object.values(groups)) {
+      const rankMap = await getRanksByAsin(group.asin, group.marketplaceId);
+      for (const kw of group.keywords) {
+        const result = rankMap.get(kw.keyword) || { position: null, page: null, found: false, blocked: false };
+        await query(
+          `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked) VALUES ($1, $2, $3, $4, $5)`,
+          [kw.id, result.position, result.page, result.found, result.blocked]
+        );
+        if (result.found) found++;
+      }
+      if (Object.keys(groups).length > 1) await new Promise(r => setTimeout(r, 300));
+    }
+    return { total: keywords.length, found };
+  }
+
   const rankCheckWorker = new Worker(
     QUEUES.RANK_CHECK,
     async (job) => {
       const { workspaceId } = job.data;
       logger.info("Rank check started", { workspaceId });
+      if (jsConfigured()) {
+        const { total, found } = await jsCheckWorkspaceRanks(workspaceId);
+        logger.info("Rank check complete (JS)", { workspaceId, total, found });
+        return { workspaceId, total, found };
+      }
       const results = await scrapeWorkspaceRanks(workspaceId, { query });
       const found = results.filter(r => r.found).length;
       const blocked = results.filter(r => r.blocked).length;
-      logger.info("Rank check complete", { workspaceId, total: results.length, found, blocked });
+      logger.info("Rank check complete (scrape)", { workspaceId, total: results.length, found, blocked });
       return { workspaceId, total: results.length, found, blocked };
     },
     { connection: createRedisConnection(), concurrency: 1, limiter: { max: 1, duration: 3600000 } }

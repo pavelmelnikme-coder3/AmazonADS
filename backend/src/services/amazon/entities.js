@@ -239,7 +239,7 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
     const params = [];
     let pi = 1;
     for (const c of chunk) {
-      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
       params.push(
         workspaceId, profileDbId,
         String(c.campaignId), c.name, c.campaignType,
@@ -248,20 +248,22 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
         c.dailyBudget ?? c.budget?.budget ?? null,
         c.startDate || null, c.endDate || null,
         c.bidding?.strategy || null,
-        JSON.stringify(c)
+        JSON.stringify(c),
+        c.portfolioId ? String(c.portfolioId) : null
       );
     }
     await query(
       `INSERT INTO campaigns
          (workspace_id, profile_id, amazon_campaign_id, name, campaign_type,
           targeting_type, state, daily_budget, start_date, end_date,
-          bidding_strategy, raw_data, synced_at)
+          bidding_strategy, raw_data, amazon_portfolio_id, synced_at)
        VALUES ${values.join(",")}
        ON CONFLICT (profile_id, amazon_campaign_id) DO UPDATE SET
          name=EXCLUDED.name, state=EXCLUDED.state,
          daily_budget=EXCLUDED.daily_budget,
          bidding_strategy=EXCLUDED.bidding_strategy,
          raw_data=EXCLUDED.raw_data,
+         amazon_portfolio_id=EXCLUDED.amazon_portfolio_id,
          synced_at=NOW(), updated_at=NOW()`,
       params
     );

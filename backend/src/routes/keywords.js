@@ -32,6 +32,17 @@ router.get("/", async (req, res, next) => {
       params.push(campaignIds);
     }
 
+    // Portfolio filter
+    const rawPortfolioIds = req.query['portfolioIds[]'] || req.query.portfolioIds;
+    const portfolioIds = rawPortfolioIds
+      ? (Array.isArray(rawPortfolioIds) ? rawPortfolioIds : rawPortfolioIds.split(','))
+          .filter(id => id && id.trim())
+      : null;
+    if (portfolioIds && portfolioIds.length > 0) {
+      conditions.push(`c.amazon_portfolio_id = ANY($${pi++})`);
+      params.push(portfolioIds);
+    }
+
     if (adGroupId)  { conditions.push(`k.ad_group_id = $${pi++}`);      params.push(adGroupId); }
     if (state)      { conditions.push(`k.state = $${pi++}`);            params.push(state); }
     if (search)     { conditions.push(`k.keyword_text ILIKE $${pi++}`); params.push(`%${search}%`); }

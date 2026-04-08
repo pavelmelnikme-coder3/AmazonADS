@@ -24,7 +24,7 @@ import {
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
   HelpCircle, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
-  FlaskConical,
+  FlaskConical, Briefcase,
 } from 'lucide-react';
 
 // Unified icon size helper
@@ -1389,6 +1389,9 @@ const RankTrackerPage = ({ workspaceId }) => {
   const [histDays, setHistDays]   = useState(30);
   const [histData, setHistData]   = useState({});   // id → snapshots[]
   const [toast, setToast]         = useState(null);
+  const [editingAsin, setEditingAsin] = useState(null); // asin string being edited
+  const [editKwsText, setEditKwsText] = useState("");
+  const [editAdding, setEditAdding]   = useState(false);
 
   const { data: keywords, loading } = useAsync(
     () => workspaceId ? get("/keyword-ranks") : Promise.resolve([]),
@@ -1409,17 +1412,30 @@ const RankTrackerPage = ({ workspaceId }) => {
   }, [keywords]);
 
   const handleAdd = async () => {
-    const cleanAsin = newAsin.trim().toUpperCase();
-    const keywords  = newKw.split("\n").map(k => k.trim().toLowerCase()).filter(k => k.length >= 2);
-    if (!cleanAsin || cleanAsin.length !== 10) return setAddError(t("rankings.errorAsin"));
+    const asins    = newAsin.split("\n").map(a => a.trim().toUpperCase()).filter(a => /^[A-Z0-9]{10}$/.test(a));
+    const keywords = newKw.split("\n").map(k => k.trim().toLowerCase()).filter(k => k.length >= 2);
+    if (!asins.length) return setAddError(t("rankings.errorAsins"));
     if (!keywords.length) return setAddError(t("rankings.errorKeyword"));
     setAdding(true); setAddError(null);
     try {
-      await Promise.all(keywords.map(kw => post("/keyword-ranks", { asin: cleanAsin, keyword: kw })));
-      setNewKw(""); reload();
-      showToast(keywords.length > 1 ? `${keywords.length} ${t("rankings.keywordsAdded")}` : t("rankings.added"));
+      await Promise.all(asins.flatMap(asin => keywords.map(kw => post("/keyword-ranks", { asin, keyword: kw }))));
+      setNewAsin(""); setNewKw(""); reload();
+      const total = asins.length * keywords.length;
+      showToast(total > 1 ? `${total} ${t("rankings.keywordsAdded")}` : t("rankings.added"));
     } catch (e) { setAddError(e.message); }
     finally { setAdding(false); }
+  };
+
+  const handleAddToAsin = async (asin) => {
+    const keywords = editKwsText.split("\n").map(k => k.trim().toLowerCase()).filter(k => k.length >= 2);
+    if (!keywords.length) return;
+    setEditAdding(true);
+    try {
+      await Promise.all(keywords.map(kw => post("/keyword-ranks", { asin, keyword: kw })));
+      setEditingAsin(null); setEditKwsText(""); reload();
+      showToast(`${keywords.length} ${t("rankings.keywordsAdded")}`);
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setEditAdding(false); }
   };
 
   const handleDelete = async (id) => {
@@ -1569,11 +1585,15 @@ const RankTrackerPage = ({ workspaceId }) => {
         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--tx2)", marginBottom: 10 }}>{t("rankings.addTitle")}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div>
-            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>ASIN</div>
-            <input value={newAsin} onChange={e => setNewAsin(e.target.value.toUpperCase())}
-              onKeyDown={e => e.key === "Enter" && handleAdd()}
-              placeholder="B0XXXXXXXXXX" maxLength={10}
-              style={{ width: 140, fontFamily: "var(--mono)", letterSpacing: ".05em", fontSize: 13 }} />
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>
+              {t("rankings.asinLabel")}
+              <span style={{ color: "var(--tx3)", marginLeft: 6 }}>({t("rankings.asinHint")})</span>
+            </div>
+            <textarea value={newAsin} onChange={e => setNewAsin(e.target.value.toUpperCase())}
+              placeholder={t("rankings.asinPlaceholderMulti")}
+              rows={3}
+              style={{ width: 160, fontFamily: "var(--mono)", letterSpacing: ".05em", fontSize: 12,
+                resize: "vertical", minHeight: 64, lineHeight: 1.8 }} />
           </div>
           <div style={{ flex: 1, minWidth: 200 }}>
             <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>
@@ -1608,10 +1628,32 @@ const RankTrackerPage = ({ workspaceId }) => {
           {Object.entries(grouped).map(([asin, kws]) => (
             <div key={asin} className="card" style={{ padding: "14px 16px" }}>
               {/* ASIN header */}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: editingAsin === asin ? 8 : 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
                 <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)" }}>{asin}</span>
                 <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
+                <button
+                  onClick={() => { setEditingAsin(editingAsin === asin ? null : asin); setEditKwsText(""); }}
+                  className="btn btn-ghost"
+                  style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", color: "var(--ac2)" }}
+                  title={t("rankings.addToGroup")}>
+                  {editingAsin === asin ? "✕" : "+ " + t("rankings.addToGroup")}
+                </button>
               </div>
+
+              {/* Inline add-keywords form */}
+              {editingAsin === asin && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, padding: "8px 0", borderBottom: "1px solid var(--b1)" }}>
+                  <textarea value={editKwsText} onChange={e => setEditKwsText(e.target.value)}
+                    placeholder={t("rankings.keywordPlaceholderMulti")}
+                    rows={2}
+                    style={{ flex: 1, fontSize: 12, resize: "vertical", minHeight: 48,
+                      fontFamily: "var(--ui)", lineHeight: 1.6 }} />
+                  <button onClick={() => handleAddToAsin(asin)} disabled={editAdding || !editKwsText.trim()}
+                    className="btn btn-primary" style={{ fontSize: 12, padding: "6px 14px", alignSelf: "flex-end" }}>
+                    {editAdding ? "…" : t("rankings.addBtn")}
+                  </button>
+                </div>
+              )}
 
               {/* Keyword rows */}
               <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
@@ -4542,6 +4584,97 @@ function CampaignMultiSelect({ selectedIds, onChange }) {
   );
 }
 
+// ─── PortfolioMultiSelect ─────────────────────────────────────────────────────
+function PortfolioMultiSelect({ selectedIds, onChange }) {
+  const [open, setOpen]       = useState(false);
+  const [portfolios, setPortfolios] = useState([]);
+  const [search, setSearch]   = useState('');
+  const [loaded, setLoaded]   = useState(false);
+
+  useEffect(() => {
+    if (!open || loaded) return;
+    apiFetch('/portfolios')
+      .then(d => { setPortfolios(Array.isArray(d) ? d : []); setLoaded(true); })
+      .catch(() => setLoaded(true));
+  }, [open]);
+
+  const filtered = portfolios.filter(p =>
+    p.name?.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggle = (id) => {
+    onChange(selectedIds.includes(id) ? selectedIds.filter(x => x !== id) : [...selectedIds, id]);
+  };
+
+  const label = selectedIds.length === 0
+    ? 'All portfolios'
+    : selectedIds.length === 1
+      ? (portfolios.find(p => p.amazon_portfolio_id === selectedIds[0])?.name || '1 portfolio')
+      : `${selectedIds.length} portfolios`;
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className={`btn ${selectedIds.length > 0 ? 'btn-primary' : 'btn-ghost'}`}
+        style={{ fontSize: 11, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 5, minWidth: 130 }}
+      >
+        <Briefcase size={11} strokeWidth={1.75} />
+        <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>{label}</span>
+        <ChevronDown size={11} strokeWidth={1.75} />
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: '110%', right: 0, zIndex: 999,
+          background: 'var(--s1)', border: '1px solid var(--b2)',
+          borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+          width: 280, maxHeight: 320, display: 'flex', flexDirection: 'column',
+        }}>
+          <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--b1)' }}>
+            <input
+              autoFocus placeholder="Search portfolios…" value={search}
+              onChange={e => setSearch(e.target.value)}
+              style={{ width: '100%', padding: '5px 8px', borderRadius: 5, fontSize: 12,
+                background: 'var(--s2)', border: '1px solid var(--b2)',
+                color: 'var(--tx)', outline: 'none', boxSizing: 'border-box' }}
+            />
+          </div>
+          {selectedIds.length > 0 && (
+            <div style={{ padding: '5px 10px', borderBottom: '1px solid var(--b1)' }}>
+              <button onClick={() => onChange([])}
+                style={{ fontSize: 11, color: 'var(--ac)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                Clear ({selectedIds.length})
+              </button>
+            </div>
+          )}
+          <div style={{ overflowY: 'auto', flex: 1 }}>
+            {!loaded && <div style={{ padding: 16, textAlign: 'center', fontSize: 12, color: 'var(--tx3)' }}>Loading…</div>}
+            {loaded && filtered.length === 0 && (
+              <div style={{ padding: 16, textAlign: 'center', color: 'var(--tx2)', fontSize: 12 }}>No portfolios</div>
+            )}
+            {filtered.map(p => (
+              <label key={p.amazon_portfolio_id}
+                style={{ display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 12px', cursor: 'pointer',
+                  background: selectedIds.includes(p.amazon_portfolio_id) ? 'rgba(59,130,246,0.08)' : 'transparent' }}>
+                <input type="checkbox" checked={selectedIds.includes(p.amazon_portfolio_id)}
+                  onChange={() => toggle(p.amazon_portfolio_id)}
+                  style={{ accentColor: 'var(--ac)', width: 13, height: 13 }} />
+                <span style={{ fontSize: 12, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {p.name}
+                </span>
+                <span style={{ fontSize: 10, color: 'var(--tx3)' }}>{p.campaign_count}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+      {open && <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 998 }} />}
+    </div>
+  );
+}
+
 // ─── NegativeKeywordsTab ──────────────────────────────────────────────────────
 function NegativeKeywordsTab({ workspaceId }) {
   const [negatives, setNegatives]   = useState([]);
@@ -5626,11 +5759,12 @@ const KeywordsPage = ({ workspaceId }) => {
   const [kwTab, setKwTab] = useState(() => localStorage.getItem("af_kw_tab") || 'keywords'); // 'keywords' | 'searchterms' | 'negatives'
   const kwScrollRestoredRef = useRef(false);
 
-  // Keywords date range + campaign filter
+  // Keywords date range + campaign + portfolio filter
   const [kwDateFrom, setKwDateFrom]     = useState(null);
   const [kwDateTo, setKwDateTo]         = useState(null);
   const [kwMetricsDays, setKwMetricsDays] = useState(30);
   const [kwCampaignIds, setKwCampaignIds] = useState([]);
+  const [kwPortfolioIds, setKwPortfolioIds] = useState([]);
 
   // Search Terms state
   const [searchTerms, setSearchTerms] = useState([]);
@@ -5644,6 +5778,7 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stDateTo, setStDateTo]         = useState(null);
   const [stMetricsDays, setStMetricsDays] = useState(30);
   const [stCampaignIds, setStCampaignIds] = useState([]);
+  const [stPortfolioIds, setStPortfolioIds] = useState([]);
   const [stCampaignType, setStCampaignType] = useState('');   // '' | 'SP' | 'SB' | 'SD'
   const [stSyncing, setStSyncing] = useState(false);
   const [stSelected, setStSelected] = useState(new Set());
@@ -5719,12 +5854,13 @@ const KeywordsPage = ({ workspaceId }) => {
       params.set('metricsDays', stMetricsDays);
     }
     stCampaignIds.forEach(id => params.append('campaignIds[]', id));
+    stPortfolioIds.forEach(id => params.append('portfolioIds[]', id));
     if (stCampaignType) params.set('campaignType', stCampaignType);
     apiFetch(`/search-terms?${params}`)
       .then(d => { setSearchTerms(d?.data || []); setStTotal(d?.pagination?.total || 0); setStSelected(new Set()); })
       .catch(() => setSearchTerms([]))
       .finally(() => setStLoading(false));
-  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds, stCampaignType]);
+  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds, stPortfolioIds, stCampaignType]);
 
   const stRecommendation = (term) => {
     const acos = parseFloat(term.sales) > 0 ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100 : null;
@@ -5851,9 +5987,10 @@ const KeywordsPage = ({ workspaceId }) => {
         p.set('metricsDays', kwFilters.metricsDays);
       }
       kwCampaignIds.forEach(id => p.append('campaignIds[]', id));
+      kwPortfolioIds.forEach(id => p.append('portfolioIds[]', id));
       return apiFetch('/keywords?' + p.toString());
     },
-    [workspaceId, page, pageSize, sortBy, sortDir, kwFilters, kwDateFrom, kwDateTo, kwMetricsDays, kwCampaignIds]
+    [workspaceId, page, pageSize, sortBy, sortDir, kwFilters, kwDateFrom, kwDateTo, kwMetricsDays, kwCampaignIds, kwPortfolioIds]
   );
 
   const keywords = kwResponse?.data ?? [];
@@ -6231,6 +6368,10 @@ const KeywordsPage = ({ workspaceId }) => {
               selectedIds={stCampaignIds}
               onChange={setStCampaignIds}
             />
+            <PortfolioMultiSelect
+              selectedIds={stPortfolioIds}
+              onChange={setStPortfolioIds}
+            />
             <span style={{ fontSize: 11, color: "var(--tx3)", marginLeft: "auto" }}>
               {stTotal.toLocaleString()} queries
             </span>
@@ -6514,6 +6655,7 @@ const KeywordsPage = ({ workspaceId }) => {
           }}
         />
         <CampaignMultiSelect selectedIds={kwCampaignIds} onChange={(ids) => { setKwCampaignIds(ids); setPage(1); }} />
+        <PortfolioMultiSelect selectedIds={kwPortfolioIds} onChange={(ids) => { setKwPortfolioIds(ids); setPage(1); }} />
 
         <div style={{ width: 1, height: 20, background: "var(--b2)", flexShrink: 0 }} />
 
@@ -7135,7 +7277,7 @@ const EMPTY_RULE_FORM = {
   name: "", description: "", dry_run: false, is_active: true,
   conditions: [{ metric: "clicks", op: "gte", value: "30" }],
   actions:    [{ type: "pause_keyword", value: "" }],
-  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", dayparting: null },
+  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_targeting_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", campaign_name_mode: "include", dayparting: null },
   safety: { min_bid: "0.02", max_bid: "50" },
 };
 
@@ -7796,24 +7938,58 @@ const RuleWizardModal = ({
                     </select>
                   </div>
 
-                  <div style={{ marginBottom:10 }}>
-                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.matchTypes")}</div>
-                    <div style={{ display:"flex", gap:5 }}>
-                      {RULE_MATCH_TYPES.map(mt => (
-                        <button key={mt.value} onClick={() => toggleMatchType(mt.value)}
-                          className={`btn ${(form.scope.match_types||[]).includes(mt.value)?"btn-primary":"btn-ghost"}`}
-                          style={{ fontSize:11, padding:"5px 10px", flex:1 }}>{mt.label}</button>
-                      ))}
+                  {form.scope?.campaign_targeting_type !== "auto" && (
+                    <div style={{ marginBottom:10 }}>
+                      <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.matchTypes")}</div>
+                      <div style={{ display:"flex", gap:5 }}>
+                        {RULE_MATCH_TYPES.map(mt => (
+                          <button key={mt.value} onClick={() => toggleMatchType(mt.value)}
+                            className={`btn ${(form.scope.match_types||[]).includes(mt.value)?"btn-primary":"btn-ghost"}`}
+                            style={{ fontSize:11, padding:"5px 10px", flex:1 }}>{mt.label}</button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
+                  )}
+
+                  {(form.scope?.entity_type || "keyword") === "keyword" && (!form.scope?.campaign_type || form.scope?.campaign_type === "sponsoredProducts") && (
+                    <div style={{ marginBottom:10 }}>
+                      <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignTargetingType")}</div>
+                      <div style={{ display:"flex", gap:5 }}>
+                        {[
+                          { value:"", label:t("rules.targetingAll") },
+                          { value:"auto", label:t("rules.targetingAutoShort") },
+                          { value:"manual", label:t("rules.targetingManualShort") },
+                        ].map(opt => (
+                          <button key={opt.value}
+                            className={`btn ${(form.scope?.campaign_targeting_type || "") === opt.value ? "btn-primary" : "btn-ghost"}`}
+                            style={{ fontSize:11, padding:"5px 10px", flex:1 }}
+                            onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, campaign_targeting_type: opt.value } }))}>
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   <div style={{ marginBottom:10 }}>
-                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignNameFilter")}</div>
+                    <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+                      <span>{t("rules.campaignNameFilter")}</span>
+                      <div style={{ display:"flex", gap:3 }}>
+                        {["include","exclude"].map(mode => (
+                          <button key={mode}
+                            className={`btn ${(form.scope?.campaign_name_mode || "include") === mode ? "btn-primary" : "btn-ghost"}`}
+                            style={{ fontSize:10, padding:"2px 7px" }}
+                            onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, campaign_name_mode: mode } }))}>
+                            {mode === "include" ? t("rules.nameInclude") : t("rules.nameExclude")}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     <input
                       value={form.scope?.campaign_name_contains || ""}
                       onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, campaign_name_contains: e.target.value } }))}
                       placeholder={t("rules.campaignNamePlaceholder")}
-                      style={{ ...INP_SM }} />
+                      style={{ ...INP_SM, borderColor: form.scope?.campaign_name_mode === "exclude" && form.scope?.campaign_name_contains ? "var(--red)" : undefined }} />
                   </div>
 
                   {(form.scope?.entity_type || "keyword") === "product_target" && (
@@ -8133,7 +8309,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [asins, setAsins]               = useState("");
   const [productTitle, setProductTitle] = useState("");
   const [locale, setLocale]             = useState("en");
-  const [sources, setSources]           = useState({ amazon: true, ai: true, jungle_scout: false });
+  const [sources, setSources]           = useState({ amazon: false, ai: false, jungle_scout: true });
   const [loading, setLoading]           = useState(false);
   const [results, setResults]           = useState(null); // { keywords, product_title, sources_used, jungle_scout_available }
   const [selected, setSelected]         = useState(new Set());
@@ -8347,8 +8523,13 @@ const KeywordResearchPage = ({ workspaceId }) => {
     }
     if (sortBy) {
       list.sort((a, b) => {
-        const va = a.kw[sortBy] ?? -Infinity;
-        const vb = b.kw[sortBy] ?? -Infinity;
+        const getVal = (kw) => {
+          if (sortBy === "impressions_share")
+            return kw.impressions_share ?? kw.monthly_search_volume ?? -Infinity;
+          return kw[sortBy] ?? -Infinity;
+        };
+        const va = getVal(a.kw);
+        const vb = getVal(b.kw);
         if (typeof va === "string") return sortDir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
         return sortDir === "asc" ? va - vb : vb - va;
       });
@@ -9224,7 +9405,7 @@ const RulesPage = ({ workspaceId }) => {
       is_active:   rule.is_active !== false,
       conditions:  parse(rule.conditions, EMPTY_RULE_FORM.conditions),
       actions:     parse(rule.actions,    EMPTY_RULE_FORM.actions),
-      scope:       { ...parsedScope, dayparting },
+      scope:       { ...EMPTY_RULE_FORM.scope, ...parsedScope, dayparting },
       safety:      parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
     setEditRule(rule); setShowForm(true);

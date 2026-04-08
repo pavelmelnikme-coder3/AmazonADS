@@ -57,6 +57,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     startDate = new Date(Date.now() - periodDays * 86400000).toISOString().split("T")[0];
   }
 
+  // Look up org_id once (needed for writeAudit)
+  const { rows: [ws] } = await query("SELECT org_id FROM workspaces WHERE id = $1", [workspaceId]);
+  const orgId = ws?.org_id || null;
+
   // Separate bid threshold conditions (applied in SQL WHERE) from metric conditions (post-fetch filter)
   const bidConditions    = conditions.filter(c => c.metric === "bid");
   const metricConditions = conditions.filter(c => c.metric !== "bid");
@@ -69,12 +73,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     if (!scope.campaign_name_contains) return piRef;
     const names = scope.campaign_name_contains.split(",").map(s => s.trim()).filter(Boolean);
     if (!names.length) return piRef;
+    const exclude = scope.campaign_name_mode === "exclude";
+    const op = exclude ? "NOT ILIKE" : "ILIKE";
+    const join = exclude ? " AND " : " OR ";
     if (names.length === 1) {
-      conds.push(`${alias}.name ILIKE $${piRef++}`);
+      conds.push(`${alias}.name ${op} $${piRef++}`);
       params.push(`%${names[0]}%`);
     } else {
-      const orParts = names.map(() => `${alias}.name ILIKE $${piRef++}`).join(" OR ");
-      conds.push(`(${orParts})`);
+      const parts = names.map(() => `${alias}.name ${op} $${piRef++}`).join(join);
+      conds.push(`(${parts})`);
       params.push(...names.map(n => `%${n}%`));
     }
     return piRef;
@@ -102,6 +109,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     if (scope.match_types?.length) {
       kConds.push(`k.match_type = ANY($${pi++}::text[])`);
       kParams.push(scope.match_types);
+    }
+    if (scope.campaign_targeting_type) {
+      kConds.push(`LOWER(c.targeting_type) = $${pi++}`);
+      kParams.push(scope.campaign_targeting_type.toLowerCase());
     }
     pi = addCampaignNameFilter(kConds, kParams, pi);
     for (const bc of bidConditions) {
@@ -173,6 +184,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       tParams.push(scope.campaign_type);
     }
     tPi = addCampaignNameFilter(tConds, tParams, tPi);
+    if (scope.campaign_targeting_type) {
+      tConds.push(`LOWER(c.targeting_type) = $${tPi++}`);
+      tParams.push(scope.campaign_targeting_type.toLowerCase());
+    }
     if (scope.targeting_type) {
       const ttMap = { auto: "close-match", product: "asinSameAs", views: "views", audience: "audience" };
       const ttVal = ttMap[scope.targeting_type];
@@ -245,7 +260,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.pause_keyword", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
@@ -275,7 +290,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.enable_keyword", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
@@ -309,7 +324,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.adjust_bid_pct", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
@@ -343,7 +358,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2", [clampedBid, entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.set_bid", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { bid: currentBid }, afterData: { bid: clampedBid }, source: "rule",
@@ -372,7 +387,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE targets SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "target.pause", entityType: "target",
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
@@ -403,7 +418,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE targets SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "target.enable", entityType: "target",
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
@@ -438,7 +453,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (!dryRun) {
             await query("UPDATE targets SET bid = $1, updated_at = NOW() WHERE id = $2", [newBid, entity.id]);
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "target.adjust_bid_pct", entityType: "target",
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: { bid: currentBid }, afterData: { bid: newBid }, source: "rule",
@@ -495,7 +510,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               insertedId = insRows[0]?.id || null;
 
               await writeAudit({
-                workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "keyword.add_negative", entityType: "keyword",
                 entityId: entity.id, entityName: entity.keyword_text,
                 beforeData: {}, afterData: { match_type: matchType, level: "ad_group", added_as_negative: true },
@@ -556,7 +571,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             insertedNtId = ntRows[0]?.id || null;
 
             await writeAudit({
-              workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+              orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "target.add_negative", entityType: "target",
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
               beforeData: {}, afterData: { added_as_negative: true }, source: "rule",
