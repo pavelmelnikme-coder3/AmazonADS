@@ -11,7 +11,7 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const logger  = require("../config/logger");
 const { getAmazonKeywordRecommendations } = require("../services/amazon/keywordRecommendations");
-const { getKeywordsByAsin, getKeywordsByKeyword, isConfigured: jsConfigured } = require("../services/junglescout/client");
+const { getKeywordsByAsin, getKeywordsByKeyword, getRanksByAsin, isConfigured: jsConfigured } = require("../services/junglescout/client");
 const { generateSeedKeywords, scoreAndFilterKeywords } = require("../services/ai/keywordResearch");
 const { pushNewKeywords } = require("../services/amazon/writeback");
 const { writeAudit, updateAuditStatus } = require("./audit");
@@ -27,7 +27,7 @@ router.post("/discover", async (req, res, next) => {
       profileId,       // local DB profile UUID (required)
       adGroupId,       // local DB ad group UUID (optional — improves Amazon recommendations)
       productTitle,    // product title for AI (optional — auto-fetched if ASIN known)
-      locale = "en",   // target language for AI
+      locale = "",     // target language for AI (empty = all languages)
       sources = ["amazon", "ai"], // which sources to use
     } = req.body;
 
@@ -177,8 +177,84 @@ router.post("/discover", async (req, res, next) => {
       }
     }
 
-    // Sort: Amazon highest first (they're most campaign-relevant), then by relevance
+    // ── 6. JS organic rank enrichment — search volume + organic relevance ────────
+    // For each input ASIN: fetch organic rank data from JS.
+    // Builds two maps:
+    //   svMap:      keyword_lower → monthly_search_volume  (fills in missing volumes)
+    //   organicMap: keyword_lower → { count, scoreSum }    (for organic relevance)
+    if (jsConfigured() && allAsins.length) {
+      const asinsToCheck = allAsins.slice(0, 10); // cap at 10 ASINs
+      const rankMaps = [];
+      for (const a of asinsToCheck) {
+        try {
+          const rankMap = await getRanksByAsin(a, profile.marketplace_id);
+          rankMaps.push(rankMap);
+        } catch (e) {
+          logger.warn("Keyword research: getRanksByAsin failed (non-fatal)", { asin: a, error: e.message });
+          rankMaps.push(new Map());
+        }
+        if (asinsToCheck.indexOf(a) < asinsToCheck.length - 1) {
+          await new Promise(r => setTimeout(r, 350));
+        }
+      }
+
+      // Build search volume map: keyword → highest volume seen across all rank maps
+      const svMap = new Map();
+      for (const rankMap of rankMaps) {
+        for (const [kw, data] of rankMap.entries()) {
+          if (data.search_volume != null) {
+            const cur = svMap.get(kw);
+            if (cur == null || data.search_volume > cur) svMap.set(kw, data.search_volume);
+          }
+        }
+      }
+
+      // Build organic map: keyword → page-1 ranking info
+      // Score per ASIN: pos 1-5=1.0, 6-10=0.8, 11-16=0.6, >16=0
+      const organicMap = new Map(); // keyword → { count, scoreSum }
+      for (const rankMap of rankMaps) {
+        for (const [kw, data] of rankMap.entries()) {
+          if (!data.found || data.position == null || data.position > 16) continue;
+          const w = data.position <= 5 ? 1.0 : data.position <= 10 ? 0.8 : 0.6;
+          if (!organicMap.has(kw)) organicMap.set(kw, { count: 0, scoreSum: 0, topPosition: data.position });
+          const entry = organicMap.get(kw);
+          entry.count++;
+          entry.scoreSum += w;
+          if (data.position < entry.topPosition) entry.topPosition = data.position;
+        }
+      }
+
+      logger.info("Keyword research: JS organic enrichment", {
+        asins: asinsToCheck.length,
+        svEntries: svMap.size,
+        organicEntries: organicMap.size,
+      });
+
+      // Enrich final keywords
+      finalKeywords = finalKeywords.map(kw => {
+        const key = kw.keyword_text.toLowerCase();
+        const sv = svMap.get(key);
+        const org = organicMap.get(key);
+        const organicScore = org && asinsToCheck.length > 0
+          ? Math.round((org.scoreSum / asinsToCheck.length) * 100)
+          : null;
+        return {
+          ...kw,
+          monthly_search_volume: kw.monthly_search_volume ?? sv ?? null,
+          organic_rank_score:    organicScore,
+          organic_rank_count:    org?.count ?? null,
+          organic_top_position:  org?.topPosition ?? null,
+        };
+      });
+    }
+
+    // Sort: organic rank score first (if available), then by relevance + amazon boost
     finalKeywords.sort((a, b) => {
+      // Primary: organic rank score (higher = more relevant)
+      const orgA = a.organic_rank_score ?? -1;
+      const orgB = b.organic_rank_score ?? -1;
+      if (orgA !== orgB) return orgB - orgA;
+      // Secondary: relevance score with Amazon source boost
       const scoreA = (a.relevance_score || 0) + (a.source === "amazon_ads" ? 15 : 0);
       const scoreB = (b.relevance_score || 0) + (b.source === "amazon_ads" ? 15 : 0);
       return scoreB - scoreA;

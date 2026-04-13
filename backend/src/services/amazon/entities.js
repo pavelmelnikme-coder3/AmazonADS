@@ -531,17 +531,55 @@ async function syncKeywords(profileDbRecord, amazonKeywords) {
 // ─── PORTFOLIOS ──────────────────────────────────────────────────────────────
 
 async function fetchPortfolios(profile) {
-  const base = baseOpts(profile);
-  const result = await getAll({
-    ...base,
-    path: "/portfolios",
-    params: { portfolioStateFilter: "enabled,paused" },
-    group: "default",
-    responseKey: "portfolios",
-    debug: true,
-  });
-  logger.info("fetchPortfolios result", { profileId: base.profileId, count: result.length });
-  return result;
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const baseUrl = resolveBaseUrl(profile);
+  const accessToken = await getValidAccessToken(profile.connection_id);
+  const mediaType = "application/vnd.portfolio.v3+json";
+
+  const headers = {
+    "Authorization": `Bearer ${accessToken}`,
+    "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+    "Amazon-Advertising-API-Scope": String(profile.profile_id),
+    "Content-Type": mediaType,
+    "Accept": mediaType,
+  };
+
+  async function fetchByState(state) {
+    const items = [];
+    let nextToken = null;
+    do {
+      const body = { stateFilter: { include: [state] }, maxResults: 100 };
+      if (nextToken) body.nextToken = nextToken;
+      const response = await axios.post(`${baseUrl}/portfolios/list`, body, {
+        headers, timeout: 30000, validateStatus: null,
+      });
+      if (response.status === 200) {
+        items.push(...(response.data?.portfolios || []));
+        nextToken = response.data?.nextToken || null;
+      } else {
+        logger.warn("fetchPortfolios v3 failed", {
+          profileId: profile.profile_id, state, status: response.status,
+          body: JSON.stringify(response.data).slice(0, 300),
+        });
+        break;
+      }
+    } while (nextToken);
+    return items;
+  }
+
+  const portfolios = [];
+  try {
+    // API v3 only supports ENABLED state filter for portfolios
+    const enabled = await fetchByState("ENABLED");
+    portfolios.push(...enabled);
+  } catch (e) {
+    logger.warn("fetchPortfolios error", { profileId: profile.profile_id, error: e.message });
+  }
+
+  logger.info("fetchPortfolios result", { profileId: profile.profile_id, count: portfolios.length });
+  return portfolios;
 }
 
 async function syncPortfolios(profileDbRecord, amazonPortfolios) {
@@ -564,9 +602,9 @@ async function syncPortfolios(profileDbRecord, amazonPortfolios) {
          synced_at = NOW(), updated_at = NOW()`,
       [
         workspaceId, profileDbId,
-        String(p.portfolioId), p.name, p.state || "enabled",
+        String(p.portfolioId), p.name, (p.state || "ENABLED").toLowerCase(),
         p.budget?.amount || null, p.budget?.currencyCode || null,
-        p.budget?.startDate || null, p.budget?.endDate || null,
+        null, p.budget?.endDate || null,
         JSON.stringify(p),
       ]
     );

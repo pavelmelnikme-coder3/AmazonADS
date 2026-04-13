@@ -486,10 +486,13 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             : action.value === "both" ? ["negativeExact", "negativePhrase"] : ["negativeExact"];
 
           for (const matchType of negMatchTypes) {
+            // Normalize match_type: Amazon sync stores "negative_exact"/"negative_phrase" (snake_case)
+            // but rule engine uses "negativeExact"/"negativePhrase" (camelCase) — match both
             const { rows: existing } = await query(
               `SELECT id FROM negative_keywords
                WHERE workspace_id=$1 AND campaign_id=$2
-               AND LOWER(keyword_text)=LOWER($3) AND match_type=$4`,
+               AND LOWER(keyword_text)=LOWER($3)
+               AND REPLACE(LOWER(match_type),'_','') = REPLACE(LOWER($4),'_','')`,
               [workspaceId, entity.campaign_id, entity.keyword_text, matchType]
             );
             if (existing.length > 0) continue;
@@ -505,7 +508,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                  RETURNING id`,
                 [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
                   `rule-${entity.id}-${matchType}`,
-                  entity.keyword_text, matchType]
+                  entity.keyword_text, matchType.replace(/([A-Z])/g, '_$1').toLowerCase()]  // store as snake_case: negativeExact → negative_exact
               );
               insertedId = insRows[0]?.id || null;
 
@@ -536,7 +539,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               entity_id: entity.id, keyword_text: entity.keyword_text,
               campaign_name: entity.campaign_name, action: "add_negative_keyword",
               match_type: matchType, level: "ad_group",
-              metrics: { clicks: entity.clicks, orders: entity.orders, acos: entity.acos },
+              metrics: { clicks: entity.clicks, orders: entity.orders, acos: entity.acos, spend: entity.spend },
             });
           }
 
@@ -610,7 +613,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           applied.push({
             entity_id: entity.id, expression: entity.expression,
             campaign_name: entity.campaign_name, action: "add_negative_target",
-            metrics: { clicks: entity.clicks, orders: entity.orders },
+            metrics: { clicks: entity.clicks, orders: entity.orders, spend: entity.spend, acos: entity.acos },
           });
         }
       } catch (e) {

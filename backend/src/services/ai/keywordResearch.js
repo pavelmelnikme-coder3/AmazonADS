@@ -33,14 +33,18 @@ const LOCALE_NAMES = {
  * @param {string} [params.locale]         - e.g. "de"
  * @returns {Promise<Array>}
  */
-async function generateSeedKeywords({ productTitle, productDescription, marketplace, locale = "en" }) {
+async function generateSeedKeywords({ productTitle, productDescription, marketplace, locale = "" }) {
   if (!productTitle) return [];
-  const langName = LOCALE_NAMES[locale] || locale;
+  const langName = locale ? (LOCALE_NAMES[locale] || locale) : null;
+
+  const langInstruction = langName
+    ? `Target language: ${langName}\nCRITICAL: ALL keywords MUST be written in ${langName}. Never use English if the target language is different.`
+    : `Target language: use the most natural language(s) for this product and marketplace. Include keywords in all relevant languages shoppers actually use.`;
 
   const prompt = `You are an expert Amazon PPC keyword researcher. Generate highly relevant Amazon search keywords for this product.
 
 Product: "${productTitle}"${productDescription ? `\nDescription: "${productDescription.slice(0, 500)}"` : ""}
-Target language: ${langName}
+${langInstruction}
 
 Generate exactly 30 keywords that Amazon shoppers use when searching for this type of product.
 Cover:
@@ -49,8 +53,6 @@ Cover:
 3. Problem-solving queries ("best X for Y")
 4. Category browse terms
 5. Competitor/alternative terms
-
-CRITICAL: ALL keywords MUST be written in ${langName}. Never use English if the target language is different.
 
 Respond ONLY with valid JSON, no markdown, no explanation:
 {"keywords":[{"text":"keyword","match_type":"exact|phrase|broad","relevance":85}]}
@@ -96,17 +98,18 @@ relevance: 90-100 = core product keywords, 70-89 = highly relevant, 50-69 = rele
  * @param {string} [params.locale]
  * @returns {Promise<Array>} sorted by relevance_score desc, irrelevant filtered out
  */
-async function scoreAndFilterKeywords({ keywords, productTitle, locale = "en" }) {
+async function scoreAndFilterKeywords({ keywords, productTitle, locale = "" }) {
   if (!keywords?.length || !productTitle) return keywords;
-  const langName = LOCALE_NAMES[locale] || locale;
+  const langName = locale ? (LOCALE_NAMES[locale] || locale) : null;
 
   const results = [];
 
   // Process in batches of 50
   for (let i = 0; i < keywords.length; i += 50) {
     const batch = keywords.slice(i, i + 50);
+    const marketplaceDesc = langName ? `${langName} marketplace` : "Amazon marketplace";
 
-    const prompt = `Rate these keywords for relevance to: "${productTitle}" on Amazon (${langName} marketplace).
+    const prompt = `Rate these keywords for relevance to: "${productTitle}" on Amazon (${marketplaceDesc}).
 
 For each keyword provide:
 - relevance_score: 0-100

@@ -178,25 +178,43 @@ const AI_PARAM_LABELS = {
   new_bid:                   'New bid',
   old_bid:                   'Old bid',
 };
+const formatAiParamValue = (key, val) => {
+  const n = parseFloat(val);
+  if (key === 'bid_adjustment_pct' || key === 'bid_adjustment') {
+    return `${n > 0 ? '+' : ''}${n}%`;
+  }
+  if (key === 'bid' || key === 'daily_budget') {
+    return `€${isNaN(n) ? val : n.toFixed(2)}`;
+  }
+  if (key === 'state') return String(val);
+  return String(val);
+};
+const AI_PARAM_DISPLAY = {
+  bid_adjustment_pct: 'Изменение ставки',
+  bid_adjustment:     'Изменение ставки',
+  bid:                'Новая ставка',
+  daily_budget:       'Новый бюджет/день',
+  state:              'Статус',
+};
 const renderAiParams = (params) => {
   if (!params) return null;
   const obj = (typeof params === 'string')
     ? (() => { try { return JSON.parse(params); } catch { return null; } })()
     : (typeof params === 'object' ? params : null);
   if (!obj) return null;
-  const entries = Object.entries(obj);
+  const entries = Object.entries(obj).filter(([, v]) => v !== '' && v !== null && v !== undefined);
   if (entries.length === 0) return null;
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', marginTop: 4,
-      padding: '6px 10px', background: 'var(--s2)', borderRadius: 6, border: '1px solid var(--b2)' }}>
+    <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: '4px 10px',
+      padding: '2px 8px', background: 'var(--s2)', borderRadius: 5, border: '1px solid var(--b2)' }}>
       {entries.map(([key, val]) => (
         <span key={key} style={{ fontSize: 11, color: 'var(--tx2)', whiteSpace: 'nowrap' }}>
-          <span style={{ color: 'var(--tx3)' }}>{AI_PARAM_LABELS[key] || key.replace(/_/g, ' ')}:</span>
+          <span style={{ color: 'var(--tx3)' }}>{AI_PARAM_DISPLAY[key] || key.replace(/_/g, ' ')}:</span>
           {' '}
-          <span style={{ color: 'var(--tx)', fontWeight: 600 }}>{String(val)}</span>
+          <span style={{ color: 'var(--tx)', fontWeight: 600 }}>{formatAiParamValue(key, val)}</span>
         </span>
       ))}
-    </div>
+    </span>
   );
 };
 
@@ -1392,6 +1410,9 @@ const RankTrackerPage = ({ workspaceId }) => {
   const [editingAsin, setEditingAsin] = useState(null); // asin string being edited
   const [editKwsText, setEditKwsText] = useState("");
   const [editAdding, setEditAdding]   = useState(false);
+  const [editingLabel, setEditingLabel] = useState(null); // asin being note-edited
+  const [labelDraft, setLabelDraft]     = useState({});   // asin → draft text
+  const [productPopup, setProductPopup] = useState(null); // { asin, title, brand, image_url, label }
 
   const { data: keywords, loading } = useAsync(
     () => workspaceId ? get("/keyword-ranks") : Promise.resolve([]),
@@ -1465,6 +1486,16 @@ const RankTrackerPage = ({ workspaceId }) => {
       showToast(t("rankings.checkAllStarted"));
     } catch (e) { showToast(e.message, "err"); }
     finally { setChecking(false); }
+  };
+
+  const saveLabel = async (asin) => {
+    const label = (labelDraft[asin] ?? "").trim();
+    try {
+      await patch(`/keyword-ranks/labels/${asin}`, { label });
+      setEditingLabel(null);
+      reload();
+      showToast(t("rankings.noteSaved"));
+    } catch (e) { showToast(e.message, "err"); }
   };
 
   const loadHistory = async (id, days, force = false) => {
@@ -1555,6 +1586,72 @@ const RankTrackerPage = ({ workspaceId }) => {
 
   return (
     <div className="fade">
+      {/* Product popup */}
+      {productPopup && (() => {
+        const POP_W = 340, POP_H = 440, GAP = 8;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const { x: cx, y: cy } = productPopup;
+        // Default: below-right of click
+        let left = cx + GAP, top = cy + GAP;
+        // Flip left if overflows right
+        if (left + POP_W > vw - GAP) left = cx - POP_W - GAP;
+        // Flip up if overflows bottom
+        if (top + POP_H > vh - GAP) top = cy - POP_H - GAP;
+        // Clamp
+        left = Math.max(GAP, Math.min(left, vw - POP_W - GAP));
+        top  = Math.max(GAP, Math.min(top,  vh - POP_H - GAP));
+        return (
+        <div onClick={() => setProductPopup(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 9000, background: "transparent" }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ position: "fixed", left, top, width: POP_W,
+              background: "var(--bg)", borderRadius: 12, padding: 18,
+              boxShadow: "0 8px 40px rgba(0,0,0,.28)", display: "flex", flexDirection: "column", gap: 12 }}>
+            {/* Image */}
+            {productPopup.image_url ? (
+              <img src={productPopup.image_url} alt={productPopup.title}
+                style={{ width: "100%", maxHeight: 160, objectFit: "contain", borderRadius: 8, background: "#fff", padding: 6 }} />
+            ) : (
+              <div style={{ width: "100%", height: 120, borderRadius: 8, background: "var(--b1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span style={{ fontSize: 12, color: "var(--tx3)" }}>Нет фото</span>
+              </div>
+            )}
+            {/* Info */}
+            <div>
+              <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--ac2)", marginBottom: 6 }}>{productPopup.asin}</div>
+              {productPopup.brand && (
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em" }}>{productPopup.brand}</div>
+              )}
+              {productPopup.title && (
+                <div style={{ fontSize: 13, color: "var(--tx)", lineHeight: 1.5 }}>{productPopup.title}</div>
+              )}
+              {!productPopup.title && !productPopup.brand && (
+                <div style={{ fontSize: 13, color: "var(--tx3)" }}>Товар не найден в базе данных</div>
+              )}
+            </div>
+            {/* Note */}
+            <div>
+              <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6 }}>Примечание</div>
+              <input
+                value={labelDraft[productPopup.asin] ?? productPopup.label ?? ""}
+                onChange={e => setLabelDraft(d => ({ ...d, [productPopup.asin]: e.target.value }))}
+                onKeyDown={e => { if (e.key === "Enter") saveLabel(productPopup.asin).then(() => setProductPopup(p => p ? { ...p, label: (labelDraft[p.asin] ?? p.label ?? "").trim() } : null)); }}
+                placeholder="Название товара или SKU…"
+                style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid var(--b2)", outline: "none", fontFamily: "var(--ui)" }}
+              />
+            </div>
+            {/* Buttons */}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setProductPopup(null)}
+                className="btn btn-ghost" style={{ flex: 1, fontSize: 13, padding: "7px 12px", minWidth: 0 }}>Закрыть</button>
+              <button onClick={() => saveLabel(productPopup.asin).then(() => setProductPopup(p => p ? { ...p, label: (labelDraft[p.asin] ?? p.label ?? "").trim() } : null))}
+                className="btn btn-primary" style={{ flex: 1, fontSize: 13, padding: "7px 12px", minWidth: 0 }}>Сохранить</button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
+
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
         <div>
@@ -1564,7 +1661,7 @@ const RankTrackerPage = ({ workspaceId }) => {
           <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("rankings.subtitle")}</div>
         </div>
         <button onClick={handleCheckAll} disabled={checking || loading || !keywords?.length}
-          className="btn btn-ghost" style={{ fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+          className="btn" style={{ fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6, background: "#16a34a", color: "#fff", border: "none", opacity: (checking || loading || !keywords?.length) ? 0.6 : 1 }}>
           <Ic icon={RefreshCw} size={13} />
           {checking ? t("rankings.checking") : t("rankings.checkAll")}
         </button>
@@ -1629,8 +1726,36 @@ const RankTrackerPage = ({ workspaceId }) => {
             <div key={asin} className="card" style={{ padding: "14px 16px" }}>
               {/* ASIN header */}
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: editingAsin === asin ? 8 : 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
-                <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)" }}>{asin}</span>
+                <span
+                  onClick={e => setProductPopup({ asin, title: kws[0]?.product_title, brand: kws[0]?.product_brand, image_url: kws[0]?.product_image_url, label: kws[0]?.asin_label || "", x: e.clientX, y: e.clientY })}
+                  style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)", cursor: "pointer", textDecoration: "underline dotted" }}
+                  title="Открыть карточку товара">{asin}</span>
                 <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
+
+                {/* ASIN note/label */}
+                {editingLabel === asin ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1 }}>
+                    <input
+                      autoFocus
+                      value={labelDraft[asin] ?? ""}
+                      onChange={e => setLabelDraft(d => ({ ...d, [asin]: e.target.value }))}
+                      onKeyDown={e => { if (e.key === "Enter") saveLabel(asin); if (e.key === "Escape") setEditingLabel(null); }}
+                      placeholder={t("rankings.notePlaceholder")}
+                      style={{ flex: 1, fontSize: 12, padding: "2px 7px", borderRadius: 5, border: "1px solid var(--ac2)", outline: "none", fontFamily: "var(--ui)" }}
+                    />
+                    <button onClick={() => saveLabel(asin)} className="btn btn-primary" style={{ fontSize: 11, padding: "2px 10px" }}>✓</button>
+                    <button onClick={() => setEditingLabel(null)} className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}>✕</button>
+                  </div>
+                ) : (
+                  <span
+                    onClick={() => { setEditingLabel(asin); setLabelDraft(d => ({ ...d, [asin]: kws[0]?.asin_label || "" })); }}
+                    title={t("rankings.noteLabel")}
+                    style={{ fontSize: 12, color: kws[0]?.asin_label ? "var(--tx2)" : "var(--tx3)", cursor: "pointer",
+                      borderBottom: "1px dashed var(--b3)", paddingBottom: 1, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {kws[0]?.asin_label || `+ ${t("rankings.noteLabel")}`}
+                  </span>
+                )}
+
                 <button
                   onClick={() => { setEditingAsin(editingAsin === asin ? null : asin); setEditKwsText(""); }}
                   className="btn btn-ghost"
@@ -1686,7 +1811,19 @@ const RankTrackerPage = ({ workspaceId }) => {
                         </div>
 
                         {/* Keyword text */}
-                        <div style={{ flex: 1, fontSize: 13, color: "var(--tx)" }}>{kw.keyword}</div>
+                        <div style={{ flex: 1, fontSize: 13, color: "var(--tx)", display: "flex", alignItems: "center", gap: 6 }}>
+                          <span>{kw.keyword}</span>
+                          {kw.search_volume != null && (
+                            <span style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
+                              background: "var(--b1)", borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap" }}
+                              title="Jungle Scout: ежемесячный объём поиска">
+                              {kw.search_volume >= 1000
+                                ? `${(kw.search_volume / 1000).toFixed(kw.search_volume >= 10000 ? 0 : 1)}K`
+                                : kw.search_volume}
+                              /мес
+                            </span>
+                          )}
+                        </div>
 
                         {/* Last checked */}
                         {checkedAt && (
@@ -1738,6 +1875,9 @@ const RankTrackerPage = ({ workspaceId }) => {
 };
 
 // ─── Products / BSR Page ──────────────────────────────────────────────────────
+const AMAZON_DOMAIN = { ATVPDKIKX0DER: "com", A2EUQ1WTGCTBG2: "ca", A1AM78C64UM0Y8: "com.mx", A1F83G8C2ARO7P: "co.uk", A1PA6795UKMFR9: "de", APJ6JRA9NG5V4: "it", A13V1IB3VIYZZH: "fr", A1RKKUPIHCS9HS: "es", A39IBJ37TRP1C6: "com.au", A1VC38T7YXB528: "co.jp", A21TJRUUN4KGV: "in" };
+const amazonProductUrl = (asin, marketplaceId) => "https://www.amazon." + (AMAZON_DOMAIN[marketplaceId] || "de") + "/dp/" + asin;
+
 const ProductsPage = ({ workspaceId }) => {
   const { t: tr } = useI18n();
   const [newAsin, setNewAsin] = useState("");
@@ -2001,9 +2141,14 @@ const ProductsPage = ({ workspaceId }) => {
 
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 4, flexWrap: "wrap" }}>
-                      <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--ac2)" }}>
+                      <a
+                        href={amazonProductUrl(p.asin, p.marketplace_id)}
+                        target="_blank" rel="noopener noreferrer"
+                        style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--ac2)", textDecoration: "none", borderBottom: "1px dotted var(--ac2)" }}
+                        title="Открыть на Amazon"
+                      >
                         {p.asin}
-                      </span>
+                      </a>
                       {p.brand && (
                         <span className="badge bg-bl" style={{ fontSize: 10 }}>{p.brand}</span>
                       )}
@@ -6964,9 +7109,9 @@ function parseRuleJSON(val, fallback) {
 // ─── Analytics / Analyst Report Page ─────────────────────────────────────────
 const AnalyticsPage = ({ workspaceId }) => {
   const { t: tr } = useI18n();
-  const [rangeMode, setRangeMode] = useState("7");
+  const [rangeMode, setRangeMode] = useState("30");
   const [customStart, setCustomStart] = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - 7);
+    const d = new Date(); d.setDate(d.getDate() - 30);
     return d.toISOString().split("T")[0];
   });
   const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().split("T")[0]);
@@ -6974,7 +7119,13 @@ const AnalyticsPage = ({ workspaceId }) => {
   const [showConfig, setShowConfig] = useState(false);
   const [editRow, setEditRow] = useState(null);
   const [saveMsg, setSaveMsg] = useState(null);
-  const [tick, setTick] = useState(0);
+  const [cfgTick, setCfgTick] = useState(0);
+  const [dataTick, setDataTick] = useState(0);
+  const [viewTab, setViewTab] = useState("detail"); // "detail" | "summary"
+  const [sortKey, setSortKey] = useState("sales");
+  const [sortDir, setSortDir] = useState("desc");
+  const [sumSortKey, setSumSortKey] = useState("sales");
+  const [sumSortDir, setSumSortDir] = useState("desc");
   const { colgroup: prodColgroup, resizeHandle: prodRH } = useResizableColumns(
     "products-config", [100, 80, 70, 140, 80, 80, 65, 55, 85, 80, 55]
   );
@@ -6984,12 +7135,19 @@ const AnalyticsPage = ({ workspaceId }) => {
     ? new Date(Date.now() - parseInt(rangeMode) * 86400000).toISOString().split("T")[0]
     : customStart;
 
-  const { data: config, loading: cfgLoading } = useAsync(
-    () => workspaceId ? get("/analytics-report/config") : Promise.resolve([]),
-    [workspaceId, tick]
+  const { data: reportData, loading: reportLoading } = useAsync(
+    () => workspaceId
+      ? get(`/analytics-report/data?startDate=${startDate}&endDate=${endDate}`)
+      : Promise.resolve(null),
+    [workspaceId, startDate, endDate, dataTick]
   );
 
-  const reloadConfig = () => setTick(t => t + 1);
+  const { data: config, loading: cfgLoading } = useAsync(
+    () => workspaceId ? get("/analytics-report/config") : Promise.resolve([]),
+    [workspaceId, cfgTick]
+  );
+
+  const reloadConfig = () => { setCfgTick(t => t + 1); setDataTick(t => t + 1); };
 
   const handleDownload = async () => {
     setGenerating(true);
@@ -6998,15 +7156,9 @@ const AnalyticsPage = ({ workspaceId }) => {
       const wid   = workspaceId || localStorage.getItem("af_workspace");
       const url   = `${(import.meta?.env?.VITE_API_URL) || "http://localhost:4000/api/v1"}/analytics-report/download?startDate=${startDate}&endDate=${endDate}`;
       const resp  = await fetch(url, {
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "x-workspace-id": wid,
-        },
+        headers: { "Authorization": `Bearer ${token}`, "x-workspace-id": wid },
       });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text);
-      }
+      if (!resp.ok) { const text = await resp.text(); throw new Error(text); }
       const blob = await resp.blob();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
@@ -7031,7 +7183,7 @@ const AnalyticsPage = ({ workspaceId }) => {
         google_ads_weekly:  parseFloat(row.google_ads_weekly)  || 0,
         facebook_ads_weekly:parseFloat(row.facebook_ads_weekly)|| 0,
         sellable_quota:     parseInt(row.sellable_quota)       || 0,
-        label:              row.label ? parseInt(row.label) : null,
+        label:              row.label !== "" && row.label != null ? parseInt(row.label) : null,
       });
       setSaveMsg("saved");
       setTimeout(() => setSaveMsg(null), 2000);
@@ -7048,13 +7200,74 @@ const AnalyticsPage = ({ workspaceId }) => {
     amazon_fee_pct:-0.15, vat_pct:-0.19,
     google_ads_weekly:0, facebook_ads_weekly:0, sellable_quota:0,
   };
-
   const CONFIG_FIELDS = ["asin","sku","label","product_name","cogs_per_unit","shipping_per_unit","amazon_fee_pct","vat_pct","google_ads_weekly","facebook_ads_weekly"];
+
+  const fmtEur = (v) => v == null ? "—" : `€${Math.abs(v) >= 1000 ? (v/1000).toFixed(1)+"K" : parseFloat(v).toFixed(2)}`;
+  const fmtPct = (v) => v == null ? "—" : `${parseFloat(v).toFixed(1)}%`;
+  const fmtNum = (v) => v == null ? "—" : parseInt(v).toLocaleString();
+  const profitColor = (v) => v == null ? "var(--tx2)" : v > 0 ? "var(--grn)" : v < 0 ? "var(--red)" : "var(--tx2)";
+  const acosColor  = (v) => v == null ? "var(--tx2)" : v < 15 ? "var(--grn)" : v < 30 ? "var(--amb)" : "var(--red)";
+
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("desc"); }
+  };
+  const toggleSumSort = (key) => {
+    if (sumSortKey === key) setSumSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSumSortKey(key); setSumSortDir("desc"); }
+  };
+
+  const sortedRows = useMemo(() => {
+    if (!reportData?.rows) return [];
+    return [...reportData.rows].sort((a, b) => {
+      const av = a[sortKey] ?? (sortDir === "asc" ? Infinity : -Infinity);
+      const bv = b[sortKey] ?? (sortDir === "asc" ? Infinity : -Infinity);
+      if (typeof av === "string") return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      return sortDir === "asc" ? av - bv : bv - av;
+    });
+  }, [reportData, sortKey, sortDir]);
+
+  const sortedSummary = useMemo(() => {
+    if (!reportData?.summary) return [];
+    return [...reportData.summary].sort((a, b) => {
+      const av = a[sumSortKey] ?? (sumSortDir === "asc" ? Infinity : -Infinity);
+      const bv = b[sumSortKey] ?? (sumSortDir === "asc" ? Infinity : -Infinity);
+      if (typeof av === "string") return sumSortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
+      return sumSortDir === "asc" ? av - bv : bv - av;
+    });
+  }, [reportData, sumSortKey, sumSortDir]);
+
+  const SortTh = ({ label, k, onSort, sortK, sortD, style={} }) => (
+    <th onClick={() => onSort(k)} style={{ cursor:"pointer", userSelect:"none", whiteSpace:"nowrap", ...style }}>
+      {label}{sortK === k ? (sortD === "asc" ? " ↑" : " ↓") : ""}
+    </th>
+  );
+
+  // Totals for detail view
+  const totals = useMemo(() => {
+    if (!reportData?.rows?.length) return null;
+    const rows = reportData.rows;
+    const sum = (key) => rows.reduce((acc, r) => acc + (parseFloat(r[key]) || 0), 0);
+    const sales = sum("sales");
+    const total_ads = sum("total_ads");
+    const total_spend = sum("total_spend");
+    const gross_profit = sum("gross_profit");
+    const net_profit = sum("net_profit");
+    const units = rows.reduce((acc, r) => acc + (parseInt(r.units) || 0), 0);
+    return {
+      units, sales, sp_spend: sum("sp_spend"), sd_spend: sum("sd_spend"), sb_spend: sum("sb_spend"),
+      total_ads, google_ads: sum("google_ads"), facebook_ads: sum("facebook_ads"), total_spend,
+      acos: sales > 0 ? total_ads / sales * 100 : 0,
+      real_acos: sales > 0 ? total_spend / sales * 100 : 0,
+      gross_profit, net_profit,
+      margin: sales > 0 ? gross_profit / sales * 100 : 0,
+    };
+  }, [reportData]);
 
   return (
     <div className="fade">
       {/* ── Header ── */}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:20, flexWrap:"wrap", gap:10 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16, flexWrap:"wrap", gap:10 }}>
         <div>
           <h1 style={{ fontFamily:"var(--disp)", fontSize:22, fontWeight:700, marginBottom:4 }}>
             {tr("analytics.title")}
@@ -7062,70 +7275,194 @@ const AnalyticsPage = ({ workspaceId }) => {
           <div style={{ fontSize:12, color:"var(--tx3)" }}>{startDate} – {endDate}</div>
         </div>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
-          {[["7","7d"],["14","14d"],["30","30d"]].map(([val,label]) => (
-            <button key={val}
-              onClick={() => setRangeMode(val)}
+          {[["7","7d"],["14","14d"],["30","30d"]].map(([val,lbl]) => (
+            <button key={val} onClick={() => setRangeMode(val)}
               className={`btn ${rangeMode===val?"btn-primary":"btn-ghost"}`}
-              style={{ fontSize:12, padding:"5px 10px" }}>
-              {label}
-            </button>
+              style={{ fontSize:12, padding:"5px 10px" }}>{lbl}</button>
           ))}
-          <button
-            onClick={() => setRangeMode("custom")}
+          <button onClick={() => setRangeMode("custom")}
             className={`btn ${rangeMode==="custom"?"btn-primary":"btn-ghost"}`}
-            style={{ fontSize:12, padding:"5px 10px" }}
-          >
+            style={{ fontSize:12, padding:"5px 10px" }}>
             <Ic icon={Calendar} size={13} /> {rangeMode==="custom" ? `${customStart.slice(5)} – ${customEnd.slice(5)}` : "Custom"}
           </button>
           {rangeMode === "custom" && (
             <>
               <input type="date" value={customStart} max={customEnd}
                 onChange={e => setCustomStart(e.target.value)}
-                style={{ fontSize:12, padding:"4px 8px", borderRadius:6,
-                  background:"var(--s2)", border:"1px solid var(--b2)",
-                  color:"var(--tx)", outline:"none", cursor:"pointer" }} />
+                style={{ fontSize:12, padding:"4px 8px", borderRadius:6, background:"var(--s2)",
+                  border:"1px solid var(--b2)", color:"var(--tx)", outline:"none", cursor:"pointer" }} />
               <span style={{ fontSize:12, color:"var(--tx3)" }}>→</span>
-              <input type="date" value={customEnd} min={customStart}
-                max={new Date().toISOString().split("T")[0]}
+              <input type="date" value={customEnd} min={customStart} max={new Date().toISOString().split("T")[0]}
                 onChange={e => setCustomEnd(e.target.value)}
-                style={{ fontSize:12, padding:"4px 8px", borderRadius:6,
-                  background:"var(--s2)", border:"1px solid var(--b2)",
-                  color:"var(--tx)", outline:"none", cursor:"pointer" }} />
+                style={{ fontSize:12, padding:"4px 8px", borderRadius:6, background:"var(--s2)",
+                  border:"1px solid var(--b2)", color:"var(--tx)", outline:"none", cursor:"pointer" }} />
             </>
           )}
-          <button
-            onClick={handleDownload}
-            disabled={generating}
-            className="btn btn-primary"
-            style={{ fontSize:12, padding:"6px 16px", display:"flex", alignItems:"center", gap:6 }}
-          >
-            {generating ? tr("analytics.generating") : <><Ic icon={Download} size={13} /> {tr("analytics.download")}</>}
+          <button onClick={handleDownload} disabled={generating} className="btn btn-primary"
+            style={{ fontSize:12, padding:"6px 16px", display:"flex", alignItems:"center", gap:6 }}>
+            {generating ? tr("analytics.generating") : <><Ic icon={Download} size={13} /> XLSX</>}
           </button>
         </div>
       </div>
 
-      {/* ── Info card ── */}
-      <div className="card" style={{ padding:"14px 18px", marginBottom:16,
-        border:"1px solid rgba(59,130,246,.25)", background:"rgba(59,130,246,.05)" }}>
-        <div style={{ fontSize:13, fontWeight:600, marginBottom:6, color:"var(--tx)" }}>Report contents</div>
-        <div style={{ fontSize:12, color:"var(--tx2)", lineHeight:1.8 }}>
-          <b>Sheet_1</b>: All SKUs — SP/SD/SB spend, sales, units, Real ACOS, BSR, P&amp;L formulas ·{" "}
-          <b>Sheet_2</b>: Summary by product group ·{" "}
-          <b>Sheet_3</b>: ASIN→SKU→Label reference
-        </div>
-        <div style={{ fontSize:11, color:"var(--tx3)", marginTop:6 }}>
-          Amazon fees, VAT, COGS, Shipping are calculated from cost config below.
-          Without config those columns will be 0.
-        </div>
+      {/* ── View tabs ── */}
+      <div style={{ display:"flex", gap:2, marginBottom:12, borderBottom:"1px solid var(--b2)", paddingBottom:0 }}>
+        {[["detail","По товарам"],["summary","По группам"]].map(([id, label]) => (
+          <button key={id} onClick={() => setViewTab(id)}
+            style={{ fontSize:12, padding:"7px 16px", background:"none", border:"none",
+              borderBottom: viewTab===id ? "2px solid var(--ac)" : "2px solid transparent",
+              color: viewTab===id ? "var(--ac)" : "var(--tx3)", cursor:"pointer",
+              fontWeight: viewTab===id ? 600 : 400, marginBottom:-1 }}>
+            {label}
+          </button>
+        ))}
       </div>
+
+      {/* ── Detail table ── */}
+      {viewTab === "detail" && (
+        <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
+          {reportLoading ? (
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>Загрузка данных…</div>
+          ) : !reportData?.rows?.length ? (
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
+              Нет данных за выбранный период. Настройте стоимость товаров ниже.
+            </div>
+          ) : (
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                <thead>
+                  <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
+                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>Товар / ASIN</th>
+                    <SortTh label="Гр" k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} />
+                    <SortTh label="Единиц" k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Продажи" k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="SP" k="sp_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="SD" k="sd_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="SB" k="sb_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Ads всего" k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="ACOS" k="acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Real ACOS" k="real_acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="BSR" k="bsr_rank" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Вал. прибыль" k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Чист. прибыль" k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Маржа" k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedRows.map((row, i) => (
+                    <tr key={row.asin} style={{ borderBottom:"1px solid var(--b2)", background: i%2===1 ? "var(--s1)" : "transparent" }}>
+                      <td style={{ padding:"7px 10px", position:"sticky", left:0, background: i%2===1 ? "var(--s1)" : "var(--bg)", zIndex:1, minWidth:160, maxWidth:240 }}>
+                        <div style={{ fontSize:11, fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color:"var(--tx)" }} title={row.product_name}>
+                          {row.product_name !== row.asin ? row.product_name : ""}
+                        </div>
+                        <div style={{ fontFamily:"var(--mono)", fontSize:10, color:"var(--tx3)" }}>{row.asin}</div>
+                        {row.sku && <div style={{ fontSize:10, color:"var(--tx3)" }}>{row.sku}</div>}
+                      </td>
+                      <td style={{ padding:"7px 6px", textAlign:"center", fontSize:11, color:"var(--tx3)" }}>
+                        {row.label != null ? <span style={{ background:"var(--s2)", borderRadius:4, padding:"1px 6px", fontSize:10, fontWeight:600 }}>{row.label}</span> : ""}
+                      </td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtNum(row.units)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, fontWeight:500 }}>{fmtEur(row.sales)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>{row.sp_spend > 0 ? fmtEur(row.sp_spend) : "—"}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>{row.sd_spend > 0 ? fmtEur(row.sd_spend) : "—"}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>{row.sb_spend > 0 ? fmtEur(row.sb_spend) : "—"}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(row.total_ads)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: acosColor(row.acos) }}>{fmtPct(row.acos)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: acosColor(row.real_acos) }}>{fmtPct(row.real_acos)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>{row.bsr_rank ? fmtNum(row.bsr_rank) : "—"}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, fontWeight:500, color: profitColor(row.gross_profit) }}>{fmtEur(row.gross_profit)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, fontWeight:500, color: profitColor(row.net_profit) }}>{fmtEur(row.net_profit)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: profitColor(row.margin) }}>{fmtPct(row.margin)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                {totals && (
+                  <tfoot>
+                    <tr style={{ borderTop:"2px solid var(--b2)", background:"var(--s2)", fontWeight:600 }}>
+                      <td style={{ padding:"7px 10px", fontSize:11, position:"sticky", left:0, background:"var(--s2)" }}>ИТОГО ({reportData.rows.length} товаров)</td>
+                      <td></td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtNum(totals.units)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.sales)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.sp_spend)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.sd_spend)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.sb_spend)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.total_ads)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: acosColor(totals.acos) }}>{fmtPct(totals.acos)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: acosColor(totals.real_acos) }}>{fmtPct(totals.real_acos)}</td>
+                      <td></td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: profitColor(totals.gross_profit) }}>{fmtEur(totals.gross_profit)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: profitColor(totals.net_profit) }}>{fmtEur(totals.net_profit)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: profitColor(totals.margin) }}>{fmtPct(totals.margin)}</td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Summary by group ── */}
+      {viewTab === "summary" && (
+        <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
+          {reportLoading ? (
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>Загрузка данных…</div>
+          ) : !reportData?.summary?.length ? (
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
+              Нет данных. Добавьте товары и настройте Label в конфигурации ниже.
+            </div>
+          ) : (
+            <div style={{ overflowX:"auto" }}>
+              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                <thead>
+                  <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
+                    <SortTh label="Группа" k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} />
+                    <SortTh label="Товаров" k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Единиц" k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Продажи" k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="SP+SD+SB" k="total_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Google+FB" k="google_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Весь бюджет" k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="ACOS" k="acos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="TACOS" k="tacos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Вал. прибыль" k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Чист. прибыль" k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label="Маржа" k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedSummary.map((g, i) => (
+                    <tr key={g.label} style={{ borderBottom:"1px solid var(--b2)", background: i%2===1 ? "var(--s1)" : "transparent" }}>
+                      <td style={{ padding:"8px 10px", fontWeight:600, fontSize:12 }}>
+                        <span style={{ background:"var(--ac)", color:"#fff", borderRadius:4, padding:"2px 8px", fontSize:11 }}>{g.label}</span>
+                      </td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>{g.products}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtNum(g.units)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, fontWeight:600 }}>{fmtEur(g.sales)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(g.total_ads)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>
+                        {(g.google_ads + g.facebook_ads) > 0 ? fmtEur(g.google_ads + g.facebook_ads) : "—"}
+                      </td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(g.total_spend)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: acosColor(g.acos) }}>{fmtPct(g.acos)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: acosColor(g.tacos) }}>{fmtPct(g.tacos)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, fontWeight:500, color: profitColor(g.gross_profit) }}>{fmtEur(g.gross_profit)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, fontWeight:500, color: profitColor(g.net_profit) }}>{fmtEur(g.net_profit)}</td>
+                      <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color: profitColor(g.margin) }}>{fmtPct(g.margin)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── SKU Cost Config ── */}
       <div className="card" style={{ overflow:"hidden" }}>
-        <div
-          onClick={() => setShowConfig(c => !c)}
-          style={{ padding:"14px 18px", display:"flex", justifyContent:"space-between",
+        <div style={{ padding:"14px 18px", display:"flex", justifyContent:"space-between",
             alignItems:"center", cursor:"pointer", userSelect:"none" }}
-        >
+          onClick={() => setShowConfig(c => !c)}>
           <div>
             <div style={{ fontFamily:"var(--disp)", fontSize:14, fontWeight:600 }}>
               {tr("analytics.configTitle")}
@@ -7135,7 +7472,20 @@ const AnalyticsPage = ({ workspaceId }) => {
               {tr("analytics.configSubtitle")}
             </div>
           </div>
-          <span style={{ color:"var(--tx3)" }}>{showConfig ? <ChevronUp size={16} strokeWidth={1.75} /> : <ChevronDown size={16} strokeWidth={1.75} />}</span>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }} onClick={e => e.stopPropagation()}>
+            <button className="btn btn-ghost" style={{ fontSize:11, padding:"4px 12px" }}
+              onClick={async () => {
+                try {
+                  const r = await post("/analytics-report/sync-products", {});
+                  setSaveMsg("synced");
+                  setTimeout(() => setSaveMsg(null), 2500);
+                  reloadConfig();
+                } catch(e) { alert(e.message); }
+              }}>
+              Синхр. товары
+            </button>
+            <span style={{ color:"var(--tx3)" }}>{showConfig ? <ChevronUp size={16} strokeWidth={1.75} /> : <ChevronDown size={16} strokeWidth={1.75} />}</span>
+          </div>
         </div>
 
         {showConfig && (
@@ -7164,22 +7514,16 @@ const AnalyticsPage = ({ workspaceId }) => {
                       <tr key={row.id}>
                         {CONFIG_FIELDS.map(field => (
                           <td key={field} style={{ padding:"4px 6px" }}>
-                            <input
-                              value={editRow[field] ?? ""}
+                            <input value={editRow[field] ?? ""}
                               onChange={e => setEditRow(r => ({ ...r, [field]: e.target.value }))}
                               style={{ width:"100%", fontSize:11, padding:"2px 4px",
                                 background:"var(--s2)", border:"1px solid var(--b2)",
-                                borderRadius:4, color:"var(--tx)" }}
-                            />
+                                borderRadius:4, color:"var(--tx)" }} />
                           </td>
                         ))}
                         <td style={{ whiteSpace:"nowrap", padding:"4px 8px" }}>
-                          <button onClick={() => handleSaveRow(editRow)}
-                            className="btn btn-primary" style={{ fontSize:10, padding:"2px 8px" }}>
-                            {tr("analytics.save")}
-                          </button>
-                          <button onClick={() => setEditRow(null)}
-                            className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}><X size={11} strokeWidth={1.75} /></button>
+                          <button onClick={() => handleSaveRow(editRow)} className="btn btn-primary" style={{ fontSize:10, padding:"2px 8px" }}>{tr("analytics.save")}</button>
+                          <button onClick={() => setEditRow(null)} className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}><X size={11} strokeWidth={1.75} /></button>
                         </td>
                       </tr>
                     ) : (
@@ -7187,9 +7531,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                         <td style={{ fontFamily:"var(--mono)", fontSize:11 }}>{row.asin}</td>
                         <td style={{ fontSize:11 }}>{row.sku}</td>
                         <td style={{ textAlign:"center", fontSize:11 }}>{row.label}</td>
-                        <td style={{ fontSize:11, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {row.product_name}
-                        </td>
+                        <td style={{ fontSize:11, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{row.product_name}</td>
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.cogs_per_unit).toFixed(2)}</td>
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{parseFloat(row.shipping_per_unit).toFixed(2)}</td>
                         <td className="num" style={{ textAlign:"right", fontSize:11 }}>{(parseFloat(row.amazon_fee_pct)*100).toFixed(0)}%</td>
@@ -7200,38 +7542,28 @@ const AnalyticsPage = ({ workspaceId }) => {
                       </tr>
                     )
                   ))}
-
-                  {/* Add new row */}
                   {editRow?.id === "__new__" ? (
                     <tr>
                       {CONFIG_FIELDS.map(field => (
                         <td key={field} style={{ padding:"4px 6px" }}>
-                          <input
-                            value={editRow[field] ?? ""}
+                          <input value={editRow[field] ?? ""}
                             onChange={e => setEditRow(r => ({ ...r, [field]: e.target.value }))}
                             placeholder={field === "amazon_fee_pct" ? "-0.15" : field === "vat_pct" ? "-0.19" : ""}
                             style={{ width:"100%", fontSize:11, padding:"2px 4px",
                               background:"var(--s2)", border:"1px solid var(--ac)",
-                              borderRadius:4, color:"var(--tx)" }}
-                          />
+                              borderRadius:4, color:"var(--tx)" }} />
                         </td>
                       ))}
                       <td style={{ whiteSpace:"nowrap", padding:"4px 8px" }}>
-                        <button onClick={() => handleSaveRow(editRow)}
-                          className="btn btn-primary" style={{ fontSize:10, padding:"2px 8px" }}>
-                          {tr("analytics.save")}
-                        </button>
-                        <button onClick={() => setEditRow(null)}
-                          className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}><X size={11} strokeWidth={1.75} /></button>
+                        <button onClick={() => handleSaveRow(editRow)} className="btn btn-primary" style={{ fontSize:10, padding:"2px 8px" }}>{tr("analytics.save")}</button>
+                        <button onClick={() => setEditRow(null)} className="btn btn-ghost" style={{ fontSize:10, padding:"2px 6px", marginLeft:4 }}><X size={11} strokeWidth={1.75} /></button>
                       </td>
                     </tr>
                   ) : (
                     <tr>
                       <td colSpan={11} style={{ padding:"8px 14px" }}>
-                        <button
-                          onClick={() => setEditRow({ ...EMPTY_ROW, id:"__new__" })}
-                          className="btn btn-ghost"
-                          style={{ fontSize:11, padding:"4px 12px" }}>
+                        <button onClick={() => setEditRow({ ...EMPTY_ROW, id:"__new__" })}
+                          className="btn btn-ghost" style={{ fontSize:11, padding:"4px 12px" }}>
                           + {tr("analytics.addProduct")}
                         </button>
                       </td>
@@ -7240,7 +7572,6 @@ const AnalyticsPage = ({ workspaceId }) => {
                 </tbody>
               </table>
             </div>
-
             {(!config || config.length === 0) && !editRow && (
               <div style={{ padding:"16px 18px", color:"var(--tx3)", fontSize:13 }}>
                 {tr("analytics.noConfig")}
@@ -8222,6 +8553,7 @@ const RuleWizardModal = ({
 
 // ─── Keyword Research Page ────────────────────────────────────────────────────
 const LOCALES = [
+  { code: "", label: "All languages" },
   { code: "en", label: "English" }, { code: "de", label: "Deutsch" },
   { code: "fr", label: "Français" }, { code: "es", label: "Español" },
   { code: "it", label: "Italiano" }, { code: "ja", label: "日本語" },
@@ -8301,15 +8633,18 @@ function parseAmazonUrl(raw) {
 const KeywordResearchPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [profiles, setProfiles]         = useState([]);
-  const [profileId, setProfileId]       = useState("");
   const [adGroups, setAdGroups]         = useState([]);
   const [adGroupId, setAdGroupId]       = useState("");
   const [urlInput, setUrlInput]         = useState("");
   const [urlParsed, setUrlParsed]       = useState(null); // { asin, tld, titleHint }
   const [asins, setAsins]               = useState("");
   const [productTitle, setProductTitle] = useState("");
-  const [locale, setLocale]             = useState("en");
-  const [sources, setSources]           = useState({ amazon: false, ai: false, jungle_scout: true });
+
+  // Persisted prefs — restored from localStorage on mount
+  const _kwrPrefs = (() => { try { return JSON.parse(localStorage.getItem("kwr_prefs") || "{}"); } catch { return {}; } })();
+  const [profileId, setProfileId]       = useState(_kwrPrefs.profileId || "");
+  const [locale, setLocale]             = useState(_kwrPrefs.locale ?? "");
+  const [sources, setSources]           = useState(_kwrPrefs.sources || { amazon: false, ai: false, jungle_scout: true });
   const [loading, setLoading]           = useState(false);
   const [results, setResults]           = useState(null); // { keywords, product_title, sources_used, jungle_scout_available }
   const [selected, setSelected]         = useState(new Set());
@@ -8318,13 +8653,15 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [adding, setAdding]             = useState(false);
   const [addResult, setAddResult]       = useState(null);
   const [error, setError]               = useState("");
-  const [sortBy, setSortBy]             = useState("relevance_score");
+  const [sortBy, setSortBy]             = useState("organic_rank_score");
   const [sortDir, setSortDir]           = useState("desc");
   const [filterText, setFilterText]     = useState("");
   const [filterMatch, setFilterMatch]   = useState("");
   const [filterMinRel, setFilterMinRel] = useState(0);
+  const [filterSource, setFilterSource] = useState("");
+  const [activeTip, setActiveTip]       = useState(null);
   const [bulkMatch, setBulkMatch]       = useState("");
-  const [colWidths, setColWidths]       = useState({ keyword_text: 230, source: 100, match_type: 180, relevance_score: 110, impressions_share: 115, bid_suggested: 135, _actions: 40 });
+  const [colWidths, setColWidths]       = useState({ source: 90, match_type: 148, relevance_score: 96, impressions_share: 84, monthly_search_volume: 92, ease_of_ranking: 84 });
   const [targetCampaignId, setTargetCampaignId] = useState("");
   const [targetAdGroupId, setTargetAdGroupId]   = useState("");
   const [editModal, setEditModal]       = useState(null); // null | [{ keyword_text, match_type, bid }]
@@ -8369,11 +8706,16 @@ const KeywordResearchPage = ({ workspaceId }) => {
     apiFetch("/profiles").then(data => {
       const attached = (data || []).filter(p => p.is_attached);
       setProfiles(attached);
-      if (attached.length === 1) setProfileId(attached[0].id);
-      // If URL was already pasted before profiles loaded, apply profile matching now
+      // Only auto-select if no saved preference
+      if (attached.length === 1 && !_kwrPrefs.profileId) setProfileId(attached[0].id);
       setUrlParsed(p => { if (p) applyParsedUrl(p, attached); return p; });
     }).catch(() => {});
   }, [workspaceId]);
+
+  // Persist user preferences to localStorage
+  useEffect(() => {
+    try { localStorage.setItem("kwr_prefs", JSON.stringify({ profileId, locale, sources })); } catch {}
+  }, [profileId, locale, sources]);
 
   const handleUrlChange = (val) => {
     setUrlInput(val);
@@ -8410,8 +8752,8 @@ const KeywordResearchPage = ({ workspaceId }) => {
     setSelected(new Set());
     setMatchOverrides({});
     setAddResult(null);
-    setFilterText(""); setFilterMatch(""); setFilterMinRel(0);
-    setSortBy("relevance_score"); setSortDir("desc"); setBulkMatch("");
+    setFilterText(""); setFilterMatch(""); setFilterMinRel(0); setFilterSource("");
+    setSortBy("organic_rank_score"); setSortDir("desc"); setBulkMatch("");
 
     try {
       const activeSources = Object.entries(sources)
@@ -8521,6 +8863,9 @@ const KeywordResearchPage = ({ workspaceId }) => {
     if (filterMinRel > 0) {
       list = list.filter(({ kw }) => (kw.relevance_score ?? 0) >= filterMinRel);
     }
+    if (filterSource) {
+      list = list.filter(({ kw }) => (kw.source || "").includes(filterSource));
+    }
     if (sortBy) {
       list.sort((a, b) => {
         const getVal = (kw) => {
@@ -8551,16 +8896,16 @@ const KeywordResearchPage = ({ workspaceId }) => {
     const rows = selected.size > 0
       ? displayedKws.filter(({ origIdx }) => selected.has(origIdx))
       : displayedKws;
-    const header = ["Keyword", "Source", "Match Type", "Relevance", "Bid Suggested", "Bid Low", "Bid High", "Impressions Share"];
+    const header = ["Keyword", "Source", "Match Type", "Organic Rank %", "Relevance", "Monthly Searches", "Impressions Share (Amazon)", "Ease of Ranking (JS)"];
     const lines = [header.join(","), ...rows.map(({ kw, origIdx }) => [
       `"${(kw.keyword_text || "").replace(/"/g, '""')}"`,
       kw.source || "",
       matchOverrides[origIdx] || kw.match_type || "broad",
+      kw.organic_rank_score != null ? kw.organic_rank_score + "%" : "",
       kw.relevance_score ?? "",
-      kw.bid_suggested ?? "",
-      kw.bid_range_low ?? "",
-      kw.bid_range_high ?? "",
+      kw.monthly_search_volume ?? "",
       kw.impressions_share ?? "",
+      kw.ease_of_ranking ?? "",
     ].join(","))];
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
@@ -8638,7 +8983,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
   };
 
   return (
-    <div style={{ padding: "24px 28px", maxWidth: 1100, position: "relative" }}>
+    <div style={{ padding: "24px 28px", position: "relative" }}>
 
       {/* ── Page header ── */}
       <div style={{ marginBottom: 24, display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
@@ -8732,7 +9077,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
         {/* Settings section */}
         <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--b1)" }}>
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 14 }}>{t("kwr.sectionSettings")}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div>
               <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>{t("kwr.profileLabel")}</label>
               <select value={profileId} onChange={e => setProfileId(e.target.value)}
@@ -8741,20 +9086,6 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 <option value="">{t("kwr.profilePlaceholder")}</option>
                 {profiles.map(p => (
                   <option key={p.id} value={p.id}>{p.account_name || p.profile_id}{p.marketplace ? ` · ${p.marketplace}` : ""}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 500, color: "var(--tx2)", display: "block", marginBottom: 6 }}>
-                {t("kwr.adGroupLabel")}
-                <span style={{ fontWeight: 400, color: "var(--tx3)", marginLeft: 4 }}>{t("kwr.adGroupOptional")}</span>
-              </label>
-              <select value={adGroupId} onChange={e => setAdGroupId(e.target.value)}
-                style={{ width: "100%", fontSize: 13, padding: "8px 12px", borderRadius: 8,
-                  background: "var(--s2)", border: "1.5px solid var(--b2)", color: adGroupId ? "var(--tx)" : "var(--tx3)" }}>
-                <option value="">{t("kwr.adGroupPlaceholder")}</option>
-                {adGroups.map(ag => (
-                  <option key={ag.id} value={ag.id}>{ag.campaign_name} / {ag.name}</option>
                 ))}
               </select>
             </div>
@@ -8869,6 +9200,22 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   background: "var(--s1)", color: "var(--tx)", width: 200 }} />
             </div>
             <div style={{ display: "flex", gap: 4 }}>
+              {[
+                { val: "",             label: "Все источники" },
+                { val: "amazon_ads",   label: "Amazon Ads" },
+                { val: "jungle_scout", label: "Jungle Scout" },
+                { val: "ai",           label: "AI" },
+              ].map(({ val, label }) => (
+                <button key={val} onClick={() => setFilterSource(val)}
+                  style={{ fontSize: 11, padding: "4px 10px", borderRadius: 20, cursor: "pointer", fontWeight: 500,
+                    border: `1.5px solid ${filterSource === val ? "var(--ac)" : "var(--b2)"}`,
+                    background: filterSource === val ? "rgba(59,130,246,.12)" : "transparent",
+                    color: filterSource === val ? "var(--ac2)" : "var(--tx3)" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 4 }}>
               {["", "broad", "phrase", "exact"].map(mt => (
                 <button key={mt} onClick={() => setFilterMatch(mt)}
                   style={{ fontSize: 11, padding: "4px 10px", borderRadius: 20, cursor: "pointer", fontWeight: 500,
@@ -8886,8 +9233,8 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 style={{ width: 80, accentColor: "var(--ac)" }} />
               <span style={{ fontFamily: "var(--mono)", fontSize: 11, minWidth: 24 }}>{filterMinRel || "—"}</span>
             </div>
-            {(filterText || filterMatch || filterMinRel > 0) && (
-              <button onClick={() => { setFilterText(""); setFilterMatch(""); setFilterMinRel(0); }}
+            {(filterText || filterMatch || filterMinRel > 0 || filterSource) && (
+              <button onClick={() => { setFilterText(""); setFilterMatch(""); setFilterMinRel(0); setFilterSource(""); }}
                 style={{ fontSize: 11, color: "var(--tx3)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
                 Сбросить
               </button>
@@ -8895,49 +9242,65 @@ const KeywordResearchPage = ({ workspaceId }) => {
           </div>
 
           {/* Table */}
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, tableLayout: "fixed" }}>
-              <colgroup>
-                <col style={{ width: 40 }} />
-                {[
-                  { key: "keyword_text" }, { key: "source" }, { key: "match_type" },
-                  { key: "relevance_score" }, { key: "impressions_share" }, { key: "bid_suggested" }, { key: "_actions" },
-                ].map(col => <col key={col.key} style={{ width: colWidths[col.key] }} />)}
-              </colgroup>
+          <div style={{ overflowX: "auto" }} onClick={() => setActiveTip(null)}>
+            {/* Column tooltip popup */}
+            {activeTip && (
+              <div style={{ position: "fixed", top: activeTip.y, left: activeTip.x, zIndex: 2000,
+                background: "#1e293b", color: "#f1f5f9", borderRadius: 8, padding: "9px 13px",
+                fontSize: 12, lineHeight: 1.6, maxWidth: 270, boxShadow: "0 6px 20px rgba(0,0,0,.35)",
+                pointerEvents: "none", whiteSpace: "normal", transform: "translateX(-50%) translateY(-100%) translateY(-8px)" }}>
+                {activeTip.text}
+              </div>
+            )}
+            {/* Industry-standard table: tableLayout auto, widths on th, keyword column fills remaining space */}
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
-                <tr style={{ background: "var(--s2)", borderBottom: "1px solid var(--b1)" }}>
-                  <th style={{ width: 40, padding: "9px 0 9px 16px" }}>
+                <tr style={{ background: "var(--s2)", borderBottom: "2px solid var(--b1)" }}>
+                  <th style={{ width: 36, padding: "10px 0 10px 16px", flexShrink: 0 }}>
                     <input type="checkbox"
                       checked={selected.size === displayedKws.length && displayedKws.length > 0}
                       onChange={e => toggleAll(e.target.checked)}
                       style={{ accentColor: "var(--ac)", width: 14, height: 14 }} />
                   </th>
                   {[
-                    { key: "keyword_text",    label: t("kwr.colKeyword"),   align: "left",   sortable: true },
-                    { key: "source",          label: t("kwr.colSource"),    align: "left",   sortable: false },
-                    { key: "match_type",      label: t("kwr.colMatchType"), align: "left",   sortable: false },
-                    { key: "relevance_score", label: t("kwr.colRelevance"), align: "center", sortable: true },
-                    { key: "impressions_share", label: t("kwr.colSearches"), align: "right", sortable: true },
-                    { key: "bid_suggested",   label: t("kwr.colBid"),       align: "right",  sortable: true },
-                    { key: "_actions",        label: "",                    align: "right",  sortable: false },
+                    { key: "keyword_text",          label: "Ключевое слово",  align: "left",   sortable: true,  tip: null,   w: null },
+                    { key: "source",                label: "Источник",         align: "left",   sortable: false, tip: null,   w: colWidths.source ?? 88 },
+                    { key: "match_type",            label: "Тип",              align: "left",   sortable: false, tip: "Exact — точное совпадение. Phrase — фраза с доп. словами. Broad — широкое соответствие. Выбирайте тип перед добавлением.", w: colWidths.match_type ?? 148 },
+                    { key: "organic_rank_score",    label: "Органика",         align: "center", sortable: true,  tip: "Jungle Scout: сколько из введённых ASIN органически ранжируются по этому ключу на 1-й странице (позиции 1–16). Учитывается только органика без рекламы. Топ-5 = вес 1.0, топ-10 = 0.8, топ-16 = 0.6. Чем выше % — тем более конкурентен запрос для вашей ниши.", w: colWidths.organic_rank_score ?? 80 },
+                    { key: "relevance_score",       label: "Релев.",           align: "center", sortable: true,  tip: "Оценка соответствия ключа вашему товару (0–100). AI: анализирует заголовок, 50–100. Jungle Scout: собственный алгоритм.", w: colWidths.relevance_score ?? 72 },
+                    { key: "impressions_share",     label: "Инд. показов",     align: "right",  sortable: true,  tip: "Amazon Ads: индекс частоты запроса в рекламной выдаче. Только Amazon Ads.", w: colWidths.impressions_share ?? 88 },
+                    { key: "monthly_search_volume", label: "Поисков/мес",      align: "right",  sortable: true,  tip: "Ежемесячный объём поиска из Jungle Scout. Данные обогащаются для всех источников.", w: colWidths.monthly_search_volume ?? 96 },
+                    { key: "ease_of_ranking",       label: "Сложность",        align: "right",  sortable: true,  tip: "Jungle Scout: сложность органического продвижения (0–100). Чем ниже — тем легче ранжироваться. ≤30 зелёный, ≤60 жёлтый, >60 красный.", w: colWidths.ease_of_ranking ?? 84 },
+                    { key: "_actions",              label: "",                  align: "right",  sortable: false, tip: null,   w: 36 },
                   ].map(col => (
                     <th key={col.key}
-                      style={{ padding: "9px 12px", textAlign: col.align, color: "var(--tx3)", fontWeight: 600,
+                      style={{
+                        width: col.w ?? undefined,
+                        padding: col.key === "_actions" ? "10px 8px" : "10px 8px 10px 12px",
+                        textAlign: col.align, color: "var(--tx3)", fontWeight: 600,
                         fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase",
                         position: "relative", cursor: col.sortable ? "pointer" : "default",
-                        userSelect: "none", whiteSpace: "nowrap", overflow: "hidden" }}
+                        userSelect: "none", whiteSpace: "nowrap",
+                      }}
                       onClick={() => col.sortable && handleSort(col.key)}>
-                      {col.label} {col.sortable && <SortIcon col={col.key} />}
-                      {col.key !== "_actions" && (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                        {col.label}
+                        {col.sortable && <SortIcon col={col.key} />}
+                        {col.tip && (
+                          <HelpCircle size={10} style={{ color: "var(--tx3)", opacity: 0.5, cursor: "help", flexShrink: 0 }}
+                            onClick={e => { e.stopPropagation(); setActiveTip(activeTip?.key === col.key ? null : { key: col.key, text: col.tip, x: e.clientX, y: e.clientY }); }} />
+                        )}
+                      </span>
+                      {col.w != null && col.key !== "_actions" && (
                         <div
                           onMouseDown={e => startResize(col.key, e)}
                           onClick={e => e.stopPropagation()}
-                          style={{ position: "absolute", right: 0, top: "20%", bottom: "20%", width: 9,
+                          style={{ position: "absolute", right: 0, top: "20%", bottom: "20%", width: 8,
                             cursor: "col-resize", zIndex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}
                           onMouseEnter={e => e.currentTarget.querySelector("span").style.background = "var(--ac)"}
                           onMouseLeave={e => e.currentTarget.querySelector("span").style.background = "var(--b2)"}>
                           <span style={{ display: "block", width: 2, height: "100%", borderRadius: 2,
-                            background: "var(--b2)", transition: "background .15s, width .15s", pointerEvents: "none" }} />
+                            background: "var(--b2)", pointerEvents: "none" }} />
                         </div>
                       )}
                     </th>
@@ -8989,36 +9352,56 @@ const KeywordResearchPage = ({ workspaceId }) => {
                         </div>
                       </td>
 
+                      {/* Organic rank score — % of ASINs ranking page 1 organically */}
+                      <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                        {kw.organic_rank_score != null ? (() => {
+                          const os = kw.organic_rank_score;
+                          const oc = os >= 70 ? "var(--grn)" : os >= 35 ? "var(--amb)" : "var(--red)";
+                          return (
+                            <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 44 }}
+                              title={kw.organic_rank_count != null ? `${kw.organic_rank_count} из введённых ASIN ранжируются на стр. 1${kw.organic_top_position != null ? `, лучшая позиция: #${kw.organic_top_position}` : ""}` : ""}>
+                              <span style={{ fontSize: 13, fontWeight: 700, color: oc, fontFamily: "var(--mono)" }}>{os}%</span>
+                              <div style={{ width: 36, height: 3, borderRadius: 2, background: "var(--b1)", overflow: "hidden" }}>
+                                <div style={{ width: `${os}%`, height: "100%", background: oc, borderRadius: 2 }} />
+                              </div>
+                            </div>
+                          );
+                        })() : <span style={{ color: "var(--tx3)", fontSize: 11 }}>—</span>}
+                      </td>
+
+                      {/* Relevance score */}
                       <td style={{ padding: "10px 12px", textAlign: "center" }}>
                         {score != null ? (
-                          <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 52 }}>
+                          <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 3, minWidth: 44 }}>
                             <span style={{ fontSize: 13, fontWeight: 700, color: relColor(score), fontFamily: "var(--mono)" }}>{score}</span>
-                            <div style={{ width: 40, height: 3, borderRadius: 2, background: "var(--b1)", overflow: "hidden" }}>
+                            <div style={{ width: 36, height: 3, borderRadius: 2, background: "var(--b1)", overflow: "hidden" }}>
                               <div style={{ width: `${score}%`, height: "100%", background: relColor(score), borderRadius: 2 }} />
                             </div>
                           </div>
                         ) : <span style={{ color: "var(--tx3)" }}>—</span>}
                       </td>
 
+                      {/* Amazon: impression share index */}
                       <td style={{ padding: "10px 12px", textAlign: "right", color: "var(--tx2)", fontFamily: "var(--mono)", fontSize: 12 }}>
                         {kw.impressions_share != null
-                          ? <span title="Индекс популярности запроса (Amazon)">{kw.impressions_share >= 1 ? Math.round(kw.impressions_share).toLocaleString() : kw.impressions_share.toFixed(2)}</span>
-                          : kw.monthly_search_volume
-                            ? kw.monthly_search_volume.toLocaleString()
-                            : <span style={{ color: "var(--tx3)" }}>—</span>}
+                          ? <span>{kw.impressions_share >= 1 ? Math.round(kw.impressions_share).toLocaleString() : kw.impressions_share.toFixed(2)}</span>
+                          : <span style={{ color: "var(--tx3)" }}>—</span>}
                       </td>
 
-                      <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 12, color: "var(--tx2)" }}>
-                        {kw.bid_suggested ? (
-                          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
-                            <span style={{ fontWeight: 600 }}>${parseFloat(kw.bid_suggested).toFixed(2)}</span>
-                            {kw.bid_range_low != null && kw.bid_range_high != null && (
-                              <span style={{ fontSize: 10, color: "var(--tx3)" }}>
-                                ${parseFloat(kw.bid_range_low).toFixed(2)}–${parseFloat(kw.bid_range_high).toFixed(2)}
-                              </span>
-                            )}
-                          </div>
-                        ) : <span style={{ color: "var(--tx3)" }}>—</span>}
+                      {/* Jungle Scout: monthly search volume */}
+                      <td style={{ padding: "10px 12px", textAlign: "right", color: "var(--tx2)", fontFamily: "var(--mono)", fontSize: 12 }}>
+                        {kw.monthly_search_volume != null
+                          ? kw.monthly_search_volume.toLocaleString()
+                          : <span style={{ color: "var(--tx3)" }}>—</span>}
+                      </td>
+
+                      {/* Jungle Scout: ease of ranking (lower = easier) */}
+                      <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 12 }}>
+                        {kw.ease_of_ranking != null ? (() => {
+                          const eor = kw.ease_of_ranking;
+                          const c = eor <= 30 ? "var(--grn)" : eor <= 60 ? "var(--amb)" : "var(--red)";
+                          return <span style={{ color: c, fontWeight: 600 }}>{eor}</span>;
+                        })() : <span style={{ color: "var(--tx3)" }}>—</span>}
                       </td>
 
                       <td style={{ padding: "10px 8px", textAlign: "right" }} onClick={e => e.stopPropagation()}>
@@ -9036,7 +9419,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   );
                 })}
                 {displayedKws.length === 0 && (
-                  <tr><td colSpan={8} style={{ padding: "32px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
+                  <tr><td colSpan={9} style={{ padding: "32px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
                     Ничего не найдено по фильтрам
                   </td></tr>
                 )}
@@ -9058,68 +9441,61 @@ const KeywordResearchPage = ({ workspaceId }) => {
         <div style={{
           position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
           background: "var(--s1)", border: "1px solid var(--b2)",
-          borderRadius: 14, padding: "12px 20px",
-          display: "flex", alignItems: "center", gap: 14,
-          boxShadow: "0 8px 32px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.2)",
+          borderRadius: 40, padding: "10px 10px 10px 20px",
+          display: "flex", alignItems: "center", gap: 12,
+          boxShadow: "0 8px 32px rgba(0,0,0,.3), 0 2px 8px rgba(0,0,0,.15)",
           zIndex: 100, animation: "slideInFromBottom .2s ease",
           whiteSpace: "nowrap",
         }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)" }}>
-            {selected.size !== 1 ? t("kwr.selectedPlural", { n: selected.size }) : t("kwr.selected", { n: selected.size })}
+          {/* Count badge */}
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#fff",
+            background: "var(--ac)", borderRadius: 20,
+            padding: "2px 10px", minWidth: 28, textAlign: "center" }}>
+            {selected.size}
           </span>
-          <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
+          <span style={{ fontSize: 13, color: "var(--tx2)" }}>
+            {selected.size !== 1 ? t("kwr.selectedPlural", { n: "" }).trim() : t("kwr.selected", { n: "" }).trim()}
+          </span>
+
+          <div style={{ width: 1, height: 18, background: "var(--b2)" }} />
+
           {/* Bulk match type */}
-          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--tx3)" }}>
+          <div style={{ display: "flex", gap: 4 }}>
             {["broad", "phrase", "exact"].map(mt => (
               <button key={mt} onClick={() => applyBulkMatch(mt)}
-                style={{ fontSize: 11, padding: "3px 9px", borderRadius: 20, cursor: "pointer", fontWeight: 600,
+                style={{ fontSize: 11, padding: "4px 10px", borderRadius: 20, cursor: "pointer", fontWeight: 600,
                   border: `1.5px solid ${bulkMatch === mt ? MATCH_BADGE[mt] || "var(--b2)" : "var(--b2)"}`,
                   background: bulkMatch === mt ? (MATCH_BADGE[mt] || "#64748b") + "18" : "transparent",
-                  color: bulkMatch === mt ? MATCH_BADGE[mt] || "var(--tx)" : "var(--tx3)" }}>
+                  color: bulkMatch === mt ? MATCH_BADGE[mt] || "var(--tx)" : "var(--tx3)",
+                  transition: "all .15s" }}>
                 {mt}
               </button>
             ))}
           </div>
-          <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
-          {/* Default bid */}
-          <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 7, color: "var(--tx2)" }}>
-            {t("kwr.bidLabel")}
-            <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
-              <span style={{ position: "absolute", left: 9, fontSize: 12, color: "var(--tx3)", pointerEvents: "none" }}>$</span>
-              <input type="number" value={defaultBid} onChange={e => setDefaultBid(e.target.value)}
-                step="0.01" min="0.02" max="99"
-                style={{ width: 80, fontSize: 13, padding: "5px 22px 5px 20px", borderRadius: 7,
-                  background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", fontFamily: "var(--mono)" }} />
-            </div>
-          </label>
-          <div style={{ width: 1, height: 20, background: "var(--b2)" }} />
-          {/* Campaign → Ad group cascade */}
-          <select value={targetCampaignId} onChange={e => { setTargetCampaignId(e.target.value); setTargetAdGroupId(""); }}
-            style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid var(--b2)",
-              background: "var(--s2)", color: targetCampaignId ? "var(--tx)" : "var(--tx3)", maxWidth: 160, cursor: "pointer" }}>
-            <option value="">— Кампания —</option>
-            {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          <select value={targetAdGroupId} onChange={e => setTargetAdGroupId(e.target.value)}
-            disabled={filteredAdGroups.length === 0}
-            style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: `1px solid ${targetAdGroupId ? "var(--ac)" : "var(--b2)"}`,
-              background: "var(--s2)", color: targetAdGroupId ? "var(--tx)" : "var(--tx3)", maxWidth: 160, cursor: "pointer" }}>
-            <option value="">— Группа объявлений —</option>
-            {filteredAdGroups.map(ag => <option key={ag.id} value={ag.id}>{ag.name}</option>)}
-          </select>
+
+          <div style={{ width: 1, height: 18, background: "var(--b2)" }} />
+
           {addResult && !adding && (
-            <span style={{ fontSize: 13, color: "var(--grn)", fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
-              <Check size={13} /> {addResult.skipped ? t("kwr.addedSkipped", { n: addResult.added, skipped: addResult.skipped }) : t("kwr.addedSuccess", { n: addResult.added })}
+            <span style={{ fontSize: 12, color: "var(--grn)", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+              <Check size={12} /> {addResult.skipped ? t("kwr.addedSkipped", { n: addResult.added, skipped: addResult.skipped }) : t("kwr.addedSuccess", { n: addResult.added })}
             </span>
           )}
+
           <button onClick={openEditModal} disabled={adding}
-            className="btn btn-primary"
-            style={{ padding: "8px 18px", fontSize: 13, gap: 7 }}>
-            <Plus size={13} /> {t("kwr.addBtn")}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 18px", borderRadius: 30,
+              background: "var(--ac)", color: "#fff", border: "none", cursor: "pointer",
+              fontSize: 13, fontWeight: 600, transition: "opacity .15s",
+              opacity: adding ? 0.6 : 1 }}>
+            <Plus size={14} /> {t("kwr.addBtn")}
           </button>
+
           <button onClick={() => setSelected(new Set())}
-            style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: 4, display: "flex" }}>
-            <X size={14} />
+            style={{ background: "var(--s3)", border: "none", cursor: "pointer", color: "var(--tx3)",
+              padding: 0, display: "flex", alignItems: "center", justifyContent: "center",
+              width: 28, height: 28, borderRadius: "50%", transition: "background .15s" }}
+            onMouseEnter={e => e.currentTarget.style.background = "var(--b2)"}
+            onMouseLeave={e => e.currentTarget.style.background = "var(--s3)"}>
+            <X size={13} />
           </button>
         </div>
       )}
@@ -9130,12 +9506,12 @@ const KeywordResearchPage = ({ workspaceId }) => {
         const profileCount = editModal.filter(kw => { const d = dupInfo[`${kw.keyword_text.toLowerCase()}|${kw.match_type}`]; return d?.in_profile && !d?.in_adgroup; }).length;
         const addableCount = editModal.length - dupCount;
         return (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 200,
-          display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" }}
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 9000,
+          display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" }}
           onClick={e => { if (e.target === e.currentTarget) setEditModal(null); }}>
-          <div style={{ background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 14,
-            width: "100%", maxWidth: 900, height: "90vh", display: "flex", flexDirection: "column",
-            boxShadow: "0 24px 64px rgba(0,0,0,.5)" }}>
+          <div style={{ background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 16,
+            width: "90vw", maxWidth: 1200, height: "88vh", display: "flex", flexDirection: "column",
+            boxShadow: "0 32px 80px rgba(0,0,0,.55)", overflow: "hidden" }}>
 
             {/* ── Header ── */}
             <div style={{ padding: "18px 24px", borderBottom: "1px solid var(--b1)", flexShrink: 0,
@@ -9159,74 +9535,74 @@ const KeywordResearchPage = ({ workspaceId }) => {
             <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
 
               {/* Left panel — campaign + ad group picker */}
-              <div style={{ width: 280, flexShrink: 0, borderRight: "1px solid var(--b1)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div style={{ width: 320, flexShrink: 0, borderRight: "1px solid var(--b1)", display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--s2)" }}>
+
                 {/* Campaign section */}
-                <div style={{ padding: "12px 14px 6px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 8 }}>Кампания</div>
+                <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 10 }}>Кампания</div>
                   <div style={{ position: "relative" }}>
-                    <Search size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+                    <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
                     <input value={campSearch} onChange={e => setCampSearch(e.target.value)}
                       placeholder="Поиск кампании…"
-                      style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "6px 8px 6px 28px",
-                        borderRadius: 7, border: "1px solid var(--b2)", background: "var(--s2)", color: "var(--tx)" }} />
+                      style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "8px 10px 8px 32px",
+                        borderRadius: 8, border: "1px solid var(--b2)", background: "var(--s1)", color: "var(--tx)" }} />
                   </div>
                 </div>
-                <div style={{ overflowY: "auto", flex: "0 1 220px", borderBottom: "1px solid var(--b1)" }}>
-                  {!targetCampaignId && (
-                    <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--tx3)", fontStyle: "italic" }}>
-                      Выберите кампанию
+                <div style={{ overflowY: "auto", flex: "0 0 40%", borderBottom: "1px solid var(--b1)" }}>
+                  {modalCampaigns.length === 0 && (
+                    <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)", fontStyle: "italic" }}>
+                      {campSearch ? "Не найдено" : "Нет кампаний"}
                     </div>
                   )}
                   {modalCampaigns.map(c => (
                     <div key={c.id} onClick={() => { setTargetCampaignId(c.id); setTargetAdGroupId(""); setAgSearch(""); }}
-                      style={{ padding: "8px 14px", fontSize: 12, cursor: "pointer", borderRadius: 0,
-                        background: targetCampaignId === c.id ? "rgba(59,130,246,.12)" : "transparent",
+                      style={{ padding: "9px 16px", fontSize: 13, cursor: "pointer",
+                        background: targetCampaignId === c.id ? "rgba(59,130,246,.1)" : "transparent",
                         color: targetCampaignId === c.id ? "var(--ac2)" : "var(--tx)",
                         fontWeight: targetCampaignId === c.id ? 600 : 400,
                         borderLeft: `3px solid ${targetCampaignId === c.id ? "var(--ac)" : "transparent"}`,
-                        transition: "background .1s" }}
-                      onMouseEnter={e => { if (targetCampaignId !== c.id) e.currentTarget.style.background = "var(--s2)"; }}
+                        transition: "all .1s", lineHeight: 1.4 }}
+                      onMouseEnter={e => { if (targetCampaignId !== c.id) e.currentTarget.style.background = "var(--s3)"; }}
                       onMouseLeave={e => { if (targetCampaignId !== c.id) e.currentTarget.style.background = "transparent"; }}>
                       {c.name}
                     </div>
                   ))}
-                  {modalCampaigns.length === 0 && (
-                    <div style={{ padding: "10px 14px", fontSize: 12, color: "var(--tx3)" }}>Не найдено</div>
-                  )}
                 </div>
 
                 {/* Ad group section */}
-                <div style={{ padding: "12px 14px 6px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 8 }}>Группа объявлений</div>
+                <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 10 }}>Группа объявлений</div>
                   <div style={{ position: "relative" }}>
-                    <Search size={12} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+                    <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
                     <input value={agSearch} onChange={e => setAgSearch(e.target.value)}
                       placeholder="Поиск группы…"
-                      style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "6px 8px 6px 28px",
-                        borderRadius: 7, border: "1px solid var(--b2)", background: "var(--s2)", color: "var(--tx)" }} />
+                      disabled={!targetCampaignId}
+                      style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "8px 10px 8px 32px",
+                        borderRadius: 8, border: "1px solid var(--b2)", background: targetCampaignId ? "var(--s1)" : "var(--s2)",
+                        color: "var(--tx)", opacity: targetCampaignId ? 1 : 0.5 }} />
                   </div>
                 </div>
                 <div style={{ overflowY: "auto", flex: 1 }}>
                   {!targetCampaignId && (
-                    <div style={{ padding: "8px 14px", fontSize: 12, color: "var(--tx3)", fontStyle: "italic" }}>
+                    <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)", fontStyle: "italic" }}>
                       Сначала выберите кампанию
                     </div>
                   )}
                   {modalAdGroups.map(ag => (
                     <div key={ag.id} onClick={() => setTargetAdGroupId(ag.id)}
-                      style={{ padding: "8px 14px", fontSize: 12, cursor: "pointer",
-                        background: targetAdGroupId === ag.id ? "rgba(59,130,246,.12)" : "transparent",
+                      style={{ padding: "9px 16px", fontSize: 13, cursor: "pointer",
+                        background: targetAdGroupId === ag.id ? "rgba(59,130,246,.1)" : "transparent",
                         color: targetAdGroupId === ag.id ? "var(--ac2)" : "var(--tx)",
                         fontWeight: targetAdGroupId === ag.id ? 600 : 400,
                         borderLeft: `3px solid ${targetAdGroupId === ag.id ? "var(--ac)" : "transparent"}`,
-                        transition: "background .1s" }}
-                      onMouseEnter={e => { if (targetAdGroupId !== ag.id) e.currentTarget.style.background = "var(--s2)"; }}
+                        transition: "all .1s", lineHeight: 1.4 }}
+                      onMouseEnter={e => { if (targetAdGroupId !== ag.id) e.currentTarget.style.background = "var(--s3)"; }}
                       onMouseLeave={e => { if (targetAdGroupId !== ag.id) e.currentTarget.style.background = "transparent"; }}>
                       {ag.name}
                     </div>
                   ))}
                   {targetCampaignId && modalAdGroups.length === 0 && (
-                    <div style={{ padding: "10px 14px", fontSize: 12, color: "var(--tx3)" }}>Не найдено</div>
+                    <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)" }}>Не найдено</div>
                   )}
                 </div>
               </div>
@@ -9559,7 +9935,18 @@ const RulesPage = ({ workspaceId }) => {
                   {r.applied?.length > 0 ? (
                     <div>
                       <div style={LABEL}>{r.dry_run ? t("rules.willChange") : t("rules.changed")}</div>
-                      <div style={{ maxHeight:280, overflowY:"auto" }}>
+                      {/* Table header */}
+                      <div style={{ display:"grid", gridTemplateColumns:"1fr 110px 52px 52px 64px 48px", gap:"0 8px",
+                        padding:"5px 12px", borderBottom:"2px solid var(--b2)",
+                        fontSize:10, fontWeight:600, color:"var(--tx3)", textTransform:"uppercase", letterSpacing:".04em" }}>
+                        <span>Ключевое слово</span>
+                        <span>Действие</span>
+                        <span style={{ textAlign:"right" }}>Клики</span>
+                        <span style={{ textAlign:"right" }}>Ордера</span>
+                        <span style={{ textAlign:"right" }}>АКОС</span>
+                        <span style={{ textAlign:"right" }}>Расход</span>
+                      </div>
+                      <div style={{ maxHeight:300, overflowY:"auto" }}>
                         {r.applied.map((a, i) => {
                           const entityLabel = a.keyword_text || (a.expression
                             ? (typeof a.expression === "object"
@@ -9570,31 +9957,52 @@ const RulesPage = ({ workspaceId }) => {
                           const badgeCls = ["pause_keyword","pause_target"].includes(a.action) ? "bg-amb"
                             : ["enable_keyword","enable_target"].includes(a.action) ? "bg-grn" : "bg-bl";
                           const actionLabel =
-                            a.action === "pause_keyword"         ? "PAUSE"
-                            : a.action === "enable_keyword"      ? "ENABLE"
-                            : a.action === "pause_target"        ? "PAUSE TGT"
-                            : a.action === "enable_target"       ? "ENABLE TGT"
-                            : a.action === "adjust_bid_pct"      ? `BID ${a.change_pct}`
+                            a.action === "pause_keyword"           ? "PAUSE"
+                            : a.action === "enable_keyword"        ? "ENABLE"
+                            : a.action === "pause_target"          ? "PAUSE TGT"
+                            : a.action === "enable_target"         ? "ENABLE TGT"
+                            : a.action === "adjust_bid_pct"        ? `BID ${a.change_pct}`
                             : a.action === "adjust_target_bid_pct" ? `TGT ${a.change_pct}`
-                            : a.action === "add_negative_keyword"  ? `NEG-${(a.match_type||"exact").toUpperCase()}`
+                            : a.action === "add_negative_keyword"  ? `NEG-${(a.match_type||"EXACT").toUpperCase()}`
                             : a.action === "add_negative_target"   ? "NEG TGT"
                             : `BID→${a.new_bid}€`;
+                          const m = a.metrics || {};
+                          const clicks  = m.clicks  != null ? Number(m.clicks)  : null;
+                          const orders  = m.orders  != null ? Number(m.orders)  : null;
+                          const acos    = m.acos    != null ? parseFloat(m.acos) : null;
+                          const spend   = m.spend   != null ? parseFloat(m.spend) : null;
                           return (
-                            <div key={i} style={{ padding:"8px 12px", borderBottom:"1px solid var(--b1)",
-                              display:"flex", gap:10, alignItems:"center", fontSize:12 }}>
-                              <span style={{ fontFamily:"var(--mono)", color: isTarget ? "var(--amb)" : "var(--ac2)",
-                                minWidth:120, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                                {entityLabel}
+                            <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr 110px 52px 52px 64px 48px", gap:"0 8px",
+                              padding:"7px 12px", borderBottom:"1px solid var(--b1)",
+                              alignItems:"center", fontSize:12 }}>
+                              <div style={{ overflow:"hidden", minWidth:0 }}>
+                                <div style={{ fontFamily:"var(--mono)", fontSize:11,
+                                  color: isTarget ? "var(--amb)" : "var(--ac2)",
+                                  overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                  {entityLabel}
+                                </div>
+                                {a.campaign_name && (
+                                  <div style={{ fontSize:10, color:"var(--tx3)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1 }}>
+                                    {a.campaign_name}
+                                  </div>
+                                )}
+                              </div>
+                              <span className={`badge ${badgeCls}`} style={{ fontSize:10, justifySelf:"start" }}>{actionLabel}</span>
+                              <span style={{ textAlign:"right", fontFamily:"var(--mono)", fontSize:12,
+                                color: clicks === 0 ? "var(--tx3)" : "var(--tx)" }}>
+                                {clicks != null ? clicks : "—"}
                               </span>
-                              <span className={`badge ${badgeCls}`} style={{ fontSize:10 }}>{actionLabel}</span>
-                              <span style={{ color:"var(--tx3)", fontSize:11, marginLeft:"auto" }}>
-                                {a.campaign_name}
+                              <span style={{ textAlign:"right", fontFamily:"var(--mono)", fontSize:12,
+                                color: orders === 0 ? "var(--tx3)" : "var(--grn)" }}>
+                                {orders != null ? orders : "—"}
                               </span>
-                              {a.metrics && (
-                                <span style={{ fontSize:10, color:"var(--tx3)" }}>
-                                  {a.metrics.clicks}cl · {a.metrics.orders}ord · {a.metrics.acos ? parseFloat(a.metrics.acos).toFixed(1)+"%" : "—"}
-                                </span>
-                              )}
+                              <span style={{ textAlign:"right", fontFamily:"var(--mono)", fontSize:12,
+                                color: acos == null ? "var(--tx3)" : acos > 50 ? "var(--red)" : acos > 30 ? "var(--amb)" : "var(--grn)" }}>
+                                {acos != null ? acos.toFixed(1)+"%" : "—"}
+                              </span>
+                              <span style={{ textAlign:"right", fontFamily:"var(--mono)", fontSize:11, color:"var(--tx3)" }}>
+                                {spend != null ? spend.toFixed(0)+"€" : "—"}
+                              </span>
                             </div>
                           );
                         })}
@@ -11245,16 +11653,28 @@ function AIPage({ workspaceId }) {
 
                     {actions.length > 0 && (
                       <div style={{ marginBottom:10 }}>
-                        {actions.map((a, ai) => (
-                          <div key={ai} style={{ fontSize:11, color:"var(--tx3)", padding:"2px 0",
-                            display:"flex", gap:6, alignItems:"center" }}>
-                            <ChevronRight size={11} strokeWidth={1.75} color="var(--ac2)" />
-                            <span style={{ fontFamily:"var(--mono)" }}>{a.entity_name || a.entity_id}</span>
-                            <span>—</span>
-                            <span>{a.action_type?.replace(/_/g," ")}</span>
-                            {a.params && Object.keys(a.params).length > 0 && renderAiParams(a.params)}
-                          </div>
-                        ))}
+                        {actions.map((a, ai) => {
+                          const entityDisplay = a.entity_name || (a.entity_id ? a.entity_id.slice(0,8)+"…" : "—");
+                          const ACTION_LABEL = {
+                            bid_increase: "повысить ставки", bid_decrease: "снизить ставки",
+                            adjust_bid: "изменить ставку", adjust_budget: "изменить бюджет",
+                            pause: "приостановить", pause_campaign: "приостановить",
+                            enable: "активировать", enable_campaign: "активировать",
+                            add_keyword: "добавить ключевое слово",
+                          };
+                          const actionLabel = ACTION_LABEL[a.action_type] || a.action_type?.replace(/_/g," ");
+                          const hasParams = a.params && Object.keys(a.params).filter(k => a.params[k] !== '' && a.params[k] !== null).length > 0;
+                          return (
+                            <div key={ai} style={{ fontSize:11, color:"var(--tx3)", padding:"3px 0",
+                              display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
+                              <ChevronRight size={11} strokeWidth={1.75} color="var(--ac2)" />
+                              <span style={{ color:"var(--tx2)", fontWeight:500 }}>{entityDisplay}</span>
+                              <span style={{ color:"var(--tx3)" }}>—</span>
+                              <span style={{ color:"var(--tx3)" }}>{actionLabel}</span>
+                              {hasParams && renderAiParams(a.params)}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
 
@@ -11962,7 +12382,7 @@ export default function App() {
           <Ic icon={sidebarCollapsed ? ChevronRight : ChevronLeft} size={13} />
         </button>
 
-        <main style={{ marginLeft: sidebarCollapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W, flex: 1, padding: "26px 30px", minHeight: "100vh", overflow: "auto", transition: "margin-left 220ms cubic-bezier(0.4,0,0.2,1)" }}>
+        <main style={{ marginLeft: sidebarCollapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W, flex: 1, minWidth: 0, padding: "26px 30px", minHeight: "100vh", overflow: "auto", transition: "margin-left 220ms cubic-bezier(0.4,0,0.2,1)", boxSizing: "border-box", width: `calc(100vw - ${sidebarCollapsed ? SIDEBAR_W_COLLAPSED : SIDEBAR_W}px)` }}>
           {Object.entries(allPages).map(([key, page]) => {
             const isActive = key === active;
             const isMounted = mountedPages.has(key);

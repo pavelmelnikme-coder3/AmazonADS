@@ -88,18 +88,31 @@ RESPONSE FORMAT — return ONLY a valid JSON array, no markdown, no extra text:
     "actions": [
       {
         "action_type": "adjust_bid|adjust_budget|pause|enable|add_keyword",
-        "entity_type": "campaign|ad_group|keyword|target",
-        "entity_id": "id from data or null",
+        "entity_type": "campaign|keyword",
+        "entity_id": "UUID from the data, or null",
         "entity_name": "human readable name",
-        "params": { "field": "value" }
+        "params": <see PARAMS SCHEMA below>
       }
     ]
   }
 ]
 
+PARAMS SCHEMA — use exactly these field names, never invent others:
+- Bid change on campaign (adjusts ALL keyword bids in that campaign by a %):
+  { "bid_adjustment_pct": 15 }   ← positive = increase, negative = decrease. Integer percent.
+- Budget change on campaign:
+  { "daily_budget": 25.00 }      ← absolute new daily budget in EUR, as a number
+- Pause/enable a campaign:
+  { "state": "paused" }  or  { "state": "enabled" }
+- Bid change on a specific keyword:
+  { "bid": 0.45 }                ← absolute new bid in EUR, as a number
+- Pause/enable a specific keyword:
+  { "state": "paused" }  or  { "state": "enabled" }
+
 Rules:
 - Return 3-8 recommendations max, ordered by priority (1 = most urgent)
 - Be specific: cite exact campaign names, ACOS values, spend amounts from the data
+- entity_id MUST be the UUID from the data — never use Amazon IDs or null if a real UUID is available
 - Only recommend actions that are clearly supported by the data
 - If no issues found, return a single recommendation of type "other" with positive feedback`;
 
@@ -162,7 +175,28 @@ router.get("/recommendations", async (req, res, next) => {
        LIMIT $${pi}`,
       [...params, parseInt(limit)]
     );
-    res.json(rows);
+
+    // Enrich actions with entity names from campaigns/keywords tables
+    const enriched = await Promise.all(rows.map(async rec => {
+      const actions = typeof rec.actions === "string" ? JSON.parse(rec.actions) : (rec.actions || []);
+      const enrichedActions = await Promise.all(actions.map(async action => {
+        if (action.entity_name || !action.entity_id) return action;
+        let entityName = null;
+        try {
+          if (action.entity_type === "campaign") {
+            const { rows: [r] } = await query("SELECT name FROM campaigns WHERE id = $1 AND workspace_id = $2", [action.entity_id, req.workspaceId]);
+            entityName = r?.name || null;
+          } else if (action.entity_type === "keyword") {
+            const { rows: [r] } = await query("SELECT keyword_text FROM keywords WHERE id = $1 AND workspace_id = $2", [action.entity_id, req.workspaceId]);
+            entityName = r?.keyword_text || null;
+          }
+        } catch {}
+        return entityName ? { ...action, entity_name: entityName } : action;
+      }));
+      return { ...rec, actions: enrichedActions };
+    }));
+
+    res.json(enriched);
   } catch (err) { next(err); }
 });
 
@@ -355,25 +389,89 @@ router.post("/recommendations/:id/preview", async (req, res, next) => {
     const changes = [];
 
     for (const action of actions) {
+      const params = action.params || {};
+
       if (action.entity_type === "campaign" && action.entity_id) {
         const { rows: [entity] } = await query(
-          "SELECT id, name, state, daily_budget, bidding_strategy FROM campaigns WHERE id = $1 AND workspace_id = $2",
+          "SELECT id, name, state, daily_budget FROM campaigns WHERE id = $1 AND workspace_id = $2",
           [action.entity_id, req.workspaceId]
         );
-        if (entity) {
-          for (const [field, newValue] of Object.entries(action.params || {})) {
-            changes.push({ entity_type: "campaign", entity_id: entity.id, entity_name: entity.name, field, current_value: entity[field] ?? null, new_value: newValue });
+        if (!entity) continue;
+
+        const rawPct = params.bid_adjustment_pct ?? params.bid_adjustment ?? null;
+        if (rawPct != null) {
+          const pct = parseFloat(rawPct);
+
+          // Try manual-campaign keywords first, then fall back to auto-campaign ad_group default_bid
+          const { rows: kwRows } = await query(
+            `SELECT COUNT(*) AS cnt, ROUND(AVG(bid)::numeric, 2) AS avg_bid
+             FROM keywords WHERE campaign_id = $1 AND workspace_id = $2 AND state != 'archived' AND bid IS NOT NULL`,
+            [action.entity_id, req.workspaceId]
+          );
+          let avgBid = kwRows[0]?.avg_bid != null ? parseFloat(kwRows[0].avg_bid) : null;
+          let countLabel = kwRows[0]?.cnt ? `${kwRows[0].cnt} kw` : null;
+
+          if (avgBid == null) {
+            // Auto campaign — bids live on ad_groups.default_bid
+            const { rows: agRows } = await query(
+              `SELECT COUNT(*) AS cnt, ROUND(AVG(default_bid)::numeric, 2) AS avg_bid
+               FROM ad_groups WHERE campaign_id = $1 AND workspace_id = $2 AND state != 'archived' AND default_bid IS NOT NULL`,
+              [action.entity_id, req.workspaceId]
+            );
+            avgBid = agRows[0]?.avg_bid != null ? parseFloat(agRows[0].avg_bid) : null;
+            countLabel = agRows[0]?.cnt ? `${agRows[0].cnt} ad groups` : null;
           }
+
+          changes.push({
+            entity_type: "campaign", entity_id: entity.id, entity_name: entity.name,
+            field: "bid_adjustment_pct",
+            current_value: avgBid != null ? `avg €${avgBid.toFixed(2)}${countLabel ? ` (${countLabel})` : ""}` : "—",
+            new_value: `${pct > 0 ? "+" : ""}${pct}% → avg €${avgBid != null ? (avgBid * (1 + pct / 100)).toFixed(2) : "?"}`
+          });
         }
+        if (params.daily_budget != null) {
+          changes.push({
+            entity_type: "campaign", entity_id: entity.id, entity_name: entity.name,
+            field: "daily_budget",
+            current_value: entity.daily_budget != null ? `€${parseFloat(entity.daily_budget).toFixed(2)}` : "—",
+            new_value: `€${parseFloat(params.daily_budget).toFixed(2)}`
+          });
+        }
+        // Infer state from action_type when params.state not set
+        const inferredState = params.state
+          ?? (["pause", "pause_campaign"].includes(action.action_type) ? "paused" : null)
+          ?? (["enable", "enable_campaign"].includes(action.action_type) ? "enabled" : null);
+        if (inferredState != null) {
+          changes.push({
+            entity_type: "campaign", entity_id: entity.id, entity_name: entity.name,
+            field: "state",
+            current_value: entity.state ?? "—",
+            new_value: inferredState
+          });
+        }
+
       } else if (action.entity_type === "keyword" && action.entity_id) {
         const { rows: [entity] } = await query(
           "SELECT id, keyword_text, bid, state FROM keywords WHERE id = $1 AND workspace_id = $2",
           [action.entity_id, req.workspaceId]
         );
-        if (entity) {
-          for (const [field, newValue] of Object.entries(action.params || {})) {
-            changes.push({ entity_type: "keyword", entity_id: entity.id, entity_name: entity.keyword_text, field, current_value: entity[field] ?? null, new_value: newValue });
-          }
+        if (!entity) continue;
+
+        if (params.bid != null) {
+          changes.push({
+            entity_type: "keyword", entity_id: entity.id, entity_name: entity.keyword_text,
+            field: "bid",
+            current_value: entity.bid != null ? `€${parseFloat(entity.bid).toFixed(2)}` : "—",
+            new_value: `€${parseFloat(params.bid).toFixed(2)}`
+          });
+        }
+        if (params.state != null) {
+          changes.push({
+            entity_type: "keyword", entity_id: entity.id, entity_name: entity.keyword_text,
+            field: "state",
+            current_value: entity.state ?? "—",
+            new_value: params.state
+          });
         }
       }
     }
@@ -398,18 +496,50 @@ router.post("/recommendations/:id/apply", async (req, res, next) => {
       try {
         if (action.entity_type === "campaign" && action.entity_id) {
           const p = action.params || {};
+          const inferredState = p.state
+            ?? (["pause", "pause_campaign"].includes(action.action_type) ? "paused" : undefined)
+            ?? (["enable", "enable_campaign"].includes(action.action_type) ? "enabled" : undefined);
           const sets = []; const vals = [action.entity_id, req.workspaceId]; let pi = 3;
           if (p.daily_budget !== undefined) { sets.push(`daily_budget = $${pi++}`); vals.push(parseFloat(p.daily_budget)); }
-          if (p.state !== undefined)        { sets.push(`state = $${pi++}`);        vals.push(p.state); }
+          if (inferredState !== undefined)  { sets.push(`state = $${pi++}`);        vals.push(inferredState); }
           if (sets.length) {
             sets.push("updated_at = NOW()");
             await query(`UPDATE campaigns SET ${sets.join(", ")} WHERE id = $1 AND workspace_id = $2`, vals);
             applied.push({ action_type: action.action_type, entity: action.entity_id });
           }
+          // Bid adjustment — apply percentage change to keywords; fall back to ad_group default_bid for auto campaigns
+          const pct = p.bid_adjustment_pct != null ? parseFloat(p.bid_adjustment_pct)
+                    : p.bid_adjustment      != null ? parseFloat(p.bid_adjustment)
+                    : null;
+          if (pct != null && !isNaN(pct)) {
+            const multiplier = 1 + pct / 100;
+            const { rowCount: kwUpdated } = await query(
+              `UPDATE keywords
+               SET bid = GREATEST(ROUND((bid * $1)::numeric, 2), 0.02), updated_at = NOW()
+               WHERE campaign_id = $2 AND workspace_id = $3 AND state != 'archived' AND bid IS NOT NULL`,
+              [multiplier, action.entity_id, req.workspaceId]
+            );
+            if (kwUpdated > 0) {
+              applied.push({ action_type: action.action_type, entity: action.entity_id, keywords_updated: kwUpdated });
+            } else {
+              // Auto campaign — update ad_group default_bids instead
+              const { rowCount: agUpdated } = await query(
+                `UPDATE ad_groups
+                 SET default_bid = GREATEST(ROUND((default_bid * $1)::numeric, 2), 0.02), updated_at = NOW()
+                 WHERE campaign_id = $2 AND workspace_id = $3 AND state != 'archived' AND default_bid IS NOT NULL`,
+                [multiplier, action.entity_id, req.workspaceId]
+              );
+              applied.push({ action_type: action.action_type, entity: action.entity_id, ad_groups_updated: agUpdated });
+            }
+          }
         } else if (action.entity_type === "keyword" && action.entity_id) {
           const p = action.params || {};
           if (p.bid !== undefined) {
             await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2 AND workspace_id = $3", [parseFloat(p.bid), action.entity_id, req.workspaceId]);
+            applied.push({ action_type: action.action_type, entity: action.entity_id });
+          }
+          if (p.state !== undefined) {
+            await query("UPDATE keywords SET state = $1, updated_at = NOW() WHERE id = $2 AND workspace_id = $3", [p.state, action.entity_id, req.workspaceId]);
             applied.push({ action_type: action.action_type, entity: action.entity_id });
           }
         }

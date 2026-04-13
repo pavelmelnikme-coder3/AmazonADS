@@ -102,10 +102,12 @@ function extractOrganicAsins(html) {
 
   for (const block of blocks) {
     if (block.type !== "s-search-result") continue;
-    const asinM = block.content.match(/data-asin="([A-Z0-9]{10})"/);
-    if (asinM && !seen.has(asinM[1])) {
-      seen.add(asinM[1]);
-      asins.push(asinM[1]);
+    // Use matchAll to capture all ASINs in carousel/grid blocks (multiple products per block)
+    for (const asinM of block.content.matchAll(/data-asin="([A-Z0-9]{10})"/g)) {
+      if (!seen.has(asinM[1])) {
+        seen.add(asinM[1]);
+        asins.push(asinM[1]);
+      }
     }
   }
 

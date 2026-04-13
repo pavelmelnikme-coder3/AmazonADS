@@ -188,6 +188,10 @@ async function getRanksByAsin(asin, marketplaceId) {
           page: Math.ceil(attrs.organic_rank / 16),
           found: true,
           blocked: false,
+          search_volume: attrs.monthly_search_volume_exact
+            || attrs.monthly_search_volume_broad
+            || attrs.approximate_30_day_search_volume
+            || null,
         });
       }
     }

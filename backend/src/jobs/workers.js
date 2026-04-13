@@ -449,7 +449,7 @@ async function startWorkers() {
     logger.error("SP sync worker failed", { jobId: job?.id, error: err.message });
   });
 
-  const { scrapeWorkspaceRanks } = require("../services/amazon/rankScraper");
+  const { scrapeRank, scrapeWorkspaceRanks } = require("../services/amazon/rankScraper");
   const { getRanksByAsin, isConfigured: jsConfigured } = require("../services/junglescout/client");
 
   async function jsCheckWorkspaceRanks(workspaceId) {
@@ -469,14 +469,50 @@ async function startWorkers() {
     let found = 0;
     for (const group of Object.values(groups)) {
       const rankMap = await getRanksByAsin(group.asin, group.marketplaceId);
+      const needsScraper = [];
+
       for (const kw of group.keywords) {
         const result = rankMap.get(kw.keyword) || { position: null, page: null, found: false, blocked: false };
-        await query(
-          `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked) VALUES ($1, $2, $3, $4, $5)`,
-          [kw.id, result.position, result.page, result.found, result.blocked]
-        );
-        if (result.found) found++;
+        if (result.found) {
+          await query(
+            `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked) VALUES ($1, $2, $3, $4, $5)`,
+            [kw.id, result.position, result.page, result.found, result.blocked]
+          );
+          found++;
+        } else {
+          needsScraper.push(kw);
+        }
       }
+
+      // Fall back to scraper for keywords JS doesn't have in its top-200
+      if (needsScraper.length > 0) {
+        logger.info("Rank cron: JS not found, falling back to scraper", {
+          asin: group.asin, count: needsScraper.length,
+          keywords: needsScraper.map(k => k.keyword),
+        });
+        for (let i = 0; i < needsScraper.length; i++) {
+          const kw = needsScraper[i];
+          const result = await scrapeRank(kw.asin, kw.keyword, kw.marketplace_id);
+          await query(
+            `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked) VALUES ($1, $2, $3, $4, $5)`,
+            [kw.id, result.position, result.page, result.found, result.blocked]
+          );
+          if (result.found) found++;
+          if (result.blocked) {
+            logger.warn("Rank cron: scraper blocked during fallback — stopping", { asin: kw.asin });
+            for (let j = i + 1; j < needsScraper.length; j++) {
+              const rem = needsScraper[j];
+              await query(
+                `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked) VALUES ($1, $2, $3, $4, $5)`,
+                [rem.id, null, null, false, false]
+              );
+            }
+            break;
+          }
+          if (i < needsScraper.length - 1) await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+
       if (Object.keys(groups).length > 1) await new Promise(r => setTimeout(r, 300));
     }
     return { total: keywords.length, found };

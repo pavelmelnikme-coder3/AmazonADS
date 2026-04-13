@@ -182,6 +182,9 @@ export default {
     asinHint: "one per line",
     asinPlaceholderMulti: "B0XXXXXXXXXX\nB0YYYYYYYYYY",
     addToGroup: "Add keywords",
+    noteLabel: "Note",
+    notePlaceholder: "Product name or SKU…",
+    noteSaved: "Note saved",
   },
   campaigns: {
     title: "Campaigns",

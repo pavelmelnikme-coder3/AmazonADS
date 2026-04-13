@@ -182,6 +182,9 @@ export default {
     asinHint: "по одному на строку",
     asinPlaceholderMulti: "B0XXXXXXXXXX\nB0YYYYYYYYYY",
     addToGroup: "Добавить ключи",
+    noteLabel: "Примечание",
+    notePlaceholder: "Название товара или SKU…",
+    noteSaved: "Примечание сохранено",
   },
   campaigns: {
     title: "Кампании",

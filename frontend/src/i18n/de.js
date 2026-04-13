@@ -182,6 +182,9 @@ export default {
     asinHint: "einer pro Zeile",
     asinPlaceholderMulti: "B0XXXXXXXXXX\nB0YYYYYYYYYY",
     addToGroup: "Keywords hinzufügen",
+    noteLabel: "Notiz",
+    notePlaceholder: "Produktname oder SKU…",
+    noteSaved: "Notiz gespeichert",
   },
   campaigns: {
     title: "Kampagnen",

@@ -14,11 +14,16 @@ router.get("/", async (req, res, next) => {
     const { rows } = await query(
       `SELECT
          tk.id, tk.asin, tk.keyword, tk.marketplace_id, tk.created_at,
+         tk.search_volume,
          latest.position          AS position,
          latest.found             AS found,
          latest.blocked           AS blocked,
          latest.captured_at       AS checked_at,
-         prev.position            AS prev_position
+         prev.position            AS prev_position,
+         COALESCE(al.label, '')   AS asin_label,
+         pr.title                 AS product_title,
+         pr.brand                 AS product_brand,
+         pr.image_url             AS product_image_url
        FROM tracked_keywords tk
        LEFT JOIN LATERAL (
          SELECT position, found, blocked, captured_at
@@ -34,11 +39,29 @@ router.get("/", async (req, res, next) => {
          ORDER BY captured_at DESC
          LIMIT 1 OFFSET 1
        ) prev ON true
+       LEFT JOIN asin_labels al ON al.workspace_id = tk.workspace_id AND al.asin = tk.asin
+       LEFT JOIN products pr ON pr.asin = tk.asin AND pr.workspace_id = tk.workspace_id
        WHERE tk.workspace_id = $1 AND tk.is_active = TRUE
-       ORDER BY latest.position ASC NULLS LAST, tk.asin, tk.keyword`,
+       ORDER BY tk.asin, tk.search_volume DESC NULLS LAST, tk.keyword`,
       [req.workspaceId]
     );
     res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// PATCH /keyword-ranks/labels/:asin — save ASIN label
+router.patch("/labels/:asin", async (req, res, next) => {
+  try {
+    const { asin } = req.params;
+    const { label = "" } = req.body;
+    if (!/^[A-Z0-9]{10}$/.test(asin)) return res.status(400).json({ error: "Invalid ASIN" });
+    await query(
+      `INSERT INTO asin_labels (workspace_id, asin, label, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (workspace_id, asin) DO UPDATE SET label = EXCLUDED.label, updated_at = NOW()`,
+      [req.workspaceId, asin, label.trim()]
+    );
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 
@@ -66,18 +89,37 @@ router.post("/", async (req, res, next) => {
 
     // Auto-check rank immediately after adding (async, non-blocking).
     // Only runs for newly inserted rows to avoid redundant checks on re-activation.
-    if (tk.inserted && jsConfigured()) {
-      getRanksByAsin(tk.asin, tk.marketplace_id)
-        .then(rankMap => {
-          const result = rankMap.get(tk.keyword) || { position: null, page: null, found: false, blocked: false };
-          return query(
+    if (tk.inserted) {
+      (async () => {
+        try {
+          let result = { position: null, page: null, found: false, blocked: false, search_volume: null };
+          if (jsConfigured()) {
+            const rankMap = await getRanksByAsin(tk.asin, tk.marketplace_id);
+            result = rankMap.get(tk.keyword) || result;
+            // Fall back to scraper if JS doesn't have this keyword in its top-200
+            if (!result.found) {
+              logger.info("Auto-check: JS not found, falling back to scraper", { asin: tk.asin, keyword: tk.keyword });
+              result = await scrapeRank(tk.asin, tk.keyword, tk.marketplace_id);
+            }
+          } else {
+            result = await scrapeRank(tk.asin, tk.keyword, tk.marketplace_id);
+          }
+          await query(
             `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked)
              VALUES ($1, $2, $3, $4, $5)`,
             [tk.id, result.position, result.page, result.found, result.blocked]
           );
-        })
-        .then(() => logger.info("Auto-check on add complete", { asin: tk.asin, keyword: tk.keyword }))
-        .catch(err => logger.warn("Auto-check on add failed (non-fatal)", { error: err.message }));
+          if (result.search_volume != null) {
+            await query(
+              `UPDATE tracked_keywords SET search_volume = $1 WHERE id = $2`,
+              [result.search_volume, tk.id]
+            );
+          }
+          logger.info("Auto-check on add complete", { asin: tk.asin, keyword: tk.keyword, position: result.position, found: result.found, search_volume: result.search_volume });
+        } catch (err) {
+          logger.warn("Auto-check on add failed (non-fatal)", { error: err.message });
+        }
+      })();
     }
   } catch (err) { next(err); }
 });
@@ -122,8 +164,13 @@ router.post("/:id/check", async (req, res, next) => {
     let result;
     if (jsConfigured()) {
       const rankMap = await getRanksByAsin(tk.asin, tk.marketplace_id);
-      result = rankMap.get(tk.keyword) || { position: null, page: null, found: false, blocked: false };
-      logger.info("Rank check via Jungle Scout", { asin: tk.asin, keyword: tk.keyword, position: result.position });
+      result = rankMap.get(tk.keyword) || { position: null, page: null, found: false, blocked: false, search_volume: null };
+      logger.info("Rank check via Jungle Scout", { asin: tk.asin, keyword: tk.keyword, position: result.position, found: result.found });
+      // JS only returns top ~200 keywords by search volume — fall back to scraper if not found
+      if (!result.found) {
+        logger.info("Rank check: JS returned not found, falling back to scraper", { asin: tk.asin, keyword: tk.keyword });
+        result = await scrapeRank(tk.asin, tk.keyword, tk.marketplace_id);
+      }
     } else {
       result = await scrapeRank(tk.asin, tk.keyword, tk.marketplace_id);
     }
@@ -134,6 +181,12 @@ router.post("/:id/check", async (req, res, next) => {
        VALUES ($1, $2, $3, $4, $5)`,
       [tk.id, result.position, result.page, result.found, result.blocked]
     );
+    if (result.search_volume != null) {
+      await query(
+        `UPDATE tracked_keywords SET search_volume = $1 WHERE id = $2`,
+        [result.search_volume, tk.id]
+      );
+    }
 
     res.json({ ...tk, ...result });
   } catch (err) { next(err); }
@@ -178,14 +231,60 @@ async function jsCheckWorkspaceRanks(workspaceId) {
 
   for (const group of Object.values(groups)) {
     const rankMap = await getRanksByAsin(group.asin, group.marketplaceId);
+
+    // Collect keywords not found by JS — will fall back to scraper
+    const needsScraper = [];
+
     for (const kw of group.keywords) {
-      const result = rankMap.get(kw.keyword) || { position: null, page: null, found: false, blocked: false };
-      await query(
-        `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [kw.id, result.position, result.page, result.found, result.blocked]
-      );
+      const result = rankMap.get(kw.keyword) || { position: null, page: null, found: false, blocked: false, search_volume: null };
+      if (result.found) {
+        await query(
+          `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [kw.id, result.position, result.page, result.found, result.blocked]
+        );
+        if (result.search_volume != null) {
+          await query(
+            `UPDATE tracked_keywords SET search_volume = $1 WHERE id = $2`,
+            [result.search_volume, kw.id]
+          );
+        }
+      } else {
+        needsScraper.push(kw);
+      }
     }
+
+    // Fall back to scraper for keywords JS doesn't have in its index
+    if (needsScraper.length > 0) {
+      logger.info("JS rank check: falling back to scraper for not-found keywords", {
+        asin: group.asin, count: needsScraper.length,
+        keywords: needsScraper.map(k => k.keyword),
+      });
+      for (let i = 0; i < needsScraper.length; i++) {
+        const kw = needsScraper[i];
+        const result = await scrapeRank(kw.asin, kw.keyword, kw.marketplace_id);
+        await query(
+          `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [kw.id, result.position, result.page, result.found, result.blocked]
+        );
+        if (result.blocked) {
+          logger.warn("Scraper blocked during batch fallback — stopping scraper portion", { asin: kw.asin });
+          // Save remaining as not found and stop scraping
+          for (let j = i + 1; j < needsScraper.length; j++) {
+            const remaining = needsScraper[j];
+            await query(
+              `INSERT INTO keyword_rank_snapshots (tracked_keyword_id, position, page, found, blocked)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [remaining.id, null, null, false, false]
+            );
+          }
+          break;
+        }
+        if (i < needsScraper.length - 1) await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+
     // Respect JS rate limit (300 req/min)
     if (Object.keys(groups).length > 1) await new Promise(r => setTimeout(r, 300));
   }
