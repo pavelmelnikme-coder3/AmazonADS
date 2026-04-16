@@ -29,6 +29,7 @@ router.post("/discover", async (req, res, next) => {
       productTitle,    // product title for AI (optional — auto-fetched if ASIN known)
       locale = "",     // target language for AI (empty = all languages)
       sources = ["amazon", "ai"], // which sources to use
+      organicTopN = 32, // organic rank threshold (positions 1–N count, divided into 3 weighted tiers)
     } = req.body;
 
     const allAsins = asins?.length ? asins
@@ -209,13 +210,17 @@ router.post("/discover", async (req, res, next) => {
         }
       }
 
-      // Build organic map: keyword → page-1 ranking info
-      // Score per ASIN: pos 1-5=1.0, 6-10=0.8, 11-16=0.6, >16=0
+      // Build organic map: keyword → top-N ranking info
+      // Threshold = organicTopN (from request), divided into 3 equal tiers by weight
+      const topN   = Math.min(100, Math.max(5, Math.round(organicTopN) || 32));
+      const tier1  = Math.floor(topN / 3);       // positions 1–tier1: weight 1.0
+      const tier2  = Math.floor((topN * 2) / 3); // positions tier1+1–tier2: weight 0.8
+                                                  // positions tier2+1–topN: weight 0.6
       const organicMap = new Map(); // keyword → { count, scoreSum }
       for (const rankMap of rankMaps) {
         for (const [kw, data] of rankMap.entries()) {
-          if (!data.found || data.position == null || data.position > 16) continue;
-          const w = data.position <= 5 ? 1.0 : data.position <= 10 ? 0.8 : 0.6;
+          if (!data.found || data.position == null || data.position > topN) continue;
+          const w = data.position <= tier1 ? 1.0 : data.position <= tier2 ? 0.8 : 0.6;
           if (!organicMap.has(kw)) organicMap.set(kw, { count: 0, scoreSum: 0, topPosition: data.position });
           const entry = organicMap.get(kw);
           entry.count++;

@@ -316,6 +316,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // ── adjust_bid_pct (keyword) ────────────────────────────────────────
         } else if (action.type === "adjust_bid_pct") {
           if (entity.entity_type !== "keyword") continue;
+          if (entity.state !== "enabled") continue; // skip paused/disabled keywords
           const pct        = parseFloat(action.value || 0) / 100;
           const currentBid = parseFloat(entity.bid || 0.10);
           const minBid     = parseFloat(safety.min_bid || 0.02);
@@ -350,6 +351,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // ── set_bid (keyword) ───────────────────────────────────────────────
         } else if (action.type === "set_bid") {
           if (entity.entity_type !== "keyword") continue;
+          if (entity.state !== "enabled") continue; // skip paused/disabled keywords
           const newBid     = parseFloat(action.value || 0.10);
           const currentBid = parseFloat(entity.bid || 0);
           const minBid     = parseFloat(safety.min_bid || 0.02);
@@ -445,6 +447,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // ── adjust_target_bid_pct ───────────────────────────────────────────
         } else if (action.type === "adjust_target_bid_pct") {
           if (entity.entity_type !== "target") continue;
+          if (entity.state !== "enabled") continue; // skip paused/disabled targets
           const pct        = parseFloat(action.value || 0) / 100;
           const currentBid = parseFloat(entity.bid || 0.10);
           const minBid     = parseFloat(safety.min_bid || 0.02);
@@ -482,6 +485,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // Amazon requires "negativeExact" / "negativePhrase" format
         } else if (action.type === "add_negative_keyword") {
           if (entity.entity_type !== "keyword") continue;
+          if (entity.state !== "enabled") continue; // skip paused/disabled keywords
           const negMatchTypes = action.value === "phrase" ? ["negativePhrase"]
             : action.value === "both" ? ["negativeExact", "negativePhrase"] : ["negativeExact"];
 
@@ -546,6 +550,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // ── add_negative_target ─────────────────────────────────────────────
         } else if (action.type === "add_negative_target") {
           if (entity.entity_type !== "target") continue;
+          if (entity.state !== "enabled") continue; // skip paused/disabled targets
           const exprJson = typeof entity.expression === "string"
             ? entity.expression : JSON.stringify(entity.expression);
 

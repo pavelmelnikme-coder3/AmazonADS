@@ -373,7 +373,7 @@ router.get("/download", async (req, res, next) => {
 
     // ── Sheet 3: Лист2 — ASIN reference ──────────────────────────────────────
     const ws3 = wb.addWorksheet("Лист2");
-    ws3.addRow(["ASIN","SKU","Lable"]);
+    ws3.addRow(["ASIN","SKU","Label"]);
     ws3.getRow(1).eachCell(cell => {
       cell.fill = headerFill; cell.font = headerFont;
       cell.alignment = { horizontal:"center" };

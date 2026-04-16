@@ -24,8 +24,12 @@ import {
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
   HelpCircle, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
-  FlaskConical, Briefcase,
+  FlaskConical, Briefcase, GripVertical,
 } from 'lucide-react';
+
+import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
+import { CSS as DndCSS } from '@dnd-kit/utilities';
 
 // Unified icon size helper
 const Ic = ({ icon: Icon, size = 14, color, style, className }) => (
@@ -1394,6 +1398,1046 @@ function rankDelta(current, prev) {
   return d;
 }
 
+// ─── Campaign Detail Modal ─────────────────────────────────────────────────────
+// Full-featured campaign drill-down: Ad Groups → Keywords/Targets/Product Ads
+function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUpdate }) {
+  const { t } = useI18n();
+  const [view, setView]           = useState("campaign");
+  const [selectedAg, setSelectedAg] = useState(null);
+  const [tab, setTab]             = useState("adgroups");
+  const [agTab, setAgTab]         = useState("keywords");
+  const [editAg, setEditAg]       = useState(null);
+  const [editKw, setEditKw]       = useState(null);
+  const [editTgt, setEditTgt]     = useState(null);
+  const [editCampaign, setEditCampaign] = useState(null);
+  const [saving, setSaving]       = useState(false);
+
+  // Search & sort
+  const [agSearch, setAgSearch]   = useState("");
+  const [kwSearch, setKwSearch]   = useState("");
+  const [tgtSearch, setTgtSearch] = useState("");
+  const [negSearch, setNegSearch] = useState("");
+  const [kwSort, setKwSort]       = useState({ field: "spend", dir: "desc" });
+  const [tgtSort, setTgtSort]     = useState({ field: "spend", dir: "desc" });
+  const [agSort, setAgSort]       = useState({ field: "spend", dir: "desc" });
+
+  // Bulk selection
+  const [kwSelected, setKwSelected]   = useState(new Set());
+  const [tgtSelected, setTgtSelected] = useState(new Set());
+  const [bulkBidPct, setBulkBidPct]   = useState("");
+  const [bulkSaving, setBulkSaving]   = useState(false);
+
+  // Add modals
+  const [addKwModal, setAddKwModal]     = useState(false);
+  const [addKwForm, setAddKwForm]       = useState({ text: "", matchType: "broad", bid: "0.50" });
+  const [addTgtModal, setAddTgtModal]   = useState(false);
+  const [addTgtForm, setAddTgtForm]     = useState({ expressionType: "asinSameAs", value: "", bid: "0.50" });
+  const [addAgModal, setAddAgModal]     = useState(false);
+  const [addAgForm, setAddAgForm]       = useState({ name: "", defaultBid: "0.50" });
+  const [addNegModal, setAddNegModal]   = useState(false);
+  const [addNegForm, setAddNegForm]     = useState({ text: "", matchType: "negativeExact", level: "campaign" });
+  const [addSaving, setAddSaving]       = useState(false);
+  const [addError, setAddError]         = useState(null);
+
+  // Placement adjustments
+  const [placements, setPlacements]         = useState(null);
+  const [editPlacements, setEditPlacements] = useState(false);
+  const [placementForm, setPlacementForm]   = useState({ top: 0, pp: 0 });
+  const [placementSaving, setPlacementSaving] = useState(false);
+
+  // Local metrics period (independent of parent)
+  const [localDays, setLocalDays] = useState(metricsDays);
+
+  // Toast
+  const [toast, setToast] = useState(null);
+  const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3000); };
+
+  // Escape key
+  useEffect(() => {
+    const h = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
+  }, [onClose]);
+
+  // Data fetching
+  const { data: agData,  loading: agLoading,  reload: reloadAgs } = useAsync(
+    () => get("/ad-groups", { campaignId: campaign.id, metricsDays: localDays, limit: 200, sortBy: "spend", sortDir: "desc" }),
+    [campaign.id, localDays]
+  );
+  const { data: kwData,  loading: kwLoading,  reload: reloadKws } = useAsync(
+    () => selectedAg
+      ? get("/keywords", { adGroupId: selectedAg.id, metricsDays: localDays, limit: 500, sortBy: "spend", sortDir: "desc" })
+      : Promise.resolve({ data: [] }),
+    [selectedAg?.id, localDays]
+  );
+  const { data: tgtData, loading: tgtLoading, reload: reloadTgts } = useAsync(
+    () => selectedAg
+      ? get("/targets", { adGroupId: selectedAg.id, metricsDays: localDays, limit: 500, sortBy: "spend", sortDir: "desc" })
+      : Promise.resolve({ data: [], pagination: {} }),
+    [selectedAg?.id, localDays]
+  );
+  const { data: adsData, loading: adsLoading } = useAsync(
+    () => selectedAg
+      ? get("/product-ads", { adGroupId: selectedAg.id, limit: 500 })
+      : Promise.resolve({ data: [] }),
+    [selectedAg?.id]
+  );
+  const { data: negData, loading: negLoading, reload: reloadNegs } = useAsync(
+    () => get("/negative-keywords", { campaignId: campaign.id, limit: 500, sortBy: "created_at", sortDir: "desc" }),
+    [campaign.id]
+  );
+
+  const adGroups   = agData?.data   || [];
+  const keywords   = kwData?.data   || [];
+  const targets    = tgtData?.data  || [];
+  const productAds = adsData?.data  || [];
+  const negatives  = negData?.data  || [];
+
+  // Filtered + sorted data
+  const numSort = (a, b, field, dir) => {
+    const va = parseFloat(a[field]) || 0, vb = parseFloat(b[field]) || 0;
+    return dir === "asc" ? va - vb : vb - va;
+  };
+  const strSort = (a, b, field, dir) => {
+    const va = (a[field] || "").toLowerCase(), vb = (b[field] || "").toLowerCase();
+    return dir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
+  };
+  const sortItems = (arr, sort) => {
+    const numFields = ["spend", "sales", "acos", "roas", "bid", "default_bid", "clicks", "orders"];
+    return [...arr].sort((a, b) =>
+      numFields.includes(sort.field) ? numSort(a, b, sort.field, sort.dir) : strSort(a, b, sort.field, sort.dir)
+    );
+  };
+
+  const filteredAgs  = sortItems(adGroups.filter(ag => !agSearch || ag.name.toLowerCase().includes(agSearch.toLowerCase())), agSort);
+  const filteredKws  = sortItems(keywords.filter(kw => !kwSearch || kw.keyword_text.toLowerCase().includes(kwSearch.toLowerCase())), kwSort);
+  const filteredTgts = sortItems(targets.filter(tg => {
+    if (!tgtSearch) return true;
+    const label = fmtTargetHelper(tg.resolved_expression || tg.expression);
+    return label.toLowerCase().includes(tgtSearch.toLowerCase());
+  }), tgtSort);
+  const filteredNegs = negatives.filter(nk => !negSearch || nk.keyword_text.toLowerCase().includes(negSearch.toLowerCase()));
+  // For ad-group view: show campaign + adgroup negatives; for campaign view: show campaign level
+  const visibleNegs  = view === "adgroup" && selectedAg
+    ? filteredNegs.filter(nk => nk.level === "campaign" || nk.ad_group_id === selectedAg.id)
+    : filteredNegs.filter(nk => nk.level === "campaign");
+
+  // Toggle sort
+  const toggleSort = (sortState, setSortFn, field) => {
+    setSortFn(prev => prev.field === field ? { field, dir: prev.dir === "asc" ? "desc" : "asc" } : { field, dir: "desc" });
+  };
+
+  // Save helpers
+  async function saveAdGroup() {
+    setSaving(true);
+    try {
+      await patch(`/ad-groups/${editAg.id}`, { state: editAg.state, defaultBid: parseFloat(editAg.defaultBid) || undefined });
+      reloadAgs();
+      setEditAg(null);
+    } catch (e) { alert(e.message); }
+    setSaving(false);
+  }
+  async function saveKeyword() {
+    setSaving(true);
+    try {
+      await patch(`/keywords/${editKw.id}`, { bid: parseFloat(editKw.bid), state: editKw.state });
+      reloadKws();
+      setEditKw(null);
+    } catch (e) { alert(e.message); }
+    setSaving(false);
+  }
+  async function saveTarget() {
+    setSaving(true);
+    try {
+      await patch(`/targets/${editTgt.id}`, { bid: parseFloat(editTgt.bid) || undefined, state: editTgt.state });
+      reloadTgts();
+      setEditTgt(null);
+    } catch (e) { alert(e.message); }
+    setSaving(false);
+  }
+  async function saveCampaignSettings() {
+    setSaving(true);
+    try {
+      await patch(`/campaigns/${campaign.id}`, {
+        dailyBudget: parseFloat(editCampaign.dailyBudget),
+        biddingStrategy: editCampaign.biddingStrategy,
+      });
+      onCampaignUpdate?.();
+      setEditCampaign(null);
+    } catch (e) { alert(e.message); }
+    setSaving(false);
+  }
+
+  // Bulk actions
+  async function bulkUpdateKw(state) {
+    if (!kwSelected.size) return;
+    setBulkSaving(true);
+    try {
+      const updates = [...kwSelected].map(id => ({ id, ...(state ? { state } : { bid: parseFloat(bulkBidPct) }) }));
+      if (state) {
+        await patch("/keywords/bulk", { updates });
+      } else {
+        // bid adjustment: fetch current bid and adjust by pct
+        const pct = parseFloat(bulkBidPct);
+        if (!isNaN(pct)) {
+          const adjUpdates = filteredKws
+            .filter(kw => kwSelected.has(kw.id))
+            .map(kw => ({ id: kw.id, bid: Math.max(0.02, parseFloat(kw.bid || 0.5) * (1 + pct / 100)) }));
+          await patch("/keywords/bulk", { updates: adjUpdates });
+        }
+      }
+      setKwSelected(new Set());
+      setBulkBidPct("");
+      reloadKws();
+    } catch (e) { showToast(e.message, "err"); }
+    setBulkSaving(false);
+  }
+  async function bulkUpdateTgt(state) {
+    if (!tgtSelected.size) return;
+    setBulkSaving(true);
+    try {
+      if (state) {
+        await patch("/targets/bulk", { updates: [...tgtSelected].map(id => ({ id, state })) });
+      } else {
+        const pct = parseFloat(bulkBidPct);
+        if (!isNaN(pct)) {
+          const adjUpdates = filteredTgts
+            .filter(tg => tgtSelected.has(tg.id))
+            .map(tg => ({ id: tg.id, bid: Math.max(0.02, parseFloat(tg.bid || 0.5) * (1 + pct / 100)) }));
+          await patch("/targets/bulk", { updates: adjUpdates });
+        }
+      }
+      setTgtSelected(new Set());
+      setBulkBidPct("");
+      reloadTgts();
+    } catch (e) { showToast(e.message, "err"); }
+    setBulkSaving(false);
+  }
+
+  // Add actions
+  async function doAddKeyword() {
+    if (!addKwForm.text.trim()) return;
+    setAddSaving(true); setAddError(null);
+    try {
+      await post("/keywords", { adGroupId: selectedAg.id, keywordText: addKwForm.text.trim(), matchType: addKwForm.matchType, bid: parseFloat(addKwForm.bid) || 0.5 });
+      setAddKwModal(false);
+      setAddKwForm({ text: "", matchType: "broad", bid: "0.50" });
+      reloadKws();
+      showToast(t("campaigns.detail.addedOk"));
+    } catch (e) { setAddError(e.message); }
+    setAddSaving(false);
+  }
+  async function doAddTarget() {
+    if (!addTgtForm.value.trim()) return;
+    setAddSaving(true); setAddError(null);
+    try {
+      await post("/targets", { adGroupId: selectedAg.id, expressionType: addTgtForm.expressionType, expressionValue: addTgtForm.value.trim(), bid: parseFloat(addTgtForm.bid) || 0.5 });
+      setAddTgtModal(false);
+      setAddTgtForm({ expressionType: "asinSameAs", value: "", bid: "0.50" });
+      reloadTgts();
+      showToast(t("campaigns.detail.addedOk"));
+    } catch (e) { setAddError(e.message); }
+    setAddSaving(false);
+  }
+  async function doAddAdGroup() {
+    if (!addAgForm.name.trim()) return;
+    setAddSaving(true); setAddError(null);
+    try {
+      await post("/ad-groups", { campaignId: campaign.id, name: addAgForm.name.trim(), defaultBid: parseFloat(addAgForm.defaultBid) || 0.5 });
+      setAddAgModal(false);
+      setAddAgForm({ name: "", defaultBid: "0.50" });
+      reloadAgs();
+      showToast(t("campaigns.detail.addedOk"));
+    } catch (e) { setAddError(e.message); }
+    setAddSaving(false);
+  }
+  async function doAddNegative() {
+    if (!addNegForm.text.trim()) return;
+    setAddSaving(true); setAddError(null);
+    try {
+      const adGroupId = addNegForm.level === "ad_group" && selectedAg ? selectedAg.id : undefined;
+      await post("/negative-keywords", { campaignId: campaign.id, adGroupId, keywordText: addNegForm.text.trim(), matchType: addNegForm.matchType });
+      setAddNegModal(false);
+      setAddNegForm({ text: "", matchType: "negativeExact", level: "campaign" });
+      reloadNegs();
+      showToast(t("campaigns.detail.addedOk"));
+    } catch (e) { setAddError(e.message); }
+    setAddSaving(false);
+  }
+  async function deleteNegative(id) {
+    try {
+      await del(`/negative-keywords/${id}`);
+      reloadNegs();
+    } catch (e) { showToast(e.message, "err"); }
+  }
+
+  // Load placement adjustments when Settings tab opens
+  useEffect(() => {
+    if (tab === "settings" && placements === null) {
+      get(`/campaigns/${campaign.id}/placement`)
+        .then(data => {
+          setPlacements(data);
+          setPlacementForm({ top: data.placementTop || 0, pp: data.placementProductPage || 0 });
+        })
+        .catch(() => {});
+    }
+  }, [tab, placements, campaign.id]);
+
+  async function savePlacements() {
+    setPlacementSaving(true);
+    try {
+      await patch(`/campaigns/${campaign.id}`, {
+        placements: [
+          { predicate: "placementTop",         percentage: parseInt(placementForm.top)  || 0 },
+          { predicate: "placementProductPage",  percentage: parseInt(placementForm.pp)   || 0 },
+        ],
+      });
+      setPlacements({ placementTop: parseInt(placementForm.top) || 0, placementProductPage: parseInt(placementForm.pp) || 0 });
+      setEditPlacements(false);
+      showToast(t("common.save"));
+    } catch (e) { showToast(e.message, "err"); }
+    setPlacementSaving(false);
+  }
+
+  function drillIntoAg(ag) {
+    setSelectedAg(ag);
+    setView("adgroup");
+    setEditKw(null);
+    setEditTgt(null);
+    setKwSearch(""); setTgtSearch("");
+    setKwSelected(new Set()); setTgtSelected(new Set());
+    setAgTab(ag.targeting_type === "auto" ? "targets" : "keywords");
+  }
+
+  // Helpers
+  const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || ct;
+
+  function fmtTargetHelper(expr) {
+    if (!expr) return "—";
+    const arr = Array.isArray(expr) ? expr : [expr];
+    const f = arr[0] || {};
+    const map = {
+      queryHighRelMatches: t("campaigns.detail.autoClose"),
+      queryBroadRelMatches: t("campaigns.detail.autoLoose"),
+      asinSubstituteRelated: t("campaigns.detail.autoSubs"),
+      asinAccessoryRelated: t("campaigns.detail.autoComps"),
+      asinSameAs: `${t("campaigns.detail.asin")}: ${f.value || ""}`,
+      asinCategorySameAs: `Category: ${f.value || ""}`,
+      asinBrandSameAs: `Brand: ${f.value || ""}`,
+    };
+    return map[f.type] || f.type || JSON.stringify(f);
+  }
+
+  const stateLabel = (s) => ({ enabled: t("common.statusEnabled"), paused: t("common.statusPaused"), archived: t("common.statusArchived") }[s] || s);
+
+  const StateBadge = ({ state, onClick }) => (
+    <span className={`tag status-clickable ${state === "enabled" ? "tag-on" : state === "paused" ? "tag-pause" : "tag-arch"}`}
+      onClick={onClick} style={{ cursor: onClick ? "pointer" : undefined, fontSize: 11 }}
+      title={onClick ? t("common.edit") : undefined}>
+      <span style={{ width: 4, height: 4, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />
+      {" "}{stateLabel(state)}
+    </span>
+  );
+
+  const StateSelect = ({ value, onChange }) => (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--s3)", border: "1px solid var(--b2)", color: "var(--tx)" }}>
+      <option value="enabled">{t("common.statusEnabled")}</option>
+      <option value="paused">{t("common.statusPaused")}</option>
+      <option value="archived">{t("common.statusArchived")}</option>
+    </select>
+  );
+
+  const chip = (label, val, col) => (
+    <span style={{ fontSize: 11, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 5, padding: "3px 9px", color: col || "var(--tx2)", whiteSpace: "nowrap" }}>
+      <span style={{ color: "var(--tx3)", marginRight: 3 }}>{label}:</span>{val}
+    </span>
+  );
+
+  const THEAD_ROW = { background: "var(--s3)", position: "sticky", top: 0, zIndex: 1 };
+  const ROW = (i) => ({ borderBottom: "1px solid var(--b1)", background: i % 2 ? "rgba(255,255,255,.015)" : "transparent" });
+  const TD = ({ children, style }) => <td style={{ padding: "7px 10px", ...style }}>{children}</td>;
+
+  // Sortable column header
+  const SortTH = ({ field, sortState, setSortFn, children, right }) => {
+    const active = sortState.field === field;
+    return (
+      <th onClick={() => toggleSort(sortState, setSortFn, field)}
+        style={{ padding: "8px 10px", textAlign: right ? "right" : "left", color: active ? "var(--ac2)" : "var(--tx3)",
+          fontWeight: 600, fontSize: 11, borderBottom: "1px solid var(--b1)", whiteSpace: "nowrap",
+          cursor: "pointer", userSelect: "none" }}>
+        {children}{active ? (sortState.dir === "asc" ? " ↑" : " ↓") : ""}
+      </th>
+    );
+  };
+  const TH = ({ children, right }) => (
+    <th style={{ padding: "8px 10px", textAlign: right ? "right" : "left", color: "var(--tx3)", fontWeight: 600, fontSize: 11, borderBottom: "1px solid var(--b1)", whiteSpace: "nowrap" }}>
+      {children}
+    </th>
+  );
+
+  // Bulk action bar
+  const BulkBar = ({ selected, onPause, onEnable, onArchive, onBidAdj, entityType }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", background: "rgba(99,102,241,.12)", borderBottom: "1px solid var(--b1)", flexShrink: 0, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 11, color: "var(--ac2)", fontWeight: 600 }}>
+        {t("campaigns.detail.selectedCount").replace("{count}", selected.size)}
+      </span>
+      <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 10px" }} onClick={onEnable} disabled={bulkSaving}>{t("campaigns.detail.bulkEnableBtn")}</button>
+      <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 10px" }} onClick={onPause}  disabled={bulkSaving}>{t("campaigns.detail.bulkPauseBtn")}</button>
+      <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 10px" }} onClick={onArchive} disabled={bulkSaving}>{t("campaigns.detail.bulkArchiveBtn")}</button>
+      <span style={{ width: 1, height: 16, background: "var(--b2)", margin: "0 2px" }} />
+      <span style={{ fontSize: 10, color: "var(--tx3)" }}>{t("campaigns.detail.bulkBidAdjLabel")}</span>
+      <input type="number" value={bulkBidPct} onChange={e => setBulkBidPct(e.target.value)}
+        placeholder="e.g. 10" style={{ width: 64, fontSize: 11, padding: "2px 6px" }} />
+      <button className="btn btn-primary" style={{ fontSize: 10, padding: "3px 10px" }} onClick={onBidAdj} disabled={bulkSaving || !bulkBidPct}>
+        {bulkSaving ? "…" : t("campaigns.detail.bulkApplyBtn")}
+      </button>
+    </div>
+  );
+
+  // Search bar
+  const SearchBar = ({ value, onChange, onAdd, addLabel }) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder={t("campaigns.detail.searchPlaceholder")}
+        style={{ fontSize: 11, padding: "4px 8px", flex: 1, maxWidth: 260, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, color: "var(--tx)" }} />
+      {onAdd && <button className="btn btn-primary" style={{ fontSize: 11, padding: "4px 12px", marginLeft: "auto" }} onClick={onAdd}>+ {addLabel}</button>}
+    </div>
+  );
+
+  // Inline add-form modal (small centered modal within the big modal)
+  const AddModal = ({ title, onClose: closeAdd, onSave, children }) => (
+    <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "var(--s1)", border: "1px solid var(--b2)", borderRadius: 8, padding: 24, width: "min(420px, 90%)", boxShadow: "0 8px 40px rgba(0,0,0,.4)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>{title}</span>
+          <button onClick={closeAdd} style={{ background: "none", border: "none", color: "var(--tx3)", cursor: "pointer", fontSize: 18 }}>×</button>
+        </div>
+        {addError && <div style={{ color: "var(--red)", fontSize: 11, marginBottom: 12, padding: "6px 10px", background: "rgba(239,68,68,.1)", borderRadius: 4 }}>{addError}</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>
+        <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+          <button className="btn btn-primary" style={{ flex: 1, fontSize: 12 }} onClick={onSave} disabled={addSaving}>
+            {addSaving ? <span className="loader" style={{ width: 12, height: 12 }} /> : t("common.save")}
+          </button>
+          <button className="btn btn-ghost" style={{ fontSize: 12, padding: "7px 14px" }} onClick={closeAdd}>{t("common.cancel")}</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const FormRow = ({ label, children }) => (
+    <div>
+      <div style={{ fontSize: 11, color: "var(--tx3)", fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
+      {children}
+    </div>
+  );
+  const FormInput = (props) => (
+    <input {...props} style={{ width: "100%", fontSize: 12, padding: "6px 10px", background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, color: "var(--tx)", boxSizing: "border-box", ...props.style }} />
+  );
+  const FormSelect = ({ value, onChange, options }) => (
+    <select value={value} onChange={e => onChange(e.target.value)}
+      style={{ width: "100%", fontSize: 12, padding: "6px 10px", background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, color: "var(--tx)" }}>
+      {options.map(({ value: v, label: l }) => <option key={v} value={v}>{l}</option>)}
+    </select>
+  );
+
+  // ── Ad Groups tab ──
+  const AdGroupsTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
+      <SearchBar value={agSearch} onChange={setAgSearch} onAdd={() => { setAddError(null); setAddAgModal(true); }} addLabel={t("campaigns.detail.addAdGroup")} />
+      {agLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      : filteredAgs.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{agSearch ? t("campaigns.detail.searchPlaceholder") : t("campaigns.detail.noAdGroups")}</div>
+      : (
+        <div style={{ overflowX: "auto", flex: 1 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr style={THEAD_ROW}>
+              <SortTH field="name"        sortState={agSort} setSortFn={setAgSort}>{t("campaigns.colName")}</SortTH>
+              <TH>{t("campaigns.colStatus")}</TH>
+              <SortTH field="default_bid" sortState={agSort} setSortFn={setAgSort}>{t("campaigns.detail.defBid")}</SortTH>
+              <TH>{t("campaigns.detail.items")}</TH>
+              <SortTH field="spend"  sortState={agSort} setSortFn={setAgSort} right>Spend</SortTH>
+              <SortTH field="sales"  sortState={agSort} setSortFn={setAgSort} right>{t("campaigns.detail.sales")}</SortTH>
+              <SortTH field="acos"   sortState={agSort} setSortFn={setAgSort} right>ACOS</SortTH>
+              <SortTH field="roas"   sortState={agSort} setSortFn={setAgSort} right>ROAS</SortTH>
+              <TH></TH>
+            </tr></thead>
+            <tbody>
+              {filteredAgs.map((ag, i) => {
+                const isEditing = editAg?.id === ag.id;
+                return (
+                  <tr key={ag.id} style={ROW(i)}>
+                    <TD><span onClick={() => drillIntoAg(ag)} style={{ color: "var(--ac2)", cursor: "pointer", fontWeight: 500 }}
+                      onMouseEnter={e => e.target.style.textDecoration = "underline"}
+                      onMouseLeave={e => e.target.style.textDecoration = "none"}
+                      title={ag.name}>{ag.name}</span></TD>
+                    <TD>{isEditing
+                      ? <StateSelect value={editAg.state} onChange={v => setEditAg(a => ({ ...a, state: v }))} />
+                      : <StateBadge state={ag.state} onClick={() => setEditAg({ id: ag.id, state: ag.state, defaultBid: ag.default_bid || "" })} />
+                    }</TD>
+                    <TD>{isEditing
+                      ? <input type="number" step="0.01" min="0.02" value={editAg.defaultBid}
+                          onChange={e => setEditAg(a => ({ ...a, defaultBid: e.target.value }))}
+                          style={{ width: 72, fontSize: 11, padding: "2px 6px" }} />
+                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>${parseFloat(ag.default_bid || 0).toFixed(2)}</span>
+                    }</TD>
+                    <TD><span style={{ fontSize: 11, color: "var(--tx3)" }}>
+                      {Number(ag.keyword_count) > 0 && <span style={{ color: "var(--ac2)" }}>{ag.keyword_count}k</span>}
+                      {Number(ag.target_count)  > 0 && <span style={{ color: "var(--amb)", marginLeft: 3 }}>{ag.target_count}t</span>}
+                      {Number(ag.keyword_count) === 0 && Number(ag.target_count) === 0 && "—"}
+                    </span></TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{parseFloat(ag.spend) > 0 ? `$${parseFloat(ag.spend).toFixed(0)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{parseFloat(ag.sales) > 0 ? `$${parseFloat(ag.sales).toFixed(0)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: ag.acos != null ? acosColor(parseFloat(ag.acos)) : "var(--tx3)" }}>
+                      {ag.acos != null ? `${parseFloat(ag.acos).toFixed(1)}%` : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--pur)" }}>
+                      {ag.roas != null ? `${parseFloat(ag.roas).toFixed(2)}×` : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right" }}>
+                      {isEditing
+                        ? <div style={{ display: "flex", gap: 4 }}>
+                            <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }} onClick={saveAdGroup} disabled={saving}>{saving ? "…" : <Check size={11} />}</button>
+                            <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditAg(null)}><X size={11} strokeWidth={1.75} /></button>
+                          </div>
+                        : <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 10px" }} onClick={() => drillIntoAg(ag)}>{t("campaigns.detail.viewBtn")}</button>
+                      }
+                    </TD>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {addAgModal && (
+        <AddModal title={t("campaigns.detail.addAdGroup")} onClose={() => setAddAgModal(false)} onSave={doAddAdGroup}>
+          <FormRow label={t("campaigns.detail.agName")}>
+            <FormInput value={addAgForm.name} onChange={e => setAddAgForm(f => ({ ...f, name: e.target.value }))} placeholder={t("campaigns.detail.agName")} autoFocus />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.defaultBidLabel")}>
+            <FormInput type="number" step="0.01" min="0.02" value={addAgForm.defaultBid} onChange={e => setAddAgForm(f => ({ ...f, defaultBid: e.target.value }))} />
+          </FormRow>
+        </AddModal>
+      )}
+    </div>
+  );
+
+  // ── Keywords tab (inside ad group) ──
+  const KeywordsTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
+      {kwSelected.size > 0 && (
+        <BulkBar selected={kwSelected}
+          onPause={() => bulkUpdateKw("paused")} onEnable={() => bulkUpdateKw("enabled")} onArchive={() => bulkUpdateKw("archived")}
+          onBidAdj={() => bulkUpdateKw(null)} entityType="kw" />
+      )}
+      <SearchBar value={kwSearch} onChange={v => { setKwSearch(v); setKwSelected(new Set()); }}
+        onAdd={() => { setAddError(null); setAddKwModal(true); }} addLabel={t("campaigns.detail.addKeyword")} />
+      {kwLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      : filteredKws.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("campaigns.detail.noKeywordsFound")}</div>
+      : (
+        <div style={{ overflowX: "auto", flex: 1 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr style={THEAD_ROW}>
+              <TH><input type="checkbox"
+                checked={kwSelected.size > 0 && filteredKws.every(kw => kwSelected.has(kw.id))}
+                onChange={e => setKwSelected(e.target.checked ? new Set(filteredKws.map(k => k.id)) : new Set())}
+                style={{ cursor: "pointer" }} /></TH>
+              <SortTH field="keyword_text" sortState={kwSort} setSortFn={setKwSort}>{t("keywords.colKeyword")}</SortTH>
+              <SortTH field="match_type"   sortState={kwSort} setSortFn={setKwSort}>{t("keywords.colMatch")}</SortTH>
+              <TH>{t("campaigns.colStatus")}</TH>
+              <SortTH field="bid"    sortState={kwSort} setSortFn={setKwSort}>{t("keywords.colBid")}</SortTH>
+              <SortTH field="clicks" sortState={kwSort} setSortFn={setKwSort} right>{t("keywords.colClicks")}</SortTH>
+              <SortTH field="orders" sortState={kwSort} setSortFn={setKwSort} right>{t("keywords.colOrders")}</SortTH>
+              <SortTH field="spend"  sortState={kwSort} setSortFn={setKwSort} right>Spend</SortTH>
+              <SortTH field="acos"   sortState={kwSort} setSortFn={setKwSort} right>ACOS</SortTH>
+              <TH></TH>
+            </tr></thead>
+            <tbody>
+              {filteredKws.map((kw, i) => {
+                const isEditing = editKw?.id === kw.id;
+                return (
+                  <tr key={kw.id} style={ROW(i)}>
+                    <TD style={{ width: 30 }}>
+                      <input type="checkbox" checked={kwSelected.has(kw.id)}
+                        onChange={e => setKwSelected(prev => { const s = new Set(prev); e.target.checked ? s.add(kw.id) : s.delete(kw.id); return s; })}
+                        style={{ cursor: "pointer" }} />
+                    </TD>
+                    <TD style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={kw.keyword_text}>{kw.keyword_text}</TD>
+                    <TD style={{ color: "var(--tx3)", fontSize: 10, textTransform: "lowercase" }}>{kw.match_type}</TD>
+                    <TD>{isEditing
+                      ? <StateSelect value={editKw.state} onChange={v => setEditKw(k => ({ ...k, state: v }))} />
+                      : <StateBadge state={kw.state} onClick={() => setEditKw({ id: kw.id, bid: kw.bid || "", state: kw.state })} />
+                    }</TD>
+                    <TD>{isEditing
+                      ? <input type="number" step="0.01" min="0.02" value={editKw.bid}
+                          onChange={e => setEditKw(k => ({ ...k, bid: e.target.value }))}
+                          style={{ width: 72, fontSize: 11, padding: "2px 6px" }} />
+                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>${parseFloat(kw.bid || 0).toFixed(2)}</span>
+                    }</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{kw.clicks ? Number(kw.clicks).toLocaleString() : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{kw.orders ? Number(kw.orders) : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{kw.spend && parseFloat(kw.spend) > 0 ? `$${parseFloat(kw.spend).toFixed(2)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: kw.acos != null ? acosColor(parseFloat(kw.acos)) : "var(--tx3)" }}>
+                      {kw.acos != null ? `${parseFloat(kw.acos).toFixed(1)}%` : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right" }}>
+                      {isEditing
+                        ? <div style={{ display: "flex", gap: 4 }}>
+                            <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }} onClick={saveKeyword} disabled={saving}>{saving ? "…" : <Check size={11} />}</button>
+                            <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditKw(null)}><X size={11} strokeWidth={1.75} /></button>
+                          </div>
+                        : <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 6px" }}
+                            onClick={() => setEditKw({ id: kw.id, bid: kw.bid || "", state: kw.state })}><Edit2 size={11} /></button>
+                      }
+                    </TD>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {addKwModal && (
+        <AddModal title={t("campaigns.detail.addKeyword")} onClose={() => { setAddKwModal(false); setAddError(null); }} onSave={doAddKeyword}>
+          <FormRow label={t("campaigns.detail.kwText")}>
+            <FormInput value={addKwForm.text} onChange={e => setAddKwForm(f => ({ ...f, text: e.target.value }))} placeholder={t("campaigns.detail.kwText")} autoFocus />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.selectMatchType")}>
+            <FormSelect value={addKwForm.matchType} onChange={v => setAddKwForm(f => ({ ...f, matchType: v }))
+            } options={[
+              { value: "exact",  label: t("keywords.matchExact") },
+              { value: "phrase", label: t("keywords.matchPhrase") },
+              { value: "broad",  label: t("keywords.matchBroad") },
+            ]} />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.bidLabel")}>
+            <FormInput type="number" step="0.01" min="0.02" value={addKwForm.bid} onChange={e => setAddKwForm(f => ({ ...f, bid: e.target.value }))} />
+          </FormRow>
+        </AddModal>
+      )}
+    </div>
+  );
+
+  // ── Targets tab (inside ad group) ──
+  const TargetsTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
+      {tgtSelected.size > 0 && (
+        <BulkBar selected={tgtSelected}
+          onPause={() => bulkUpdateTgt("paused")} onEnable={() => bulkUpdateTgt("enabled")} onArchive={() => bulkUpdateTgt("archived")}
+          onBidAdj={() => bulkUpdateTgt(null)} entityType="tgt" />
+      )}
+      <SearchBar value={tgtSearch} onChange={v => { setTgtSearch(v); setTgtSelected(new Set()); }}
+        onAdd={() => { setAddError(null); setAddTgtModal(true); }} addLabel={t("campaigns.detail.addTarget")} />
+      {tgtLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      : filteredTgts.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("campaigns.detail.noTargets")}</div>
+      : (
+        <div style={{ overflowX: "auto", flex: 1 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr style={THEAD_ROW}>
+              <TH><input type="checkbox"
+                checked={tgtSelected.size > 0 && filteredTgts.every(tg => tgtSelected.has(tg.id))}
+                onChange={e => setTgtSelected(e.target.checked ? new Set(filteredTgts.map(t => t.id)) : new Set())}
+                style={{ cursor: "pointer" }} /></TH>
+              <TH>{t("campaigns.detail.target")}</TH>
+              <SortTH field="expression_type" sortState={tgtSort} setSortFn={setTgtSort}>{t("campaigns.detail.expressionType")}</SortTH>
+              <TH>{t("campaigns.colStatus")}</TH>
+              <SortTH field="bid"    sortState={tgtSort} setSortFn={setTgtSort}>{t("keywords.colBid")}</SortTH>
+              <SortTH field="clicks" sortState={tgtSort} setSortFn={setTgtSort} right>{t("keywords.colClicks")}</SortTH>
+              <SortTH field="orders" sortState={tgtSort} setSortFn={setTgtSort} right>{t("keywords.colOrders")}</SortTH>
+              <SortTH field="spend"  sortState={tgtSort} setSortFn={setTgtSort} right>Spend</SortTH>
+              <SortTH field="acos"   sortState={tgtSort} setSortFn={setTgtSort} right>ACOS</SortTH>
+              <TH></TH>
+            </tr></thead>
+            <tbody>
+              {filteredTgts.map((tgt, i) => {
+                const isEditing = editTgt?.id === tgt.id;
+                const label = fmtTargetHelper(tgt.resolved_expression || tgt.expression);
+                return (
+                  <tr key={tgt.id} style={ROW(i)}>
+                    <TD style={{ width: 30 }}>
+                      <input type="checkbox" checked={tgtSelected.has(tgt.id)}
+                        onChange={e => setTgtSelected(prev => { const s = new Set(prev); e.target.checked ? s.add(tgt.id) : s.delete(tgt.id); return s; })}
+                        style={{ cursor: "pointer" }} />
+                    </TD>
+                    <TD style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>{label}</TD>
+                    <TD style={{ color: tgt.expression_type === "auto" ? "var(--teal)" : "var(--tx3)", fontSize: 10 }}>
+                      {tgt.expression_type === "auto" ? t("rules.targetingAutoShort") : tgt.expression_type === "manual" ? t("rules.targetingManualShort") : tgt.expression_type || "—"}
+                    </TD>
+                    <TD>{isEditing
+                      ? <StateSelect value={editTgt.state} onChange={v => setEditTgt(prev => ({ ...prev, state: v }))} />
+                      : <StateBadge state={tgt.state} onClick={() => setEditTgt({ id: tgt.id, bid: tgt.bid || "", state: tgt.state })} />
+                    }</TD>
+                    <TD>{isEditing
+                      ? <input type="number" step="0.01" min="0.02" value={editTgt.bid}
+                          onChange={e => setEditTgt(prev => ({ ...prev, bid: e.target.value }))}
+                          style={{ width: 72, fontSize: 11, padding: "2px 6px" }} />
+                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>{tgt.bid ? `$${parseFloat(tgt.bid).toFixed(2)}` : "—"}</span>
+                    }</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{tgt.clicks ? Number(tgt.clicks).toLocaleString() : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{tgt.orders ? Number(tgt.orders) : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{tgt.spend && parseFloat(tgt.spend) > 0 ? `$${parseFloat(tgt.spend).toFixed(2)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: tgt.acos != null ? acosColor(parseFloat(tgt.acos)) : "var(--tx3)" }}>
+                      {tgt.acos != null ? `${parseFloat(tgt.acos).toFixed(1)}%` : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right" }}>
+                      {isEditing
+                        ? <div style={{ display: "flex", gap: 4 }}>
+                            <button className="btn btn-green" style={{ fontSize: 10, padding: "3px 8px" }} onClick={saveTarget} disabled={saving}>{saving ? "…" : <Check size={11} />}</button>
+                            <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 8px" }} onClick={() => setEditTgt(null)}><X size={11} strokeWidth={1.75} /></button>
+                          </div>
+                        : <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 6px" }}
+                            onClick={() => setEditTgt({ id: tgt.id, bid: tgt.bid || "", state: tgt.state })}><Edit2 size={11} /></button>
+                      }
+                    </TD>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {addTgtModal && (
+        <AddModal title={t("campaigns.detail.addTarget")} onClose={() => { setAddTgtModal(false); setAddError(null); }} onSave={doAddTarget}>
+          <FormRow label={t("campaigns.detail.expressionType")}>
+            <FormSelect value={addTgtForm.expressionType} onChange={v => setAddTgtForm(f => ({ ...f, expressionType: v }))} options={[
+              { value: "asinSameAs",         label: `ASIN (${t("campaigns.detail.asin")})` },
+              { value: "asinCategorySameAs", label: "Category ID" },
+              { value: "asinBrandSameAs",    label: "Brand ID" },
+            ]} />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.asinTarget")}>
+            <FormInput value={addTgtForm.value} onChange={e => setAddTgtForm(f => ({ ...f, value: e.target.value }))}
+              placeholder={addTgtForm.expressionType === "asinSameAs" ? "B0XXXXXXXXXX" : "ID"} autoFocus />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.bidLabel")}>
+            <FormInput type="number" step="0.01" min="0.02" value={addTgtForm.bid} onChange={e => setAddTgtForm(f => ({ ...f, bid: e.target.value }))} />
+          </FormRow>
+        </AddModal>
+      )}
+    </div>
+  );
+
+  // ── Product Ads tab ──
+  const ProductAdsTab = () => (
+    <div style={{ overflowX: "auto" }}>
+      {adsLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      : productAds.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("campaigns.detail.noProductAds")}</div>
+      : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead><tr style={THEAD_ROW}>
+            <TH></TH><TH>{t("campaigns.detail.asin")}</TH><TH>{t("campaigns.detail.sku")}</TH><TH>{t("campaigns.colStatus")}</TH><TH>{t("nav.products")}</TH>
+          </tr></thead>
+          <tbody>
+            {productAds.map((ad, i) => (
+              <tr key={ad.id} style={ROW(i)}>
+                <TD style={{ width: 36 }}>
+                  {ad.image_url
+                    ? <img src={ad.image_url} alt="" style={{ width: 30, height: 30, objectFit: "contain", borderRadius: 3, border: "1px solid var(--b1)" }} />
+                    : <div style={{ width: 30, height: 30, background: "var(--s3)", borderRadius: 3, border: "1px solid var(--b1)" }} />
+                  }
+                </TD>
+                <TD style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ac2)" }}>
+                  <a href={`https://www.amazon.de/dp/${ad.asin}`} target="_blank" rel="noopener noreferrer"
+                    style={{ color: "inherit", textDecoration: "none" }}
+                    onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
+                    onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>
+                    {ad.asin || "—"}
+                  </a>
+                </TD>
+                <TD style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--tx3)" }}>{ad.sku || "—"}</TD>
+                <TD><StateBadge state={ad.state || "enabled"} /></TD>
+                <TD style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--tx2)", fontSize: 11 }} title={ad.product_title}>
+                  {ad.product_title || ad.brand || "—"}
+                </TD>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+
+  // ── Negatives tab ──
+  const NegativesTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
+      <SearchBar value={negSearch} onChange={setNegSearch}
+        onAdd={() => { setAddError(null); setAddNegForm(f => ({ ...f, level: view === "adgroup" ? "ad_group" : "campaign" })); setAddNegModal(true); }}
+        addLabel={t("campaigns.detail.addNegative")} />
+      {negLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      : visibleNegs.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("negatives.noResults")}</div>
+      : (
+        <div style={{ overflowX: "auto", flex: 1 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr style={THEAD_ROW}>
+              <TH>{t("keywords.colKeyword")}</TH><TH>{t("campaigns.detail.matchType")}</TH>
+              <TH>{t("campaigns.detail.kwNegLevel")}</TH><TH>{t("campaigns.detail.added")}</TH><TH></TH>
+            </tr></thead>
+            <tbody>
+              {visibleNegs.map((nk, i) => (
+                <tr key={nk.id} style={ROW(i)}>
+                  <TD style={{ color: "var(--tx)" }}>{nk.keyword_text}</TD>
+                  <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{(nk.match_type || "").replace(/negative_?/, "")}</TD>
+                  <TD><span className={`badge ${nk.level === "campaign" ? "bg-bl" : "bg-amb"}`} style={{ fontSize: 10 }}>
+                    {nk.level === "campaign" ? t("campaigns.detail.levelCampaign") : t("campaigns.detail.levelAdGroup")}
+                  </span></TD>
+                  <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{nk.created_at ? new Date(nk.created_at).toLocaleDateString() : "—"}</TD>
+                  <TD style={{ textAlign: "right" }}>
+                    <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 8px", color: "var(--red)" }}
+                      onClick={() => deleteNegative(nk.id)}>{t("campaigns.detail.deleteNeg")}</button>
+                  </TD>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {addNegModal && (
+        <AddModal title={t("campaigns.detail.addNegative")} onClose={() => { setAddNegModal(false); setAddError(null); }} onSave={doAddNegative}>
+          <FormRow label={t("campaigns.detail.kwText")}>
+            <FormInput value={addNegForm.text} onChange={e => setAddNegForm(f => ({ ...f, text: e.target.value }))} placeholder={t("campaigns.detail.kwText")} autoFocus />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.selectMatchType")}>
+            <FormSelect value={addNegForm.matchType} onChange={v => setAddNegForm(f => ({ ...f, matchType: v }))} options={[
+              { value: "negativeExact",  label: t("campaigns.detail.negMatchExact") },
+              { value: "negativePhrase", label: t("campaigns.detail.negMatchPhrase") },
+            ]} />
+          </FormRow>
+          <FormRow label={t("campaigns.detail.kwNegLevel")}>
+            <FormSelect value={addNegForm.level} onChange={v => setAddNegForm(f => ({ ...f, level: v }))} options={[
+              { value: "campaign", label: t("campaigns.detail.levelCampaign") },
+              ...(selectedAg ? [{ value: "ad_group", label: t("campaigns.detail.levelAdGroup") }] : []),
+            ]} />
+          </FormRow>
+        </AddModal>
+      )}
+    </div>
+  );
+
+  // ── Settings tab ──
+  const SettingsTab = () => {
+    const ec = editCampaign || { dailyBudget: campaign.daily_budget || "", biddingStrategy: campaign.bidding_strategy || "" };
+    const isEditing = !!editCampaign;
+    return (
+      <div style={{ padding: "24px 28px", maxWidth: 560 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          {[
+            { label: t("campaigns.detail.campaignType"), val: campaign.campaign_type || "—" },
+            { label: t("rules.targetingType"), val: campaign.targeting_type || "—" },
+            { label: t("campaigns.detail.startDate"), val: campaign.start_date || "—" },
+          ].map(({ label, val }) => (
+            <div key={label}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)", marginBottom: 5, textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
+              <div style={{ fontSize: 13 }}>{val}</div>
+            </div>
+          ))}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)", marginBottom: 5, textTransform: "uppercase", letterSpacing: ".04em" }}>{t("campaigns.detail.dailyBudget")}</div>
+            {isEditing
+              ? <input type="number" step="0.01" min="1" value={ec.dailyBudget}
+                  onChange={e => setEditCampaign(c => ({ ...c, dailyBudget: e.target.value }))}
+                  style={{ fontSize: 13, padding: "6px 10px", width: 160 }} />
+              : <div style={{ fontSize: 13, fontFamily: "var(--mono)" }}>
+                  {campaign.daily_budget ? `$${parseFloat(campaign.daily_budget).toFixed(2)}` : "—"}
+                </div>
+            }
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)", marginBottom: 5, textTransform: "uppercase", letterSpacing: ".04em" }}>{t("campaigns.detail.biddingStrategy")}</div>
+            {isEditing
+              ? <select value={ec.biddingStrategy} onChange={e => setEditCampaign(c => ({ ...c, biddingStrategy: e.target.value }))}
+                  style={{ fontSize: 13, padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 5, color: "var(--tx)" }}>
+                  <option value="legacyForSales">{t("campaigns.detail.bidDynDown")}</option>
+                  <option value="autoForSales">{t("campaigns.detail.bidDynUpDown")}</option>
+                  <option value="manual">{t("campaigns.detail.bidFixed")}</option>
+                </select>
+              : <div style={{ fontSize: 13 }}>
+                  {{ legacyForSales: t("campaigns.detail.bidDynDown"), autoForSales: t("campaigns.detail.bidDynUpDown"), manual: t("campaigns.detail.bidFixed") }[campaign.bidding_strategy] || campaign.bidding_strategy || "—"}
+                </div>
+            }
+          </div>
+          {!isEditing
+            ? <button className="btn btn-primary" style={{ alignSelf: "flex-start", fontSize: 12, padding: "7px 18px" }}
+                onClick={() => setEditCampaign({ dailyBudget: campaign.daily_budget || "", biddingStrategy: campaign.bidding_strategy || "" })}>
+                {t("campaigns.detail.editSettings")}
+              </button>
+            : <div style={{ display: "flex", gap: 10 }}>
+                <button className="btn btn-primary" style={{ fontSize: 12, padding: "7px 18px" }} onClick={saveCampaignSettings} disabled={saving}>
+                  {saving ? <span className="loader" style={{ width: 12, height: 12 }} /> : t("common.save")}
+                </button>
+                <button className="btn btn-ghost" style={{ fontSize: 12, padding: "7px 14px" }} onClick={() => setEditCampaign(null)}>{t("common.cancel")}</button>
+              </div>
+          }
+
+          {/* Placement Adjustments */}
+          <div style={{ paddingTop: 20, borderTop: "1px solid var(--b1)" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)", marginBottom: 14, textTransform: "uppercase", letterSpacing: ".04em" }}>
+              {t("campaigns.detail.placementAdj")}
+            </div>
+            {placements === null ? (
+              <div style={{ color: "var(--tx3)", fontSize: 12 }}><span className="loader" style={{ width: 12, height: 12 }} /></div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 12, color: "var(--tx2)", width: 200 }}>{t("campaigns.detail.placementTop")}</span>
+                  {editPlacements
+                    ? <input type="number" min="0" max="900" step="1" value={placementForm.top}
+                        onChange={e => setPlacementForm(f => ({ ...f, top: e.target.value }))}
+                        style={{ width: 80, fontSize: 12, padding: "4px 8px" }} />
+                    : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)", fontSize: 13 }}>{placements.placementTop ?? 0}%</span>
+                  }
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 12, color: "var(--tx2)", width: 200 }}>{t("campaigns.detail.placementPP")}</span>
+                  {editPlacements
+                    ? <input type="number" min="0" max="900" step="1" value={placementForm.pp}
+                        onChange={e => setPlacementForm(f => ({ ...f, pp: e.target.value }))}
+                        style={{ width: 80, fontSize: 12, padding: "4px 8px" }} />
+                    : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)", fontSize: 13 }}>{placements.placementProductPage ?? 0}%</span>
+                  }
+                </div>
+                {!editPlacements
+                  ? <button className="btn btn-ghost" style={{ alignSelf: "flex-start", fontSize: 11, padding: "5px 14px" }}
+                      onClick={() => setEditPlacements(true)}>{t("common.edit")}</button>
+                  : <div style={{ display: "flex", gap: 10 }}>
+                      <button className="btn btn-primary" style={{ fontSize: 11, padding: "5px 14px" }} onClick={savePlacements} disabled={placementSaving}>
+                        {placementSaving ? <span className="loader" style={{ width: 11, height: 11 }} /> : t("campaigns.detail.placementSave")}
+                      </button>
+                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "5px 10px" }} onClick={() => setEditPlacements(false)}>{t("common.cancel")}</button>
+                    </div>
+                }
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const DTAB = (active) => ({
+    fontSize: 12, padding: "9px 16px", fontWeight: active ? 600 : 400,
+    color: active ? "var(--ac2)" : "var(--tx3)",
+    borderBottom: active ? "2px solid var(--ac2)" : "2px solid transparent",
+    background: "none", border: "none", cursor: "pointer", whiteSpace: "nowrap", transition: "color 150ms",
+  });
+
+  const campaignTabs = [
+    { id: "adgroups",  label: `${t("campaigns.detail.adGroups")} (${adGroups.length || "…"})` },
+    { id: "settings",  label: t("campaigns.detail.settings") },
+    { id: "negatives", label: `${t("campaigns.detail.negatives")} (${negatives.filter(n => n.level === "campaign").length || "0"})` },
+  ];
+  const agTabs = [
+    ...(selectedAg?.targeting_type !== "auto" ? [{ id: "keywords", label: `${t("nav.keywords")} (${keywords.length || "…"})` }] : []),
+    { id: "targets",   label: `${t("campaigns.detail.targets")} (${targets.length || "…"})` },
+    { id: "ads",       label: `${t("campaigns.detail.productAds")} (${productAds.length || "…"})` },
+    { id: "negatives", label: `${t("campaigns.detail.negatives")}` },
+  ];
+
+  const periodOptions = [7, 14, 30, 90];
+
+  return createPortal(
+    <div>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 900 }} />
+      <div style={{
+        position: "fixed", top: "4vh", left: "50%", transform: "translateX(-50%)",
+        width: "min(1140px, 96vw)", height: "92vh",
+        background: "var(--s2)", borderRadius: 10, border: "1px solid var(--b2)",
+        zIndex: 901, display: "flex", flexDirection: "column", overflow: "hidden",
+        boxShadow: "0 24px 80px rgba(0,0,0,.5)", animation: "fadeIn 180ms ease",
+      }}>
+        {/* Toast */}
+        {toast && (
+          <div style={{
+            position: "absolute", top: 14, left: "50%", transform: "translateX(-50%)",
+            padding: "8px 20px", borderRadius: 6, fontSize: 12, fontWeight: 600,
+            background: toast.type === "err" ? "var(--red)" : "var(--grn)", color: "#fff",
+            zIndex: 20, boxShadow: "0 4px 16px rgba(0,0,0,.3)", pointerEvents: "none",
+          }}>{toast.msg}</div>
+        )}
+        {/* Header */}
+        <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, minWidth: 0, flex: 1, marginRight: 12 }}>
+              {view === "adgroup" ? (
+                <>
+                  <button onClick={() => { setView("campaign"); setSelectedAg(null); setEditKw(null); setEditTgt(null); setTab("adgroups"); setKwSelected(new Set()); setTgtSelected(new Set()); }}
+                    style={{ background: "none", border: "none", color: "var(--ac2)", cursor: "pointer", padding: 0, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 260 }}>
+                    ← {campaign.name.length > 35 ? campaign.name.slice(0, 35) + "…" : campaign.name}
+                  </button>
+                  <ChevronRight size={11} strokeWidth={2} style={{ flexShrink: 0 }} />
+                  <span style={{ color: "var(--tx)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedAg?.name}</span>
+                </>
+              ) : (
+                <div style={{ fontWeight: 700, fontSize: 15, color: "var(--tx)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {campaign.name}
+                </div>
+              )}
+            </div>
+            {/* Period selector */}
+            <div style={{ display: "flex", gap: 2, marginRight: 12, flexShrink: 0 }}>
+              {periodOptions.map(d => (
+                <button key={d} onClick={() => setLocalDays(d)}
+                  style={{ fontSize: 10, padding: "3px 8px", borderRadius: 4, border: "1px solid",
+                    borderColor: localDays === d ? "var(--ac2)" : "var(--b2)",
+                    background: localDays === d ? "rgba(99,102,241,.18)" : "transparent",
+                    color: localDays === d ? "var(--ac2)" : "var(--tx3)", cursor: "pointer" }}>
+                  {t(`campaigns.detail.period${d}d`)}
+                </button>
+              ))}
+            </div>
+            <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--tx3)", cursor: "pointer", fontSize: 22, lineHeight: 1, padding: "0 4px", flexShrink: 0 }}>×</button>
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <span className={`badge ${typeLabel(campaign.campaign_type) === "SP" ? "bg-bl" : typeLabel(campaign.campaign_type) === "SB" ? "bg-grn" : "bg-amb"}`} style={{ fontSize: 10 }}>{typeLabel(campaign.campaign_type)}</span>
+            <span className={`tag ${campaign.state === "enabled" ? "tag-on" : campaign.state === "paused" ? "tag-pause" : "tag-arch"}`} style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ width: 4, height: 4, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />{campaign.state}
+            </span>
+            {chip(t("campaigns.colBudget"), campaign.daily_budget ? `$${parseFloat(campaign.daily_budget).toFixed(0)}` : "—")}
+            {chip("Spend", `$${parseFloat(campaign.spend || 0).toFixed(0)}`, "var(--ac2)")}
+            {campaign.acos != null && chip("ACOS", `${parseFloat(campaign.acos).toFixed(1)}%`, acosColor(parseFloat(campaign.acos)))}
+            {campaign.roas != null && chip("ROAS", `${parseFloat(campaign.roas).toFixed(2)}×`, "var(--pur)")}
+            {view === "adgroup" && selectedAg && selectedAg.default_bid && chip(t("campaigns.detail.agBid"), `$${parseFloat(selectedAg.default_bid).toFixed(2)}`, "var(--ac2)")}
+            {view === "adgroup" && selectedAg && parseFloat(selectedAg.acos) > 0 && chip(t("campaigns.detail.agAcos"), `${parseFloat(selectedAg.acos).toFixed(1)}%`, acosColor(parseFloat(selectedAg.acos)))}
+          </div>
+        </div>
+        {/* Tabs */}
+        <div style={{ display: "flex", borderBottom: "1px solid var(--b1)", flexShrink: 0, overflowX: "auto" }}>
+          {(view === "campaign" ? campaignTabs : agTabs).map(({ id, label }) => (
+            <button key={id} style={DTAB(view === "campaign" ? tab === id : agTab === id)}
+              onClick={() => view === "campaign" ? setTab(id) : setAgTab(id)}>{label}</button>
+          ))}
+        </div>
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+          {view === "campaign" && tab === "adgroups"  && <AdGroupsTab />}
+          {view === "campaign" && tab === "settings"  && <SettingsTab />}
+          {view === "campaign" && tab === "negatives" && <NegativesTab />}
+          {view === "adgroup"  && agTab === "keywords"  && <KeywordsTab />}
+          {view === "adgroup"  && agTab === "targets"   && <TargetsTab />}
+          {view === "adgroup"  && agTab === "ads"       && <ProductAdsTab />}
+          {view === "adgroup"  && agTab === "negatives" && <NegativesTab />}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Drag-and-drop wrapper for a single ASIN group card
+function SortableAsinGroup({ id, children }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: DndCSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.45 : 1,
+    position: "relative",
+    zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      {children({ dragHandleProps: { ...listeners, ...attributes } })}
+    </div>
+  );
+}
+
 const RankTrackerPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [tick, setTick]           = useState(0);
@@ -1413,6 +2457,7 @@ const RankTrackerPage = ({ workspaceId }) => {
   const [editingLabel, setEditingLabel] = useState(null); // asin being note-edited
   const [labelDraft, setLabelDraft]     = useState({});   // asin → draft text
   const [productPopup, setProductPopup] = useState(null); // { asin, title, brand, image_url, label }
+  const [customOrder, setCustomOrder]   = useState(null); // null = use server order; string[] after first drag
 
   const { data: keywords, loading } = useAsync(
     () => workspaceId ? get("/keyword-ranks") : Promise.resolve([]),
@@ -1431,6 +2476,58 @@ const RankTrackerPage = ({ workspaceId }) => {
       return acc;
     }, {});
   }, [keywords]);
+
+  // Sorted list of ASIN keys: custom drag order > server display_order > newest first
+  const sortedAsins = React.useMemo(() => {
+    const allAsins = Object.keys(grouped);
+    if (!allAsins.length) return [];
+
+    if (customOrder) {
+      const knownSet = new Set(customOrder);
+      // Any ASINs added after last drag go to the top (newest first among them)
+      const newAsins = allAsins
+        .filter(a => !knownSet.has(a))
+        .sort((a, b) => {
+          const at = grouped[a]?.length ? Math.min(...grouped[a].map(k => new Date(k.created_at).getTime())) : 0;
+          const bt = grouped[b]?.length ? Math.min(...grouped[b].map(k => new Date(k.created_at).getTime())) : 0;
+          return bt - at;
+        });
+      return [...newAsins, ...customOrder.filter(a => grouped[a])];
+    }
+
+    // No custom order yet — use server-supplied display_order or newest-first fallback
+    return [...allAsins].sort((a, b) => {
+      const ao = grouped[a]?.[0]?.asin_display_order ?? null;
+      const bo = grouped[b]?.[0]?.asin_display_order ?? null;
+      const at = grouped[a]?.length ? Math.min(...grouped[a].map(k => new Date(k.created_at).getTime())) : 0;
+      const bt = grouped[b]?.length ? Math.min(...grouped[b].map(k => new Date(k.created_at).getTime())) : 0;
+      if (ao !== null && bo !== null) return ao - bo;
+      if (ao === null && bo === null) return bt - at; // newest first
+      return ao === null ? -1 : 1;   // unordered (new) before explicitly ordered
+    });
+  }, [grouped, customOrder]);
+
+  // DnD sensors
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+
+  const handleDragEnd = async ({ active, over }) => {
+    if (!over || active.id === over.id) return;
+    const oldIndex = sortedAsins.indexOf(active.id);
+    const newIndex = sortedAsins.indexOf(over.id);
+    const newOrder = arrayMove(sortedAsins, oldIndex, newIndex);
+    setCustomOrder(newOrder);
+    try {
+      await patch("/keyword-ranks/asin-order", {
+        order: newOrder.map((asin, idx) => ({ asin, display_order: idx }))
+      });
+    } catch (e) {
+      setCustomOrder(null); // revert on error
+      showToast(e.message, "err");
+    }
+  };
 
   const handleAdd = async () => {
     const asins    = newAsin.split("\n").map(a => a.trim().toUpperCase()).filter(a => /^[A-Z0-9]{10}$/.test(a));
@@ -1721,154 +2818,173 @@ const RankTrackerPage = ({ workspaceId }) => {
           <p style={{ fontSize: 13, color: "var(--tx3)", maxWidth: 340, margin: "0 auto" }}>{t("rankings.emptyDesc")}</p>
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {Object.entries(grouped).map(([asin, kws]) => (
-            <div key={asin} className="card" style={{ padding: "14px 16px" }}>
-              {/* ASIN header */}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: editingAsin === asin ? 8 : 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
-                <span
-                  onClick={e => setProductPopup({ asin, title: kws[0]?.product_title, brand: kws[0]?.product_brand, image_url: kws[0]?.product_image_url, label: kws[0]?.asin_label || "", x: e.clientX, y: e.clientY })}
-                  style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)", cursor: "pointer", textDecoration: "underline dotted" }}
-                  title="Открыть карточку товара">{asin}</span>
-                <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
-
-                {/* ASIN note/label */}
-                {editingLabel === asin ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1 }}>
-                    <input
-                      autoFocus
-                      value={labelDraft[asin] ?? ""}
-                      onChange={e => setLabelDraft(d => ({ ...d, [asin]: e.target.value }))}
-                      onKeyDown={e => { if (e.key === "Enter") saveLabel(asin); if (e.key === "Escape") setEditingLabel(null); }}
-                      placeholder={t("rankings.notePlaceholder")}
-                      style={{ flex: 1, fontSize: 12, padding: "2px 7px", borderRadius: 5, border: "1px solid var(--ac2)", outline: "none", fontFamily: "var(--ui)" }}
-                    />
-                    <button onClick={() => saveLabel(asin)} className="btn btn-primary" style={{ fontSize: 11, padding: "2px 10px" }}>✓</button>
-                    <button onClick={() => setEditingLabel(null)} className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}>✕</button>
-                  </div>
-                ) : (
-                  <span
-                    onClick={() => { setEditingLabel(asin); setLabelDraft(d => ({ ...d, [asin]: kws[0]?.asin_label || "" })); }}
-                    title={t("rankings.noteLabel")}
-                    style={{ fontSize: 12, color: kws[0]?.asin_label ? "var(--tx2)" : "var(--tx3)", cursor: "pointer",
-                      borderBottom: "1px dashed var(--b3)", paddingBottom: 1, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {kws[0]?.asin_label || `+ ${t("rankings.noteLabel")}`}
-                  </span>
-                )}
-
-                <button
-                  onClick={() => { setEditingAsin(editingAsin === asin ? null : asin); setEditKwsText(""); }}
-                  className="btn btn-ghost"
-                  style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", color: "var(--ac2)" }}
-                  title={t("rankings.addToGroup")}>
-                  {editingAsin === asin ? "✕" : "+ " + t("rankings.addToGroup")}
-                </button>
-              </div>
-
-              {/* Inline add-keywords form */}
-              {editingAsin === asin && (
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, padding: "8px 0", borderBottom: "1px solid var(--b1)" }}>
-                  <textarea value={editKwsText} onChange={e => setEditKwsText(e.target.value)}
-                    placeholder={t("rankings.keywordPlaceholderMulti")}
-                    rows={2}
-                    style={{ flex: 1, fontSize: 12, resize: "vertical", minHeight: 48,
-                      fontFamily: "var(--ui)", lineHeight: 1.6 }} />
-                  <button onClick={() => handleAddToAsin(asin)} disabled={editAdding || !editKwsText.trim()}
-                    className="btn btn-primary" style={{ fontSize: 12, padding: "6px 14px", alignSelf: "flex-end" }}>
-                    {editAdding ? "…" : t("rankings.addBtn")}
-                  </button>
-                </div>
-              )}
-
-              {/* Keyword rows */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-                {kws.map(kw => {
-                  const badge  = positionBadge(kw.position, kw.found);
-                  const delta  = rankDelta(kw.position, kw.prev_position);
-                  const isExp  = expanded === kw.id;
-                  const isChk  = checkingId === kw.id;
-                  const checkedAt = kw.checked_at
-                    ? new Date(kw.checked_at).toLocaleString("de", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-                    : null;
-
-                  return (
-                    <div key={kw.id}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
-                        borderBottom: isExp ? "none" : "1px solid var(--b1)" }}>
-                        {/* Position badge */}
-                        <div style={{
-                          minWidth: 52, padding: "3px 8px", borderRadius: 20, textAlign: "center",
-                          background: badge.bg, border: `1px solid ${badge.border}`,
-                          fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: badge.color,
-                        }}>{badge.label}</div>
-
-                        {/* Delta */}
-                        <div style={{ width: 36, fontSize: 11, fontWeight: 600, textAlign: "center" }}>
-                          {delta === null ? <span style={{ color: "var(--tx3)" }}>—</span>
-                            : delta > 0 ? <span style={{ color: "var(--grn)" }}>↑{delta}</span>
-                            : delta < 0 ? <span style={{ color: "var(--red)" }}>↓{Math.abs(delta)}</span>
-                            : <span style={{ color: "var(--tx3)" }}>=</span>}
+        <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <SortableContext items={sortedAsins} strategy={verticalListSortingStrategy}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {sortedAsins.map(asin => {
+                const kws = grouped[asin];
+                if (!kws) return null;
+                return (
+                  <SortableAsinGroup key={asin} id={asin}>
+                    {({ dragHandleProps }) => (
+                    <div className="card" style={{ padding: "14px 16px" }}>
+                      {/* ASIN header */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: editingAsin === asin ? 8 : 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
+                        {/* Drag handle */}
+                        <div {...dragHandleProps}
+                          style={{ cursor: "grab", color: "var(--tx3)", display: "flex", alignItems: "center", flexShrink: 0, touchAction: "none" }}
+                          title="Перетащить для изменения порядка">
+                          <Ic icon={GripVertical} size={14} />
                         </div>
 
-                        {/* Keyword text */}
-                        <div style={{ flex: 1, fontSize: 13, color: "var(--tx)", display: "flex", alignItems: "center", gap: 6 }}>
-                          <span>{kw.keyword}</span>
-                          {kw.search_volume != null && (
-                            <span style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
-                              background: "var(--b1)", borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap" }}
-                              title="Jungle Scout: ежемесячный объём поиска">
-                              {kw.search_volume >= 1000
-                                ? `${(kw.search_volume / 1000).toFixed(kw.search_volume >= 10000 ? 0 : 1)}K`
-                                : kw.search_volume}
-                              /мес
-                            </span>
-                          )}
-                        </div>
+                        <span
+                          onClick={e => setProductPopup({ asin, title: kws[0]?.product_title, brand: kws[0]?.product_brand, image_url: kws[0]?.product_image_url, label: kws[0]?.asin_label || "", x: e.clientX, y: e.clientY })}
+                          style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)", cursor: "pointer", textDecoration: "underline dotted" }}
+                          title="Открыть карточку товара">{asin}</span>
+                        <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
 
-                        {/* Last checked */}
-                        {checkedAt && (
-                          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{checkedAt}</div>
+                        {/* ASIN note/label */}
+                        {editingLabel === asin ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1 }}>
+                            <input
+                              autoFocus
+                              value={labelDraft[asin] ?? ""}
+                              onChange={e => setLabelDraft(d => ({ ...d, [asin]: e.target.value }))}
+                              onKeyDown={e => { if (e.key === "Enter") saveLabel(asin); if (e.key === "Escape") setEditingLabel(null); }}
+                              placeholder={t("rankings.notePlaceholder")}
+                              style={{ flex: 1, fontSize: 12, padding: "2px 7px", borderRadius: 5, border: "1px solid var(--ac2)", outline: "none", fontFamily: "var(--ui)" }}
+                            />
+                            <button onClick={() => saveLabel(asin)} className="btn btn-primary" style={{ fontSize: 11, padding: "2px 10px" }}>✓</button>
+                            <button onClick={() => setEditingLabel(null)} className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}>✕</button>
+                          </div>
+                        ) : (
+                          <span
+                            onClick={() => { setEditingLabel(asin); setLabelDraft(d => ({ ...d, [asin]: kws[0]?.asin_label || "" })); }}
+                            title={t("rankings.noteLabel")}
+                            style={{ fontSize: 12, color: kws[0]?.asin_label ? "var(--tx2)" : "var(--tx3)", cursor: "pointer",
+                              borderBottom: "1px dashed var(--b3)", paddingBottom: 1, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {kws[0]?.asin_label || `+ ${t("rankings.noteLabel")}`}
+                          </span>
                         )}
 
-                        {/* Actions */}
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <button onClick={() => toggleExpand(kw.id)} className="btn btn-ghost"
-                            style={{ fontSize: 11, padding: "3px 8px" }}>
-                            <Ic icon={isExp ? ChevronUp : ChevronDown} size={12} />
-                          </button>
-                          <button onClick={() => handleCheckOne(kw.id)} disabled={isChk} className="btn btn-ghost"
-                            style={{ fontSize: 11, padding: "3px 8px" }} title={t("rankings.checkNow")}>
-                            {isChk ? <span className="loader" style={{ width: 10, height: 10 }} /> : <Ic icon={RefreshCw} size={12} />}
-                          </button>
-                          <button onClick={() => handleDelete(kw.id)} className="btn btn-ghost"
-                            style={{ fontSize: 11, padding: "3px 8px", color: "var(--red)" }} title={t("rankings.remove")}>
-                            <Ic icon={X} size={12} />
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => { setEditingAsin(editingAsin === asin ? null : asin); setEditKwsText(""); }}
+                          className="btn btn-ghost"
+                          style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", color: "var(--ac2)" }}
+                          title={t("rankings.addToGroup")}>
+                          {editingAsin === asin ? "✕" : "+ " + t("rankings.addToGroup")}
+                        </button>
                       </div>
 
-                      {/* Expanded history */}
-                      {isExp && (
-                        <div style={{ padding: "12px 0 8px", borderBottom: "1px solid var(--b1)" }}>
-                          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                            {RANK_DAYS.map(d => (
-                              <button key={d} onClick={() => switchDays(d)}
-                                className={`btn ${histDays === d ? "btn-primary" : "btn-ghost"}`}
-                                style={{ fontSize: 11, padding: "3px 10px" }}>
-                                {d === 7 ? t("rankings.week") : t("rankings.month")}
-                              </button>
-                            ))}
-                          </div>
-                          <HistoryBars data={currentHist} />
+                      {/* Inline add-keywords form */}
+                      {editingAsin === asin && (
+                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, padding: "8px 0", borderBottom: "1px solid var(--b1)" }}>
+                          <textarea value={editKwsText} onChange={e => setEditKwsText(e.target.value)}
+                            placeholder={t("rankings.keywordPlaceholderMulti")}
+                            rows={2}
+                            style={{ flex: 1, fontSize: 12, resize: "vertical", minHeight: 48,
+                              fontFamily: "var(--ui)", lineHeight: 1.6 }} />
+                          <button onClick={() => handleAddToAsin(asin)} disabled={editAdding || !editKwsText.trim()}
+                            className="btn btn-primary" style={{ fontSize: 12, padding: "6px 14px", alignSelf: "flex-end" }}>
+                            {editAdding ? "…" : t("rankings.addBtn")}
+                          </button>
                         </div>
                       )}
+
+                      {/* Keyword rows */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                        {kws.map(kw => {
+                          const badge  = positionBadge(kw.position, kw.found);
+                          const delta  = rankDelta(kw.position, kw.prev_position);
+                          const isExp  = expanded === kw.id;
+                          const isChk  = checkingId === kw.id;
+                          const checkedAt = kw.checked_at
+                            ? new Date(kw.checked_at).toLocaleString("de", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                            : null;
+
+                          return (
+                            <div key={kw.id}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+                                borderBottom: isExp ? "none" : "1px solid var(--b1)" }}>
+                                {/* Position badge */}
+                                <div style={{
+                                  minWidth: 52, padding: "3px 8px", borderRadius: 20, textAlign: "center",
+                                  background: badge.bg, border: `1px solid ${badge.border}`,
+                                  fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: badge.color,
+                                }}>{badge.label}</div>
+
+                                {/* Delta */}
+                                <div style={{ width: 36, fontSize: 11, fontWeight: 600, textAlign: "center" }}>
+                                  {delta === null ? <span style={{ color: "var(--tx3)" }}>—</span>
+                                    : delta > 0 ? <span style={{ color: "var(--grn)" }}>↑{delta}</span>
+                                    : delta < 0 ? <span style={{ color: "var(--red)" }}>↓{Math.abs(delta)}</span>
+                                    : <span style={{ color: "var(--tx3)" }}>=</span>}
+                                </div>
+
+                                {/* Keyword text */}
+                                <div style={{ flex: 1, fontSize: 13, color: "var(--tx)", display: "flex", alignItems: "center", gap: 6 }}>
+                                  <span>{kw.keyword}</span>
+                                  {kw.search_volume != null && (
+                                    <span style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
+                                      background: "var(--b1)", borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap" }}
+                                      title="Jungle Scout: ежемесячный объём поиска">
+                                      {kw.search_volume >= 1000
+                                        ? `${(kw.search_volume / 1000).toFixed(kw.search_volume >= 10000 ? 0 : 1)}K`
+                                        : kw.search_volume}
+                                      /мес
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Last checked */}
+                                {checkedAt && (
+                                  <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{checkedAt}</div>
+                                )}
+
+                                {/* Actions */}
+                                <div style={{ display: "flex", gap: 4 }}>
+                                  <button onClick={() => toggleExpand(kw.id)} className="btn btn-ghost"
+                                    style={{ fontSize: 11, padding: "3px 8px" }}>
+                                    <Ic icon={isExp ? ChevronUp : ChevronDown} size={12} />
+                                  </button>
+                                  <button onClick={() => handleCheckOne(kw.id)} disabled={isChk} className="btn btn-ghost"
+                                    style={{ fontSize: 11, padding: "3px 8px" }} title={t("rankings.checkNow")}>
+                                    {isChk ? <span className="loader" style={{ width: 10, height: 10 }} /> : <Ic icon={RefreshCw} size={12} />}
+                                  </button>
+                                  <button onClick={() => handleDelete(kw.id)} className="btn btn-ghost"
+                                    style={{ fontSize: 11, padding: "3px 8px", color: "var(--red)" }} title={t("rankings.remove")}>
+                                    <Ic icon={X} size={12} />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Expanded history */}
+                              {isExp && (
+                                <div style={{ padding: "12px 0 8px", borderBottom: "1px solid var(--b1)" }}>
+                                  <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                                    {RANK_DAYS.map(d => (
+                                      <button key={d} onClick={() => switchDays(d)}
+                                        className={`btn ${histDays === d ? "btn-primary" : "btn-ghost"}`}
+                                        style={{ fontSize: 11, padding: "3px 10px" }}>
+                                        {d === 7 ? t("rankings.week") : t("rankings.month")}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <HistoryBars data={currentHist} />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
+                    )}
+                  </SortableAsinGroup>
+                );
+              })}
             </div>
-          ))}
-        </div>
+          </SortableContext>
+        </DndContext>
       )}
     </div>
   );
@@ -3483,6 +4599,480 @@ const FilterPanel = ({ isOpen, onClose, filters, onUpdate, onReset, presets, onS
   );
 };
 
+// ─── Error Boundary for wizards ──────────────────────────────────────────────
+class WizardErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) return createPortal(
+      <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
+        display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+        <div className="card" style={{ padding:24, maxWidth:480, width:"100%" }}>
+          <div style={{ fontWeight:700, marginBottom:12, color:"var(--red,#e53)" }}>Error opening modal</div>
+          <pre style={{ fontSize:12, color:"var(--tx2)", whiteSpace:"pre-wrap", wordBreak:"break-all",
+            background:"var(--s2)", padding:10, borderRadius:6, marginBottom:16 }}>
+            {this.state.error.message}
+          </pre>
+          <button className="btn btn-ghost" onClick={this.props.onClose}>Close</button>
+        </div>
+      </div>,
+      document.body
+    );
+    return this.props.children;
+  }
+}
+
+// ─── Create Campaign Wizard ───────────────────────────────────────────────────
+const CreateCampaignModal = ({ workspaceId, onClose, onCreated }) => {
+  const { t } = useI18n();
+  const [step, setStep] = useState(1);
+  const [profiles, setProfiles] = useState(null);
+  const [form, setForm] = useState({
+    campaignType: "sponsoredProducts",
+    profileId: "",
+    targetingType: "manual",
+    name: "",
+    dailyBudget: "",
+    startDate: new Date().toISOString().slice(0, 10),
+    endDate: "",
+    biddingStrategy: "legacyForSales",
+    agName: "",
+    agBid: "0.50",
+    keywords: "",
+    kwMatchType: "broad",
+    skipAg: false,
+  });
+  const [errors, setErrors] = useState({});
+  const [creating, setCreating] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    get("/profiles", { workspaceId })
+      .then(d => setProfiles(Array.isArray(d) ? d : []))
+      .catch(() => setProfiles([]));
+  }, [workspaceId]);
+
+  const selProfile = profiles?.find(p => p.id === form.profileId);
+  const currency = selProfile?.currency_code || "EUR";
+  const setF = (k, v) => { setForm(f => ({ ...f, [k]: v })); setErrors(e => ({ ...e, [k]: null })); };
+
+  const wizSteps = [
+    { n: 1, label: t("campaigns.create.step1") },
+    { n: 2, label: t("campaigns.create.step2") },
+    { n: 3, label: t("campaigns.create.step3") },
+    { n: 4, label: t("campaigns.create.step4") },
+  ];
+
+  const validate = (s) => {
+    const errs = {};
+    if (s === 1 && !form.profileId) errs.profileId = t("campaigns.create.errProfile");
+    if (s === 2) {
+      if (!form.name.trim()) errs.name = t("campaigns.create.errRequired");
+      const b = parseFloat(form.dailyBudget);
+      if (isNaN(b) || b < 1) errs.dailyBudget = t("campaigns.create.errBudget", { min: "1.00" });
+    }
+    if (s === 3 && !form.skipAg && !form.agName.trim()) errs.agName = t("campaigns.create.errRequired");
+    return errs;
+  };
+
+  const goNext = () => {
+    const errs = validate(step);
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    setErrors({});
+    setStep(s => s + 1);
+  };
+  const goBack  = () => setStep(s => s - 1);
+  const goClose = () => { onClose(); setStep(1); setResult(null); setErrors({}); };
+
+  const doCreate = async () => {
+    setCreating(true);
+    setErrors({});
+    try {
+      const campRes = await post("/campaigns", {
+        profileId:       form.profileId,
+        name:            form.name.trim(),
+        campaignType:    form.campaignType,
+        state:           "enabled",
+        dailyBudget:     parseFloat(form.dailyBudget),
+        targetingType:   form.targetingType,
+        startDate:       form.startDate || undefined,
+        endDate:         form.endDate   || undefined,
+        biddingStrategy: form.biddingStrategy,
+      });
+      const campaign = campRes.data;
+      let kwCount = 0, kwErrors = 0;
+
+      if (!form.skipAg && form.agName.trim()) {
+        const agRes = await post("/ad-groups", {
+          campaignId:  campaign.id,
+          name:        form.agName.trim(),
+          defaultBid:  parseFloat(form.agBid) || 0.50,
+        });
+        const ag = agRes.data;
+        if (form.campaignType !== "sponsoredDisplay") {
+          const kwLines = form.keywords.split("\n").map(l => l.trim()).filter(Boolean);
+          for (const kw of kwLines) {
+            try {
+              await post("/keywords", {
+                adGroupId:   ag.id,
+                keywordText: kw,
+                matchType:   form.kwMatchType,
+                bid:         parseFloat(form.agBid) || 0.50,
+              });
+              kwCount++;
+            } catch { kwErrors++; }
+          }
+        }
+      }
+      setResult({ campaign, kwCount, kwErrors });
+      if (onCreated) onCreated();
+    } catch (e) {
+      setErrors({ create: e.message || t("common.error") });
+    }
+    setCreating(false);
+  };
+
+  const TYPE_OPTIONS = [
+    { value: "sponsoredProducts", icon: "📦", title: t("campaigns.create.sp_title"), desc: t("campaigns.create.sp_desc") },
+    { value: "sponsoredBrands",   icon: "🏷️",  title: t("campaigns.create.sb_title"), desc: t("campaigns.create.sb_desc") },
+    { value: "sponsoredDisplay",  icon: "📊", title: t("campaigns.create.sd_title"), desc: t("campaigns.create.sd_desc") },
+  ];
+
+  const BIDDING_OPTIONS = [
+    { value: "legacyForSales", label: t("campaigns.create.bidFixed") },
+    { value: "autoForSales",   label: t("campaigns.create.bidDownOnly") },
+    { value: "autoForClicks",  label: t("campaigns.create.bidUpDown") },
+  ];
+
+  const TYPE_LABELS = {
+    sponsoredProducts: "Sponsored Products",
+    sponsoredBrands:   "Sponsored Brands",
+    sponsoredDisplay:  "Sponsored Display",
+  };
+
+  const fieldLabelStyle = { fontSize:12, fontWeight:600, color:"var(--tx2)", display:"block", marginBottom:6,
+    textTransform:"uppercase", letterSpacing:"0.05em" };
+  const errStyle = { fontSize:12, color:"var(--red,#e53)", marginTop:4 };
+
+  return createPortal(
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.65)", zIndex:1000,
+      display:"flex", alignItems:"center", justifyContent:"center", padding:"16px" }}>
+      <div className="card" style={{ width:"100%", maxWidth:860, minHeight:520,
+        maxHeight:"90vh", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+        {/* Header */}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          padding:"18px 28px 0", flexShrink:0 }}>
+          <div style={{ fontFamily:"var(--disp)", fontSize:18, fontWeight:700 }}>
+            {t("campaigns.newCampaign")}
+          </div>
+          <button onClick={goClose} style={{ background:"none", border:"none", cursor:"pointer",
+            color:"var(--tx3)", padding:4 }}>
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+
+        {/* Stepper */}
+        <div style={{ display:"flex", alignItems:"center", padding:"14px 28px 0", flexShrink:0 }}>
+          {wizSteps.map((s, idx) => {
+            const done   = step > s.n;
+            const active = step === s.n;
+            return (
+              <div key={s.n} style={{ display:"flex", alignItems:"center", flex: idx < wizSteps.length-1 ? 1 : "none" }}>
+                <div onClick={() => done && setStep(s.n)}
+                  style={{ display:"flex", alignItems:"center", gap:7, cursor: done ? "pointer" : "default", paddingBottom:12 }}>
+                  <div style={{ width:22, height:22, borderRadius:"50%", display:"flex",
+                    alignItems:"center", justifyContent:"center", fontSize:10, fontWeight:700,
+                    background: (active||done) ? "var(--ac)" : "var(--s3)",
+                    color: (active||done) ? "#fff" : "var(--tx3)", flexShrink:0 }}>
+                    {done ? <Check size={11} strokeWidth={2.5} /> : s.n}
+                  </div>
+                  <span style={{ fontSize:12, fontWeight: active ? 600 : 400,
+                    color: active ? "var(--tx)" : done ? "var(--ac)" : "var(--tx3)", whiteSpace:"nowrap" }}>
+                    {s.label}
+                  </span>
+                </div>
+                {idx < wizSteps.length-1 && (
+                  <div style={{ flex:1, height:1, background:"var(--b2)", margin:"0 12px", marginBottom:12 }} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ height:1, background:"var(--b1)", flexShrink:0 }} />
+
+        {/* Content */}
+        <div style={{ flex:1, overflowY:"auto", padding:"24px 28px" }}>
+
+          {/* ══ Step 1: Type & Account ══ */}
+          {step === 1 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:22 }}>
+              <div>
+                <label style={fieldLabelStyle}>{t("campaigns.create.typeLabel")}</label>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+                  {TYPE_OPTIONS.map(tp => (
+                    <button key={tp.value} onClick={() => setF("campaignType", tp.value)}
+                      style={{ background: form.campaignType === tp.value ? "var(--s3)" : "var(--s2)",
+                        border: `2px solid ${form.campaignType === tp.value ? "var(--ac)" : "var(--b2)"}`,
+                        borderRadius:10, padding:"14px 16px", cursor:"pointer", textAlign:"left",
+                        transition:"border-color 150ms,background 150ms",
+                        display:"flex", flexDirection:"column", gap:6 }}>
+                      <span style={{ fontSize:22 }}>{tp.icon}</span>
+                      <span style={{ fontSize:13, fontWeight:700, color:"var(--tx)" }}>{tp.title}</span>
+                      <span style={{ fontSize:11, color:"var(--tx3)", lineHeight:1.5 }}>{tp.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {form.campaignType === "sponsoredProducts" && (
+                <div>
+                  <label style={fieldLabelStyle}>{t("campaigns.create.targetingLabel")}</label>
+                  <div style={{ display:"flex", gap:10 }}>
+                    {[
+                      { value:"manual", label: t("campaigns.create.targetingManual") },
+                      { value:"auto",   label: t("campaigns.create.targetingAuto") },
+                    ].map(opt => (
+                      <label key={opt.value} style={{ display:"flex", alignItems:"center", gap:8, padding:"10px 16px",
+                        background: form.targetingType === opt.value ? "var(--s3)" : "var(--s2)",
+                        border: `2px solid ${form.targetingType === opt.value ? "var(--ac)" : "var(--b2)"}`,
+                        borderRadius:8, cursor:"pointer", flex:1, transition:"all 150ms" }}>
+                        <input type="radio" name="targeting" value={opt.value}
+                          checked={form.targetingType === opt.value}
+                          onChange={() => setF("targetingType", opt.value)}
+                          style={{ accentColor:"var(--ac)" }} />
+                        <span style={{ fontSize:13 }}>{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label style={fieldLabelStyle}>{t("campaigns.create.profileLabel")}</label>
+                {profiles === null ? (
+                  <div style={{ fontSize:13, color:"var(--tx3)" }}>{t("common.loading")}</div>
+                ) : (
+                  <select value={form.profileId} onChange={e => setF("profileId", e.target.value)}
+                    style={{ width:"100%", maxWidth:420 }}>
+                    <option value="">{t("campaigns.create.profileSelect")}</option>
+                    {profiles.map(p => (
+                      <option key={p.id} value={p.id}>
+                        {p.account_name || p.profile_id} · {p.country_code} ({p.currency_code})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {errors.profileId && <div style={errStyle}>{errors.profileId}</div>}
+              </div>
+            </div>
+          )}
+
+          {/* ══ Step 2: Campaign Details ══ */}
+          {step === 2 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+              <div>
+                <label style={fieldLabelStyle}>{t("campaigns.create.nameLabel")}</label>
+                <input value={form.name} onChange={e => setF("name", e.target.value)}
+                  placeholder={t("campaigns.create.namePlaceholder")}
+                  style={{ width:"100%" }} autoFocus />
+                {errors.name && <div style={errStyle}>{errors.name}</div>}
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+                <div>
+                  <label style={fieldLabelStyle}>{t("campaigns.create.budgetLabel")} ({currency})</label>
+                  <input type="number" min="1" step="0.01" value={form.dailyBudget}
+                    onChange={e => setF("dailyBudget", e.target.value)}
+                    placeholder="25.00" style={{ width:"100%" }} />
+                  {errors.dailyBudget && <div style={errStyle}>{errors.dailyBudget}</div>}
+                </div>
+                <div>
+                  <label style={fieldLabelStyle}>{t("campaigns.create.startDateLabel")}</label>
+                  <input type="date" value={form.startDate}
+                    onChange={e => setF("startDate", e.target.value)} style={{ width:"100%" }} />
+                </div>
+              </div>
+
+              <div>
+                <label style={fieldLabelStyle}>
+                  {t("campaigns.create.endDateLabel")}
+                  <span style={{ fontWeight:400, color:"var(--tx3)", marginLeft:6, textTransform:"none" }}>
+                    ({t("campaigns.create.endDateOpt")})
+                  </span>
+                </label>
+                <input type="date" value={form.endDate}
+                  onChange={e => setF("endDate", e.target.value)} style={{ width:200 }} />
+              </div>
+
+              {form.campaignType === "sponsoredProducts" && form.targetingType === "manual" && (
+                <div>
+                  <label style={fieldLabelStyle}>{t("campaigns.create.biddingLabel")}</label>
+                  {BIDDING_OPTIONS.map(opt => (
+                    <label key={opt.value} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 14px",
+                      marginBottom:6, background: form.biddingStrategy === opt.value ? "var(--s3)" : "var(--s2)",
+                      border: `1.5px solid ${form.biddingStrategy === opt.value ? "var(--ac)" : "var(--b2)"}`,
+                      borderRadius:8, cursor:"pointer", transition:"all 120ms" }}>
+                      <input type="radio" name="bidding" value={opt.value}
+                        checked={form.biddingStrategy === opt.value}
+                        onChange={() => setF("biddingStrategy", opt.value)}
+                        style={{ accentColor:"var(--ac)" }} />
+                      <span style={{ fontSize:13 }}>{opt.label}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ══ Step 3: Ad Group & Keywords ══ */}
+          {step === 3 && (
+            <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+              <label style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer" }}>
+                <input type="checkbox" checked={form.skipAg}
+                  onChange={e => setF("skipAg", e.target.checked)}
+                  style={{ accentColor:"var(--ac)", width:16, height:16 }} />
+                <span style={{ fontSize:13, color:"var(--tx2)" }}>{t("campaigns.create.skipAg")}</span>
+              </label>
+
+              {!form.skipAg && (
+                <>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr auto", gap:12, alignItems:"start" }}>
+                    <div>
+                      <label style={fieldLabelStyle}>{t("campaigns.create.agNameLabel")}</label>
+                      <input value={form.agName} onChange={e => setF("agName", e.target.value)}
+                        placeholder={t("campaigns.create.agNamePlaceholder")}
+                        style={{ width:"100%" }} />
+                      {errors.agName && <div style={errStyle}>{errors.agName}</div>}
+                    </div>
+                    <div style={{ minWidth:130 }}>
+                      <label style={fieldLabelStyle}>{t("campaigns.create.agBidLabel")} ({currency})</label>
+                      <input type="number" min="0.02" step="0.01" value={form.agBid}
+                        onChange={e => setF("agBid", e.target.value)} style={{ width:"100%" }} />
+                    </div>
+                  </div>
+
+                  {form.campaignType !== "sponsoredDisplay" && (
+                    <div>
+                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
+                        <label style={{ ...fieldLabelStyle, marginBottom:0 }}>
+                          {t("campaigns.create.kwLabel")}
+                          <span style={{ fontWeight:400, color:"var(--tx3)", marginLeft:6, textTransform:"none" }}>
+                            ({t("common.optional")})
+                          </span>
+                        </label>
+                        <select value={form.kwMatchType} onChange={e => setF("kwMatchType", e.target.value)}
+                          style={{ fontSize:12, padding:"3px 6px" }}>
+                          <option value="broad">Broad</option>
+                          <option value="phrase">Phrase</option>
+                          <option value="exact">Exact</option>
+                        </select>
+                      </div>
+                      <textarea value={form.keywords} onChange={e => setF("keywords", e.target.value)}
+                        placeholder={t("campaigns.create.kwPlaceholder")}
+                        rows={7} style={{ width:"100%", fontFamily:"monospace", fontSize:12, resize:"vertical" }} />
+                      {form.keywords.trim() && (
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginTop:4 }}>
+                          {form.keywords.split("\n").filter(l => l.trim()).length} {t("campaigns.create.kwLabel").toLowerCase()}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ══ Step 4: Review ══ */}
+          {step === 4 && !result && (() => {
+            const rows = [
+              { label: t("campaigns.create.typeLabel"),    value: TYPE_LABELS[form.campaignType] },
+              { label: t("campaigns.create.profileLabel"), value: selProfile ? `${selProfile.account_name || selProfile.profile_id} · ${selProfile.country_code}` : "—" },
+              { label: t("campaigns.create.nameLabel"),    value: form.name },
+              { label: t("campaigns.create.budgetLabel"),  value: `${form.dailyBudget} ${currency}/day` },
+              { label: t("campaigns.create.startDateLabel"), value: form.startDate },
+              ...(form.endDate ? [{ label: t("campaigns.create.endDateLabel"), value: form.endDate }] : []),
+              ...(form.campaignType === "sponsoredProducts" ? [
+                { label: t("campaigns.create.targetingLabel"), value: form.targetingType === "manual" ? t("campaigns.create.targetingManual") : t("campaigns.create.targetingAuto") },
+                ...(form.targetingType === "manual" ? [{ label: t("campaigns.create.biddingLabel"), value: BIDDING_OPTIONS.find(o => o.value === form.biddingStrategy)?.label }] : []),
+              ] : []),
+              { label: t("campaigns.create.reviewAdGroup"), value: form.skipAg ? t("campaigns.create.reviewNone") : form.agName },
+              ...(!form.skipAg && form.keywords.trim() ? [{ label: t("campaigns.create.reviewKeywords"), value: `${form.keywords.split("\n").filter(l => l.trim()).length} (${form.kwMatchType})` }] : []),
+            ];
+            return (
+              <div>
+                <div style={{ fontSize:14, fontWeight:600, marginBottom:14 }}>{t("campaigns.create.reviewTitle")}</div>
+                <div style={{ border:"1px solid var(--b2)", borderRadius:10, overflow:"hidden" }}>
+                  {rows.map((row, i) => (
+                    <div key={i} style={{ display:"flex", padding:"10px 16px",
+                      borderBottom: i < rows.length-1 ? "1px solid var(--b1)" : "none",
+                      background: i % 2 === 0 ? "var(--s2)" : "transparent" }}>
+                      <div style={{ width:200, fontSize:12, color:"var(--tx3)", flexShrink:0 }}>{row.label}</div>
+                      <div style={{ fontSize:13, fontWeight:500, color:"var(--tx)" }}>{row.value}</div>
+                    </div>
+                  ))}
+                </div>
+                {errors.create && (
+                  <div style={{ marginTop:12, padding:"10px 14px", background:"rgba(220,50,47,.08)",
+                    borderRadius:8, fontSize:13, color:"var(--red,#e53)" }}>
+                    {errors.create}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* ══ Success ══ */}
+          {result && (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center",
+              minHeight:220, gap:12, textAlign:"center" }}>
+              <div style={{ fontSize:40 }}>✅</div>
+              <div style={{ fontSize:18, fontWeight:700 }}>{t("campaigns.create.createdTitle")}</div>
+              {result.kwCount > 0 && (
+                <div style={{ fontSize:13, color:"var(--tx2)" }}>
+                  {t("campaigns.create.createdDesc", { kw: result.kwCount })}
+                </div>
+              )}
+              <div style={{ display:"flex", gap:10, marginTop:8 }}>
+                <button className="btn btn-ghost" onClick={() => {
+                  setStep(1);
+                  setForm(f => ({ ...f, name:"", dailyBudget:"", endDate:"",
+                    agName:"", keywords:"", skipAg:false,
+                    startDate: new Date().toISOString().slice(0,10) }));
+                  setResult(null); setErrors({});
+                }}>
+                  {t("campaigns.create.createAnother")}
+                </button>
+                <button className="btn btn-ghost" onClick={goClose}>{t("common.close")}</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        {!result && (
+          <div style={{ display:"flex", justifyContent:"space-between", padding:"16px 28px",
+            borderTop:"1px solid var(--b1)", flexShrink:0 }}>
+            <button className="btn btn-ghost" onClick={step === 1 ? goClose : goBack} disabled={creating}>
+              {step === 1 ? t("common.cancel") : t("campaigns.create.back")}
+            </button>
+            {step < 4 ? (
+              <button className="btn btn-primary" onClick={goNext}>
+                {t("campaigns.create.next")}
+              </button>
+            ) : (
+              <button className="btn btn-primary" onClick={doCreate} disabled={creating}>
+                {creating ? t("campaigns.create.creating") : t("campaigns.create.createBtn")}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 // ─── Campaigns Page (real data) ───────────────────────────────────────────────
 const CAMPAIGN_DEFAULT_FILTERS = {
   search: "", status: "", type: "", strategy: "",
@@ -3515,10 +5105,9 @@ const CampaignsPage = ({ workspaceId }) => {
   const [selected, setSelected] = useState(new Set());
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [budgetPct, setBudgetPct] = useState("");
-  // S2-4: Campaign drill-down panel
-  const [panelCampaign, setPanelCampaign] = useState(null);
-  const [panelKws, setPanelKws]           = useState([]);
-  const [panelLoading, setPanelLoading]   = useState(false);
+  // Campaign detail modal
+  const [detailCampaign, setDetailCampaign] = useState(null);
+  const [createCampOpen, setCreateCampOpen] = useState(false);
   const { colgroup: campColgroup, resizeHandle: campRH, resetCols: campResetCols } = useResizableColumns(
     "campaigns", [36, 200, 80, 90, 95, 85, 85, 75, 75, 60]
   );
@@ -3532,6 +5121,30 @@ const CampaignsPage = ({ workspaceId }) => {
     { key: "acos",   label: "ACOS" },
     { key: "roas",   label: "ROAS" },
   ]);
+
+  // Listen for af:navigate — when navigating to campaigns with a search term, apply it immediately.
+  // CampaignsPage is keep-alive so this listener is always registered once mounted.
+  useEffect(() => {
+    const handler = (e) => {
+      const { page, search } = e.detail || {};
+      if (page !== "campaigns" || !search) return;
+      sessionStorage.removeItem("af:pending_search:campaigns");
+      setCampFilter("search", search);
+      setPage(1);
+    };
+    window.addEventListener("af:navigate", handler);
+    return () => window.removeEventListener("af:navigate", handler);
+  }, []);
+
+  // Fallback: apply pending campaign search if this page mounts after the af:navigate event fired.
+  useEffect(() => {
+    const pending = sessionStorage.getItem("af:pending_search:campaigns");
+    if (pending) {
+      sessionStorage.removeItem("af:pending_search:campaigns");
+      setCampFilter("search", pending);
+      setPage(1);
+    }
+  }, []);
 
   // S1-7: connections for last-sync timestamp
   const [connections, setConnections] = useState([]);
@@ -3555,29 +5168,6 @@ const CampaignsPage = ({ workspaceId }) => {
     { key: "r", handler: () => reload() },
     { key: "R", handler: () => reload() },
   ]);
-
-  // S2-4: open campaign panel + Escape key close
-  const openCampaignPanel = async (campaign) => {
-    setPanelCampaign(campaign);
-    setPanelLoading(true);
-    setPanelKws([]);
-    try {
-      const data = await apiFetch(`/keywords?limit=200&campaignId=${campaign.id}`);
-      const campKws = data?.data || data?.keywords || [];
-      campKws.sort((a, b) => parseFloat(b.spend || 0) - parseFloat(a.spend || 0));
-      setPanelKws(campKws);
-    } catch {
-      setPanelKws([]);
-    } finally {
-      setPanelLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape' && panelCampaign) setPanelCampaign(null); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
-  }, [panelCampaign]);
 
   function handleCampSort(field) {
     const isText = ["name", "state"].includes(field);
@@ -3667,7 +5257,7 @@ const CampaignsPage = ({ workspaceId }) => {
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("campaigns.title")}</h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("campaigns.count", { count: data?.pagination?.total ?? "—" })}</div>
         </div>
-        <button className="btn btn-primary">{t("campaigns.newCampaign")}</button>
+        <button className="btn btn-primary" onClick={() => setCreateCampOpen(true)}>{t("campaigns.newCampaign")}</button>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
@@ -3766,7 +5356,7 @@ const CampaignsPage = ({ workspaceId }) => {
                         <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelect(c.id)} /></td>
                         {campCV("name") && <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
                           <span
-                            onClick={(e) => { e.stopPropagation(); openCampaignPanel(c); }}
+                            onClick={(e) => { e.stopPropagation(); setDetailCampaign(c); }}
                             style={{ cursor: 'pointer', color: 'var(--ac2)' }}
                             onMouseEnter={e => e.target.style.textDecoration = 'underline'}
                             onMouseLeave={e => e.target.style.textDecoration = 'none'}
@@ -3908,77 +5498,25 @@ const CampaignsPage = ({ workspaceId }) => {
       document.body
       )}
 
-      {/* S2-4: Campaign drill-down panel */}
-      {panelCampaign && createPortal(
-        <div>
-          <div onClick={() => setPanelCampaign(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 800 }} />
-          <div style={{ position: 'fixed', top: 0, right: 0, width: 520, height: '100vh', background: 'var(--s2)', borderLeft: '1px solid var(--b1)', zIndex: 801, display: 'flex', flexDirection: 'column', overflowY: 'hidden', animation: 'slideInRight 200ms ease' }}>
-            {/* Header */}
-            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--b1)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexShrink: 0 }}>
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--tx)', maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {panelCampaign.name}
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                  {[
-                    { label: 'Type',       value: panelCampaign.campaign_type || '—' },
-                    { label: 'Status',     value: panelCampaign.state, color: panelCampaign.state === 'enabled' ? 'var(--grn)' : 'var(--tx3)' },
-                    { label: 'Budget/day', value: panelCampaign.daily_budget ? `$${parseFloat(panelCampaign.daily_budget).toFixed(0)}` : '—' },
-                    { label: 'Spend',      value: `$${parseFloat(panelCampaign.spend || 0).toFixed(0)}` },
-                    { label: 'ACOS',       value: panelCampaign.acos != null ? `${parseFloat(panelCampaign.acos).toFixed(1)}%` : '—', color: panelCampaign.acos != null ? acosColor(parseFloat(panelCampaign.acos)) : 'var(--tx3)' },
-                    { label: 'ROAS',       value: panelCampaign.roas != null ? `${parseFloat(panelCampaign.roas).toFixed(2)}×` : '—' },
-                  ].map(stat => (
-                    <span key={stat.label} style={{ fontSize: 11, background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 5, padding: '2px 8px', color: stat.color || 'var(--tx2)', whiteSpace: 'nowrap' }}>
-                      <span style={{ color: 'var(--tx3)' }}>{stat.label}:</span> {stat.value}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <button onClick={() => setPanelCampaign(null)} style={{ background: 'none', border: 'none', color: 'var(--tx3)', cursor: 'pointer', fontSize: 20, lineHeight: 1, padding: '0 4px', flexShrink: 0 }}>×</button>
-            </div>
-            {/* Keywords label */}
-            <div style={{ padding: '10px 20px 8px', borderBottom: '1px solid var(--b1)', fontSize: 11, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--tx3)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-              Keywords
-              {!panelLoading && <span style={{ background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 10, padding: '1px 7px', fontSize: 11, color: 'var(--tx2)', textTransform: 'none', letterSpacing: 0 }}>{panelKws.length}</span>}
-            </div>
-            {/* Keywords table */}
-            <div style={{ overflowY: 'auto', flex: 1 }}>
-              {panelLoading ? (
-                <div style={{ padding: 40, textAlign: 'center' }}><span className="loader" /></div>
-              ) : panelKws.length === 0 ? (
-                <div style={{ padding: 40, textAlign: 'center', color: 'var(--tx3)', fontSize: 13 }}>{t("settings.noPanelKeywords")}</div>
-              ) : (
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead>
-                    <tr style={{ position: 'sticky', top: 0, background: 'var(--s2)' }}>
-                      {['Keyword', 'Match', 'Bid', 'Clicks', 'ACOS', 'Spend'].map(h => (
-                        <th key={h} style={{ padding: '8px 12px', textAlign: h === 'Keyword' || h === 'Match' ? 'left' : 'right', color: 'var(--tx3)', fontWeight: 500, fontSize: 11, borderBottom: '1px solid var(--b1)', whiteSpace: 'nowrap', fontFamily: 'var(--mono)' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {panelKws.slice(0, 100).map((kw, i) => (
-                      <tr key={kw.id} style={{ borderBottom: '1px solid var(--b1)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.015)' }}>
-                        <td style={{ padding: '7px 12px', color: 'var(--tx)', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={kw.keyword_text}>{kw.keyword_text}</td>
-                        <td style={{ padding: '7px 12px', color: 'var(--tx3)', fontSize: 10, textTransform: 'lowercase' }}>{kw.match_type}</td>
-                        <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--ac2)', fontFamily: 'var(--mono)' }}>${parseFloat(kw.bid || 0).toFixed(2)}</td>
-                        <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--tx2)', fontFamily: 'var(--mono)' }}>{kw.clicks ? Number(kw.clicks).toLocaleString() : '—'}</td>
-                        <td style={{ padding: '7px 12px', textAlign: 'right', color: kw.acos != null ? acosColor(parseFloat(kw.acos)) : 'var(--tx3)', fontFamily: 'var(--mono)' }}>{kw.acos != null ? parseFloat(kw.acos).toFixed(1) + '%' : '—'}</td>
-                        <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--tx2)', fontFamily: 'var(--mono)' }}>{kw.spend && parseFloat(kw.spend) > 0 ? '$' + parseFloat(kw.spend).toFixed(2) : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-            {/* Footer */}
-            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--b1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
-              <span style={{ fontSize: 11, color: 'var(--tx3)' }}>Showing top {Math.min(panelKws.length, 100)} keywords by spend</span>
-              <button onClick={() => setPanelCampaign(null)} style={{ fontSize: 12, padding: '4px 12px', background: 'var(--s3)', border: '1px solid var(--b2)', borderRadius: 5, color: 'var(--tx2)', cursor: 'pointer' }}>{t("settings.close")}</button>
-            </div>
-          </div>
-        </div>,
-        document.body
+      {/* Campaign Detail Modal */}
+      {detailCampaign && (
+        <CampaignDetailModal
+          campaign={detailCampaign}
+          metricsDays={campFilters.metricsDays || 30}
+          onClose={() => setDetailCampaign(null)}
+          onCampaignUpdate={reload}
+        />
+      )}
+
+      {/* Create Campaign Wizard */}
+      {createCampOpen && (
+        <WizardErrorBoundary onClose={() => setCreateCampOpen(false)}>
+          <CreateCampaignModal
+            workspaceId={workspaceId}
+            onClose={() => setCreateCampOpen(false)}
+            onCreated={reload}
+          />
+        </WizardErrorBoundary>
       )}
 
       <FilterPanel
@@ -8645,6 +10183,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [profileId, setProfileId]       = useState(_kwrPrefs.profileId || "");
   const [locale, setLocale]             = useState(_kwrPrefs.locale ?? "");
   const [sources, setSources]           = useState(_kwrPrefs.sources || { amazon: false, ai: false, jungle_scout: true });
+  const [organicTopN, setOrganicTopN]   = useState(_kwrPrefs.organicTopN || 32);
   const [loading, setLoading]           = useState(false);
   const [results, setResults]           = useState(null); // { keywords, product_title, sources_used, jungle_scout_available }
   const [selected, setSelected]         = useState(new Set());
@@ -8714,8 +10253,8 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
   // Persist user preferences to localStorage
   useEffect(() => {
-    try { localStorage.setItem("kwr_prefs", JSON.stringify({ profileId, locale, sources })); } catch {}
-  }, [profileId, locale, sources]);
+    try { localStorage.setItem("kwr_prefs", JSON.stringify({ profileId, locale, sources, organicTopN })); } catch {}
+  }, [profileId, locale, sources, organicTopN]);
 
   const handleUrlChange = (val) => {
     setUrlInput(val);
@@ -8758,7 +10297,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
     try {
       const activeSources = Object.entries(sources)
         .filter(([, v]) => v).map(([k]) => k);
-      const body = { profileId, locale, sources: activeSources };
+      const body = { profileId, locale, sources: activeSources, organicTopN: Number(organicTopN) || 32 };
       if (asinList.length) body.asins = asinList;
       if (productTitle)    body.productTitle = productTitle;
       if (adGroupId)       body.adGroupId = adGroupId;
@@ -9102,7 +10641,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
         {/* Sources + action */}
         <div style={{ padding: "16px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, fontWeight: 500, color: "var(--tx3)", marginRight: 4 }}>{t("kwr.sourcesLabel")}</span>
             {srcConfig.map(({ key, label, icon, desc }) => {
               const on = !!sources[key];
@@ -9121,6 +10660,23 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 </button>
               );
             })}
+            {sources.jungle_scout && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: 4, padding: "4px 10px",
+                borderRadius: 20, border: "1.5px solid var(--b2)", background: "var(--s2)" }}
+                title="Органика: учитывать позиции до топ-N. Веса: первая треть = 1.0, вторая = 0.8, третья = 0.6">
+                <span style={{ fontSize: 11, color: "var(--tx3)", whiteSpace: "nowrap" }}>Органика топ-</span>
+                <input
+                  type="number" min={5} max={100} step={1}
+                  value={organicTopN}
+                  onChange={e => {
+                    const v = Math.min(100, Math.max(5, parseInt(e.target.value) || 32));
+                    setOrganicTopN(v);
+                  }}
+                  style={{ width: 44, fontSize: 12, fontWeight: 600, padding: "2px 4px", textAlign: "center",
+                    border: "none", background: "transparent", color: "var(--ac2)", outline: "none" }}
+                />
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -9266,7 +10822,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                     { key: "keyword_text",          label: "Ключевое слово",  align: "left",   sortable: true,  tip: null,   w: null },
                     { key: "source",                label: "Источник",         align: "left",   sortable: false, tip: null,   w: colWidths.source ?? 88 },
                     { key: "match_type",            label: "Тип",              align: "left",   sortable: false, tip: "Exact — точное совпадение. Phrase — фраза с доп. словами. Broad — широкое соответствие. Выбирайте тип перед добавлением.", w: colWidths.match_type ?? 148 },
-                    { key: "organic_rank_score",    label: "Органика",         align: "center", sortable: true,  tip: "Jungle Scout: сколько из введённых ASIN органически ранжируются по этому ключу на 1-й странице (позиции 1–16). Учитывается только органика без рекламы. Топ-5 = вес 1.0, топ-10 = 0.8, топ-16 = 0.6. Чем выше % — тем более конкурентен запрос для вашей ниши.", w: colWidths.organic_rank_score ?? 80 },
+                    { key: "organic_rank_score",    label: "Органика",         align: "center", sortable: true,  tip: `Jungle Scout: сколько из введённых ASIN органически ранжируются по этому ключу в топ-${organicTopN}. Учитывается только органика без рекламы. Первая треть позиций = вес 1.0, вторая = 0.8, третья = 0.6. Чем выше % — тем более конкурентен запрос для вашей ниши.`, w: colWidths.organic_rank_score ?? 80 },
                     { key: "relevance_score",       label: "Релев.",           align: "center", sortable: true,  tip: "Оценка соответствия ключа вашему товару (0–100). AI: анализирует заголовок, 50–100. Jungle Scout: собственный алгоритм.", w: colWidths.relevance_score ?? 72 },
                     { key: "impressions_share",     label: "Инд. показов",     align: "right",  sortable: true,  tip: "Amazon Ads: индекс частоты запроса в рекламной выдаче. Только Amazon Ads.", w: colWidths.impressions_share ?? 88 },
                     { key: "monthly_search_volume", label: "Поисков/мес",      align: "right",  sortable: true,  tip: "Ежемесячный объём поиска из Jungle Scout. Данные обогащаются для всех источников.", w: colWidths.monthly_search_volume ?? 96 },
@@ -9359,7 +10915,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                           const oc = os >= 70 ? "var(--grn)" : os >= 35 ? "var(--amb)" : "var(--red)";
                           return (
                             <div style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 44 }}
-                              title={kw.organic_rank_count != null ? `${kw.organic_rank_count} из введённых ASIN ранжируются на стр. 1${kw.organic_top_position != null ? `, лучшая позиция: #${kw.organic_top_position}` : ""}` : ""}>
+                              title={kw.organic_rank_count != null ? `${kw.organic_rank_count} из введённых ASIN в топ-${organicTopN}${kw.organic_top_position != null ? `, лучшая позиция: #${kw.organic_top_position}` : ""}` : ""}>
                               <span style={{ fontSize: 13, fontWeight: 700, color: oc, fontFamily: "var(--mono)" }}>{os}%</span>
                               <div style={{ width: 36, height: 3, borderRadius: 2, background: "var(--b1)", overflow: "hidden" }}>
                                 <div style={{ width: `${os}%`, height: "100%", background: oc, borderRadius: 2 }} />
@@ -9982,7 +11538,14 @@ const RulesPage = ({ workspaceId }) => {
                                   {entityLabel}
                                 </div>
                                 {a.campaign_name && (
-                                  <div style={{ fontSize:10, color:"var(--tx3)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1 }}>
+                                  <div
+                                    onClick={() => {
+                                      sessionStorage.setItem("af:pending_search:campaigns", a.campaign_name);
+                                      setShowResult(null);
+                                      window.dispatchEvent(new CustomEvent("af:navigate", { detail: { page: "campaigns", search: a.campaign_name } }));
+                                    }}
+                                    title="Перейти к кампании"
+                                    style={{ fontSize:10, color:"var(--ac2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1, cursor:"pointer", textDecoration:"underline dotted" }}>
                                     {a.campaign_name}
                                   </div>
                                 )}
@@ -10041,7 +11604,7 @@ const RulesPage = ({ workspaceId }) => {
             const acts  = parse(rule.actions);
             const scope = parse(rule.scope) || {};
             const last  = rule.last_run_result
-              ? (typeof rule.last_run_result === "string" ? JSON.parse(rule.last_run_result) : rule.last_run_result)
+              ? (typeof rule.last_run_result === "string" ? (() => { try { return JSON.parse(rule.last_run_result); } catch { return null; } })() : rule.last_run_result)
               : null;
             const isRunning = runningId === rule.id;
 
@@ -12276,6 +13839,18 @@ export default function App() {
     const handler = (e) => { setToast(e.detail); setTimeout(() => setToast(null), 2000); };
     window.addEventListener("af:toast", handler);
     return () => window.removeEventListener("af:toast", handler);
+  }, []);
+
+  // Handle cross-component navigation (e.g. from simulation modal → campaigns page)
+  useEffect(() => {
+    const handler = (e) => {
+      const { page } = e.detail || {};
+      if (!page) return;
+      localStorage.setItem("af_page", page);
+      setActive(page);
+    };
+    window.addEventListener("af:navigate", handler);
+    return () => window.removeEventListener("af:navigate", handler);
   }, []);
 
   // Handle OAuth callback on page load

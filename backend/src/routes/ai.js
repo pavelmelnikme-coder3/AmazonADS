@@ -555,6 +555,7 @@ router.post("/recommendations/:id/apply", async (req, res, next) => {
 
     await writeAudit({
       orgId: req.orgId,
+      workspaceId: req.workspaceId,
       actorId: req.user.id,
       actorName: req.user.name,
       actorType: "user",

@@ -2,7 +2,7 @@ const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit, updateAuditStatus } = require("./audit");
-const { pushKeywordUpdates, loadKeywordContext } = require("../services/amazon/writeback");
+const { pushKeywordUpdates, loadKeywordContext, pushNewKeywords } = require("../services/amazon/writeback");
 const logger = require("../config/logger");
 
 const router = express.Router();
@@ -273,6 +273,75 @@ router.patch("/:id", async (req, res, next) => {
     }).catch(e => logger.warn("single keyword write-back error", { error: e.message }));
 
     res.json(kw);
+  } catch (err) { next(err); }
+});
+
+// POST /keywords — create a single keyword in an ad group
+router.post("/", async (req, res, next) => {
+  try {
+    const { adGroupId, keywordText, matchType = "broad", bid = 0.50 } = req.body;
+    if (!adGroupId || !keywordText?.trim())
+      return res.status(400).json({ error: "adGroupId and keywordText required" });
+    const bidVal = Math.max(0.02, parseFloat(bid) || 0.50);
+    const mt = (matchType || "broad").toLowerCase();
+    if (!["exact", "phrase", "broad"].includes(mt))
+      return res.status(400).json({ error: "matchType must be exact, phrase, or broad" });
+
+    const { rows: [ag] } = await query(
+      `SELECT ag.id, ag.amazon_ag_id, ag.campaign_id,
+              c.amazon_campaign_id, c.campaign_type,
+              c.profile_id AS profile_db_id,
+              p.profile_id AS amazon_profile_id,
+              p.connection_id, p.marketplace_id
+       FROM ad_groups ag
+       JOIN campaigns c ON c.id = ag.campaign_id
+       JOIN amazon_profiles p ON p.id = c.profile_id
+       WHERE ag.id = $1 AND ag.workspace_id = $2`,
+      [adGroupId, req.workspaceId]
+    );
+    if (!ag) return res.status(404).json({ error: "Ad group not found" });
+
+    // Dedup check
+    const { rows: existing } = await query(
+      `SELECT id FROM keywords WHERE ad_group_id = $1 AND LOWER(keyword_text) = LOWER($2) AND match_type = $3`,
+      [adGroupId, keywordText.trim(), mt]
+    );
+    if (existing.length) return res.status(409).json({ error: "Keyword already exists in this ad group with this match type" });
+
+    const fakeId = `kw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const { rows: [ins] } = await query(
+      `INSERT INTO keywords
+         (workspace_id, profile_id, campaign_id, ad_group_id, amazon_keyword_id, keyword_text, match_type, state, bid, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'enabled',$8,NOW(),NOW())
+       ON CONFLICT (profile_id, amazon_keyword_id) DO NOTHING
+       RETURNING id, keyword_text, match_type, bid, state`,
+      [req.workspaceId, ag.profile_db_id, ag.campaign_id, adGroupId, fakeId, keywordText.trim(), mt, bidVal]
+    );
+    if (!ins) return res.status(409).json({ error: "Keyword already exists" });
+
+    pushNewKeywords([{
+      localId: ins.id,
+      connectionId: ag.connection_id,
+      profileId: ag.amazon_profile_id?.toString(),
+      marketplaceId: ag.marketplace_id,
+      campaignType: ag.campaign_type,
+      amazonCampaignId: ag.amazon_campaign_id,
+      amazonAdGroupId: ag.amazon_ag_id,
+      keywordText: keywordText.trim(),
+      matchType: mt.toUpperCase(),
+      bid: bidVal,
+    }]).catch(() => {});
+
+    await writeAudit({
+      orgId: req.orgId, workspaceId: req.workspaceId,
+      actorId: req.user.id, actorName: req.user.name,
+      action: "keyword.added", entityType: "keyword",
+      entityId: ins.id, entityName: keywordText.trim(),
+      afterData: { keyword_text: keywordText.trim(), match_type: mt, bid: bidVal },
+      source: "ui",
+    });
+
+    res.json({ data: ins });
   } catch (err) { next(err); }
 });
 

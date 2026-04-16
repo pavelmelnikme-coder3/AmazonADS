@@ -21,6 +21,7 @@ router.get("/", async (req, res, next) => {
          latest.captured_at       AS checked_at,
          prev.position            AS prev_position,
          COALESCE(al.label, '')   AS asin_label,
+         al.display_order         AS asin_display_order,
          pr.title                 AS product_title,
          pr.brand                 AS product_brand,
          pr.image_url             AS product_image_url
@@ -121,6 +122,24 @@ router.post("/", async (req, res, next) => {
         }
       })();
     }
+  } catch (err) { next(err); }
+});
+
+// PATCH /keyword-ranks/asin-order — save user-defined display order for ASIN groups
+router.patch("/asin-order", async (req, res, next) => {
+  try {
+    const { order } = req.body; // [{ asin, display_order }, ...]
+    if (!Array.isArray(order)) return res.status(400).json({ error: "order must be an array" });
+    for (const { asin, display_order } of order) {
+      if (!/^[A-Z0-9]{10}$/.test(asin)) continue;
+      await query(
+        `INSERT INTO asin_labels (workspace_id, asin, display_order, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (workspace_id, asin) DO UPDATE SET display_order = EXCLUDED.display_order, updated_at = NOW()`,
+        [req.workspaceId, asin, display_order]
+      );
+    }
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 

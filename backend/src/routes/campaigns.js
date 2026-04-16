@@ -2,7 +2,7 @@ const express = require("express");
 const { query, withTransaction } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit } = require("./audit");
-const { post, patch: apiPatch } = require("../services/amazon/adsClient");
+const { post: apiPost, patch: apiPatch } = require("../services/amazon/adsClient");
 const logger = require("../config/logger");
 
 const router = express.Router();
@@ -156,7 +156,7 @@ router.get("/:id", async (req, res, next) => {
 // PATCH /campaigns/:id — update status, budget, bidding strategy
 router.patch("/:id", async (req, res, next) => {
   try {
-    const { state, dailyBudget, biddingStrategy } = req.body;
+    const { state, dailyBudget, biddingStrategy, placements } = req.body;
     const allowed = ["enabled", "paused", "archived"];
     if (state && !allowed.includes(state)) {
       return res.status(400).json({ error: `state must be one of: ${allowed.join(", ")}` });
@@ -178,7 +178,16 @@ router.patch("/:id", async (req, res, next) => {
     const amazonPayload = { campaignId: campaign.amazon_campaign_id };
     if (state) amazonPayload.state = state;
     if (dailyBudget !== undefined) amazonPayload.dailyBudget = parseFloat(dailyBudget);
-    if (biddingStrategy) amazonPayload.bidding = { strategy: biddingStrategy };
+    if (biddingStrategy && !placements) amazonPayload.bidding = { strategy: biddingStrategy };
+    if (placements) {
+      amazonPayload.bidding = {
+        strategy: biddingStrategy || campaign.bidding_strategy || "legacyForSales",
+        adjustments: placements.map(p => ({
+          predicate:  p.predicate,
+          percentage: Math.min(900, Math.max(0, parseInt(p.percentage) || 0)),
+        })),
+      };
+    }
 
     const endpoint = {
       sponsoredProducts: "/v2/sp/campaigns",
@@ -187,14 +196,29 @@ router.patch("/:id", async (req, res, next) => {
     }[campaign.campaign_type];
 
     // Apply to Amazon
-    await apiPatch({
-      connectionId: campaign.connection_id,
-      profileId: String(campaign.amazon_profile_id),
-      marketplace: campaign.marketplace_id,
-      path: endpoint,
-      data: [amazonPayload],
-      group: "campaigns",
-    });
+    // Placement-only calls are non-fatal; budget/state/strategy changes surface errors to user
+    if (endpoint) {
+      if (placements && !state && dailyBudget === undefined && !biddingStrategy) {
+        // Placement-only update: non-fatal
+        apiPatch({
+          connectionId: campaign.connection_id,
+          profileId: String(campaign.amazon_profile_id),
+          marketplace: campaign.marketplace_id,
+          path: endpoint,
+          data: [amazonPayload],
+          group: "campaigns",
+        }).catch(e => logger.warn("Placement write-back failed (non-fatal)", { error: e.message }));
+      } else {
+        await apiPatch({
+          connectionId: campaign.connection_id,
+          profileId: String(campaign.amazon_profile_id),
+          marketplace: campaign.marketplace_id,
+          path: endpoint,
+          data: [amazonPayload],
+          group: "campaigns",
+        });
+      }
+    }
 
     // Update our DB
     const updates = [];
@@ -231,6 +255,34 @@ router.patch("/:id", async (req, res, next) => {
   }
 });
 
+// GET /campaigns/:id/placement — return current placement bid adjustments
+router.get("/:id/placement", async (req, res, next) => {
+  try {
+    const { rows: [camp] } = await query(
+      `SELECT raw_data, bidding_strategy FROM campaigns WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+    if (!camp) return res.status(404).json({ error: "Campaign not found" });
+
+    // Amazon SP API v3 stores placement in raw_data.dynamicBidding.placementBidding
+    // Amazon SP API v2 format uses raw_data.bidding.adjustments
+    // Handle both formats:
+    const v3 = camp.raw_data?.dynamicBidding?.placementBidding || [];
+    const v2 = camp.raw_data?.bidding?.adjustments || [];
+
+    let top = 0, pp = 0;
+    if (v3.length > 0) {
+      top = v3.find(a => a.placement === "PLACEMENT_TOP")?.percentage ?? 0;
+      pp  = v3.find(a => a.placement === "PLACEMENT_PRODUCT_PAGE")?.percentage ?? 0;
+    } else if (v2.length > 0) {
+      top = v2.find(a => a.predicate === "placementTop")?.percentage ?? 0;
+      pp  = v2.find(a => a.predicate === "placementProductPage")?.percentage ?? 0;
+    }
+
+    res.json({ placementTop: top, placementProductPage: pp, strategy: camp.bidding_strategy });
+  } catch (err) { next(err); }
+});
+
 // GET /campaigns/:id/metrics
 router.get("/:id/metrics", async (req, res, next) => {
   try {
@@ -256,6 +308,133 @@ router.get("/:id/metrics", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// POST /campaigns — create a new campaign
+router.post("/", async (req, res, next) => {
+  try {
+    const {
+      profileId,
+      name,
+      campaignType = "sponsoredProducts",
+      state = "enabled",
+      dailyBudget,
+      targetingType = "manual",
+      startDate,
+      endDate,
+      biddingStrategy = "legacyForSales",
+    } = req.body;
+
+    if (!profileId || !name?.trim())
+      return res.status(400).json({ error: "profileId and name required" });
+
+    const budget = parseFloat(dailyBudget);
+    if (isNaN(budget) || budget < 1)
+      return res.status(400).json({ error: "dailyBudget must be at least 1" });
+
+    if (!["sponsoredProducts", "sponsoredBrands", "sponsoredDisplay"].includes(campaignType))
+      return res.status(400).json({ error: "Invalid campaignType" });
+
+    const { rows: [profile] } = await query(
+      `SELECT p.id, p.profile_id AS amazon_profile_id, p.marketplace_id, p.connection_id
+       FROM amazon_profiles p
+       WHERE p.id = $1 AND p.workspace_id = $2`,
+      [profileId, req.workspaceId]
+    );
+    if (!profile) return res.status(404).json({ error: "Profile not found" });
+
+    const today = new Date().toISOString().slice(0, 10);
+    const startFmt = (startDate || today).replace(/-/g, "");
+
+    let amazonCampaignId = `camp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const path = {
+      sponsoredProducts: "/sp/campaigns",
+      sponsoredBrands:   "/sb/campaigns",
+      sponsoredDisplay:  "/sd/campaigns",
+    }[campaignType];
+
+    let amazonData;
+    if (campaignType === "sponsoredProducts") {
+      const camp = {
+        name: name.trim(),
+        campaignType: "sponsoredProducts",
+        state: state.toUpperCase(),
+        targetingType: (targetingType || "manual").toUpperCase(),
+        startDate: startFmt,
+        budget: { budgetType: "DAILY", budget },
+      };
+      if (endDate) camp.endDate = endDate.replace(/-/g, "");
+      amazonData = { campaigns: [camp] };
+    } else if (campaignType === "sponsoredBrands") {
+      const camp = {
+        name: name.trim(),
+        campaignType: "sponsoredBrands",
+        state: state.toUpperCase(),
+        startDate: startFmt,
+        budget,
+        budgetType: "dailyBudget",
+      };
+      if (endDate) camp.endDate = endDate.replace(/-/g, "");
+      amazonData = { campaigns: [camp] };
+    } else {
+      const camp = {
+        name: name.trim(),
+        campaignType: "sponsoredDisplay",
+        state: state.toUpperCase(),
+        startDate: startFmt,
+        budget,
+        budgetType: "daily",
+      };
+      if (endDate) camp.endDate = endDate.replace(/-/g, "");
+      amazonData = { campaigns: [camp] };
+    }
+
+    try {
+      const result = await apiPost({
+        connectionId: profile.connection_id,
+        profileId:    String(profile.amazon_profile_id),
+        marketplace:  profile.marketplace_id,
+        path,
+        data:         amazonData,
+        group:        "campaigns",
+      });
+      const created = result?.campaigns?.success?.[0];
+      if (created?.campaignId) amazonCampaignId = String(created.campaignId);
+    } catch (e) {
+      logger.warn("Campaign create write-back failed (non-fatal)", { error: e.message });
+    }
+
+    const { rows: [ins] } = await query(
+      `INSERT INTO campaigns
+         (workspace_id, profile_id, amazon_campaign_id, name, campaign_type, state,
+          daily_budget, targeting_type, bidding_strategy, start_date, end_date, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+       RETURNING id, name, campaign_type, state, daily_budget, targeting_type, bidding_strategy, start_date, end_date`,
+      [
+        req.workspaceId, profileId, amazonCampaignId,
+        name.trim(), campaignType, state,
+        budget, targetingType, biddingStrategy,
+        startDate || today,
+        endDate || null,
+      ]
+    );
+
+    await writeAudit({
+      orgId:       req.orgId,
+      workspaceId: req.workspaceId,
+      actorId:     req.user.id,
+      actorName:   req.user.name,
+      action:      "campaign.created",
+      entityType:  "campaign",
+      entityId:    ins.id,
+      entityName:  name.trim(),
+      afterData:   { name: name.trim(), campaignType, dailyBudget: budget, state },
+      source:      "ui",
+    });
+
+    res.json({ data: ins });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;
