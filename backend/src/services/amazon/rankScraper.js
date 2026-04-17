@@ -235,4 +235,125 @@ async function scrapeWorkspaceRanks(workspaceId, db) {
   return results;
 }
 
-module.exports = { scrapeRank, scrapeWorkspaceRanks };
+/**
+ * Scrape title, brand, and main image for a single ASIN from the product page.
+ * @returns {{ asin, title, brand, imageUrl, blocked, error }}
+ */
+async function scrapeProductMeta(asin, marketplaceId = "A1PA6795UKMFR9") {
+  const { domain, lang, scraperCountry } = MARKETPLACE[marketplaceId] || MARKETPLACE["A1PA6795UKMFR9"];
+  const ua = pickUA();
+  const amazonUrl = `https://www.${domain}/dp/${asin}`;
+  const url = SCRAPERAPI_KEY
+    ? `http://api.scraperapi.com/?api_key=${SCRAPERAPI_KEY}&url=${encodeURIComponent(amazonUrl)}&country_code=${scraperCountry}`
+    : amazonUrl;
+
+  try {
+    const resp = await axios.get(url, {
+      ...(proxyConfig ? { proxy: proxyConfig, httpsAgent: proxyHttpsAgent } : {}),
+      headers: SCRAPERAPI_KEY ? {} : {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": lang,
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+      },
+      timeout: 20000,
+      maxRedirects: 5,
+    });
+
+    const html = resp.data;
+    if (isBlocked(html)) {
+      logger.warn("scrapeProductMeta: blocked", { asin });
+      return { asin, blocked: true };
+    }
+
+    const decodeHtml = s => s
+      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+      .replace(/&[a-z]+;/g, "").replace(/&#\d+;/g, "");
+
+    // Title
+    const titleM = html.match(/id="productTitle"[^>]*>\s*([\s\S]*?)\s*<\/span>/i);
+    const title = titleM ? decodeHtml(titleM[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()) || null : null;
+
+    // Brand — prefer explicit "Marke: X" / "Brand: X" text, fall back to byline link, then #brand span
+    let brand = null;
+    const markeM = html.match(/(?:Marke|Brand|Marca|Marque)\s*:\s*<[^>]+>\s*([^<]{2,80})\s*</i);
+    if (markeM) brand = decodeHtml(markeM[1].trim());
+    if (!brand) {
+      const bylineM = html.match(/id="bylineInfo"[^>]*>[\s\S]{0,300}?<a[^>]*>([^<]{2,80})<\/a>/i);
+      if (bylineM) {
+        const candidate = decodeHtml(bylineM[1].trim());
+        // Skip "Visit the X Store" type text, take the store name part
+        const storeM = candidate.match(/(?:Besuche den |Visit the |Visiter la boutique |Visita lo store )?(.+?)(?:-Store| Store)?$/i);
+        brand = storeM ? storeM[1].trim() : candidate;
+      }
+    }
+    if (!brand) {
+      const brandSpanM = html.match(/id="brand"[^>]*>\s*([^<]{2,80})\s*</i);
+      if (brandSpanM) brand = decodeHtml(brandSpanM[1].trim());
+    }
+
+    // Main image — landingImage src or hiRes JSON
+    let imageUrl = null;
+    const landingM = html.match(/id="landingImage"[^>]+src="([^"]+)"/i);
+    if (landingM) imageUrl = landingM[1];
+    if (!imageUrl) {
+      const hiResM = html.match(/"hiRes"\s*:\s*"(https:[^"]+)"/);
+      if (hiResM) imageUrl = hiResM[1];
+    }
+
+    logger.info("scrapeProductMeta: ok", { asin, title: title?.slice(0, 60), brand });
+    return { asin, title, brand, imageUrl, blocked: false };
+  } catch (err) {
+    logger.error("scrapeProductMeta: failed", { asin, error: err.message });
+    return { asin, blocked: false, error: err.message };
+  }
+}
+
+/**
+ * Sync metadata for all products in a workspace that are missing a title.
+ * Respects same rate-limit delays as rank scraper.
+ */
+async function syncProductsMeta(workspaceId, db) {
+  const { rows: products } = await db.query(
+    `SELECT id, asin, marketplace_id FROM products
+     WHERE workspace_id = $1 AND is_active = true AND title IS NULL
+     ORDER BY created_at ASC`,
+    [workspaceId]
+  );
+
+  logger.info("syncProductsMeta: starting", { workspaceId, count: products.length });
+  let synced = 0;
+  let blocked = 0;
+
+  for (let i = 0; i < products.length; i++) {
+    const { id, asin, marketplace_id } = products[i];
+    const meta = await scrapeProductMeta(asin, marketplace_id);
+
+    if (meta.blocked) {
+      blocked++;
+      logger.warn("syncProductsMeta: blocked — stopping", { workspaceId, synced, remaining: products.length - i });
+      break;
+    }
+
+    if (meta.title || meta.imageUrl) {
+      await db.query(
+        `UPDATE products SET title=$1, brand=$2, image_url=$3, updated_at=NOW() WHERE id=$4`,
+        [meta.title, meta.brand, meta.imageUrl, id]
+      );
+      synced++;
+    }
+
+    if (i < products.length - 1) await randSleep(SCRAPERAPI_KEY ? 500 : 3000, SCRAPERAPI_KEY ? 1500 : 7000);
+  }
+
+  logger.info("syncProductsMeta: done", { workspaceId, synced, blocked });
+  return { synced, blocked, total: products.length };
+}
+
+module.exports = { scrapeRank, scrapeWorkspaceRanks, scrapeProductMeta, syncProductsMeta };

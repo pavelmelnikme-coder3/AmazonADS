@@ -6,6 +6,30 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-04-17
+
+### Fixed — TACoS metric
+
+- **TACoS now displays without SP-API** — falls back to `sales_14d` (ad-attributed sales) as denominator when `sp_orders` table is empty; `tacosSource: 'sp_api' | 'ads_attributed'` returned in metrics response.
+- When SP-API is connected, true TACoS (Spend / Total Revenue from orders) is used automatically.
+- i18n: `tacosEstimated` key added to EN / RU / DE.
+
+### Added — Product metadata auto-sync
+
+- **`scrapeProductMeta(asin, marketplaceId)`** — scrapes title, brand, and main image from Amazon product page (`/dp/{ASIN}`); uses existing ScraperAPI / proxy / UA-rotation infrastructure from rankScraper; decodes HTML entities.
+- **`syncProductsMeta(workspaceId, db)`** — batch syncs all products without `title` for a workspace; respects 3–7 s delay between ASINs (no SP-API required).
+- **BullMQ queue `product-meta-sync`** — dedicated worker, job deduplication by workspace ID.
+- **Daily cron 04:30 UTC** — automatically queues meta sync for workspaces with `title IS NULL` products.
+- **`POST /products/sync-meta`** — manual trigger endpoint (auth required).
+- **Auto-trigger on add** — `POST /products` (add ASIN) immediately queues meta sync when SP-API is not configured.
+
+### Changed — Products coverage
+
+- **19 missing ASINs** found in campaign names (regex `B0[A-Z0-9]{8}`) but absent from `products` table — added automatically.
+- Total products: 117 → 136; titles scraped for 128 / 136 (8 are discontinued / 404 on amazon.de).
+
+---
+
 ## [Unreleased] — 2026-04-06
 
 ### Added — Keyword Research (new section)

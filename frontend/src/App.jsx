@@ -3861,6 +3861,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
       if (item.id === "kpi_acos") {
         const targetAcos = user?.settings?.target_acos;
         const hasTacos = hasData && totals.tacos != null;
+        const tacosSource = totals.tacosSource;
         extra = (
           <div>
             <div style={{ display: "flex", gap: 3, marginTop: 5, marginBottom: 2 }}>

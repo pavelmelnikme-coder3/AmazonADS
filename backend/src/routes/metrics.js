@@ -75,9 +75,10 @@ router.get("/summary", async (req, res, next) => {
       [req.workspaceId, prevStart.toISOString().split("T")[0], prevEnd.toISOString().split("T")[0]]
     );
 
-    // TACoS via SP-API orders (null when no SP-API data available)
+    // TACoS: try SP-API orders first, fall back to ad-attributed sales (sales_14d)
     let tacos = null;
     let totalRevenue = null;
+    let tacosSource = null; // 'sp_api' | 'ads_attributed'
     try {
       const { rows: [spTotals] } = await query(
         `SELECT SUM(order_total_amount) AS total_revenue FROM sp_orders
@@ -90,9 +91,21 @@ router.get("/summary", async (req, res, next) => {
         const spend = parseFloat(totals?.spend || 0);
         if (totalRevenue > 0 && spend > 0) {
           tacos = (spend / totalRevenue * 100).toFixed(2);
+          tacosSource = 'sp_api';
         }
       }
     } catch {}
+
+    // Fallback: use ad-attributed sales_14d as denominator when SP-API unavailable
+    if (tacos === null) {
+      const adSales = parseFloat(totals?.sales || 0);
+      const spend = parseFloat(totals?.spend || 0);
+      if (adSales > 0 && spend > 0) {
+        totalRevenue = adSales;
+        tacos = (spend / adSales * 100).toFixed(2);
+        tacosSource = 'ads_attributed';
+      }
+    }
 
     const calcDelta = (curr, prevVal) => {
       if (!prevVal || prevVal === 0) return null;
@@ -112,6 +125,7 @@ router.get("/summary", async (req, res, next) => {
         acos: parseFloat(totals?.acos || 0).toFixed(2),
         roas: parseFloat(totals?.roas || 0).toFixed(2),
         tacos,
+        tacosSource,
         totalRevenue: totalRevenue ? totalRevenue.toFixed(2) : null,
       },
       deltas: {

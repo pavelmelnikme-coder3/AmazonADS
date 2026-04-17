@@ -631,6 +631,7 @@ export default {
     tacos: "TACoS",
     tacosTooltip: "Total ACoS = Расходы на рекламу / Общие продажи (органика + реклама)",
     tacosNoData: "Подключите SP-API для отображения TACoS",
+    tacosEstimated: "На основе рекламных продаж (SP-API не подключён)",
   },
   sync: {
     syncing: "Синхронизация...",

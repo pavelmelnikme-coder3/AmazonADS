@@ -33,6 +33,7 @@ const QUEUES = {
   AI_ANALYSIS:      "ai-analysis",
   SP_SYNC:          "sp-sync",
   RANK_CHECK:       "rank-check",
+  PRODUCT_META:     "product-meta-sync",
 };
 
 const defaultJobOptions = {
@@ -97,6 +98,12 @@ async function queueRankCheck(workspaceId) {
   const queue = getQueue(QUEUES.RANK_CHECK);
   const jobId = `rank_${workspaceId}`;
   return queue.add("check", { workspaceId }, { jobId });
+}
+
+async function queueProductMetaSync(workspaceId) {
+  const queue = getQueue(QUEUES.PRODUCT_META);
+  const jobId = `meta_${workspaceId}`;
+  return queue.add("sync", { workspaceId }, { jobId });
 }
 
 async function queueBulkOperation(workspaceId, operationType, items) {
@@ -540,7 +547,23 @@ async function startWorkers() {
     logger.error("Rank check worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker];
+  const { syncProductsMeta } = require("../services/amazon/rankScraper");
+  const productMetaWorker = new Worker(
+    QUEUES.PRODUCT_META,
+    async (job) => {
+      const { workspaceId } = job.data;
+      logger.info("Product meta sync started", { workspaceId });
+      const result = await syncProductsMeta(workspaceId, { query });
+      logger.info("Product meta sync done", { workspaceId, ...result });
+      return result;
+    },
+    { connection: createRedisConnection(), concurrency: 1 }
+  );
+  productMetaWorker.on("failed", (job, err) => {
+    logger.error("Product meta worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 
   // Mark stale processing/requested DB records as failed (left over from previous restarts)
@@ -566,6 +589,7 @@ module.exports = {
   queueAiAnalysis,
   queueSpSync,
   queueRankCheck,
+  queueProductMetaSync,
   startWorkers,
   stopWorkers,
   QUEUES,

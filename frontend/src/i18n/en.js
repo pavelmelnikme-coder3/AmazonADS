@@ -637,6 +637,7 @@ export default {
     tacos: "TACoS",
     tacosTooltip: "Total ACoS = Ad Spend / Total Sales (organic + ads)",
     tacosNoData: "Connect SP-API to see TACoS",
+    tacosEstimated: "Based on ad-attributed sales (SP-API not connected)",
   },
   sync: {
     syncing: "Syncing...",

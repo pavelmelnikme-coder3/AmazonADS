@@ -636,6 +636,7 @@ export default {
     tacos: "TACoS",
     tacosTooltip: "Total ACoS = Werbeausgaben / Gesamtumsatz (organisch + Anzeigen)",
     tacosNoData: "SP-API verbinden, um TACoS anzuzeigen",
+    tacosEstimated: "Basierend auf werbeattribuierten Umsätzen (SP-API nicht verbunden)",
   },
   sync: {
     syncing: "Synchronisierung...",

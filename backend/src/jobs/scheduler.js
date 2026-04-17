@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 
@@ -219,7 +219,22 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob];
+  // ─── Product metadata sync: daily at 04:30 UTC (products without title) ──────
+  const productMetaJob = new CronJob("30 4 * * *", async () => {
+    try {
+      const { rows } = await query(
+        `SELECT DISTINCT workspace_id FROM products WHERE is_active = true AND title IS NULL`
+      );
+      for (const { workspace_id } of rows) {
+        await queueProductMetaSync(workspace_id);
+      }
+      if (rows.length) logger.info("Cron: Product meta sync queued", { workspaces: rows.length });
+    } catch (err) {
+      logger.error("Cron product meta sync failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

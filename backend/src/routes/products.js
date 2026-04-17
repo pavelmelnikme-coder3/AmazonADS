@@ -3,6 +3,7 @@ const router = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { getCatalogItem } = require("../services/amazon/spClient");
+const { queueProductMetaSync } = require("../jobs/workers");
 const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
@@ -92,7 +93,23 @@ router.post("/", async (req, res, next) => {
       }
     }
 
+    // No SP-API — queue background meta scrape
+    queueProductMetaSync(req.workspaceId).catch(() => {});
     res.json(product);
+  } catch (err) { next(err); }
+});
+
+// POST /products/sync-meta — trigger metadata scrape for all products without title
+router.post("/sync-meta", async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT COUNT(*) as cnt FROM products WHERE workspace_id = $1 AND is_active = true AND title IS NULL`,
+      [req.workspaceId]
+    );
+    const pending = parseInt(rows[0].cnt);
+    if (pending === 0) return res.json({ ok: true, queued: 0, message: "All products already have metadata" });
+    await queueProductMetaSync(req.workspaceId);
+    res.json({ ok: true, queued: pending });
   } catch (err) { next(err); }
 });
 
