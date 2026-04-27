@@ -132,13 +132,20 @@ async function syncOrders(workspaceId, marketplaceId, refreshToken, options = {}
   const logId = await _startLog(workspaceId, marketplaceId, "orders");
   let fetched = 0, upserted = 0;
   try {
-    // Incremental: start from last known order date
+    // Incremental: resume from the last known order date. On first run (empty
+    // table) start with a 7-day window — Orders API rate is 1 req/min so a
+    // 30-day backfill across many pages can take an hour. Once the table has
+    // data, subsequent runs are tiny incrementals.
     if (!options.createdAfter) {
       const { rows } = await pool.query(
         `SELECT MAX(purchase_date) AS last FROM sp_orders WHERE workspace_id=$1 AND marketplace_id=$2`,
         [workspaceId, marketplaceId]
       );
-      if (rows[0].last) options.createdAfter = rows[0].last.toISOString();
+      if (rows[0].last) {
+        options.createdAfter = rows[0].last.toISOString();
+      } else {
+        options.createdAfter = new Date(Date.now() - 7 * 86400000).toISOString();
+      }
     }
 
     const orders = await getOrders(marketplaceId, refreshToken, options);

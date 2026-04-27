@@ -6,6 +6,102 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-04-27
+
+### Added — Products report export (XLSX)
+
+- **`POST /products/export`** — generates a multi-sheet XLSX report.
+  - Accepts `{startDate, endDate, columns[], includeHistory}` body.
+  - 18 selectable columns across 3 groups: Info (ASIN/Title/Brand/Marketplace), BSR (Latest/Min/Max/Avg/First/Last/Change %/Snapshots/Best Category), Ads (Spend/Sales/Orders/Clicks/ACoS).
+  - Optional Sheet 2 "BSR History" with every snapshot in the period (frozen header, formatted timestamps).
+  - Aggregates done in a single SQL with 3 CTEs: `bsr` (min/max/avg + first/last via `ARRAY_AGG ORDER BY captured_at`), `latest` (`DISTINCT ON`), `ads` (joins `fact_metrics_daily` by `entity_type='advertised_product'` and `amazon_id = ASIN`).
+- **Frontend export modal** (`ProductsPage`) — preset periods (7d/30d/90d) + custom date pickers, grouped column checkboxes with select-all/none, optional history sheet toggle, in-modal loading state.
+- i18n: 28 new keys in `products.export*` namespace across EN/RU/DE.
+
+### Added — Search-term entity type for rules
+
+- New scope `entity_type: "search_term"` in rule engine — aggregates `search_term_metrics` over the rule's period and applies `add_negative_keyword` (or `add_negative_target`) to matched queries.
+- `query` from `search_term_metrics` is aliased to `keyword_text` so existing add-negative handler accepts both keyword and search-term entities without a special branch.
+- Wizard auto-resets incompatible actions when entity type changes (e.g. switching to `search_term` keeps only `add_negative_keyword`).
+- `ruleActionsList` items can declare `et` as a string OR array (`add_negative_keyword.et = ["keyword","search_term"]`).
+- i18n key `rules.searchTerm` in EN/RU/DE.
+
+### Added — Skip-reason tracking in rule preview
+
+- `executeRule()` now records every entity that matched conditions but couldn't be acted on, with one of 5 reasons: `already_paused`, `already_enabled`, `not_enabled`, `already_negative`, `wrong_entity_type`.
+- API response gains `skipped_count` and `skipped[]` array (each with `entity_id`, `keyword_text`, `campaign_name`, `action`, `reason`, `metrics`).
+- Run-result modal renders a 4-counter funnel (`Evaluated → Passed conditions → Skipped → Will change`) with per-counter tooltips and a collapsible Skipped table where each reason is dotted-underlined and explained on hover.
+- "Совпадений" → "Прошли условия" rename across EN/RU/DE; 12 new tooltip keys.
+
+### Added — Per-day TACoS in metrics trend
+
+- Trend SQL now wraps `fact_metrics_daily` aggregation with a `daily_revenue` CTE that sums `sp_orders.order_total_amount` per `purchase_date::date`. Each trend row carries `total_revenue` and a true per-day `tacos`.
+- `Spark` component split into segments and ignores nulls — sparkline draws a gap on days without revenue instead of a misleading 0%.
+- Headline TACoS uses an **aligned period**: spend and revenue are both summed only up to `MAX(purchase_date)` from `sp_orders`; response includes `tacosPeriod {start, end, days, requestedDays}`. UI shows an amber chip "20 Apr – 25 Apr · 6/8 d" with hover-tooltip when coverage is partial.
+
+### Added — KPI sparklines with hover tooltip
+
+- `Spark` rebuilt with optional `dates`, `format` props. Always-visible round dots (rendered as absolutely-positioned divs over the SVG to stay round under `preserveAspectRatio="none"`). Hover crosshair + emphasised dot + tooltip showing per-day `value · date`.
+- Per-metric formatters (`spend → $1,234`, `acos → 12.3%`, `roas → 8.12×`, etc.) passed through `KPICard.sparkFormat`.
+
+### Added — Continuous-line keyword rank chart + BSR hover time
+
+- `HistoryBars` (Rank Tracker) replaced with SVG `<polyline>` chart in the BsrSparkline style: line + area gradient + dot per day + hover tooltip with `#rank · date hh:mm`.
+- BSR sparkline tooltip now includes time (`27 Apr 2026, 08:00`) — disambiguates multiple snapshots per day.
+
+### Added — Bulk expand/collapse all BSR histories
+
+- Master toggle button on Products page (`Раскрыть все` / `Свернуть все`).
+- Migrated `expandedId` (single string) → `expandedIds: Set<string>`. Per-product toggle adds/removes from set; master button fills/clears it.
+- Lazy fetch in batches of 10 (`Promise.all` chunks) to avoid hammering the backend pool with 137 simultaneous requests.
+- `loadAllNotes()` fetches every workspace note in one call so pins/notes appear on bulk-expanded charts.
+
+### Added — Rule preview endpoint + wizard fix
+
+- **`POST /rules/preview`** — accepts `{conditions, actions, scope, safety}` body, runs `executeRule` synthetically with `dry_run=true`. Never writes to `rules`, `rule_executions`, or `audit_events`.
+- Wizard `handlePreview` unified: always sends current form state. Previously edit mode called `/rules/:id/run` which read the **stale DB version** of the rule, ignoring unsaved form edits.
+- New endpoint defends against `Array.every([]) === true` mass-action bug: rejects empty `conditions` / `actions` with 400. Same check added to `executeRule()` (defense in depth) and `PATCH /rules/:id`.
+
+### Added — KPI sales label adapts to SP-API availability
+
+- "Общие продажи" KPI card now uses `totals.totalRevenue` (real organic + ads) when SP-API populated `sp_orders`. When sp_orders is empty, label switches to "Рекл. продажи" + tooltip explaining the difference. New i18n keys `kpiAdSales`, `kpiSalesTotalTooltip`, `kpiSalesAdTooltip`.
+
+### Added — Tip placement + 4-column grid layout
+
+- `Tip` component gains `placement: 'top' | 'bottom'` and `style` props. Used `placement="bottom"` for counter cards near the top of modals so tooltips don't clip against the modal edge.
+- Counter cards switched from flexbox `flex:1` (the inline-flex Tip wrapper was the flex child, ignoring `flex:1` on the inner card) to `display:grid; grid-template-columns: repeat(4, minmax(0, 1fr))` — all four counters now equal width regardless of content.
+
+### Fixed — TACoS calculation correctness
+
+- Removed misleading `cost / sales_14d` fallback that produced ACoS-equal-to-TACoS when SP-API was absent. TACoS now returns `null` when no SP-API data — UI shows "—" with `tacosNoData` hint.
+- Real TACoS computed from `sp_orders.order_total_amount` only.
+
+### Fixed — Orders / Financials sync 400 InvalidInput
+
+- `getOrders()` and `getFinancialEvents()` in `spClient.js` set `CreatedBefore` / `PostedBefore` to `now()`; Amazon SP-API requires it to be **at least 2 minutes earlier** because of ingestion lag. Result: every daily orders sync was failing with 400 for an unknown number of days.
+- Now uses `now − 3 min` default with a clamp to `min(requested, now − 2 min)`. Also added 3-attempt rate-limit retry (`Retry-After` aware, 90 s cap) inside `_spRequest`.
+- `syncOrders` first-time sync window reduced from 30 days to 7 days — Orders API rate is 0.0167 req/s (1/min), so a 30-page backfill could take an hour. Subsequent runs are incremental and tiny.
+
+### Fixed — `purchase_date` timestamptz vs date-literal off-by-one
+
+- `purchase_date BETWEEN '2026-04-22' AND '2026-04-22'` matched only midnight orders (because postgres coerces a date literal to `timestamptz at 00:00:00`). For a typical day with 247 orders, the metrics endpoint returned `0`. Fixed in 4 places (`metrics.js` × 2, `sp.js` × 2) by casting `purchase_date::date BETWEEN $a AND $b`.
+
+### Fixed — Rules wizard rendered stale data on preview
+
+- Wizard's "Preview" button was calling `/rules/:id/run` on the saved version when editing an existing rule, ignoring unsaved form edits. Replaced with the new `/rules/preview` endpoint that always uses the current form body.
+
+### Fixed — Rules executor accepted empty conditions array (defense)
+
+- `Array.prototype.every([])` returns `true`, so a rule with no conditions would mass-affect every entity in scope. `executeRule()` now throws `"Rule must have at least one condition"`. `POST /rules/preview` and `PATCH /rules/:id` validate explicitly.
+
+### Fixed — Export endpoint hardening
+
+- Malformed dates (`"abc"`, `"2026-13-99"`, numeric values) used to leak postgres stack trace via 500. Now rejected with 400 + ISO format check before the SQL.
+- Numeric postgres columns (NUMERIC) come back as strings via `node-postgres` — they were stored as text in XLSX, breaking number formatting. Now coerced to JS `Number` for any column with a `numFmt`.
+- OWASP CSV/XLSX formula injection mitigation: text cells starting with `= + - @ \t \r` are prefixed with a single quote so Excel renders them as text instead of executing.
+
+---
+
 ## [Unreleased] — 2026-04-17
 
 ### Fixed — TACoS metric

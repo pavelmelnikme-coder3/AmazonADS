@@ -34,7 +34,7 @@ async function getSpAccessToken(refreshToken) {
   return access_token;
 }
 
-async function _spRequest(region, path, params, refreshToken) {
+async function _spRequest(region, path, params, refreshToken, attempt = 1) {
   const baseUrl = SP_API_URLS[region] || SP_API_URLS.EU;
   const token = await getSpAccessToken(refreshToken);
   try {
@@ -53,8 +53,18 @@ async function _spRequest(region, path, params, refreshToken) {
     const spMsg  = err.response?.data?.errors?.[0]?.message;
     const status = err.response?.status;
     if (status === 429) {
+      const retryAfter = parseInt(err.response.headers?.["retry-after"] || "60", 10);
+      // Retry on rate limit up to 3 times with the Retry-After hint, capped
+      // at 90s so a single sync doesn't block forever. Beyond that, surface
+      // the error so the caller can record it in sp_sync_log.
+      if (attempt <= 3) {
+        const waitMs = Math.min(retryAfter, 90) * 1000;
+        logger.warn("SP-API rate limited — retrying", { path, attempt, waitMs });
+        await _sleep(waitMs);
+        return _spRequest(region, path, params, refreshToken, attempt + 1);
+      }
       const e = new Error(`SP-API rate limit: ${path}`);
-      e.retryAfter = parseInt(err.response.headers?.["retry-after"] || "60", 10);
+      e.retryAfter = retryAfter;
       throw e;
     }
     throw new Error(`SP-API ${status} ${spCode || ""}: ${spMsg || err.message}`);
@@ -113,8 +123,19 @@ async function getOrders(marketplaceId, refreshToken, options = {}) {
   if (!token) throw new Error("SP_API_REFRESH_TOKEN not configured");
   const region = MARKETPLACE_REGION[marketplaceId] || "EU";
 
+  // Amazon SP-API requires CreatedBefore/LastUpdatedBefore to be at least 2
+  // minutes before current time (data has a ~2-minute ingestion lag). Use a
+  // 3-minute buffer to be safe and clamp explicit overrides to never exceed
+  // (now - 2 min). Without this clamp the Orders API returns 400 InvalidInput
+  // and the daily orders sync silently fails.
+  const MIN_LAG_MS = 2 * 60 * 1000;
+  const SAFE_BEFORE_MS = 3 * 60 * 1000;
+  const safeCutoff = Date.now() - MIN_LAG_MS;
   const createdAfter  = options.createdAfter  || new Date(Date.now() - 30 * 86400000).toISOString();
-  const createdBefore = options.createdBefore || new Date().toISOString();
+  const requestedBefore = options.createdBefore
+    ? new Date(options.createdBefore).getTime()
+    : Date.now() - SAFE_BEFORE_MS;
+  const createdBefore = new Date(Math.min(requestedBefore, safeCutoff)).toISOString();
 
   let orders = [];
   let nextToken = null;
@@ -177,8 +198,13 @@ async function getFinancialEvents(marketplaceId, refreshToken, options = {}) {
   if (!token) throw new Error("SP_API_REFRESH_TOKEN not configured");
   const region = MARKETPLACE_REGION[marketplaceId] || "EU";
 
+  // Same 2-minute ingestion-lag rule as /orders — be defensive.
+  const safeCutoff = Date.now() - 2 * 60 * 1000;
   const postedAfter  = options.postedAfter  || new Date(Date.now() - 30 * 86400000).toISOString();
-  const postedBefore = options.postedBefore || new Date().toISOString();
+  const requestedBefore = options.postedBefore
+    ? new Date(options.postedBefore).getTime()
+    : Date.now() - 3 * 60 * 1000;
+  const postedBefore = new Date(Math.min(requestedBefore, safeCutoff)).toISOString();
 
   let allEvents = [];
   let nextToken = null;

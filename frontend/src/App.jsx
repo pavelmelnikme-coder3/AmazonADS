@@ -22,7 +22,7 @@ import {
   RotateCcw, RefreshCw, PenLine,
   SlidersHorizontal, Pencil, MoreHorizontal,
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
-  HelpCircle, LogOut, Plus, Sun, Moon, Copy,
+  HelpCircle, Info, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
   FlaskConical, Briefcase, GripVertical,
 } from 'lucide-react';
@@ -237,11 +237,22 @@ const fmtLastSync = (isoString) => {
 };
 
 // ─── Tooltip component (S1-6) ─────────────────────────────────────────────────
-const Tip = ({ text, children, width = 200 }) => {
+// `placement` controls which side the tooltip flows from. Default 'top' keeps
+// existing call-sites unchanged. Pass 'bottom' near the top of a modal so the
+// tip doesn't clip against the modal boundary. `style` is merged into the
+// outer wrapper so consumers can opt into flex sizing for even-width layouts.
+const Tip = ({ text, children, width = 200, placement = 'top', style }) => {
   const [show, setShow] = useState(false);
+  const above = placement !== 'bottom';
+  const tipPos = above
+    ? { bottom: 'calc(100% + 6px)' }
+    : { top:    'calc(100% + 6px)' };
+  const arrowPos = above
+    ? { top: '100%', borderTop: '5px solid #334155' }
+    : { bottom: '100%', borderBottom: '5px solid #334155' };
   return (
     <span
-      style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}
+      style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', ...style }}
       onMouseEnter={() => setShow(true)}
       onMouseLeave={() => setShow(false)}
     >
@@ -249,7 +260,7 @@ const Tip = ({ text, children, width = 200 }) => {
       {show && (
         <span style={{
           position: 'absolute',
-          bottom: 'calc(100% + 6px)',
+          ...tipPos,
           left: '50%',
           transform: 'translateX(-50%)',
           width: width,
@@ -267,14 +278,13 @@ const Tip = ({ text, children, width = 200 }) => {
         }}>
           <span style={{
             position: 'absolute',
-            top: '100%',
+            ...arrowPos,
             left: '50%',
             transform: 'translateX(-50%)',
             width: 0,
             height: 0,
             borderLeft: '5px solid transparent',
             borderRight: '5px solid transparent',
-            borderTop: '5px solid #334155',
           }} />
           {text}
         </span>
@@ -386,27 +396,146 @@ function useAsync(fn, deps = []) {
 }
 
 // ─── Micro-chart ──────────────────────────────────────────────────────────────
-const Spark = ({ data = [], color = "#3B82F6", h = 36 }) => {
+// Inline sparkline with optional interactivity. The SVG line+area uses
+// preserveAspectRatio="none" so it stretches to fill the card; markers are
+// rendered as absolutely-positioned divs *over* the SVG so they stay round
+// regardless of the card's aspect ratio (a circle inside a stretched viewBox
+// would render as an ellipse). When `dates` are supplied, hovering the strip
+// shows a crosshair + tooltip with the per-day value and date — same UX
+// pattern as BsrSparkline / RankSparkline elsewhere in the app.
+const Spark = ({ data = [], dates = [], format, color = "#3B82F6", h = 36 }) => {
+  const [hovIdx, setHovIdx] = React.useState(null);
   if (!data.length) return <div style={{ height: h }} />;
-  const w = 100, max = Math.max(...data), min = Math.min(...data), rng = max - min || 1;
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - ((v - min) / rng) * (h - 4) - 2}`).join(" ");
+  const N = data.length;
+  const w = 100;
+  // Filter out nulls when computing the range so days without data don't
+  // distort the y-axis (e.g. TACoS missing on the latest day).
+  const validVals = data.filter(v => v != null && !isNaN(v));
+  if (!validVals.length) return <div style={{ height: h }} />;
+  const max = Math.max(...validVals), min = Math.min(...validVals), rng = max - min || 1;
+  const xOf = i => (N === 1 ? w / 2 : (i / (N - 1)) * w);
+  const yOf = v => h - ((v - min) / rng) * (h - 6) - 3;
+  // Build polyline segments — split on null values to draw gaps instead of
+  // joining across days with no data.
+  const segments = [];
+  let cur = [];
+  data.forEach((v, i) => {
+    if (v != null && !isNaN(v)) cur.push(`${xOf(i)},${yOf(v)}`);
+    else if (cur.length) { segments.push(cur); cur = []; }
+  });
+  if (cur.length) segments.push(cur);
+  const longest = segments.reduce((a, b) => (b.length > a.length ? b : a), []);
+  const interactive = dates.length === N;
+
+  const onMouseMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHovIdx(Math.round(pct * (N - 1)));
+  };
+
+  const fmtVal  = format || (v => v.toLocaleString());
+  const fmtDate = d => new Date(d).toLocaleDateString("en", { day: "2-digit", month: "short" });
+  const leftPct = i => (N === 1 ? 50 : (i / (N - 1)) * 100);
+  const tooltipLeftPct = hovIdx !== null ? leftPct(hovIdx) : 0;
+
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: h }} preserveAspectRatio="none">
-      <defs><linearGradient id={`g${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={color} stopOpacity=".25" />
-        <stop offset="100%" stopColor={color} stopOpacity="0" />
-      </linearGradient></defs>
-      <polygon points={`0,${h} ${pts} ${w},${h}`} fill={`url(#g${color.replace("#","")})`} />
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
-    </svg>
+    <div style={{ position: "relative", height: h, cursor: interactive ? "crosshair" : "default" }}
+      onMouseMove={interactive ? onMouseMove : undefined}
+      onMouseLeave={interactive ? () => setHovIdx(null) : undefined}>
+      <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%", height: h, display: "block" }}
+        preserveAspectRatio="none">
+        <defs><linearGradient id={`g${color.replace("#","")}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity=".25" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient></defs>
+        {/* Area fill — only across the longest contiguous run of non-null
+            points so days without data don't get phantom area below them. */}
+        {longest.length >= 2 && (
+          <polygon
+            points={`${longest[0].split(",")[0]},${h} ${longest.join(" ")} ${longest[longest.length-1].split(",")[0]},${h}`}
+            fill={`url(#g${color.replace("#","")})`}
+          />
+        )}
+        {/* Line — one polyline per contiguous segment so null gaps stay open */}
+        {segments.map((seg, si) => seg.length >= 2 && (
+          <polyline key={si} points={seg.join(" ")} fill="none" stroke={color} strokeWidth="1.5"
+            strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        ))}
+      </svg>
+      {/* Round dots overlaid as DIVs (immune to viewBox stretching).
+          Skip null days entirely — no dot rendered. */}
+      {data.map((v, i) => {
+        if (v == null || isNaN(v)) return null;
+        return (
+          <span key={i} style={{
+            position: "absolute",
+            left: `${leftPct(i)}%`,
+            top: yOf(v),
+            transform: "translate(-50%, -50%)",
+            width: 4, height: 4, borderRadius: "50%",
+            background: color, opacity: hovIdx === i ? 0 : 0.85,
+            pointerEvents: "none",
+            transition: "opacity .15s",
+          }} />
+        );
+      })}
+      {/* Hover crosshair + emphasised dot + tooltip */}
+      {hovIdx !== null && interactive && (() => {
+        const hv = data[hovIdx];
+        const hasVal = hv != null && !isNaN(hv);
+        return (
+          <>
+            <div style={{
+              position: "absolute", top: 0, height: "100%",
+              left: `${leftPct(hovIdx)}%`,
+              borderLeft: `1px dashed ${color}`, opacity: 0.5,
+              pointerEvents: "none",
+            }} />
+            {hasVal && (
+              <span style={{
+                position: "absolute",
+                left: `${leftPct(hovIdx)}%`,
+                top: yOf(hv),
+                transform: "translate(-50%, -50%)",
+                width: 8, height: 8, borderRadius: "50%",
+                background: color, border: "1.5px solid var(--s1)",
+                boxShadow: `0 0 0 1px ${color}`,
+                pointerEvents: "none",
+              }} />
+            )}
+            <div style={{
+              position: "absolute",
+              bottom: "calc(100% + 4px)",
+              left: `clamp(40px, ${tooltipLeftPct}%, calc(100% - 40px))`,
+              transform: "translateX(-50%)",
+              background: "var(--s3)", border: "1px solid var(--b2)",
+              borderRadius: 5, padding: "3px 8px",
+              fontSize: 10, fontFamily: "var(--mono)",
+              whiteSpace: "nowrap", zIndex: 20, pointerEvents: "none",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+              color: "var(--tx)",
+            }}>
+              {hasVal ? (
+                <span style={{ color, fontWeight: 700 }}>{fmtVal(hv)}</span>
+              ) : (
+                <span style={{ color: "var(--tx3)" }}>—</span>
+              )}
+              {dates[hovIdx] && (
+                <span style={{ color: "var(--tx3)", marginLeft: 6 }}>{fmtDate(dates[hovIdx])}</span>
+              )}
+            </div>
+          </>
+        );
+      })()}
+    </div>
   );
 };
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
-const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", loading, extra }) => (
+const KPICard = ({ label, value, delta, color, spark, sparkDates, sparkFormat, prefix = "", suffix = "", loading, extra, tooltip }) => (
   <div className="card fade" style={{ padding: "18px 20px" }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-      <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", fontFamily: "var(--mono)" }}>{label}</span>
+      <span title={tooltip || undefined} style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", fontFamily: "var(--mono)", cursor: tooltip ? "help" : "default" }}>{label}</span>
       {delta != null && (
         <span className={`badge ${parseFloat(delta) >= 0 ? "bg-grn" : "bg-red"}`}>
           {parseFloat(delta) >= 0
@@ -422,7 +551,7 @@ const KPICard = ({ label, value, delta, color, spark, prefix = "", suffix = "", 
           {prefix}{value}{suffix}
         </div>
     }
-    <Spark data={spark || []} color={color} />
+    <Spark data={spark || []} dates={sparkDates} format={sparkFormat} color={color} h={48} />
     {extra}
   </div>
 );
@@ -2641,41 +2770,121 @@ const RankTrackerPage = ({ workspaceId }) => {
     );
   };
 
-  // Recharts-style bar history (reuses the pattern from BSR page)
+  // Continuous SVG line chart with dots + hover tooltip — mirrors BsrSparkline.
+  // Y-axis is inverted (lower rank number = higher on chart, since #1 is best).
+  // Renders area gradient + polyline through found points, plus a circle at
+  // each data point. Hovering shows a tooltip with the exact position number
+  // and capture timestamp.
   const HistoryBars = ({ data }) => {
-    const pts = data.filter(d => d.found && d.position !== null);
-    if (!pts.length) return <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("rankings.noHistory")}</div>;
-    const positions = pts.map(d => d.position);
+    const [hovIdx, setHovIdx] = React.useState(null);
+    const valid = data.filter(d => d.found && d.position !== null);
+    if (valid.length < 1) return <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("rankings.noHistory")}</div>;
+
+    const W = 800, H = 80, PAD = 8;
+    const positions = valid.map(d => d.position);
     const minP = Math.min(...positions);
     const maxP = Math.max(...positions);
-    const H = 60;
+    const spread = maxP - minP || 1;
+    const N = data.length;
+
+    const xOf = i => PAD + (i / (N - 1 || 1)) * (W - PAD * 2);
+    const yOf = pos => PAD + ((pos - minP) / spread) * (H - PAD * 2);
+
+    // Build polyline segments only across consecutive found points (gap on miss)
+    const segments = [];
+    let current = [];
+    data.forEach((d, i) => {
+      if (d.found && d.position !== null) {
+        current.push(`${xOf(i)},${yOf(d.position)}`);
+      } else if (current.length) {
+        segments.push(current);
+        current = [];
+      }
+    });
+    if (current.length) segments.push(current);
+
+    // Area polygon uses the longest contiguous segment (most common case)
+    const longest = segments.reduce((a, b) => (b.length > a.length ? b : a), []);
+    const areaPts = longest.length >= 2
+      ? `${longest[0].split(",")[0]},${H} ${longest.join(" ")} ${longest[longest.length-1].split(",")[0]},${H}`
+      : null;
+
+    const onMouseMove = (e) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      setHovIdx(Math.round(pct * (N - 1)));
+    };
+
+    const snap = hovIdx !== null ? data[hovIdx] : null;
+    const tooltipLeftPct = hovIdx !== null ? (hovIdx / (N - 1 || 1)) * 100 : 0;
+    const fmtDate = d => new Date(d).toLocaleDateString("de", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+
     return (
       <div>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: H }}>
-          {data.map((snap, i) => {
-            if (!snap.found || snap.position === null) {
-              return <div key={i} style={{ flex: 1, height: 4, background: "var(--b2)", borderRadius: 2, alignSelf: "flex-end" }} title="Not found" />;
-            }
-            // Better rank = taller bar (inverted)
-            const ratio = maxP > minP ? (maxP - snap.position) / (maxP - minP) : 1;
-            const h = Math.max(ratio * (H - 8) + 8, 4);
-            const badge = positionBadge(snap.position, snap.found);
-            const date = new Date(snap.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" });
-            return (
-              <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center" }}
-                title={`#${snap.position} · ${date}`}>
-                <div style={{ width: "100%", height: h,
-                  background: `linear-gradient(to top, ${badge.color}99, ${badge.color}44)`,
-                  border: `1px solid ${badge.border}`,
-                  borderRadius: "3px 3px 0 0" }} />
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
-          <span>{pts[0]?.captured_at ? new Date(pts[0].captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" }) : ""}</span>
-          <span>Best: #{minP}</span>
-          <span>{pts[pts.length - 1]?.captured_at ? new Date(pts[pts.length - 1].captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" }) : ""}</span>
+        <div style={{ position: "relative" }} onMouseMove={onMouseMove} onMouseLeave={() => setHovIdx(null)}>
+          {snap && (
+            <div style={{
+              position: "absolute", bottom: "calc(100% + 4px)",
+              left: `clamp(48px, ${tooltipLeftPct}%, calc(100% - 48px))`,
+              transform: "translateX(-50%)",
+              background: "var(--s3)", border: "1px solid var(--b2)",
+              borderRadius: 6, padding: "4px 10px", pointerEvents: "none",
+              fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx)",
+              whiteSpace: "nowrap", zIndex: 20,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.5)"
+            }}>
+              {snap.found && snap.position !== null ? (
+                <>
+                  <span style={{ color: "var(--ac2)", fontWeight: 700 }}>#{snap.position}</span>
+                  <span style={{ color: "var(--tx3)", marginLeft: 7 }}>{fmtDate(snap.captured_at)}</span>
+                </>
+              ) : (
+                <>
+                  <span style={{ color: "var(--tx3)" }}>{t("rankings.notFound")}</span>
+                  <span style={{ color: "var(--tx3)", marginLeft: 7 }}>{fmtDate(snap.captured_at)}</span>
+                </>
+              )}
+            </div>
+          )}
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: H, display: "block", overflow: "visible", cursor: "crosshair" }}
+            preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="rankGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.35"/>
+                <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.04"/>
+              </linearGradient>
+            </defs>
+            {areaPts && <polygon points={areaPts} fill="url(#rankGrad)" />}
+            {segments.map((seg, si) => seg.length >= 2 && (
+              <polyline key={si} points={seg.join(" ")} fill="none" stroke="#3B82F6" strokeWidth="2"
+                strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+            ))}
+            {/* Dots for each found point */}
+            {data.map((d, i) => {
+              if (!d.found || d.position === null) {
+                return <circle key={i} cx={xOf(i)} cy={H - PAD/2} r="2" fill="var(--b2)" vectorEffect="non-scaling-stroke" />;
+              }
+              return <circle key={i} cx={xOf(i)} cy={yOf(d.position)} r="3" fill="#3B82F6"
+                stroke="var(--s1)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />;
+            })}
+            {/* Hover crosshair */}
+            {hovIdx !== null && (
+              <g>
+                <line x1={xOf(hovIdx)} y1={0} x2={xOf(hovIdx)} y2={H}
+                  stroke="#60A5FA" strokeWidth="1" strokeDasharray="3,3" opacity="0.6" vectorEffect="non-scaling-stroke" />
+                {data[hovIdx]?.found && data[hovIdx]?.position !== null && (
+                  <circle cx={xOf(hovIdx)} cy={yOf(data[hovIdx].position)} r="5"
+                    fill="#3B82F6" stroke="var(--s1)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+                )}
+              </g>
+            )}
+          </svg>
+          <div style={{ display: "flex", justifyContent: "space-between",
+            fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
+            <span>{data[0]?.captured_at ? new Date(data[0].captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" }) : ""}</span>
+            <span>Best: #{minP}</span>
+            <span>{data[N - 1]?.captured_at ? new Date(data[N - 1].captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" }) : ""}</span>
+          </div>
         </div>
       </div>
     );
@@ -2994,13 +3203,178 @@ const RankTrackerPage = ({ workspaceId }) => {
 const AMAZON_DOMAIN = { ATVPDKIKX0DER: "com", A2EUQ1WTGCTBG2: "ca", A1AM78C64UM0Y8: "com.mx", A1F83G8C2ARO7P: "co.uk", A1PA6795UKMFR9: "de", APJ6JRA9NG5V4: "it", A13V1IB3VIYZZH: "fr", A1RKKUPIHCS9HS: "es", A39IBJ37TRP1C6: "com.au", A1VC38T7YXB528: "co.jp", A21TJRUUN4KGV: "in" };
 const amazonProductUrl = (asin, marketplaceId) => "https://www.amazon." + (AMAZON_DOMAIN[marketplaceId] || "de") + "/dp/" + asin;
 
+const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
+  const [hovIdx, setHovIdx] = React.useState(null);
+  const [hovNoteId, setHovNoteId] = React.useState(null);
+  if (!pts.length) return null;
+
+  const W = 800, H = 80, PAD = 6;
+  const ranks = pts.map(s => s.best_rank);
+  const minR = Math.min(...ranks), maxR = Math.max(...ranks);
+  const spread = maxR - minR || 1;
+
+  const xOf = i => (i / (pts.length - 1 || 1)) * W;
+  const yOf = r => PAD + ((r - minR) / spread) * (H - PAD * 2);
+  const svgPoints = pts.map((s, i) => `${xOf(i)},${yOf(s.best_rank)}`).join(" ");
+  const areaPoints = `0,${H} ${svgPoints} ${W},${H}`;
+
+  // Map each note to a chart x% position by nearest snapshot
+  const notePositions = notes.map(n => {
+    const nd = new Date(n.note_date).getTime();
+    let bestI = 0, bestDiff = Infinity;
+    pts.forEach((s, i) => {
+      const diff = Math.abs(new Date(s.captured_at).getTime() - nd);
+      if (diff < bestDiff) { bestDiff = diff; bestI = i; }
+    });
+    return { ...n, xPct: (bestI / (pts.length - 1 || 1)) * 100, xSvg: xOf(bestI) };
+  });
+
+  const onMouseMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHovIdx(Math.round(pct * (pts.length - 1)));
+  };
+
+  const snap = hovIdx !== null ? pts[hovIdx] : null;
+  const tooltipLeftPct = hovIdx !== null ? (hovIdx / (pts.length - 1 || 1)) * 100 : 0;
+  const hovNote = hovNoteId ? notePositions.find(n => n.id === hovNoteId) : null;
+
+  return (
+    <div>
+      {/* Chart area */}
+      <div style={{ position: "relative" }} onMouseMove={onMouseMove} onMouseLeave={() => setHovIdx(null)}>
+        {/* BSR hover tooltip */}
+        {snap && !hovNote && (
+          <div style={{
+            position: "absolute", bottom: "calc(100% + 4px)",
+            left: `clamp(56px, ${tooltipLeftPct}%, calc(100% - 56px))`,
+            transform: "translateX(-50%)",
+            background: "var(--s3)", border: "1px solid var(--b2)",
+            borderRadius: 6, padding: "4px 10px", pointerEvents: "none",
+            fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx)",
+            whiteSpace: "nowrap", zIndex: 20,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)"
+          }}>
+            <span style={{ color: "var(--ac2)", fontWeight: 700 }}>#{snap.best_rank.toLocaleString()}</span>
+            <span style={{ color: "var(--tx3)", marginLeft: 7 }}>
+              {new Date(snap.captured_at).toLocaleString("en", {
+                day: "2-digit", month: "short", year: "numeric",
+                hour: "2-digit", minute: "2-digit", hour12: false,
+              })}
+            </span>
+          </div>
+        )}
+        {/* Note hover tooltip */}
+        {hovNote && (
+          <div style={{
+            position: "absolute", bottom: "calc(100% + 4px)",
+            left: `clamp(70px, ${hovNote.xPct}%, calc(100% - 70px))`,
+            transform: "translateX(-50%)",
+            background: "var(--s3)", border: "1px solid #F59E0B",
+            borderRadius: 6, padding: "5px 10px", pointerEvents: "none",
+            fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx)",
+            whiteSpace: "nowrap", zIndex: 21,
+            boxShadow: "0 4px 16px rgba(0,0,0,0.5)"
+          }}>
+            <span style={{ color: "#F59E0B", marginRight: 6 }}>📌</span>
+            <span style={{ color: "var(--tx3)", marginRight: 6 }}>
+              {new Date(hovNote.note_date).toLocaleDateString("en", { day: "2-digit", month: "short" })}
+            </span>
+            <span style={{ color: "var(--tx)", fontFamily: "inherit" }}>{hovNote.text}</span>
+            {hovNote.product_id === null && (
+              <span style={{ marginLeft: 6, color: "var(--pur)", fontSize: 10 }}>ALL</span>
+            )}
+          </div>
+        )}
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 80, display: "block", overflow: "visible", cursor: "crosshair" }}
+          preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="bsrGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.35"/>
+              <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.04"/>
+            </linearGradient>
+          </defs>
+          <polygon points={areaPoints} fill="url(#bsrGrad)" />
+          <polyline points={svgPoints} fill="none" stroke="#3B82F6" strokeWidth="2"
+            strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          {/* Note vertical lines */}
+          {notePositions.map(n => (
+            <g key={n.id}
+              onMouseEnter={() => setHovNoteId(n.id)}
+              onMouseLeave={() => setHovNoteId(null)}
+              style={{ cursor: "pointer" }}>
+              <line x1={n.xSvg} y1={0} x2={n.xSvg} y2={H}
+                stroke={n.product_id === null ? "#A78BFA" : "#F59E0B"}
+                strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+              <polygon
+                points={`${n.xSvg - 5},0 ${n.xSvg + 5},0 ${n.xSvg},8`}
+                fill={n.product_id === null ? "#A78BFA" : "#F59E0B"}
+                vectorEffect="non-scaling-stroke" />
+            </g>
+          ))}
+          {/* Hover crosshair */}
+          {hovIdx !== null && (
+            <g>
+              <line x1={xOf(hovIdx)} y1={0} x2={xOf(hovIdx)} y2={H}
+                stroke="#60A5FA" strokeWidth="1" strokeDasharray="3,3" opacity="0.6" vectorEffect="non-scaling-stroke" />
+              <circle cx={xOf(hovIdx)} cy={yOf(pts[hovIdx].best_rank)} r="4"
+                fill="#3B82F6" stroke="var(--s1)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+            </g>
+          )}
+        </svg>
+        <div style={{ display: "flex", justifyContent: "space-between",
+          fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
+          <span>{new Date(pts[0].captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" })}</span>
+          <span>Best: #{minR.toLocaleString()}</span>
+          <span>{new Date(pts[pts.length-1].captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" })}</span>
+        </div>
+      </div>
+
+      {/* Notes list */}
+      {notes.length > 0 && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+          {notes.map(n => (
+            <div key={n.id} style={{
+              display: "flex", alignItems: "center", gap: 8, fontSize: 11,
+              padding: "4px 8px", borderRadius: 5,
+              background: n.product_id === null ? "rgba(167,139,250,0.08)" : "rgba(245,158,11,0.08)",
+              border: `1px solid ${n.product_id === null ? "rgba(167,139,250,0.25)" : "rgba(245,158,11,0.25)"}`,
+            }}>
+              <span style={{ color: n.product_id === null ? "#A78BFA" : "#F59E0B", fontSize: 12 }}>📌</span>
+              <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", minWidth: 52 }}>
+                {new Date(n.note_date).toLocaleDateString("en", { day: "2-digit", month: "short" })}
+              </span>
+              {n.product_id === null && (
+                <span style={{ fontSize: 9, color: "#A78BFA", background: "rgba(167,139,250,0.15)",
+                  padding: "1px 5px", borderRadius: 3, fontFamily: "var(--mono)" }}>ALL</span>
+              )}
+              <span style={{ color: "var(--tx)", flex: 1 }}>{n.text}</span>
+              <button onClick={() => onDeleteNote(n.id)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)",
+                  padding: "0 2px", fontSize: 13, lineHeight: 1 }}
+                title="Delete note">×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ProductsPage = ({ workspaceId }) => {
   const { t: tr } = useI18n();
   const [newAsin, setNewAsin] = useState("");
   const [adding, setAdding] = useState(false);
   const [refreshingId, setRefreshingId] = useState(null);
-  const [expandedId, setExpandedId] = useState(null);
+  // Set of product IDs currently expanded. Allows multi-expand and a
+  // master "expand all / collapse all" toggle for sweeping BSR review.
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
   const [history, setHistory] = useState({});
+  const [notes, setNotes] = useState({}); // keyed by product_id
+  const [globalNotes, setGlobalNotes] = useState([]);
+  const [addingNote, setAddingNote] = useState(null); // product_id | "global" | null
+  const [noteForm, setNoteForm] = useState({ date: new Date().toISOString().slice(0, 10), text: "", forAll: false });
+  const [savingNote, setSavingNote] = useState(false);
   const [error, setError] = useState(null);
   const [tick, setTick] = useState(0);
   const [search, setSearch] = useState("");
@@ -3080,15 +3454,218 @@ const ProductsPage = ({ workspaceId }) => {
     } finally { setRefreshingId(null); }
   };
 
+  const loadNotes = async (productId) => {
+    try {
+      const data = await get(`/products/notes?product_id=${productId}`);
+      const prod = data.filter(n => n.product_id === productId);
+      const glob = data.filter(n => n.product_id === null);
+      setNotes(n => ({ ...n, [productId]: prod }));
+      setGlobalNotes(glob);
+    } catch {}
+  };
+
+  // Bulk variant: one call returns every note in the workspace; partition by
+  // product_id and populate the notes map in a single setState. Used by
+  // "Expand all" so each chart shows pins without N separate fetches.
+  const loadAllNotes = async () => {
+    try {
+      const data = await get(`/products/notes`);
+      const grouped = {};
+      const glob = [];
+      for (const n of data) {
+        if (n.product_id === null) glob.push(n);
+        else (grouped[n.product_id] = grouped[n.product_id] || []).push(n);
+      }
+      setNotes(prev => ({ ...prev, ...grouped }));
+      setGlobalNotes(glob);
+    } catch {}
+  };
+
   const handleHistory = async (id) => {
-    if (expandedId === id) { setExpandedId(null); return; }
-    setExpandedId(id);
-    if (!history[id]) {
-      try {
-        const data = await get(`/products/${id}/history`);
-        setHistory(h => ({ ...h, [id]: data }));
-      } catch {}
+    const wasExpanded = expandedIds.has(id);
+    setExpandedIds(prev => {
+      const next = new Set(prev);
+      wasExpanded ? next.delete(id) : next.add(id);
+      return next;
+    });
+    if (wasExpanded) { setAddingNote(null); return; }
+    const tasks = [];
+    if (!history[id]) tasks.push(get(`/products/${id}/history`).then(d => setHistory(h => ({ ...h, [id]: d }))).catch(() => {}));
+    tasks.push(loadNotes(id));
+    await Promise.all(tasks);
+  };
+
+  // Master toggle: expand every visible (filtered) product or collapse them
+  // all. Lazy-fetches missing histories in batches of 10 to be gentle on the
+  // backend connection pool when there are 100+ products.
+  const [bulkExpanding, setBulkExpanding] = useState(false);
+
+  // Export modal state. Columns mirror ALL_EXPORT_COLUMNS in backend
+  // products.js — keep keys in sync. Default selection covers the most
+  // common case: identification + BSR period stats + ad performance.
+  const EXPORT_COLUMN_GROUPS = [
+    {
+      title: tr("products.exportGroupInfo"),
+      cols: [
+        { key: "asin",         label: "ASIN" },
+        { key: "title",        label: "Title" },
+        { key: "brand",        label: "Brand" },
+        { key: "marketplace",  label: "Marketplace" },
+      ],
+    },
+    {
+      title: tr("products.exportGroupBsr"),
+      cols: [
+        { key: "best_rank",     label: tr("products.exportColLatestBsr") },
+        { key: "best_category", label: tr("products.exportColBestCategory") },
+        { key: "min_bsr",       label: tr("products.exportColMinBsr") },
+        { key: "max_bsr",       label: tr("products.exportColMaxBsr") },
+        { key: "avg_bsr",       label: tr("products.exportColAvgBsr") },
+        { key: "first_bsr",     label: tr("products.exportColFirstBsr") },
+        { key: "last_bsr",      label: tr("products.exportColLastBsr") },
+        { key: "bsr_change",    label: tr("products.exportColBsrChange") },
+        { key: "snapshots",     label: tr("products.exportColSnapshots") },
+      ],
+    },
+    {
+      title: tr("products.exportGroupAds"),
+      cols: [
+        { key: "ad_spend",  label: tr("products.exportColAdSpend") },
+        { key: "ad_sales",  label: tr("products.exportColAdSales") },
+        { key: "ad_orders", label: tr("products.exportColAdOrders") },
+        { key: "ad_clicks", label: tr("products.exportColAdClicks") },
+        { key: "ad_acos",   label: tr("products.exportColAcos") },
+      ],
+    },
+  ];
+  const DEFAULT_EXPORT_COLS = new Set([
+    "asin","title","brand","best_rank","best_category",
+    "min_bsr","max_bsr","avg_bsr","bsr_change",
+    "ad_spend","ad_sales","ad_acos",
+  ]);
+
+  const [exportOpen, setExportOpen] = useState(false);
+  const todayStr = () => new Date().toISOString().slice(0, 10);
+  const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const [exportStart, setExportStart] = useState(daysAgo(30));
+  const [exportEnd, setExportEnd] = useState(todayStr());
+  const [exportCols, setExportCols] = useState(() => new Set(DEFAULT_EXPORT_COLS));
+  const [exportIncludeHistory, setExportIncludeHistory] = useState(false);
+  const [exportLoading, setExportLoading] = useState(false);
+
+  const setExportPreset = (days) => {
+    setExportEnd(todayStr());
+    setExportStart(daysAgo(days));
+  };
+  const toggleExportCol = (key) => setExportCols(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+  const exportColAllKeys = () => EXPORT_COLUMN_GROUPS.flatMap(g => g.cols.map(c => c.key));
+  const exportSelectAll  = () => setExportCols(new Set(exportColAllKeys()));
+  const exportSelectNone = () => setExportCols(new Set());
+
+  const handleExportDownload = async () => {
+    if (!exportCols.size) { alert(tr("products.exportPickAtLeastOne")); return; }
+    if (new Date(exportStart) > new Date(exportEnd)) {
+      alert(tr("products.exportInvalidRange")); return;
     }
+    setExportLoading(true);
+    try {
+      const token = localStorage.getItem("af_token");
+      const wid   = workspaceId || localStorage.getItem("af_workspace");
+      const url   = `${(import.meta?.env?.VITE_API_URL) || "http://localhost:4000/api/v1"}/products/export`;
+      const resp  = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "x-workspace-id": wid,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          startDate: exportStart,
+          endDate:   exportEnd,
+          columns:   [...exportCols],
+          includeHistory: exportIncludeHistory,
+        }),
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        let msg = txt;
+        try { msg = JSON.parse(txt).error || txt; } catch {}
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `adsflow-products-${exportStart}_${exportEnd}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setExportOpen(false);
+    } catch (err) {
+      alert((tr("common.error") || "Error: ") + err.message);
+    } finally {
+      setExportLoading(false);
+    }
+  };
+  const handleToggleAllHistory = async () => {
+    const visible = filteredProducts || [];
+    if (!visible.length) return;
+    const anyOpen = visible.some(p => expandedIds.has(p.id));
+    if (anyOpen) {
+      setExpandedIds(new Set());
+      setAddingNote(null);
+      return;
+    }
+    const ids = visible.map(p => p.id);
+    setExpandedIds(new Set(ids));
+    setBulkExpanding(true);
+    try {
+      // Notes ship in one call regardless of product count.
+      await loadAllNotes();
+      const missing = ids.filter(id => !history[id]);
+      if (missing.length) {
+        const CHUNK = 10;
+        for (let i = 0; i < missing.length; i += CHUNK) {
+          const chunk = missing.slice(i, i + CHUNK);
+          const results = await Promise.all(
+            chunk.map(id => get(`/products/${id}/history`).then(d => [id, d]).catch(() => [id, null]))
+          );
+          setHistory(h => {
+            const next = { ...h };
+            for (const [id, data] of results) if (data) next[id] = data;
+            return next;
+          });
+        }
+      }
+    } finally {
+      setBulkExpanding(false);
+    }
+  };
+
+  const handleSaveNote = async (productId) => {
+    if (!noteForm.text.trim()) return;
+    setSavingNote(true);
+    try {
+      const payload = {
+        product_id: noteForm.forAll ? null : productId,
+        note_date: noteForm.date,
+        text: noteForm.text.trim(),
+      };
+      await post("/products/notes", payload);
+      setAddingNote(null);
+      setNoteForm({ date: new Date().toISOString().slice(0, 10), text: "", forAll: false });
+      await loadNotes(productId);
+    } catch (e) { showToast(e.message, "err"); }
+    finally { setSavingNote(false); }
+  };
+
+  const handleDeleteNote = async (noteId, productId) => {
+    try {
+      await del(`/products/notes/${noteId}`);
+      await loadNotes(productId);
+    } catch (e) { showToast(e.message, "err"); }
   };
 
   const handleDelete = async (id) => {
@@ -3187,6 +3764,38 @@ const ProductsPage = ({ workspaceId }) => {
             <option value="updated">Sort: Last updated</option>
           </select>
 
+          {(() => {
+            const anyOpen = (filteredProducts || []).some(p => expandedIds.has(p.id));
+            return (
+              <button
+                onClick={handleToggleAllHistory}
+                disabled={bulkExpanding || !filteredProducts?.length}
+                className="btn btn-ghost"
+                title={anyOpen ? tr("products.collapseAllHint") : tr("products.expandAllHint")}
+                style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+                {bulkExpanding
+                  ? <Hourglass size={12} strokeWidth={1.75} />
+                  : anyOpen
+                    ? <ChevronUp size={13} strokeWidth={1.75} />
+                    : <ChevronDown size={13} strokeWidth={1.75} />}
+                {bulkExpanding
+                  ? tr("products.loading")
+                  : anyOpen
+                    ? tr("products.collapseAll")
+                    : tr("products.expandAll")}
+              </button>
+            );
+          })()}
+
+          <button
+            onClick={() => setExportOpen(true)}
+            disabled={!products?.length}
+            className="btn btn-ghost"
+            title={tr("products.exportHint")}
+            style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+            <Download size={13} strokeWidth={1.75} /> {tr("products.export")}
+          </button>
+
           <span style={{ fontSize: 12, color: "var(--tx3)", whiteSpace: "nowrap" }}>
             {filteredProducts.length}{filteredProducts.length !== products.length ? ` / ${products.length}` : ""} products
           </span>
@@ -3236,7 +3845,7 @@ const ProductsPage = ({ workspaceId }) => {
               ...(p.display_group_ranks || []),
             ];
             const hist = history[p.id] || [];
-            const isExpanded = expandedId === p.id;
+            const isExpanded = expandedIds.has(p.id);
             const isRefreshing = refreshingId === p.id;
             const bsrUpdated = p.bsr_updated_at
               ? new Date(p.bsr_updated_at).toLocaleString("en", {
@@ -3342,50 +3951,228 @@ const ProductsPage = ({ workspaceId }) => {
                   </div>
                 </div>
 
-                {isExpanded && hist.length > 0 && (
+                {isExpanded && (
                   <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--b1)" }}>
-                    <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 8,
-                      fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>
-                      BSR History ({hist.length} points)
+                    {/* Header row */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                      <span style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)",
+                        textTransform: "uppercase", letterSpacing: ".06em" }}>
+                        BSR History ({hist.filter(s => s.best_rank).length} points)
+                      </span>
+                      <button
+                        onClick={() => { setAddingNote(addingNote === p.id ? null : p.id); setNoteForm({ date: new Date().toISOString().slice(0, 10), text: "", forAll: false }); }}
+                        className="btn btn-ghost"
+                        style={{ fontSize: 10, padding: "3px 8px", color: "var(--amb)" }}>
+                        📌 + Заметка
+                      </button>
                     </div>
-                    <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 48 }}>
-                      {hist.map((snap, i) => {
-                        if (!snap.best_rank) return null;
-                        const ranks = hist.filter(s => s.best_rank).map(s => s.best_rank);
-                        const min = Math.min(...ranks);
-                        const max = Math.max(...ranks);
-                        const h = max > min
-                          ? Math.max(((max - snap.best_rank) / (max - min)) * 40 + 8, 4)
-                          : 24;
-                        const date = new Date(snap.captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" });
-                        return (
-                          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column",
-                            alignItems: "center", gap: 2 }}
-                            title={`#${snap.best_rank.toLocaleString()} • ${date}`}>
-                            <div style={{ width: "100%", height: h,
-                              background: "linear-gradient(to top, var(--ac), var(--ac2)88)",
-                              borderRadius: "2px 2px 0 0", transition: "height .2s" }} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between",
-                      fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", marginTop: 4 }}>
-                      <span>{new Date(hist[0]?.captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" })}</span>
-                      <span>Best: #{Math.min(...hist.filter(s => s.best_rank).map(s => s.best_rank)).toLocaleString()}</span>
-                      <span>{new Date(hist[hist.length - 1]?.captured_at).toLocaleDateString("en", { day: "2-digit", month: "short" })}</span>
-                    </div>
-                  </div>
-                )}
-                {isExpanded && hist.length === 0 && (
-                  <div style={{ marginTop: 12, fontSize: 12, color: "var(--tx3)" }}>
-                    No history yet — BSR syncs every 6 hours
+
+                    {/* Add note form */}
+                    {addingNote === p.id && (
+                      <div style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 8,
+                        background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)",
+                        display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                          <label style={{ fontSize: 10, color: "var(--tx3)" }}>Дата</label>
+                          <input type="date" value={noteForm.date}
+                            onChange={e => setNoteForm(f => ({ ...f, date: e.target.value }))}
+                            style={{ padding: "4px 8px", borderRadius: 5, fontSize: 12,
+                              background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }} />
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: "1 1 200px" }}>
+                          <label style={{ fontSize: 10, color: "var(--tx3)" }}>Заметка</label>
+                          <input
+                            autoFocus
+                            value={noteForm.text}
+                            onChange={e => setNoteForm(f => ({ ...f, text: e.target.value }))}
+                            onKeyDown={e => e.key === "Enter" && handleSaveNote(p.id)}
+                            placeholder="Снизили цену на 10%..."
+                            style={{ padding: "4px 10px", borderRadius: 5, fontSize: 12,
+                              background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }} />
+                        </div>
+                        <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--tx2)", cursor: "pointer" }}>
+                          <input type="checkbox" checked={noteForm.forAll}
+                            onChange={e => setNoteForm(f => ({ ...f, forAll: e.target.checked }))} />
+                          Для всех товаров
+                        </label>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button onClick={() => handleSaveNote(p.id)} disabled={savingNote || !noteForm.text.trim()}
+                            className="btn btn-primary" style={{ fontSize: 11, padding: "4px 12px" }}>
+                            {savingNote ? "…" : "Сохранить"}
+                          </button>
+                          <button onClick={() => setAddingNote(null)} className="btn btn-ghost"
+                            style={{ fontSize: 11, padding: "4px 10px" }}>Отмена</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Chart */}
+                    {hist.length > 0 ? (
+                      <BsrSparkline
+                        pts={hist.filter(s => s.best_rank)}
+                        notes={[...(notes[p.id] || []), ...globalNotes]}
+                        onDeleteNote={(noteId) => handleDeleteNote(noteId, p.id)}
+                      />
+                    ) : (
+                      <div style={{ fontSize: 12, color: "var(--tx3)" }}>
+                        No history yet — BSR syncs every 6 hours
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             );
           })}
         </div>
+      )}
+
+      {/* ── Export Report Modal ── */}
+      {exportOpen && createPortal(
+        <div onClick={() => !exportLoading && setExportOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.65)", zIndex: 1000,
+            display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} className="card"
+            style={{ width: "100%", maxWidth: 720, maxHeight: "92vh", display: "flex",
+              flexDirection: "column", overflow: "hidden" }}>
+            {/* Header */}
+            <div style={{ padding: "18px 24px 14px", display: "flex",
+              justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--b1)" }}>
+              <div>
+                <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>
+                  {tr("products.exportTitle")}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--tx3)", marginTop: 3 }}>
+                  {tr("products.exportSubtitle", { count: products?.length || 0 })}
+                </div>
+              </div>
+              <button onClick={() => !exportLoading && setExportOpen(false)}
+                disabled={exportLoading}
+                style={{ background: "none", border: "none", cursor: "pointer",
+                  color: "var(--tx3)", padding: 4, display: "flex" }}>
+                <X size={16} strokeWidth={1.75} />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: "16px 24px", overflowY: "auto", flex: 1 }}>
+              {/* Period section */}
+              <div style={{ marginBottom: 18 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)",
+                  textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 8 }}>
+                  {tr("products.exportPeriod")}
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                  {[7, 30, 90].map(d => (
+                    <button key={d} onClick={() => setExportPreset(d)}
+                      className={`btn ${exportStart === daysAgo(d) && exportEnd === todayStr() ? "btn-primary" : "btn-ghost"}`}
+                      style={{ fontSize: 12, padding: "6px 14px" }}>
+                      {d}d
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3 }}>
+                      {tr("products.exportFrom")}
+                    </div>
+                    <input type="date" value={exportStart} max={exportEnd}
+                      onChange={e => setExportStart(e.target.value)}
+                      style={{ width: "100%", boxSizing: "border-box", padding: "7px 10px",
+                        borderRadius: 7, fontSize: 12, background: "var(--s2)",
+                        border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 3 }}>
+                      {tr("products.exportTo")}
+                    </div>
+                    <input type="date" value={exportEnd} min={exportStart} max={todayStr()}
+                      onChange={e => setExportEnd(e.target.value)}
+                      style={{ width: "100%", boxSizing: "border-box", padding: "7px 10px",
+                        borderRadius: 7, fontSize: 12, background: "var(--s2)",
+                        border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Columns section */}
+              <div style={{ marginBottom: 18 }}>
+                <div style={{ display: "flex", justifyContent: "space-between",
+                  alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)",
+                    textTransform: "uppercase", letterSpacing: ".06em" }}>
+                    {tr("products.exportColumns")} ({exportCols.size}/{exportColAllKeys().length})
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={exportSelectAll} className="btn btn-ghost"
+                      style={{ fontSize: 11, padding: "3px 10px" }}>
+                      {tr("products.exportSelectAll")}
+                    </button>
+                    <button onClick={exportSelectNone} className="btn btn-ghost"
+                      style={{ fontSize: 11, padding: "3px 10px" }}>
+                      {tr("products.exportSelectNone")}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                  {EXPORT_COLUMN_GROUPS.map(g => (
+                    <div key={g.title} style={{ background: "var(--s2)",
+                      border: "1px solid var(--b2)", borderRadius: 8, padding: "10px 12px" }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: "var(--ac2)",
+                        textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 }}>
+                        {g.title}
+                      </div>
+                      {g.cols.map(c => (
+                        <label key={c.key} style={{ display: "flex", alignItems: "center",
+                          gap: 7, fontSize: 12, color: "var(--tx2)", padding: "3px 0",
+                          cursor: "pointer", userSelect: "none" }}>
+                          <input type="checkbox" checked={exportCols.has(c.key)}
+                            onChange={() => toggleExportCol(c.key)} />
+                          {c.label}
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Extras */}
+              <div style={{ background: "var(--s2)", border: "1px solid var(--b2)",
+                borderRadius: 8, padding: "10px 12px" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8,
+                  fontSize: 12, color: "var(--tx2)", cursor: "pointer", userSelect: "none" }}>
+                  <input type="checkbox" checked={exportIncludeHistory}
+                    onChange={e => setExportIncludeHistory(e.target.checked)} />
+                  <span>
+                    <span style={{ fontWeight: 600 }}>{tr("products.exportIncludeHistory")}</span>
+                    <span style={{ color: "var(--tx3)", marginLeft: 6, fontSize: 11 }}>
+                      {tr("products.exportIncludeHistoryHint")}
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: "flex", gap: 10, alignItems: "center",
+              padding: "14px 24px", borderTop: "1px solid var(--b1)", background: "var(--s1)" }}>
+              <button onClick={() => setExportOpen(false)} disabled={exportLoading}
+                className="btn btn-ghost" style={{ fontSize: 12, padding: "8px 18px" }}>
+                {tr("common.cancel")}
+              </button>
+              <div style={{ flex: 1 }} />
+              <button onClick={handleExportDownload}
+                disabled={exportLoading || !exportCols.size}
+                className="btn btn-primary"
+                style={{ fontSize: 12, padding: "8px 22px",
+                  display: "flex", alignItems: "center", gap: 6 }}>
+                {exportLoading
+                  ? <><Hourglass size={13} strokeWidth={1.75} /> {tr("products.exportGenerating")}</>
+                  : <><Download size={13} strokeWidth={1.75} /> {tr("products.exportDownload")}</>}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -3800,10 +4587,14 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
   const deltas = summary?.deltas || {};
   const trend = summary?.trend || [];
 
+  const sparkDates = trend.map(r => r.date);
   const sparkData = {
     spend:       trend.map(r => parseFloat(r.spend || 0)),
     sales:       trend.map(r => parseFloat(r.sales || 0)),
     acos:        trend.map(r => parseFloat(r.acos || 0)),
+    // Per-day TACoS may be null on dates without sp_orders coverage —
+    // pass through as null so Spark can draw a gap instead of pretending 0%.
+    tacos:       trend.map(r => r.tacos != null ? parseFloat(r.tacos) : null),
     roas:        trend.map(r => parseFloat(r.roas || 0)),
     clicks:      trend.map(r => parseFloat(r.clicks || 0)),
     impressions: trend.map(r => parseFloat(r.impressions || 0)),
@@ -3815,20 +4606,43 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
   const fmt$ = v => `$${parseFloat(v || 0).toLocaleString("en", { maximumFractionDigits: 0 })}`;
   const fmtN = v => parseInt(v || 0).toLocaleString();
 
+  // Per-metric tooltip formatters used inside the inline sparkline.
+  const sparkFmt = {
+    spend:       v => `$${parseFloat(v||0).toLocaleString("en",{maximumFractionDigits:0})}`,
+    sales:       v => `$${parseFloat(v||0).toLocaleString("en",{maximumFractionDigits:0})}`,
+    acos:        v => `${parseFloat(v||0).toFixed(1)}%`,
+    roas:        v => `${parseFloat(v||0).toFixed(2)}×`,
+    clicks:      v => parseInt(v||0).toLocaleString(),
+    impressions: v => parseInt(v||0).toLocaleString(),
+    orders:      v => parseInt(v||0).toLocaleString(),
+    ctr:         v => `${parseFloat(v||0).toFixed(2)}%`,
+    cpc:         v => `$${parseFloat(v||0).toFixed(2)}`,
+  };
+
+  // Show real total revenue from SP-API when available; otherwise fall back to
+  // ad-attributed sales (sales_14d) and relabel so the user knows the
+  // difference (organic ≠ ads).
+  const hasTotalRevenue = totals.totalRevenue != null && parseFloat(totals.totalRevenue) > 0;
+  const salesValue = hasTotalRevenue ? totals.totalRevenue : totals.sales;
+  const salesLabel = hasTotalRevenue ? t("overview.kpiSales") : t("overview.kpiAdSales");
+  const salesTooltip = hasTotalRevenue ? t("overview.kpiSalesTotalTooltip") : t("overview.kpiSalesAdTooltip");
+
   const kpiMap = {
-    kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: sparkData.spend },
-    kpi_sales:       { label: t("overview.kpiSales"),       value: hasData ? fmt$(totals.sales)       : "—", delta: deltas.sales, color: "#22C55E", spark: sparkData.sales },
+    kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: sparkData.spend, sparkFormat: sparkFmt.spend },
+    kpi_sales:       { label: salesLabel,                   value: hasData ? fmt$(salesValue)         : "—", delta: deltas.sales, color: "#22C55E", spark: sparkData.sales, tooltip: salesTooltip, sparkFormat: sparkFmt.sales },
     kpi_acos:        { label: acosMode === "tacos" ? t("metrics.tacos") : "ACOS",
                        value: acosMode === "tacos"
                          ? (hasData && totals.tacos != null ? `${parseFloat(totals.tacos).toFixed(1)}%` : "—")
                          : (hasData ? `${parseFloat(totals.acos).toFixed(1)}%` : "—"),
-                       delta: acosMode === "tacos" ? null : deltas.acos, color: "#F59E0B", spark: sparkData.acos },
-    kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: sparkData.roas },
-    kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: sparkData.clicks },
-    kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: sparkData.impressions },
-    kpi_orders:      { label: t("overview.kpiOrders"),      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: sparkData.orders },
-    kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: sparkData.ctr },
-    kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc },
+                       delta: acosMode === "tacos" ? null : deltas.acos, color: "#F59E0B",
+                       spark: acosMode === "tacos" ? sparkData.tacos : sparkData.acos,
+                       sparkFormat: acosMode === "tacos" ? sparkFmt.acos : sparkFmt.acos },
+    kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: sparkData.roas, sparkFormat: sparkFmt.roas },
+    kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: sparkData.clicks, sparkFormat: sparkFmt.clicks },
+    kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: sparkData.impressions, sparkFormat: sparkFmt.impressions },
+    kpi_orders:      { label: t("overview.kpiOrders"),      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: sparkData.orders, sparkFormat: sparkFmt.orders },
+    kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: sparkData.ctr, sparkFormat: sparkFmt.ctr },
+    kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc, sparkFormat: sparkFmt.cpc },
   };
 
   const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || (ct || "").slice(0, 3).toUpperCase();
@@ -3891,10 +4705,27 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
                 {t("metrics.tacosNoData")}
               </div>
             )}
+            {acosMode === "tacos" && hasTacos && totals.tacosPeriod
+              && totals.tacosPeriod.days < totals.tacosPeriod.requestedDays && (
+              <Tip placement="bottom" width={240}
+                text={t("metrics.tacosCoverageTip", { days: totals.tacosPeriod.days, requested: totals.tacosPeriod.requestedDays })}>
+                <div style={{ fontSize: 10, color: "var(--amb)", marginTop: 3,
+                  display: "flex", alignItems: "center", gap: 4, cursor: "help",
+                  borderBottom: "1px dotted var(--amb)", paddingBottom: 1, alignSelf: "flex-start" }}>
+                  <Info size={10} strokeWidth={1.75} />
+                  {t("metrics.tacosCoverage", {
+                    start: new Date(totals.tacosPeriod.start).toLocaleDateString("en", { day: "2-digit", month: "short" }),
+                    end:   new Date(totals.tacosPeriod.end).toLocaleDateString("en", { day: "2-digit", month: "short" }),
+                    days: totals.tacosPeriod.days,
+                    requested: totals.tacosPeriod.requestedDays,
+                  })}
+                </div>
+              </Tip>
+            )}
           </div>
         );
       }
-      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} loading={sl} extra={extra} />;
+      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} sparkDates={sparkDates} sparkFormat={kpi.sparkFormat} loading={sl} extra={extra} tooltip={kpi.tooltip} />;
     }
 
     if (item.id === "chart_spend") {
@@ -9176,7 +10007,7 @@ const RULE_ACTIONS_LIST = (t) => [
   { value:"enable_keyword",        label:t("rules.enableKeyword"),        et:"keyword" },
   { value:"adjust_bid_pct",        label:t("rules.adjustBidPct"),         et:"keyword" },
   { value:"set_bid",               label:t("rules.setBid"),               et:"keyword" },
-  { value:"add_negative_keyword",  label:t("rules.addNegativeKeyword"),   et:"keyword" },
+  { value:"add_negative_keyword",  label:t("rules.addNegativeKeyword"),   et:["keyword","search_term"] },
   { value:"pause_target",          label:t("rules.pauseTarget"),          et:"target" },
   { value:"enable_target",         label:t("rules.enableTarget"),         et:"target" },
   { value:"adjust_target_bid_pct", label:t("rules.adjustTargetBidPct"),   et:"target" },
@@ -9321,7 +10152,9 @@ const RuleWizardModal = ({
         {showScope && (
           <div style={{ marginTop:2, fontSize:11, color:"var(--tx3)" }}>
             <span style={{ fontFamily:"var(--mono)", marginRight:6 }}>SCOPE</span>
-            {entityType === "keyword" ? t("rules.keyword") : t("rules.productTarget")}
+            {entityType === "search_term" ? t("rules.searchTerm")
+              : entityType === "product_target" ? t("rules.productTarget")
+              : t("rules.keyword")}
             {" · "}{form.scope.campaign_type ? ruleCampTypes.find(c=>c.value===form.scope.campaign_type)?.label : t("rules.allTypes")}
             {" · "}{campCount > 0 ? t("rules.campaignsSelected", { count: campCount }) : t("rules.allEntities")}
           </div>
@@ -9345,24 +10178,23 @@ const RuleWizardModal = ({
   };
 
   // S1-2: handle preview
+  // Always preview the current form state (not the saved DB version) so that
+  // unsaved edits are reflected. Backend /rules/preview is dry-run only and
+  // never persists.
   const handlePreview = async () => {
     setPreviewData(null);
     setPreviewError(null);
     setPreviewLoading(true);
     setStep(4);
     try {
-      if (editRule?.id) {
-        const result = await post(`/rules/${editRule.id}/run`, { dry_run: true });
-        setPreviewData(result);
-      } else {
-        const tempName = `__preview_${Date.now()}`;
-        const created = await post('/rules', { ...form, name: tempName, dry_run: true, is_active: false });
-        if (created?.id) {
-          const result = await post(`/rules/${created.id}/run`, { dry_run: true });
-          setPreviewData(result);
-          await del(`/rules/${created.id}`);
-        }
-      }
+      const result = await post('/rules/preview', {
+        name: form.name || '__preview__',
+        conditions: form.conditions,
+        actions: form.actions,
+        scope: form.scope,
+        safety: form.safety,
+      });
+      setPreviewData(result);
     } catch (e) {
       setPreviewError('Preview failed — you can still save the rule directly.');
     } finally {
@@ -9519,11 +10351,25 @@ const RuleWizardModal = ({
                     {[
                       { value:"keyword",        label: t("rules.keyword") },
                       { value:"product_target", label: t("rules.productTarget") },
+                      { value:"search_term",    label: t("rules.searchTerm") },
                     ].map(et => (
                       <button key={et.value}
                         className={`btn ${(form.scope?.entity_type || "keyword") === et.value ? "btn-primary" : "btn-ghost"}`}
                         style={{ fontSize:12, padding:"7px 12px", flex:1 }}
-                        onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, entity_type: et.value } }))}>
+                        onClick={() => {
+                          // Switching to/from search_term may invalidate prior actions; reset to a sensible default
+                          setForm(f => {
+                            const newType = et.value;
+                            const allowedActionTypes = newType === "search_term"
+                              ? ["add_negative_keyword"]
+                              : newType === "product_target"
+                                ? ["pause_target","enable_target","adjust_target_bid_pct","add_negative_target"]
+                                : ["pause_keyword","enable_keyword","adjust_bid_pct","set_bid","add_negative_keyword"];
+                            const filteredActs = (f.actions || []).filter(a => allowedActionTypes.includes(a.type));
+                            const safeActs = filteredActs.length ? filteredActs : [{ type: allowedActionTypes[0], value: "" }];
+                            return { ...f, scope: { ...f.scope, entity_type: newType }, actions: safeActs };
+                          });
+                        }}>
                         {et.label}
                       </button>
                     ))}
@@ -9723,8 +10569,14 @@ const RuleWizardModal = ({
                     <div style={{ ...LABEL, marginBottom:10 }}>{t("rules.actionsTitle")}</div>
                     {form.actions.map((act, i) => {
                       const curEntityType = form.scope?.entity_type || "keyword";
+                      // entity_type → expected action target ("keyword" / "target" / "search_term").
+                      // ruleActionsList items can have et as a string or an array (for actions that
+                      // apply to multiple entity types, like add_negative_keyword on both keyword + search_term).
+                      const wantEt = curEntityType === "product_target" ? "target"
+                                   : curEntityType === "search_term"    ? "search_term"
+                                   : "keyword";
                       const filteredActions = ruleActionsList.filter(a =>
-                        curEntityType === "product_target" ? a.et === "target" : a.et === "keyword"
+                        Array.isArray(a.et) ? a.et.includes(wantEt) : a.et === wantEt
                       );
                       const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid" || act.type === "adjust_target_bid_pct";
                       const isNegKw  = act.type === "add_negative_keyword";
@@ -11475,19 +12327,77 @@ const RulesPage = ({ workspaceId }) => {
                     <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}><X size={13} strokeWidth={1.75} /></button>
                   </div>
 
-                  <div style={{ display:"flex", gap:12, marginBottom:16 }}>
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(4, minmax(0, 1fr))",
+                    gap:10, marginBottom:16 }}>
                     {[
-                      { label:t("rules.evaluated"), val:r.total_evaluated, color:"var(--tx2)" },
-                      { label:t("rules.matched"),   val:r.matched_count,   color:"var(--amb)" },
-                      { label:r.dry_run ? t("rules.willChange") : t("rules.changed"), val:r.applied_count, color:"var(--grn)" },
+                      { label:t("rules.evaluated"),       val:r.total_evaluated, color:"var(--tx2)", tip:t("rules.evaluatedTip") },
+                      { label:t("rules.passedConditions"), val:r.matched_count,   color:"var(--amb)", tip:t("rules.passedConditionsTip") },
+                      { label:t("rules.skipped"),          val:r.skipped_count ?? 0, color:"var(--tx3)", tip:t("rules.skippedTip") },
+                      { label:r.dry_run ? t("rules.willChange") : t("rules.changed"), val:r.applied_count, color:"var(--grn)", tip:t("rules.willChangeTip") },
                     ].map(s => (
-                      <div key={s.label} className="card" style={{ flex:1, padding:"12px 14px",
-                        background:"var(--s2)", textAlign:"center" }}>
-                        <div style={{ fontSize:24, fontFamily:"var(--mono)", fontWeight:600, color:s.color }}>{s.val}</div>
-                        <div style={{ fontSize:11, color:"var(--tx3)", marginTop:2 }}>{s.label}</div>
-                      </div>
+                      <Tip key={s.label} text={s.tip} placement="bottom" width={220}
+                        style={{ display:"block", width:"100%" }}>
+                        <div className="card" style={{ width:"100%", boxSizing:"border-box",
+                          padding:"12px 14px", background:"var(--s2)", textAlign:"center", cursor:"help" }}>
+                          <div style={{ fontSize:22, fontFamily:"var(--mono)", fontWeight:600, color:s.color }}>{s.val}</div>
+                          <div style={{ fontSize:10, color:"var(--tx3)", marginTop:2,
+                            display:"flex", alignItems:"center", justifyContent:"center", gap:4 }}>
+                            {s.label}
+                            <Info size={10} strokeWidth={1.75} style={{ opacity:0.6 }} />
+                          </div>
+                        </div>
+                      </Tip>
                     ))}
                   </div>
+
+                  {r.skipped?.length > 0 && (
+                    <details style={{ marginBottom:16, background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:8 }}>
+                      <summary style={{ padding:"10px 14px", cursor:"pointer", fontSize:12,
+                        color:"var(--tx2)", display:"flex", alignItems:"center", gap:8, userSelect:"none" }}>
+                        <span style={{ fontWeight:600 }}>{t("rules.skipped")}: {r.skipped.length}</span>
+                        <span style={{ color:"var(--tx3)", fontSize:11 }}>— {t("rules.skippedSubtitle")}</span>
+                      </summary>
+                      <div style={{ borderTop:"1px solid var(--b2)" }}>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 110px 1fr", gap:"0 8px",
+                          padding:"6px 14px", borderBottom:"2px solid var(--b2)", background:"var(--s1)",
+                          fontSize:10, fontWeight:600, color:"var(--tx3)", textTransform:"uppercase", letterSpacing:".04em" }}>
+                          <span>{t("rules.colKeywordTarget")}</span>
+                          <span>{t("rules.colAction")}</span>
+                          <span>{t("rules.colReason")}</span>
+                        </div>
+                        <div style={{ maxHeight:240, overflowY:"auto" }}>
+                          {r.skipped.map((s, i) => {
+                            const entityLabel = s.keyword_text || (s.expression
+                              ? (typeof s.expression === "object"
+                                  ? (s.expression[0]?.value || JSON.stringify(s.expression))
+                                  : s.expression)
+                              : s.entity_id);
+                            const reasonText = t(`rules.skipReason_${s.reason}`);
+                            const reasonTip  = t(`rules.skipReason_${s.reason}_tip`);
+                            return (
+                              <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr 110px 1fr", gap:"0 8px",
+                                padding:"6px 14px", borderBottom:"1px solid var(--b1)",
+                                alignItems:"center", fontSize:11 }}>
+                                <div style={{ fontFamily:"var(--mono)", fontSize:11, color:"var(--tx2)",
+                                  overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                  {entityLabel}
+                                </div>
+                                <span className="badge" style={{ fontSize:9, background:"var(--s3)", color:"var(--tx3)", justifySelf:"start" }}>
+                                  {s.action?.replace(/_/g," ").toUpperCase()}
+                                </span>
+                                <Tip text={reasonTip}>
+                                  <span style={{ fontSize:11, color:"var(--tx3)", cursor:"help",
+                                    borderBottom:"1px dotted var(--tx3)" }}>
+                                    {reasonText}
+                                  </span>
+                                </Tip>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </details>
+                  )}
 
                   {r.applied?.length > 0 ? (
                     <div>
@@ -11628,7 +12538,9 @@ const RulesPage = ({ workspaceId }) => {
                         {rule.is_active ? t("rules.active") : t("rules.inactive")}
                       </span>
                       <span className="badge bg-bl" style={{ fontSize:9 }}>
-                        {scope.entity_type === "product_target" ? t("rules.productTarget") : t("rules.keyword")}
+                        {scope.entity_type === "search_term" ? t("rules.searchTerm")
+                          : scope.entity_type === "product_target" ? t("rules.productTarget")
+                          : t("rules.keyword")}
                       </span>
                       <span className="badge" style={{ fontSize:9, background:"var(--s3)", color:"var(--tx2)" }}>
                         {scope.period_days === 1 ? t("rules.yesterday") : t("rules.periodDays", { days: scope.period_days || 14 })}
@@ -11636,7 +12548,7 @@ const RulesPage = ({ workspaceId }) => {
                       {last && (
                         <span style={{ fontSize:11, color:"var(--tx3)" }}>
                           {t("rules.lastRun")}: {new Date(rule.last_run_at).toLocaleString(undefined,{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}
-                          · {last.matched_count} {t("rules.matched")}
+                          · {last.matched_count} {t("rules.passedConditions").toLowerCase()}
                           · {last.applied_count} {t("rules.applied")}
                           {last.dry_run?" (sim)":""}
                         </span>

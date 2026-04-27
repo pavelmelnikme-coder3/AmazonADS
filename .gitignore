@@ -10,3 +10,10 @@ dist/
 .env.local
 .env.production
 .env.*
+
+# Test coverage reports — generated artifacts, not source
+coverage/
+*.lcov
+
+# Local Claude Code config (per-machine)
+.claude/

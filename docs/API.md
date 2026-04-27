@@ -156,6 +156,41 @@ Toggle `is_active` on/off.
 { "is_active": true }
 ```
 
+### POST /rules/preview *(2026-04-27)*
+Dry-run a rule using the **current form body** (not the saved DB version).
+Used by the wizard so unsaved edits are reflected. Never persists — does
+not write to `rules`, `rule_executions`, or `audit_events`.
+
+Request body matches the rule shape:
+```json
+{
+  "name": "optional",
+  "conditions": [{ "op": "gte", "value": 5, "metric": "clicks" }],
+  "actions":    [{ "type": "add_negative_keyword", "value": "exact" }],
+  "scope":      { "entity_type": "search_term", "period_days": 30 },
+  "safety":     { "min_bid": 0.02, "max_bid": 50 }
+}
+```
+
+Response shape:
+```json
+{
+  "matched_count":   42,
+  "skipped_count":   8,
+  "applied_count":   34,
+  "total_evaluated": 7343,
+  "applied":         [{ "entity_id": "...", "keyword_text": "...", "action": "...", "metrics": {...} }],
+  "skipped":         [{ "entity_id": "...", "reason": "already_negative", "action": "...", "metrics": {...} }],
+  "errors":          []
+}
+```
+
+`scope.entity_type` accepts: `keyword` (default), `product_target`, `search_term` (new).
+
+`skipped[*].reason` is one of: `already_paused`, `already_enabled`, `not_enabled`, `already_negative`, `wrong_entity_type`.
+
+Validation: 400 if `conditions` or `actions` arrays are missing/empty.
+
 ---
 
 ## Alerts
@@ -194,23 +229,102 @@ Mark a triggered alert as acknowledged.
 ### GET /metrics/summary
 KPI aggregation for the workspace.
 ```
-Query: ?period=7d   (7d | 14d | 30d)
+Query: ?startDate=2026-04-20&endDate=2026-04-26
 ```
 ```json
 {
-  "totalSpend": 1250.50,
-  "totalSales": 5200.00,
-  "acos": 24.05,
-  "roas": 4.16,
-  "clicks": 3420,
-  "impressions": 185000
+  "totals": {
+    "spend": "1772.37", "sales": "14389.65", "orders": 394,
+    "clicks": 3884, "impressions": 592306,
+    "ctr": "0.6557", "cpc": "0.4563",
+    "acos": "12.32", "roas": "8.12",
+    "tacos": "2.16",
+    "tacosSource": "sp_api",
+    "tacosPeriod": { "start": "2026-04-20", "end": "2026-04-26", "days": 7, "requestedDays": 7 },
+    "totalRevenue": "82103.61"
+  },
+  "deltas":  { "spend": "-12.0", "sales": "-9.5", "acos": "...", "roas": "..." },
+  "trend":   [
+    { "date": "2026-04-20", "spend": "286.93", "sales": "2385.98", "tacos": "3.28", "total_revenue": "8757.83", ... }
+  ],
+  "period":  { "start": "2026-04-20", "end": "2026-04-26" }
 }
 ```
+
+**Notes**:
+- `tacos` is `null` and `tacosSource` is `null` when `sp_orders` is empty (SP-API not connected or sync incomplete) — UI shows "—".
+- `tacosPeriod` reports the *aligned* range (start..MAX(purchase_date)) so spend and revenue cover the same days. When `days < requestedDays` the UI surfaces a coverage chip.
+- `trend[*].tacos` and `trend[*].total_revenue` are per-day; days without revenue have `tacos: null` and the sparkline draws a gap.
 
 ### GET /metrics/top-campaigns
 ```
 Query: ?limit=10&orderBy=spend
 ```
+
+---
+
+## Products *(2026-04-27 — export added)*
+
+### GET /products
+List active products with the latest BSR snapshot per ASIN.
+
+### POST /products
+Add a new ASIN to track (queues a meta + BSR fetch job).
+
+### GET /products/:id/history?days=30
+BSR snapshots for one product over the last N days.
+
+### GET /products/notes?product_id=...
+Notes pinned to the BSR chart. With no `product_id` returns ALL workspace
+notes (used for bulk expand).
+
+### POST /products/notes / DELETE /products/notes/:id
+Note CRUD.
+
+### POST /products/sync-meta
+Trigger title/brand/image scrape for products without metadata.
+
+### **POST /products/export** *(2026-04-27)*
+Generate a multi-sheet XLSX report.
+
+Request body:
+```json
+{
+  "startDate":      "2026-04-20",
+  "endDate":        "2026-04-26",
+  "columns":        ["asin","title","best_rank","ad_spend","ad_acos"],
+  "includeHistory": false
+}
+```
+
+Response: `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+binary blob with `Content-Disposition: attachment; filename="adsflow-products-{from}_{to}.xlsx"`.
+
+**Sheet 1 "Products"** — one row per active ASIN. Available columns (whitelist):
+`asin · title · brand · marketplace · best_rank · best_category · min_bsr · max_bsr · avg_bsr · first_bsr · last_bsr · bsr_change · snapshots · ad_spend · ad_sales · ad_orders · ad_clicks · ad_acos`
+
+Aggregates over the requested date range:
+- BSR fields from `bsr_snapshots` (`MIN`, `MAX`, `AVG`, `ARRAY_AGG ORDER BY captured_at` for first/last).
+- `bsr_change` = `(last - first) / first * 100`.
+- Ad fields from `fact_metrics_daily` filtered by `entity_type='advertised_product'` and `amazon_id = p.asin`.
+- `snapshots` = count of BSR datapoints in the period.
+
+**Sheet 2 "BSR History"** *(only when `includeHistory: true`)* — one row per
+snapshot (ASIN, Title, Brand, Captured At, Best BSR, Category) sorted by ASIN
+then DESC by capture time.
+
+**Validation:**
+- 400 if `startDate` or `endDate` not in `YYYY-MM-DD`.
+- 400 if `startDate > endDate`.
+- 400 if `columns` is provided but no whitelisted key matches.
+- Unknown column keys silently dropped (whitelist).
+
+**Hardening:**
+- Numeric columns (NUMERIC from postgres) coerced to JS `Number` before XLSX cell creation so number formats apply.
+- OWASP CSV-injection mitigation: text cells starting with `= + - @ \t \r` are prefixed with `'`.
+
+### DELETE /products/:id
+Soft-delete (sets `is_active = false`).
 
 ---
 

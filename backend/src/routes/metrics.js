@@ -41,21 +41,38 @@ router.get("/summary", async (req, res, next) => {
       params
     );
 
-    // Daily trend
+    // Daily trend. Joins per-day SP-API revenue so each row carries a true
+    // per-day TACoS (cost / total_sales). Days without sp_orders coverage
+    // get tacos=null and total_revenue=null — the frontend draws a gap so
+    // users notice missing revenue rather than seeing a misleading 0%.
+    // CTE column aliased `rev_date` to avoid ambiguity with fact_metrics_daily.date.
     const { rows: trend } = await query(
-      `SELECT date,
+      `WITH daily_revenue AS (
+         SELECT purchase_date::date AS rev_date,
+                SUM(order_total_amount) AS revenue
+         FROM sp_orders
+         WHERE workspace_id = $1
+           AND purchase_date::date BETWEEN $2 AND $3
+           AND order_status NOT IN ('Canceled', 'Unfulfillable')
+         GROUP BY purchase_date::date
+       )
+       SELECT date,
          SUM(impressions) as impressions,
-         SUM(clicks) as clicks,
-         SUM(cost) as spend,
-         SUM(sales_14d) as sales,
-         SUM(orders_14d) as orders,
+         SUM(clicks)      as clicks,
+         SUM(cost)        as spend,
+         SUM(sales_14d)   as sales,
+         SUM(orders_14d)  as orders,
          CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::numeric/SUM(impressions)*100 ELSE 0 END as ctr,
          CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) ELSE 0 END as cpc,
          CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 ELSE 0 END as acos,
-         CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) ELSE 0 END as roas
+         CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) ELSE 0 END as roas,
+         dr.revenue AS total_revenue,
+         CASE WHEN dr.revenue > 0 THEN SUM(cost)/dr.revenue*100 END as tacos
        FROM fact_metrics_daily
+       LEFT JOIN daily_revenue dr ON dr.rev_date = date
        WHERE ${where} AND entity_type = 'campaign'
-       GROUP BY date ORDER BY date`,
+       GROUP BY date, dr.revenue
+       ORDER BY date`,
       params
     );
 
@@ -75,37 +92,47 @@ router.get("/summary", async (req, res, next) => {
       [req.workspaceId, prevStart.toISOString().split("T")[0], prevEnd.toISOString().split("T")[0]]
     );
 
-    // TACoS: try SP-API orders first, fall back to ad-attributed sales (sales_14d)
+    // TACoS = ad spend / total sales (paid + organic) × 100.
+    // Apples-to-apples: when sp_orders coverage doesn't reach the period end
+    // (sync still catching up), align spend to the same date range. Otherwise
+    // a 7-day spend divided by a 5-day revenue produces a misleadingly low
+    // TACoS. We expose the aligned period back to the UI so users can see
+    // "TACoS for Apr 20-24 (5d/7d)" rather than blindly trust 3.6%.
     let tacos = null;
     let totalRevenue = null;
-    let tacosSource = null; // 'sp_api' | 'ads_attributed'
+    let tacosSource = null; // 'sp_api' | null
+    let tacosPeriod = null; // { start, end, days, requestedDays }
     try {
-      const { rows: [spTotals] } = await query(
-        `SELECT SUM(order_total_amount) AS total_revenue FROM sp_orders
-         WHERE workspace_id = $1 AND purchase_date BETWEEN $2 AND $3
+      const { rows: [spInfo] } = await query(
+        `SELECT
+           SUM(order_total_amount)         AS total_revenue,
+           MIN(purchase_date)::date        AS first_rev_date,
+           MAX(purchase_date)::date        AS last_rev_date,
+           COUNT(DISTINCT purchase_date::date) AS coverage_days
+         FROM sp_orders
+         WHERE workspace_id = $1 AND purchase_date::date BETWEEN $2 AND $3
          AND order_status NOT IN ('Canceled', 'Unfulfillable')`,
         [req.workspaceId, start, end]
       );
-      if (spTotals?.total_revenue) {
-        totalRevenue = parseFloat(spTotals.total_revenue);
-        const spend = parseFloat(totals?.spend || 0);
-        if (totalRevenue > 0 && spend > 0) {
-          tacos = (spend / totalRevenue * 100).toFixed(2);
+      if (spInfo?.total_revenue && spInfo.last_rev_date) {
+        totalRevenue = parseFloat(spInfo.total_revenue);
+        const alignedEnd = spInfo.last_rev_date.toISOString().split("T")[0];
+        const { rows: [alignedSpend] } = await query(
+          `SELECT SUM(cost) AS spend FROM fact_metrics_daily
+           WHERE workspace_id = $1 AND date BETWEEN $2 AND $3 AND entity_type='campaign'`,
+          [req.workspaceId, start, alignedEnd]
+        );
+        const spendForTacos = parseFloat(alignedSpend?.spend || 0);
+        if (totalRevenue > 0 && spendForTacos > 0) {
+          tacos = (spendForTacos / totalRevenue * 100).toFixed(2);
           tacosSource = 'sp_api';
+          // Inclusive day count between start and alignedEnd
+          const reqDays = Math.round((new Date(end) - new Date(start))/86400000) + 1;
+          const covDays = Math.round((new Date(alignedEnd) - new Date(start))/86400000) + 1;
+          tacosPeriod = { start, end: alignedEnd, days: covDays, requestedDays: reqDays };
         }
       }
     } catch {}
-
-    // Fallback: use ad-attributed sales_14d as denominator when SP-API unavailable
-    if (tacos === null) {
-      const adSales = parseFloat(totals?.sales || 0);
-      const spend = parseFloat(totals?.spend || 0);
-      if (adSales > 0 && spend > 0) {
-        totalRevenue = adSales;
-        tacos = (spend / adSales * 100).toFixed(2);
-        tacosSource = 'ads_attributed';
-      }
-    }
 
     const calcDelta = (curr, prevVal) => {
       if (!prevVal || prevVal === 0) return null;
@@ -126,6 +153,7 @@ router.get("/summary", async (req, res, next) => {
         roas: parseFloat(totals?.roas || 0).toFixed(2),
         tacos,
         tacosSource,
+        tacosPeriod,
         totalRevenue: totalRevenue ? totalRevenue.toFixed(2) : null,
       },
       deltas: {

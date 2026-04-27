@@ -171,3 +171,38 @@ POST /keyword-research/add-to-adgroup
 | `routes/keywordResearch.js` | `/keyword-research/discover` + `/add-to-adgroup` |
 | `services/ai/keywordResearch.js` | Claude AI seed generation + relevance scoring |
 | `services/amazon/keywordRecommendations.js` | Amazon Ads API v3 keyword recommendations |
+
+## 2026-04-27 changes (rule engine + reports)
+
+### Rule engine extensions
+- New scope `entity_type: "search_term"` — `executeRule()` aggregates `search_term_metrics` over the rule's period, joining `campaigns`/`ad_groups`/`amazon_profiles`. Synthetic `state='enabled'` so the existing `add_negative_keyword` handler accepts both keyword and search-term entities (`stm.query → keyword_text`).
+- `recordSkip(entity, action, reason)` helper — every `continue` in the action loop now logs an entity to `skipped[]` with one of 5 reason keys: `already_paused | already_enabled | not_enabled | already_negative | wrong_entity_type`. Result payload gains `skipped_count` and `skipped[]`.
+- `POST /rules/preview` — dry-run with body, never persists. Replaces wizard's prior `/rules/:id/run` call which silently used the saved (stale) DB version, ignoring unsaved form edits.
+- Defense-in-depth validation: `Array.every([])` returns `true`, so an empty conditions array would have mass-affected every entity. Rejected at `executeRule()`, `POST /rules/preview`, and `PATCH /rules/:id`.
+
+### Metrics endpoint changes
+- `/metrics/summary` trend SQL wraps a `daily_revenue` CTE (sums `sp_orders.order_total_amount` per `purchase_date::date`) so each trend row carries `total_revenue` and per-day `tacos`. Frontend `Spark` ignores nulls and draws a gap on missing days.
+- Headline TACoS uses an *aligned period*: spend and revenue are summed only over `[start, MAX(purchase_date)]`. Response gains `tacosPeriod {start, end, days, requestedDays}` so the UI can warn when coverage is partial.
+- `purchase_date` filters cast to `::date` everywhere. Without the cast, a literal like `'2026-04-22'` was coerced to `timestamptz at midnight`, causing `BETWEEN` queries to lose 24 hours of data per boundary day.
+
+### SP-API client hardening (`spClient.js`)
+- `getOrders()` and `getFinancialEvents()` set `CreatedBefore`/`PostedBefore` to `now − 3 min` (clamped to ≤ `now − 2 min`). Amazon SP-API requires the timestamp be at least 2 minutes earlier than `now()` because of ingestion lag — without this, every daily orders sync was failing 400 InvalidInput.
+- `_spRequest()` retries on 429 up to 3 times with `Retry-After` header (capped at 90 s).
+- `syncOrders` first-time window reduced from 30 d to 7 d (Orders API rate is 0.0167 req/s).
+
+### Products report export (`POST /products/export`)
+- Uses `ExcelJS` (already a dep). Generates 1 or 2 sheets with frozen header rows.
+- Sheet 1 aggregates 3 CTEs in a single query: `bsr` (min/max/avg + ARRAY_AGG for first/last), `latest` (DISTINCT ON for current rank), `ads` (joins `fact_metrics_daily` by `amazon_id = ASIN, entity_type='advertised_product'`).
+- 18 whitelisted columns; unknown keys silently dropped (no SQL injection vector since we never interpolate column names).
+- Numeric postgres values coerced to JS `Number` so XLSX number formats apply.
+- OWASP CSV-injection mitigation: text starting with `= + - @ \t \r` is prefixed with `'`.
+
+### Frontend additions
+- `Spark` rebuilt with `dates`, `format`, `placement` props. Dots rendered as absolutely-positioned `<span>` over the SVG so they stay round under `preserveAspectRatio="none"`.
+- `Tip` component gains `placement: 'top' | 'bottom'` and `style` props for use near modal edges.
+- `ProductsPage`: `expandedId: string | null` migrated to `expandedIds: Set<string>`; master toggle button + batch fetch (chunks of 10) for "expand all".
+- BSR + rank charts use the same `<polyline>` + dot + hover tooltip pattern (`BsrSparkline`-derived).
+
+### Frontend code structure unchanged
+- All edits stay inside the single-file `App.jsx` and 3 i18n files (EN/RU/DE) per existing convention.
+- 28 new keys in `products.export*` namespace, 12 new keys for rule skip reasons, plus `tacosCoverage*` and `kpiAdSales*`.

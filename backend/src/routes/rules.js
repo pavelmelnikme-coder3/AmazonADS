@@ -45,6 +45,18 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   const scope      = typeof rule.scope      === "string" ? JSON.parse(rule.scope)      : (rule.scope  || {});
   const safety     = typeof rule.safety     === "string" ? JSON.parse(rule.safety)     : (rule.safety || {});
 
+  // Defense in depth: an empty conditions array makes `Array.prototype.every`
+  // return true for every entity — so a rule with no conditions and a
+  // pause/negative action would mass-affect EVERY keyword in scope. Reject
+  // here regardless of where the rule came from (preview body, DB row, future
+  // import path) so this can never happen by accident.
+  if (!Array.isArray(conditions) || conditions.length === 0) {
+    throw new Error("Rule must have at least one condition");
+  }
+  if (!Array.isArray(actions) || actions.length === 0) {
+    throw new Error("Rule must have at least one action");
+  }
+
   // ── Period ──────────────────────────────────────────────────────────────────
   const periodDays = parseInt(scope.period_days) || 14;
   let startDate, endDate;
@@ -89,7 +101,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
   // ── Fetch keywords ────────────────────────────────────────────────────────
   let keywords = [];
-  if (entityType !== "product_target") {
+  if (entityType === "keyword") {
     const kConds  = ["k.workspace_id = $1"];
     const kParams = [workspaceId];
     let pi = 2;
@@ -166,7 +178,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
   // ── Fetch targets ─────────────────────────────────────────────────────────
   let targets = [];
-  if (entityType !== "keyword") {
+  if (entityType === "product_target") {
     const tConds  = ["t.workspace_id = $1"];
     const tParams = [workspaceId];
     let tPi = 2;
@@ -244,10 +256,105 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     targets = rows.map(r => ({ ...r, entity_type: "target" }));
   }
 
-  const entities = [...keywords, ...targets];
+  // ── Fetch search terms ────────────────────────────────────────────────────
+  // Aggregates search_term_metrics over the period. Each entity represents one
+  // (query, campaign, ad_group) combination. Synthetic state="enabled" so the
+  // existing add_negative_keyword/add_negative_target handlers accept them.
+  // The query text becomes the `keyword_text` so the negative-keyword writer
+  // doesn't need a special branch.
+  let searchTerms = [];
+  if (entityType === "search_term") {
+    const sConds  = ["stm.workspace_id = $1", "stm.date_start >= $2", "stm.date_end <= $3", "stm.campaign_id IS NOT NULL", "stm.ad_group_id IS NOT NULL"];
+    const sParams = [workspaceId, startDate, endDate];
+    let sPi = 4;
+
+    if (scope.campaign_ids?.length) {
+      sConds.push(`stm.campaign_id = ANY($${sPi++}::uuid[])`);
+      sParams.push(scope.campaign_ids);
+    }
+    if (scope.ad_group_ids?.length) {
+      sConds.push(`stm.ad_group_id = ANY($${sPi++}::uuid[])`);
+      sParams.push(scope.ad_group_ids);
+    }
+    if (scope.campaign_type) {
+      sConds.push(`c.campaign_type = $${sPi++}`);
+      sParams.push(scope.campaign_type);
+    }
+    if (scope.match_types?.length) {
+      sConds.push(`LOWER(stm.match_type) = ANY($${sPi++}::text[])`);
+      sParams.push(scope.match_types.map(m => m.toLowerCase()));
+    }
+    if (scope.campaign_targeting_type) {
+      sConds.push(`LOWER(c.targeting_type) = $${sPi++}`);
+      sParams.push(scope.campaign_targeting_type.toLowerCase());
+    }
+    sPi = addCampaignNameFilter(sConds, sParams, sPi);
+
+    const { rows } = await query(
+      `SELECT
+         MIN(stm.id::text) AS id,
+         stm.query AS keyword_text,
+         stm.campaign_id, stm.ad_group_id,
+         stm.match_type AS source_match_type,
+         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id,
+         ag.name AS ad_group_name, ag.amazon_ag_id AS amazon_ad_group_id,
+         p.id    AS profile_db_id,
+         p.profile_id  AS amazon_profile_id,
+         p.connection_id,
+         p.marketplace_id,
+         'enabled'::text AS state,
+         SUM(stm.clicks)      AS clicks,
+         SUM(stm.spend)       AS spend,
+         SUM(stm.orders)      AS orders,
+         SUM(stm.sales)       AS sales,
+         SUM(stm.impressions) AS impressions,
+         CASE WHEN SUM(stm.sales) > 0
+              THEN SUM(stm.spend)/SUM(stm.sales)*100 END AS acos,
+         CASE WHEN SUM(stm.spend) > 0
+              THEN SUM(stm.sales)/SUM(stm.spend) END     AS roas,
+         CASE WHEN SUM(stm.impressions) > 0
+              THEN SUM(stm.clicks)::numeric/SUM(stm.impressions)*100 END AS ctr,
+         CASE WHEN SUM(stm.clicks) > 0
+              THEN SUM(stm.spend)/SUM(stm.clicks) END    AS cpc
+       FROM search_term_metrics stm
+       JOIN campaigns c        ON c.id  = stm.campaign_id
+       JOIN ad_groups ag       ON ag.id = stm.ad_group_id
+       JOIN amazon_profiles p  ON p.id  = stm.profile_id
+       WHERE ${sConds.join(" AND ")}
+       GROUP BY stm.query, stm.campaign_id, stm.ad_group_id, stm.match_type,
+                c.name, c.campaign_type, c.amazon_campaign_id,
+                ag.name, ag.amazon_ag_id,
+                p.id, p.profile_id, p.connection_id, p.marketplace_id`,
+      sParams
+    );
+    searchTerms = rows.map(r => ({ ...r, entity_type: "search_term" }));
+  }
+
+  const entities = [...keywords, ...targets, ...searchTerms];
   const matched  = entities.filter(e => evaluate(metricConditions, e));
   const applied  = [];
+  const skipped  = [];
   const errors   = [];
+
+  // Helper: record an entity that matched conditions but cannot have the
+  // action applied (e.g., already in target state, duplicate negative).
+  // Reason key is i18n-resolved on the frontend so UX explanations stay close
+  // to translation files. Keep keys stable — they're shown in tooltips.
+  const recordSkip = (entity, action, reason) => {
+    skipped.push({
+      entity_id: entity.id,
+      entity_type: entity.entity_type,
+      keyword_text: entity.keyword_text || null,
+      expression: entity.expression || null,
+      campaign_name: entity.campaign_name || null,
+      action: action.type,
+      reason,
+      metrics: {
+        clicks: entity.clicks, orders: entity.orders,
+        spend: entity.spend, acos: entity.acos,
+      },
+    });
+  };
 
   for (const entity of matched) {
     for (const action of actions) {
@@ -255,8 +362,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── pause_keyword ───────────────────────────────────────────────────
         if (action.type === "pause_keyword") {
-          if (entity.entity_type !== "keyword") continue;
-          if (entity.state === "paused") continue;
+          if (entity.entity_type !== "keyword") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state === "paused") { recordSkip(entity, action, "already_paused"); continue; }
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
@@ -285,8 +392,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── enable_keyword ──────────────────────────────────────────────────
         } else if (action.type === "enable_keyword") {
-          if (entity.entity_type !== "keyword") continue;
-          if (entity.state === "enabled") continue;
+          if (entity.entity_type !== "keyword") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state === "enabled") { recordSkip(entity, action, "already_enabled"); continue; }
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
@@ -315,8 +422,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── adjust_bid_pct (keyword) ────────────────────────────────────────
         } else if (action.type === "adjust_bid_pct") {
-          if (entity.entity_type !== "keyword") continue;
-          if (entity.state !== "enabled") continue; // skip paused/disabled keywords
+          if (entity.entity_type !== "keyword") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const pct        = parseFloat(action.value || 0) / 100;
           const currentBid = parseFloat(entity.bid || 0.10);
           const minBid     = parseFloat(safety.min_bid || 0.02);
@@ -350,8 +457,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── set_bid (keyword) ───────────────────────────────────────────────
         } else if (action.type === "set_bid") {
-          if (entity.entity_type !== "keyword") continue;
-          if (entity.state !== "enabled") continue; // skip paused/disabled keywords
+          if (entity.entity_type !== "keyword") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const newBid     = parseFloat(action.value || 0.10);
           const currentBid = parseFloat(entity.bid || 0);
           const minBid     = parseFloat(safety.min_bid || 0.02);
@@ -384,8 +491,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── pause_target ────────────────────────────────────────────────────
         } else if (action.type === "pause_target") {
-          if (entity.entity_type !== "target") continue;
-          if (entity.state === "paused") continue;
+          if (entity.entity_type !== "target") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state === "paused") { recordSkip(entity, action, "already_paused"); continue; }
           if (!dryRun) {
             await query("UPDATE targets SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
@@ -415,8 +522,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── enable_target ───────────────────────────────────────────────────
         } else if (action.type === "enable_target") {
-          if (entity.entity_type !== "target") continue;
-          if (entity.state === "enabled") continue;
+          if (entity.entity_type !== "target") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state === "enabled") { recordSkip(entity, action, "already_enabled"); continue; }
           if (!dryRun) {
             await query("UPDATE targets SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
             await writeAudit({
@@ -446,8 +553,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── adjust_target_bid_pct ───────────────────────────────────────────
         } else if (action.type === "adjust_target_bid_pct") {
-          if (entity.entity_type !== "target") continue;
-          if (entity.state !== "enabled") continue; // skip paused/disabled targets
+          if (entity.entity_type !== "target") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const pct        = parseFloat(action.value || 0) / 100;
           const currentBid = parseFloat(entity.bid || 0.10);
           const minBid     = parseFloat(safety.min_bid || 0.02);
@@ -484,8 +591,13 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // action.value: "exact" | "phrase" | "both" (default: "exact")
         // Amazon requires "negativeExact" / "negativePhrase" format
         } else if (action.type === "add_negative_keyword") {
-          if (entity.entity_type !== "keyword") continue;
-          if (entity.state !== "enabled") continue; // skip paused/disabled keywords
+          // Allowed for keywords AND search terms — both write a negative keyword
+          // using `entity.keyword_text` (which is the search term `query` for
+          // search_term entities, aliased in the SELECT above).
+          if (entity.entity_type !== "keyword" && entity.entity_type !== "search_term") {
+            recordSkip(entity, action, "wrong_entity_type"); continue;
+          }
+          if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const negMatchTypes = action.value === "phrase" ? ["negativePhrase"]
             : action.value === "both" ? ["negativeExact", "negativePhrase"] : ["negativeExact"];
 
@@ -499,7 +611,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                AND REPLACE(LOWER(match_type),'_','') = REPLACE(LOWER($4),'_','')`,
               [workspaceId, entity.campaign_id, entity.keyword_text, matchType]
             );
-            if (existing.length > 0) continue;
+            if (existing.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
 
             let insertedId = null;
             if (!dryRun) {
@@ -549,8 +661,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
         // ── add_negative_target ─────────────────────────────────────────────
         } else if (action.type === "add_negative_target") {
-          if (entity.entity_type !== "target") continue;
-          if (entity.state !== "enabled") continue; // skip paused/disabled targets
+          if (entity.entity_type !== "target") { recordSkip(entity, action, "wrong_entity_type"); continue; }
+          if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const exprJson = typeof entity.expression === "string"
             ? entity.expression : JSON.stringify(entity.expression);
 
@@ -559,7 +671,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
              WHERE workspace_id=$1 AND campaign_id=$2 AND ad_group_id=$3 AND expression=$4::jsonb`,
             [workspaceId, entity.campaign_id, entity.ad_group_id, exprJson]
           );
-          if (existing.length > 0) continue;
+          if (existing.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
 
           let insertedNtId = null;
           if (!dryRun) {
@@ -632,9 +744,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     total_evaluated: entities.length,
     entity_counts:   { keywords: keywords.length, targets: targets.length },
     applied_count:   applied.length,
+    skipped_count:   skipped.length,
     dry_run:         dryRun,
     period:          { start: startDate, end: endDate, days: periodDays },
     applied,
+    skipped,
     errors,
   };
 }
@@ -741,6 +855,14 @@ router.post("/", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const { name, description, conditions, actions, schedule, scope, safety, dry_run, is_active } = req.body;
+    // If conditions/actions are explicitly provided, refuse to write empty
+    // arrays — those would let executeRule treat every entity as matched.
+    if (conditions !== undefined && (!Array.isArray(conditions) || conditions.length === 0)) {
+      return res.status(400).json({ error: "conditions cannot be empty when provided" });
+    }
+    if (actions !== undefined && (!Array.isArray(actions) || actions.length === 0)) {
+      return res.status(400).json({ error: "actions cannot be empty when provided" });
+    }
     const { rows: [rule] } = await query(
       `UPDATE rules SET
          name        = COALESCE($1, name),
@@ -776,6 +898,38 @@ router.delete("/:id", async (req, res, next) => {
   try {
     await query("DELETE FROM rules WHERE id = $1 AND workspace_id = $2", [req.params.id, req.workspaceId]);
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── POST /rules/preview — dry-run with form body, never persists ──────────────
+// Used by the rule editor: lets users preview an UNSAVED rule (or unsaved edits
+// to an existing rule) against fresh metrics. Does not write to rules,
+// rule_executions, or audit_log — pure read-only evaluation.
+router.post("/preview", async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    // Empty arrays are truthy — must explicitly check `.length`. Without this
+    // a `{conditions: [], actions: [...]}` body would pass and the engine
+    // would treat every entity as matching (Array.every on []=true).
+    if (!Array.isArray(body.conditions) || body.conditions.length === 0) {
+      return res.status(400).json({ error: "At least one condition is required" });
+    }
+    if (!Array.isArray(body.actions) || body.actions.length === 0) {
+      return res.status(400).json({ error: "At least one action is required" });
+    }
+    const synthetic = {
+      id: null,
+      workspace_id: req.workspaceId,
+      name: body.name || "__preview__",
+      conditions: body.conditions,
+      actions: body.actions,
+      scope: body.scope || {},
+      safety: body.safety || {},
+      dry_run: true,
+      is_active: false,
+    };
+    const result = await executeRule(synthetic, req.workspaceId, true, req.user.id, req.user.name);
+    res.json(result);
   } catch (err) { next(err); }
 });
 

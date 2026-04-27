@@ -51,8 +51,10 @@ router.get("/orders", async (req, res, next) => {
     const { startDate, endDate, status, fulfillmentChannel, page = 1, limit = 50 } = req.query;
     let q = `SELECT o.*, COUNT(*) OVER() AS total_count FROM sp_orders o WHERE o.workspace_id=$1`;
     const params = [wid];
-    if (startDate) { params.push(startDate); q += ` AND o.purchase_date >= $${params.length}`; }
-    if (endDate)   { params.push(endDate);   q += ` AND o.purchase_date <= $${params.length}`; }
+    // Cast to ::date so a date literal like "2026-04-22" matches the entire
+    // day, not only the midnight instant — purchase_date is timestamptz.
+    if (startDate) { params.push(startDate); q += ` AND o.purchase_date::date >= $${params.length}::date`; }
+    if (endDate)   { params.push(endDate);   q += ` AND o.purchase_date::date <= $${params.length}::date`; }
     if (status)    { params.push(status);    q += ` AND o.order_status = $${params.length}`; }
     if (fulfillmentChannel) { params.push(fulfillmentChannel); q += ` AND o.fulfillment_channel = $${params.length}`; }
     const offset = (parseInt(page) - 1) * parseInt(limit);
@@ -80,8 +82,8 @@ router.get("/orders/summary", async (req, res, next) => {
          COUNT(*) FILTER (WHERE fulfillment_channel = 'MFN') AS fbm_orders
        FROM sp_orders
        WHERE workspace_id=$2
-         AND ($3::text IS NULL OR purchase_date >= $3::timestamptz)
-         AND ($4::text IS NULL OR purchase_date <= $4::timestamptz)
+         AND ($3::text IS NULL OR purchase_date::date >= $3::date)
+         AND ($4::text IS NULL OR purchase_date::date <= $4::date)
        GROUP BY period ORDER BY period DESC`,
       [trunc, req.workspace.id, startDate || null, endDate || null]
     );
