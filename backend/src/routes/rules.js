@@ -384,7 +384,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, keyword_text: entity.keyword_text,
+            entity_type: entity.entity_type, entity_id: entity.id, keyword_text: entity.keyword_text,
             campaign_name: entity.campaign_name, action: "pause_keyword",
             previous_state: entity.state, new_state: "paused",
             metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders, acos: entity.acos },
@@ -414,7 +414,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, keyword_text: entity.keyword_text,
+            entity_type: entity.entity_type, entity_id: entity.id, keyword_text: entity.keyword_text,
             campaign_name: entity.campaign_name, action: "enable_keyword",
             previous_state: entity.state, new_state: "enabled",
             metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders },
@@ -449,7 +449,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, keyword_text: entity.keyword_text,
+            entity_type: entity.entity_type, entity_id: entity.id, keyword_text: entity.keyword_text,
             campaign_name: entity.campaign_name, action: "adjust_bid_pct",
             previous_bid: currentBid, new_bid: newBid,
             change_pct: (pct * 100).toFixed(1) + "%",
@@ -484,7 +484,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, keyword_text: entity.keyword_text,
+            entity_type: entity.entity_type, entity_id: entity.id, keyword_text: entity.keyword_text,
             campaign_name: entity.campaign_name, action: "set_bid",
             previous_bid: currentBid, new_bid: clampedBid,
           });
@@ -514,7 +514,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, expression: entity.expression,
+            entity_type: entity.entity_type, entity_id: entity.id, expression: entity.expression,
             campaign_name: entity.campaign_name, action: "pause_target",
             previous_state: entity.state, new_state: "paused",
             metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders, acos: entity.acos },
@@ -545,7 +545,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, expression: entity.expression,
+            entity_type: entity.entity_type, entity_id: entity.id, expression: entity.expression,
             campaign_name: entity.campaign_name, action: "enable_target",
             previous_state: entity.state, new_state: "enabled",
             metrics: { clicks: entity.clicks, spend: entity.spend, orders: entity.orders },
@@ -581,7 +581,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, expression: entity.expression,
+            entity_type: entity.entity_type, entity_id: entity.id, expression: entity.expression,
             campaign_name: entity.campaign_name, action: "adjust_target_bid_pct",
             previous_bid: currentBid, new_bid: newBid,
             change_pct: (pct * 100).toFixed(1) + "%",
@@ -600,6 +600,81 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const negMatchTypes = action.value === "phrase" ? ["negativePhrase"]
             : action.value === "both" ? ["negativeExact", "negativePhrase"] : ["negativeExact"];
+
+          // ASIN-shaped search terms (e.g. "b076j8j3w5") are masked ASIN queries.
+          // Amazon matches these as products, not keywords — a negative KEYWORD
+          // wouldn't actually exclude them. Auto-route to add_negative_target
+          // (ASIN-level exclusion) which is what Amazon actually honours.
+          const isAsinShaped = /^b0[a-z0-9]{8}$/i.test(entity.keyword_text || "");
+          if (isAsinShaped && entity.entity_type === "search_term") {
+            const asinUpper = entity.keyword_text.toUpperCase();
+            const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
+
+            // Dedup: if this ASIN is already a negative_target anywhere in the
+            // campaign (any ad group, or campaign-level), skip — it's already
+            // excluded effectively.
+            const { rows: dupTgt } = await query(
+              `SELECT id FROM negative_targets
+               WHERE workspace_id=$1 AND campaign_id=$2
+                 AND expression @> $3::jsonb`,
+              [workspaceId, entity.campaign_id, exprUpperJson]
+            );
+            if (dupTgt.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+
+            let insertedNtId = null;
+            if (!dryRun) {
+              const { rows: ntRows } = await query(
+                `INSERT INTO negative_targets
+                   (workspace_id, profile_id, campaign_id, ad_group_id,
+                    amazon_neg_target_id, expression, expression_type, level)
+                 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                 ON CONFLICT DO NOTHING
+                 RETURNING id`,
+                [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
+                  `rule-neg-asin-${entity.id}`,
+                  exprUpperJson, "asinSameAs", "ad_group"]
+              );
+              insertedNtId = ntRows[0]?.id || null;
+
+              await writeAudit({
+                orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+                action: "search_term.add_negative_target_auto", entityType: "search_term",
+                entityId: entity.id, entityName: entity.keyword_text,
+                beforeData: {},
+                afterData: { added_as_negative_target: true, asin: asinUpper, level: "ad_group" },
+                source: "rule",
+              });
+
+              if (insertedNtId && entity.connection_id) {
+                // Reuse the existing v3 POST writer — it already uses the
+                // correct uppercase ASIN_SAME_AS, ENABLED state, and updates
+                // negative_targets.amazon_neg_target_id with the real Amazon ID.
+                pushNegativeAsin({
+                  localId: insertedNtId,
+                  connectionId: entity.connection_id,
+                  profileId: String(entity.amazon_profile_id),
+                  marketplaceId: entity.marketplace_id,
+                  campaignType: entity.campaign_type,
+                  amazonCampaignId: entity.amazon_campaign_id,
+                  amazonAdGroupId: entity.amazon_ad_group_id || null,
+                  asinValue: asinUpper,
+                  level: "ad_group",
+                }).catch(e => logger.warn("Rule auto-route negative_target write-back failed",
+                  { error: e.message }));
+              }
+            }
+
+            applied.push({
+              entity_type: entity.entity_type, entity_id: entity.id,
+              keyword_text: entity.keyword_text,
+              expression: [{ type: "ASIN_SAME_AS", value: asinUpper }],
+              campaign_name: entity.campaign_name, action: "add_negative_target",
+              auto_routed: true,
+              level: "ad_group",
+              metrics: { clicks: entity.clicks, orders: entity.orders, acos: entity.acos, spend: entity.spend },
+            });
+            continue;
+          }
 
           for (const matchType of negMatchTypes) {
             // Normalize match_type: Amazon sync stores "negative_exact"/"negative_phrase" (snake_case)
@@ -652,7 +727,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               }
             }
             applied.push({
-              entity_id: entity.id, keyword_text: entity.keyword_text,
+              entity_type: entity.entity_type, entity_id: entity.id, keyword_text: entity.keyword_text,
               campaign_name: entity.campaign_name, action: "add_negative_keyword",
               match_type: matchType, level: "ad_group",
               metrics: { clicks: entity.clicks, orders: entity.orders, acos: entity.acos, spend: entity.spend },
@@ -728,7 +803,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             }
           }
           applied.push({
-            entity_id: entity.id, expression: entity.expression,
+            entity_type: entity.entity_type, entity_id: entity.id, expression: entity.expression,
             campaign_name: entity.campaign_name, action: "add_negative_target",
             metrics: { clicks: entity.clicks, orders: entity.orders, spend: entity.spend, acos: entity.acos },
           });

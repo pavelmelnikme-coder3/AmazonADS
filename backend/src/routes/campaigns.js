@@ -99,7 +99,7 @@ router.get("/", async (req, res, next) => {
       `SELECT
          c.id, c.amazon_campaign_id, c.name, c.campaign_type, c.state,
          c.daily_budget, c.start_date, c.end_date, c.bidding_strategy, c.synced_at,
-         p.marketplace, p.country_code, p.currency_code,
+         p.marketplace, p.marketplace_id, p.country_code, p.currency_code,
          COALESCE(m.impressions,0) as impressions,
          COALESCE(m.clicks,0) as clicks,
          COALESCE(m.cost,0) as spend,
@@ -138,7 +138,7 @@ router.get("/", async (req, res, next) => {
 router.get("/:id", async (req, res, next) => {
   try {
     const { rows } = await query(
-      `SELECT c.*, p.marketplace, p.country_code, p.currency_code, p.profile_id as amazon_profile_id,
+      `SELECT c.*, p.marketplace, p.marketplace_id, p.country_code, p.currency_code, p.profile_id as amazon_profile_id,
               conn.id as connection_id
        FROM campaigns c
        JOIN amazon_profiles p ON p.id = c.profile_id

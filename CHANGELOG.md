@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-04-28
+
+### Fixed — Amazon Ads API v3 migration for SP entity sync
+
+- **`fetchTargets()` SP** rewritten to `POST /sp/targets/list` with media type `application/vnd.spTargetingClause.v3+json`. Legacy `GET /sp/targets` (v2) silently dropped AUTO-targeting expressions (close-/loose-match, substitutes, complements) — that bug left **197/201 (98%) of AUTO campaigns** without targets in our DB. SD continues to use legacy `GET /sd/targets` (v3 list endpoint returns 405 in EU region).
+- **`fetchProductAds()`** rewritten to `POST /sp/productAds/list` (`application/vnd.spProductAd.v3+json`). The legacy GET endpoint was returning 403 in EU and our `product_ads` table was completely empty (0 rows) for the West&East profile. After migration: **3 864 product ads** synced for one profile.
+- **`fetchNegativeTargets()` SP** rewritten to `POST /sp/negativeTargets/list` (same v2-deprecation issue). DB went from **6 → 5 121** SP negative targets.
+- **`syncTargets()` / `syncProductAds()`** normalize v3 response shape: state lowercased (`ENABLED` → `enabled`) to match schema; `bid` accepts both plain numbers and v3 `{value, currency}` objects.
+- Coverage on `West&East GmbH` profile after re-sync: SP MANUAL `293 → 9` empty (those 9 are campaigns with zero ad groups), SP AUTO `197 → 5`, SD unchanged at `0`.
+
+### Fixed — Rule engine: ASIN-shaped search terms produced ineffective negatives
+
+- Search terms like `b076j8j3w5` are masked ASIN queries Amazon shows when a buyer arrives via product-page traffic. Adding them as `negative_keyword` is useless — Amazon matches ASIN traffic against `negative_targets`, not keywords.
+- New duplicate check in `add_negative_keyword` action (`backend/src/routes/rules.js`): if `entity_type === "search_term"` and `keyword_text` matches `/^b0[a-z0-9]{8}$/i`, query `negative_targets` for an existing `[{type:"ASIN_SAME_AS", value:"<UPPER>"}]` expression in the same campaign. Hit → `recordSkip(reason: "already_negative")`.
+- **Auto-routing**: when no existing target dedup is found, the rule now writes a `negative_target` instead of a `negative_keyword`. Reuses `pushNegativeAsin()` writeback (POST v3, uppercase `ASIN_SAME_AS`, `state: "ENABLED"`, real-id update on success). Single negation regardless of `action.value` (phrase/both/exact) — phrase match doesn't apply to ASIN queries.
+- Frontend simulation table: auto-routed rows show badge `NEG ASIN ↻` (vs plain `NEG TGT`) with hover tooltip explaining the conversion.
+- Validated on prod: 9/13 (query, campaign) pairs from a real customer rule were correctly classified as duplicates after the fix; the remaining 4 will be added as new negative_targets on next live run.
+
+### Fixed — Search Terms list returned 13 daily rows for one query
+
+- `GET /search-terms` was selecting `stm.*` from `search_term_metrics`, which stores **one row per `(campaign, ad_group, query, date_start, date_end)`**. A 30-day window with daily reports therefore showed each query 13–30 times with per-day metrics — confusing and inconsistent with Amazon's UI which always shows aggregated totals.
+- Query rewritten to `GROUP BY (query, campaign_id, ad_group_id, keyword_text, match_type, ...)` with `SUM(impressions/clicks/spend/orders/sales)` and recomputed ACOS from the aggregates. Adds `day_rows` field for future "13 days" UI hints.
+- Per-period filters (`minClicks`, `minSpend`, `hasOrders`, `noOrders`) moved from `WHERE` to `HAVING` — `min_clicks=10` now means "≥10 clicks across the period" instead of "≥10 in any single day".
+- COUNT for pagination wraps the aggregated query in a subquery.
+- Validated against Amazon Ads UI: our `b0bl22bp1k` row shows 24,448 imp / 492 clicks / €701.19 spend; Amazon shows 24,533 / 496 / €706.36 — discrepancy is attribution-window related (7d vs 14d), not data loss.
+
+### Added — Open campaign in Amazon Ads console (region-aware)
+
+- New button in `CampaignDetailModal` header: opens `https://advertising.amazon.{tld}/cm/{sp|sb|sd}/campaigns/{amazon_campaign_id}` in a new tab, where `tld` is derived from `marketplace_id` via the existing `AMAZON_DOMAIN` map (DE → `.de`, US → `.com`, UK → `.co.uk`, etc.).
+- Earlier hardcoded `.com` redirected DE sellers to the public registration page because session cookies live per-region. Region-aware URL reuses the user's existing session.
+- `marketplace_id` added to `GET /campaigns` and `GET /campaigns/:id` SELECT (`p.marketplace_id` join from `amazon_profiles`).
+- New i18n keys `campaigns.detail.openInAmazonAds` + `openInAmazonAdsTip` in EN/RU/DE.
+
+### Added — Open campaign in new tab from rule simulation
+
+- Click on a campaign-name link in the rule-simulation modal now opens the campaigns page in a **new browser tab** instead of replacing the simulation. Implementation: `<a href="?page=campaigns&search=NAME" target="_blank">`.
+- App-level deep-link reader added to the `active` page state initializer: parses `?page=` and `?search=` from URL on mount, queues the search via `sessionStorage`, then `history.replaceState({}, "", pathname)` so reload doesn't re-trigger.
+
+### Added — 7-day BSR sparkline on hover (Products page)
+
+- New `BsrHoverChart` component renders a 180×80 inline SVG tooltip above each BSR badge in the product list. Shows up to 7 points (one per day, latest snapshot of that day) with a trend indicator (▼ green / ▲ red) and per-day rank on hover.
+- Category-aware: badge for `Sport & Freizeit` shows that category's history; primary badge falls back to `best_rank` if its category isn't present in some snapshots.
+- Lazy fetch: first hover on a product fires `GET /products/:id/history`; cached in the existing `history` state. `bsrHoverFetching` ref dedupes concurrent fetches.
+
+### Added — Clicks column in Campaigns table
+
+- Inserted between `Бюджет/д` and `Spend`. Sortable (backend already accepted `sortBy=clicks`), toggleable via `Cols` dropdown, default width 70px. Existing `useResizableColumns` saved widths gracefully fall back to defaults when the column count changes (length-mismatch check in the hook).
+
+### Added — Context-aware label for the entity column in rule simulation
+
+- The `Будет изменено` / `Пропущено` tables in the rule run modal previously hardcoded `Ключевое слово` even when rows were search terms or targets. New helper `entityColLabel(items)` reads `entity_type` from each row and picks the right header: `Ключевой запрос` (search_term) / `Ключевое слово` (keyword) / `Таргет` (target). Mixed → `Ключевое слово / Запрос / Таргет`.
+- Backend now passes `entity_type` in every `applied.push()` (9 spots in `executeRule`) and in `recordSkip`.
+- New i18n keys `rules.colKeyword` / `colSearchTerm` / `colTarget` in EN/RU/DE; `colKeywordTarget` updated to include search term.
+
+---
+
 ## [Unreleased] — 2026-04-27
 
 ### Added — Products report export (XLSX)

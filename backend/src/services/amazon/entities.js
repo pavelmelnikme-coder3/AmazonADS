@@ -616,15 +616,62 @@ async function syncPortfolios(profileDbRecord, amazonPortfolios) {
 
 // ─── PRODUCT ADS ─────────────────────────────────────────────────────────────
 
+// Sponsored Products product ads via v3 (POST /sp/productAds/list).
+// Legacy GET /sp/productAds returns 403 in the EU region — same v2 deprecation
+// as targets/keywords. v3 uses the standard list-with-stateFilter pattern.
 async function fetchProductAds(profile) {
-  const base = baseOpts(profile);
-  return getAll({
-    ...base,
-    path: "/sp/productAds",
-    params: { stateFilter: "enabled,paused,archived" },
-    group: "ad_groups",
-    responseKey: "productAds",
-  });
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const baseUrl = resolveBaseUrl(profile);
+  const mediaType = "application/vnd.spProductAd.v3+json";
+
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    const ads = [];
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+        maxResults: 500,
+      };
+      if (nextToken) body.nextToken = nextToken;
+      const response = await axios.post(`${baseUrl}/sp/productAds/list`, body, {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile.profile_id),
+          "Content-Type": mediaType,
+          "Accept": mediaType,
+        },
+        timeout: 30000,
+      });
+      const batch = Array.isArray(response.data?.productAds) ? response.data.productAds : [];
+      ads.push(...batch);
+      nextToken = response.data?.nextToken || null;
+      page++;
+      logger.info("SP productAds list page done", {
+        profileId: profile.profile_id, page,
+        batchCount: batch.length, totalSoFar: ads.length, hasMore: !!nextToken,
+        totalResults: response.data?.totalResults,
+      });
+    } while (nextToken && page < 400);
+    logger.info("SP productAds fetch complete",
+      { profileId: profile.profile_id, total: ads.length });
+    return ads;
+  } catch (err) {
+    const status = err.response?.status || err.status;
+    if ([401, 403, 404].includes(status)) {
+      logger.info("SP productAds skipped (no access)",
+        { profileId: profile.profile_id, status });
+      return [];
+    }
+    logger.warn("SP productAds fetch failed",
+      { profileId: profile.profile_id, status, error: err.message,
+        responseBody: err.response?.data });
+    return [];
+  }
 }
 
 async function syncProductAds(profileDbRecord, amazonProductAds) {
@@ -653,13 +700,14 @@ async function syncProductAds(profileDbRecord, amazonProductAds) {
     const params = [];
     let pi = 1;
     for (const ad of chunk) {
+      // v3 returns state UPPERCASE — normalize to lowercase to match schema.
       values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
       params.push(
         workspaceId, profileDbId,
         campMap.get(String(ad.campaignId)) || null,
         agMap.get(String(ad.adGroupId)) || null,
         String(ad.adId), ad.asin || null, ad.sku || null,
-        ad.state || "enabled", JSON.stringify(ad),
+        (ad.state || "enabled").toLowerCase(), JSON.stringify(ad),
       );
     }
     await query(
@@ -680,27 +728,85 @@ async function syncProductAds(profileDbRecord, amazonProductAds) {
 
 // ─── TARGETS ─────────────────────────────────────────────────────────────────
 
-const TARGET_ENDPOINTS = {
-  SP: { path: "/sp/targets",  responseKey: "targetingClauses" },
-  SD: { path: "/sd/targets",  responseKey: "targetingClauses" },
-};
-
+// Targeting clauses:
+//   SP — Amazon Ads API v3 (POST /sp/targets/list). Required for AUTO targeting
+//        expressions (close/loose match, substitutes, complements) — the legacy
+//        GET endpoint omits them, which is why ~98% of AUTO campaigns had no
+//        targets in our DB.
+//   SD — legacy GET /sd/targets. Amazon hasn't released a v3 list for SD; the
+//        v3 POST returns 405 Method Not Allowed in EU region.
 async function fetchTargets(profile, adType = "SP") {
-  const base = baseOpts(profile);
-  const ep = TARGET_ENDPOINTS[adType];
-  return getAll({
-    ...base,
-    path: ep.path,
-    params: { stateFilter: "enabled,paused,archived" },
-    group: "ad_groups",
-    responseKey: ep.responseKey,
-  }).catch(err => {
-    if (err.status === 401 || err.status === 403 || err.status === 404) {
-      logger.info(`${adType} targets skipped`, { profileId: base.profileId, status: err.status });
+  if (adType === "SD") {
+    const base = baseOpts(profile);
+    return getAll({
+      ...base,
+      path: "/sd/targets",
+      params: { stateFilter: "enabled,paused,archived" },
+      group: "ad_groups",
+      responseKey: null,
+    }).catch(err => {
+      if (err.status === 401 || err.status === 403 || err.status === 404) {
+        logger.info("SD targets skipped (no access)",
+          { profileId: profile.profile_id, status: err.status });
+        return [];
+      }
+      throw err;
+    });
+  }
+
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const baseUrl = resolveBaseUrl(profile);
+  const mediaType = "application/vnd.spTargetingClause.v3+json";
+
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    const targets = [];
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+        maxResults: 500,
+      };
+      if (nextToken) body.nextToken = nextToken;
+      const response = await axios.post(`${baseUrl}/sp/targets/list`, body, {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile.profile_id),
+          "Content-Type": mediaType,
+          "Accept": mediaType,
+        },
+        timeout: 30000,
+      });
+      const batch = Array.isArray(response.data?.targetingClauses)
+        ? response.data.targetingClauses : [];
+      targets.push(...batch);
+      nextToken = response.data?.nextToken || null;
+      page++;
+      logger.info("SP targets list page done", {
+        profileId: profile.profile_id, page,
+        batchCount: batch.length, totalSoFar: targets.length, hasMore: !!nextToken,
+        totalResults: response.data?.totalResults,
+      });
+    } while (nextToken && page < 400);
+    logger.info("SP targets fetch complete",
+      { profileId: profile.profile_id, total: targets.length });
+    return targets;
+  } catch (err) {
+    const status = err.response?.status || err.status;
+    if ([401, 403, 404].includes(status)) {
+      logger.info("SP targets skipped (no access)",
+        { profileId: profile.profile_id, status });
       return [];
     }
-    throw err;
-  });
+    logger.warn("SP targets fetch failed",
+      { profileId: profile.profile_id, status, error: err.message,
+        responseBody: err.response?.data });
+    return [];
+  }
 }
 
 async function syncTargets(profileDbRecord, amazonTargets, adType = "SP") {
@@ -729,6 +835,13 @@ async function syncTargets(profileDbRecord, amazonTargets, adType = "SP") {
     const params = [];
     let pi = 1;
     for (const t of chunk) {
+      // v3 returns state as UPPERCASE ("ENABLED"/"PAUSED"/"ARCHIVED") and bid
+      // can come as a plain number or as { value, currency }. Normalize both
+      // to match the schema (lowercase state, NUMERIC bid).
+      const stateLower = (t.state || "enabled").toLowerCase();
+      const bidValue = (t.bid && typeof t.bid === "object")
+        ? (Number(t.bid.value) || null)
+        : (t.bid != null ? Number(t.bid) : null);
       values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
       params.push(
         workspaceId, profileDbId,
@@ -738,7 +851,7 @@ async function syncTargets(profileDbRecord, amazonTargets, adType = "SP") {
         t.expressionType || null,
         t.expression ? JSON.stringify(t.expression) : null,
         t.resolvedExpression ? JSON.stringify(t.resolvedExpression) : null,
-        t.state || "enabled", t.bid || null,
+        stateLower, bidValue,
         JSON.stringify(t),
       );
     }
@@ -878,27 +991,81 @@ async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
 
 // ─── NEGATIVE TARGETS ────────────────────────────────────────────────────────
 
-const NEG_TARGET_ENDPOINTS = {
-  SP: { path: "/sp/negativeTargets",  responseKey: "negativeTargetingClauses" },
-  SD: { path: "/sd/negativeTargets",  responseKey: "negativeTargetingClauses" },
-};
-
+// Negative targets:
+//   SP — Amazon Ads API v3 (POST /sp/negativeTargets/list).
+//   SD — legacy GET /sd/negativeTargets (no v3 list endpoint exists yet).
 async function fetchNegativeTargets(profile, adType = "SP") {
-  const base = baseOpts(profile);
-  const ep = NEG_TARGET_ENDPOINTS[adType];
-  return getAll({
-    ...base,
-    path: ep.path,
-    params: { stateFilter: "enabled,archived" },
-    group: "ad_groups",
-    responseKey: ep.responseKey,
-  }).catch(err => {
-    if (err.status === 401 || err.status === 403 || err.status === 404) {
-      logger.info(`${adType} negative targets skipped`, { profileId: base.profileId, status: err.status });
+  if (adType === "SD") {
+    const base = baseOpts(profile);
+    return getAll({
+      ...base,
+      path: "/sd/negativeTargets",
+      params: { stateFilter: "enabled,archived" },
+      group: "ad_groups",
+      responseKey: null,
+    }).catch(err => {
+      if (err.status === 401 || err.status === 403 || err.status === 404) {
+        logger.info("SD negative targets skipped (no access)",
+          { profileId: profile.profile_id, status: err.status });
+        return [];
+      }
+      throw err;
+    });
+  }
+
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const baseUrl = resolveBaseUrl(profile);
+  const mediaType = "application/vnd.spNegativeTargetingClause.v3+json";
+
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    const negTargets = [];
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "ARCHIVED"] },
+        maxResults: 500,
+      };
+      if (nextToken) body.nextToken = nextToken;
+      const response = await axios.post(`${baseUrl}/sp/negativeTargets/list`, body, {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile.profile_id),
+          "Content-Type": mediaType,
+          "Accept": mediaType,
+        },
+        timeout: 30000,
+      });
+      const batch = Array.isArray(response.data?.negativeTargetingClauses)
+        ? response.data.negativeTargetingClauses : [];
+      negTargets.push(...batch);
+      nextToken = response.data?.nextToken || null;
+      page++;
+      logger.info("SP negativeTargets list page done", {
+        profileId: profile.profile_id, page,
+        batchCount: batch.length, totalSoFar: negTargets.length, hasMore: !!nextToken,
+        totalResults: response.data?.totalResults,
+      });
+    } while (nextToken && page < 400);
+    logger.info("SP negativeTargets fetch complete",
+      { profileId: profile.profile_id, total: negTargets.length });
+    return negTargets;
+  } catch (err) {
+    const status = err.response?.status || err.status;
+    if ([401, 403, 404].includes(status)) {
+      logger.info("SP negative targets skipped (no access)",
+        { profileId: profile.profile_id, status });
       return [];
     }
-    throw err;
-  });
+    logger.warn("SP negativeTargets fetch failed",
+      { profileId: profile.profile_id, status, error: err.message,
+        responseBody: err.response?.data });
+    return [];
+  }
 }
 
 async function syncNegativeTargets(profileDbRecord, amazonNegTargets, adType = "SP") {

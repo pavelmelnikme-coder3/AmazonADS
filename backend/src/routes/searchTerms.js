@@ -86,69 +86,118 @@ router.get("/", async (req, res, next) => {
       conditions.push(`stm.query ILIKE $${pi++}`);
       params.push(`%${search}%`);
     }
+
+    // search_term_metrics has one row per (workspace, campaign, ad_group, query,
+    // date_start, date_end). The list view should aggregate over the selected
+    // date range so each (query, campaign, ad_group, keyword, match_type) row
+    // shows totals — matching how Amazon Ads UI displays Search Terms.
+    // Per-period filters (minClicks/minSpend/hasOrders/noOrders) therefore
+    // apply via HAVING on the aggregated sums.
+    const havingClauses = [];
     if (minClicks) {
-      conditions.push(`stm.clicks >= $${pi++}`);
+      havingClauses.push(`SUM(stm.clicks) >= $${pi++}`);
       params.push(parseInt(minClicks));
     }
     if (minSpend) {
-      conditions.push(`stm.spend >= $${pi++}`);
+      havingClauses.push(`SUM(stm.spend) >= $${pi++}`);
       params.push(parseFloat(minSpend));
     }
     if (noOrders === "true") {
-      conditions.push(`stm.orders = 0 AND stm.clicks > 0`);
+      havingClauses.push(`SUM(stm.orders) = 0 AND SUM(stm.clicks) > 0`);
     }
     if (hasOrders === "true") {
-      conditions.push(`stm.orders > 0`);
+      havingClauses.push(`SUM(stm.orders) > 0`);
     }
 
-    const allowedSort = { spend: "stm.spend", clicks: "stm.clicks", orders: "stm.orders", impressions: "stm.impressions", query: "stm.query" };
-    const orderField = allowedSort[sortBy] || "stm.spend";
+    const allowedSort = {
+      spend:       "SUM(stm.spend)",
+      clicks:      "SUM(stm.clicks)",
+      orders:      "SUM(stm.orders)",
+      impressions: "SUM(stm.impressions)",
+      query:       "stm.query",
+    };
+    const orderField = allowedSort[sortBy] || "SUM(stm.spend)";
     const orderDir = sortDir === "asc" ? "ASC" : "DESC";
-    const where = conditions.join(" AND ");
+    const where  = conditions.join(" AND ");
+    const having = havingClauses.length ? `HAVING ${havingClauses.join(" AND ")}` : "";
+
+    const fromAndJoins = `
+      FROM search_term_metrics stm
+      LEFT JOIN campaigns c1
+        ON c1.id = stm.campaign_id
+      LEFT JOIN campaigns c2
+        ON c2.amazon_campaign_id = stm.amazon_campaign_id
+       AND c2.workspace_id = stm.workspace_id
+       AND stm.campaign_id IS NULL
+      LEFT JOIN (
+        SELECT k.workspace_id,
+               LOWER(k.keyword_text) AS kw,
+               LOWER(k.match_type)   AS mt,
+               MIN(c.name)           AS campaign_name
+        FROM keywords k
+        JOIN campaigns c ON c.id = k.campaign_id
+        WHERE k.workspace_id = $1
+        GROUP BY k.workspace_id, LOWER(k.keyword_text), LOWER(k.match_type)
+      ) kw_c
+        ON kw_c.workspace_id = stm.workspace_id
+       AND kw_c.kw = LOWER(stm.keyword_text)
+       AND kw_c.mt = LOWER(stm.match_type)
+       AND stm.campaign_id IS NULL
+       AND stm.keyword_text IS NOT NULL`;
+
+    const groupBy = `GROUP BY
+        stm.query,
+        COALESCE(stm.campaign_id, c2.id),
+        stm.ad_group_id,
+        stm.keyword_text,
+        stm.match_type,
+        stm.amazon_campaign_id,
+        COALESCE(c1.name, c2.name, stm.campaign_name, kw_c.campaign_name),
+        stm.ad_group_name,
+        stm.workspace_id`;
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(
-        `SELECT stm.*,
-           COALESCE(
-             c1.name,
-             c2.name,
-             stm.campaign_name,
-             kw_c.campaign_name
-           ) AS campaign_name,
+        `SELECT
+           MIN(stm.id::text) AS id,
+           stm.query,
+           stm.workspace_id,
            COALESCE(stm.campaign_id, c2.id) AS resolved_campaign_id,
-           CASE WHEN stm.sales > 0
-                THEN ROUND((stm.spend / stm.sales * 100)::numeric, 2)
+           COALESCE(stm.campaign_id, c2.id) AS campaign_id,
+           stm.ad_group_id,
+           stm.amazon_campaign_id,
+           stm.keyword_text,
+           stm.match_type,
+           COALESCE(c1.name, c2.name, stm.campaign_name, kw_c.campaign_name) AS campaign_name,
+           stm.ad_group_name,
+           SUM(stm.impressions)::bigint AS impressions,
+           SUM(stm.clicks)::bigint      AS clicks,
+           SUM(stm.spend)::numeric(14,4) AS spend,
+           SUM(stm.orders)::bigint      AS orders,
+           SUM(stm.sales)::numeric(14,4) AS sales,
+           CASE WHEN SUM(stm.sales) > 0
+                THEN ROUND((SUM(stm.spend) / SUM(stm.sales) * 100)::numeric, 2)
                 ELSE NULL
-           END AS acos
-         FROM search_term_metrics stm
-         LEFT JOIN campaigns c1
-           ON c1.id = stm.campaign_id
-         LEFT JOIN campaigns c2
-           ON c2.amazon_campaign_id = stm.amazon_campaign_id
-          AND c2.workspace_id = stm.workspace_id
-          AND stm.campaign_id IS NULL
-         LEFT JOIN (
-           SELECT k.workspace_id,
-                  LOWER(k.keyword_text) AS kw,
-                  LOWER(k.match_type)   AS mt,
-                  MIN(c.name)           AS campaign_name
-           FROM keywords k
-           JOIN campaigns c ON c.id = k.campaign_id
-           WHERE k.workspace_id = $1
-           GROUP BY k.workspace_id, LOWER(k.keyword_text), LOWER(k.match_type)
-         ) kw_c
-           ON kw_c.workspace_id = stm.workspace_id
-          AND kw_c.kw = LOWER(stm.keyword_text)
-          AND kw_c.mt = LOWER(stm.match_type)
-          AND stm.campaign_id IS NULL
-          AND stm.keyword_text IS NOT NULL
+           END AS acos,
+           MIN(stm.date_start) AS date_start,
+           MAX(stm.date_end)   AS date_end,
+           COUNT(*)::int       AS day_rows
+         ${fromAndJoins}
          WHERE ${where}
+         ${groupBy}
+         ${having}
          ORDER BY ${orderField} ${orderDir} NULLS LAST
          LIMIT $${pi} OFFSET $${pi + 1}`,
         [...params, limit, offset]
       ),
       query(
-        `SELECT COUNT(*) as total FROM search_term_metrics stm WHERE ${where}`,
+        `SELECT COUNT(*)::int AS total FROM (
+           SELECT 1
+           ${fromAndJoins}
+           WHERE ${where}
+           ${groupBy}
+           ${having}
+         ) agg`,
         params
       ),
     ]);

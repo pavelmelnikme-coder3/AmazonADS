@@ -24,7 +24,7 @@ import {
   BarChart2, FileBarChart, Settings, Orbit, Plug2,
   HelpCircle, Info, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
-  FlaskConical, Briefcase, GripVertical,
+  FlaskConical, Briefcase, GripVertical, ExternalLink,
 } from 'lucide-react';
 
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -2512,6 +2512,17 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                 </button>
               ))}
             </div>
+            {amazonAdsCampaignUrl(campaign) && (
+              <a href={amazonAdsCampaignUrl(campaign)} target="_blank" rel="noopener noreferrer"
+                title={t("campaigns.detail.openInAmazonAdsTip")}
+                style={{ fontSize: 10, padding: "3px 10px", borderRadius: 4, border: "1px solid var(--b2)",
+                  background: "transparent", color: "var(--tx2)", cursor: "pointer", textDecoration: "none",
+                  display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8, flexShrink: 0,
+                  whiteSpace: "nowrap" }}>
+                <ExternalLink size={11} strokeWidth={1.75} />
+                {t("campaigns.detail.openInAmazonAds")}
+              </a>
+            )}
             <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--tx3)", cursor: "pointer", fontSize: 22, lineHeight: 1, padding: "0 4px", flexShrink: 0 }}>×</button>
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -3203,6 +3214,120 @@ const RankTrackerPage = ({ workspaceId }) => {
 const AMAZON_DOMAIN = { ATVPDKIKX0DER: "com", A2EUQ1WTGCTBG2: "ca", A1AM78C64UM0Y8: "com.mx", A1F83G8C2ARO7P: "co.uk", A1PA6795UKMFR9: "de", APJ6JRA9NG5V4: "it", A13V1IB3VIYZZH: "fr", A1RKKUPIHCS9HS: "es", A39IBJ37TRP1C6: "com.au", A1VC38T7YXB528: "co.jp", A21TJRUUN4KGV: "in" };
 const amazonProductUrl = (asin, marketplaceId) => "https://www.amazon." + (AMAZON_DOMAIN[marketplaceId] || "de") + "/dp/" + asin;
 
+// Build a deep link to Amazon Advertising console for a specific campaign.
+// The console is regional — using the wrong TLD (.com for a DE seller) sends
+// the user to the public registration page because session cookies don't match.
+// Use the seller's marketplace TLD so their existing session is reused.
+const AMAZON_ADS_TYPE = { sponsoredProducts: "sp", sponsoredBrands: "sb", sponsoredDisplay: "sd" };
+const amazonAdsCampaignUrl = (campaign) => {
+  const seg = AMAZON_ADS_TYPE[campaign?.campaign_type] || "sp";
+  const id  = campaign?.amazon_campaign_id;
+  if (!id) return null;
+  const tld = AMAZON_DOMAIN[campaign?.marketplace_id] || "com";
+  return `https://advertising.amazon.${tld}/cm/${seg}/campaigns/${id}`;
+};
+
+// Tiny 7-day sparkline shown on hover over a BSR badge in the product list.
+// Uses one data point per day (latest snapshot of that day) so the chart has
+// at most 7 points regardless of capture frequency. Lower rank = better, so
+// plotting raw rank with min at top is intuitive (the line going DOWN means
+// rank improved). Hovering individual days shows the exact rank+date.
+const BsrHoverChart = ({ history, categoryTitle, fallbackBest }) => {
+  const [hovIdx, setHovIdx] = React.useState(null);
+  const series = React.useMemo(() => {
+    if (!history?.length) return [];
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const byDay = new Map();
+    for (const snap of history) {
+      const t = new Date(snap.captured_at).getTime();
+      if (t < cutoff) continue;
+      const all = [
+        ...(snap.classification_ranks || []),
+        ...(snap.display_group_ranks || []),
+      ];
+      const match = categoryTitle ? all.find(r => r.title === categoryTitle) : null;
+      const rank = match?.rank ?? (fallbackBest ? snap.best_rank : null);
+      if (rank == null) continue;
+      const dayKey = new Date(snap.captured_at).toISOString().slice(0, 10);
+      const prev = byDay.get(dayKey);
+      if (!prev || prev.t < t) byDay.set(dayKey, { t, captured_at: snap.captured_at, rank });
+    }
+    return [...byDay.values()].sort((a, b) => a.t - b.t);
+  }, [history, categoryTitle, fallbackBest]);
+
+  if (!history) {
+    return <div style={{ padding: "12px 14px", fontSize: 11, color: "var(--tx3)" }}>Загрузка…</div>;
+  }
+  if (series.length < 2) {
+    return <div style={{ padding: "12px 14px", fontSize: 11, color: "var(--tx3)" }}>
+      Недостаточно данных за 7 дней
+    </div>;
+  }
+
+  const W = 160, H = 44, PAD = 5;
+  const ranks = series.map(p => p.rank);
+  const minR = Math.min(...ranks), maxR = Math.max(...ranks);
+  const spread = (maxR - minR) || 1;
+  const xOf = i => PAD + (i / (series.length - 1)) * (W - PAD * 2);
+  const yOf = r => PAD + ((r - minR) / spread) * (H - PAD * 2);
+  const linePoints = series.map((p, i) => `${xOf(i)},${yOf(p.rank)}`).join(" ");
+  const areaPoints = `${xOf(0)},${H} ${linePoints} ${xOf(series.length - 1)},${H}`;
+  const trend = ranks[ranks.length - 1] - ranks[0];
+  const hovPt = hovIdx !== null ? series[hovIdx] : null;
+
+  const onMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHovIdx(Math.round(pct * (series.length - 1)));
+  };
+
+  return (
+    <div style={{ width: 180 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+        padding: "6px 10px 2px", fontSize: 10, color: "var(--tx3)" }}>
+        <span style={{ textTransform: "uppercase", letterSpacing: ".05em", fontWeight: 600 }}>7 дней</span>
+        <span style={{ color: trend < 0 ? "var(--grn)" : trend > 0 ? "var(--red)" : "var(--tx3)",
+          fontFamily: "var(--mono)", fontWeight: 600 }}>
+          {trend === 0 ? "−" : trend < 0 ? "▼" : "▲"}
+          {trend !== 0 ? ` ${Math.abs(trend).toLocaleString()}` : ""}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} onMouseMove={onMove} onMouseLeave={() => setHovIdx(null)}
+        style={{ width: W, height: H, display: "block", margin: "0 auto", cursor: "crosshair" }}>
+        <defs>
+          <linearGradient id="bsrHoverGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3B82F6" stopOpacity="0.35"/>
+            <stop offset="100%" stopColor="#3B82F6" stopOpacity="0.04"/>
+          </linearGradient>
+        </defs>
+        <polygon points={areaPoints} fill="url(#bsrHoverGrad)" />
+        <polyline points={linePoints} fill="none" stroke="#3B82F6" strokeWidth="1.4" />
+        {series.map((p, i) => (
+          <circle key={i} cx={xOf(i)} cy={yOf(p.rank)} r={hovIdx === i ? 3 : 1.6}
+            fill={hovIdx === i ? "#fff" : "#3B82F6"} stroke="#3B82F6" strokeWidth="1" />
+        ))}
+        {hovIdx !== null && (
+          <line x1={xOf(hovIdx)} x2={xOf(hovIdx)} y1={PAD} y2={H - PAD}
+            stroke="#3B82F6" strokeWidth="0.5" strokeDasharray="2,2" />
+        )}
+      </svg>
+      <div style={{ padding: "3px 10px 7px", fontSize: 10, fontFamily: "var(--mono)",
+        color: "var(--tx)", textAlign: "center", minHeight: 14 }}>
+        {hovPt ? (
+          <>
+            <span style={{ color: "var(--ac2)", fontWeight: 700 }}>#{hovPt.rank.toLocaleString()}</span>
+            <span style={{ color: "var(--tx3)", marginLeft: 6 }}>
+              {new Date(hovPt.captured_at).toLocaleDateString("ru", { day: "2-digit", month: "short" })}
+            </span>
+          </>
+        ) : (
+          <span style={{ color: "var(--tx3)" }}>наведи на день</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
   const [hovIdx, setHovIdx] = React.useState(null);
   const [hovNoteId, setHovNoteId] = React.useState(null);
@@ -3370,6 +3495,19 @@ const ProductsPage = ({ workspaceId }) => {
   // master "expand all / collapse all" toggle for sweeping BSR review.
   const [expandedIds, setExpandedIds] = useState(() => new Set());
   const [history, setHistory] = useState({});
+  // Hover sparkline state — { pid, idx } where idx is the BSR badge index
+  // for that product. Lazy-fetches /:id/history on first hover so the chart
+  // appears with at most ~200ms delay on cold cache.
+  const [bsrHover, setBsrHover] = useState(null);
+  const bsrHoverFetching = useRef(new Set());
+  const ensureBsrHistory = (id) => {
+    if (history[id] || bsrHoverFetching.current.has(id)) return;
+    bsrHoverFetching.current.add(id);
+    get(`/products/${id}/history`)
+      .then(d => setHistory(h => ({ ...h, [id]: d })))
+      .catch(() => {})
+      .finally(() => bsrHoverFetching.current.delete(id));
+  };
   const [notes, setNotes] = useState({}); // keyed by product_id
   const [globalNotes, setGlobalNotes] = useState([]);
   const [addingNote, setAddingNote] = useState(null); // product_id | "global" | null
@@ -3893,30 +4031,51 @@ const ProductsPage = ({ workspaceId }) => {
 
                     {allRanks.length > 0 ? (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {allRanks.map((r, i) => (
-                          <a
-                            key={i}
-                            href={r.link}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{
-                              display: "inline-flex", alignItems: "center", gap: 6,
-                              padding: "4px 10px", borderRadius: 20, textDecoration: "none",
-                              background: i === 0 ? "rgba(59,130,246,.15)" : "var(--s2)",
-                              border: `1px solid ${i === 0 ? "rgba(59,130,246,.35)" : "var(--b2)"}`,
-                            }}
-                          >
-                            <span style={{
-                              fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
-                              color: i === 0 ? "var(--ac2)" : "var(--tx)",
-                            }}>
-                              #{r.rank.toLocaleString()}
-                            </span>
-                            <span style={{ fontSize: 11, color: "var(--tx3)" }}>
-                              {r.title}
-                            </span>
-                          </a>
-                        ))}
+                        {allRanks.map((r, i) => {
+                          const isHovered = bsrHover?.pid === p.id && bsrHover?.idx === i;
+                          return (
+                            <div key={i} style={{ position: "relative" }}
+                              onMouseEnter={() => { ensureBsrHistory(p.id); setBsrHover({ pid: p.id, idx: i }); }}
+                              onMouseLeave={() => setBsrHover(h => h?.pid === p.id && h?.idx === i ? null : h)}>
+                              <a
+                                href={r.link}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  display: "inline-flex", alignItems: "center", gap: 6,
+                                  padding: "4px 10px", borderRadius: 20, textDecoration: "none",
+                                  background: i === 0 ? "rgba(59,130,246,.15)" : "var(--s2)",
+                                  border: `1px solid ${i === 0 ? "rgba(59,130,246,.35)" : "var(--b2)"}`,
+                                }}
+                              >
+                                <span style={{
+                                  fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700,
+                                  color: i === 0 ? "var(--ac2)" : "var(--tx)",
+                                }}>
+                                  #{r.rank.toLocaleString()}
+                                </span>
+                                <span style={{ fontSize: 11, color: "var(--tx3)" }}>
+                                  {r.title}
+                                </span>
+                              </a>
+                              {isHovered && (
+                                <div style={{
+                                  position: "absolute", bottom: "calc(100% + 6px)", left: "50%",
+                                  transform: "translateX(-50%)", zIndex: 30,
+                                  background: "var(--s2)", border: "1px solid var(--b2)",
+                                  borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,.45)",
+                                  pointerEvents: "auto",
+                                }}>
+                                  <BsrHoverChart
+                                    history={history[p.id]}
+                                    categoryTitle={r.title}
+                                    fallbackBest={i === 0}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : (
                       <div style={{ fontSize: 12, color: "var(--tx3)" }}>
@@ -5941,13 +6100,14 @@ const CampaignsPage = ({ workspaceId }) => {
   const [detailCampaign, setDetailCampaign] = useState(null);
   const [createCampOpen, setCreateCampOpen] = useState(false);
   const { colgroup: campColgroup, resizeHandle: campRH, resetCols: campResetCols } = useResizableColumns(
-    "campaigns", [36, 200, 80, 90, 95, 85, 85, 75, 75, 60]
+    "campaigns", [36, 200, 80, 90, 95, 70, 85, 85, 75, 75, 60]
   );
   const { isVisible: campCV, ColVisDropdown: CampColsBtn } = useColumnVisibility("campaigns", [
     { key: "name",   label: t("campaigns.colName") },
     { key: "type",   label: t("campaigns.colType") },
     { key: "status", label: t("campaigns.colStatus") },
     { key: "budget", label: t("campaigns.colBudget") },
+    { key: "clicks", label: "Clicks" },
     { key: "spend",  label: "Spend" },
     { key: "sales",  label: "Sales" },
     { key: "acos",   label: "ACOS" },
@@ -6175,10 +6335,11 @@ const CampaignsPage = ({ workspaceId }) => {
                       {campCV("type")   && <th>{t("campaigns.colType")}{campRH(2)}</th>}
                       {campCV("status") && <SortHeader field="state"  label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(3)} />}
                       {campCV("budget") && <SortHeader field="budget" label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(4)} />}
-                      {campCV("spend")  && <SortHeader field="spend"  label="Spend" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />}
-                      {campCV("sales")  && <SortHeader field="sales"  label="Sales" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />}
-                      {campCV("acos")   && <SortHeader field="acos"   label="ACOS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />}
-                      {campCV("roas")   && <SortHeader field="roas"   label="ROAS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />}
+                      {campCV("clicks") && <SortHeader field="clicks" label="Clicks" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />}
+                      {campCV("spend")  && <SortHeader field="spend"  label="Spend" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />}
+                      {campCV("sales")  && <SortHeader field="sales"  label="Sales" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />}
+                      {campCV("acos")   && <SortHeader field="acos"   label="ACOS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />}
+                      {campCV("roas")   && <SortHeader field="roas"   label="ROAS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(9)} />}
                       <th></th>
                     </tr>
                   </thead>
@@ -6244,6 +6405,7 @@ const CampaignsPage = ({ workspaceId }) => {
                             );
                           })()}
                         </td>}
+                        {campCV("clicks") && <td className="num" style={{ textAlign: "right", color: c.clicks > 0 ? "var(--tx)" : "var(--tx3)", fontVariantNumeric: "tabular-nums" }}>{c.clicks > 0 ? Number(c.clicks).toLocaleString() : "—"}</td>}
                         {campCV("spend") && <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend || 0).toFixed(0)}</td>}
                         {campCV("sales") && <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>}
                         {campCV("acos") && <td className="num" style={{ textAlign: "right", color: acosColor(c.acos) }}>
@@ -12258,6 +12420,20 @@ const RulesPage = ({ workspaceId }) => {
 
   const LABEL = { fontSize:11, color:"var(--tx3)", marginBottom:4, fontFamily:"var(--mono)", textTransform:"uppercase", letterSpacing:".05em" };
 
+  // Pick the entity-column header based on what types are actually in the data:
+  // search terms, keywords, and targets share this column but should be labeled
+  // accurately so users don't mistake search-term rows for keyword rows.
+  const entityColLabel = (items) => {
+    const types = new Set((items || []).map(x => x?.entity_type).filter(Boolean));
+    if (types.size === 1) {
+      const only = [...types][0];
+      if (only === "search_term") return t("rules.colSearchTerm");
+      if (only === "target")      return t("rules.colTarget");
+      if (only === "keyword")     return t("rules.colKeyword");
+    }
+    return t("rules.colKeywordTarget");
+  };
+
   return (
     <div className="fade">
       {/* Toast */}
@@ -12361,7 +12537,7 @@ const RulesPage = ({ workspaceId }) => {
                         <div style={{ display:"grid", gridTemplateColumns:"1fr 110px 1fr", gap:"0 8px",
                           padding:"6px 14px", borderBottom:"2px solid var(--b2)", background:"var(--s1)",
                           fontSize:10, fontWeight:600, color:"var(--tx3)", textTransform:"uppercase", letterSpacing:".04em" }}>
-                          <span>{t("rules.colKeywordTarget")}</span>
+                          <span>{entityColLabel(r.skipped)}</span>
                           <span>{t("rules.colAction")}</span>
                           <span>{t("rules.colReason")}</span>
                         </div>
@@ -12406,7 +12582,7 @@ const RulesPage = ({ workspaceId }) => {
                       <div style={{ display:"grid", gridTemplateColumns:"1fr 110px 52px 52px 64px 48px", gap:"0 8px",
                         padding:"5px 12px", borderBottom:"2px solid var(--b2)",
                         fontSize:10, fontWeight:600, color:"var(--tx3)", textTransform:"uppercase", letterSpacing:".04em" }}>
-                        <span>Ключевое слово</span>
+                        <span>{entityColLabel(r.applied)}</span>
                         <span>Действие</span>
                         <span style={{ textAlign:"right" }}>Клики</span>
                         <span style={{ textAlign:"right" }}>Ордера</span>
@@ -12431,7 +12607,7 @@ const RulesPage = ({ workspaceId }) => {
                             : a.action === "adjust_bid_pct"        ? `BID ${a.change_pct}`
                             : a.action === "adjust_target_bid_pct" ? `TGT ${a.change_pct}`
                             : a.action === "add_negative_keyword"  ? `NEG-${(a.match_type||"EXACT").toUpperCase()}`
-                            : a.action === "add_negative_target"   ? "NEG TGT"
+                            : a.action === "add_negative_target"   ? (a.auto_routed ? "NEG ASIN ↻" : "NEG TGT")
                             : `BID→${a.new_bid}€`;
                           const m = a.metrics || {};
                           const clicks  = m.clicks  != null ? Number(m.clicks)  : null;
@@ -12449,19 +12625,21 @@ const RulesPage = ({ workspaceId }) => {
                                   {entityLabel}
                                 </div>
                                 {a.campaign_name && (
-                                  <div
-                                    onClick={() => {
-                                      sessionStorage.setItem("af:pending_search:campaigns", a.campaign_name);
-                                      setShowResult(null);
-                                      window.dispatchEvent(new CustomEvent("af:navigate", { detail: { page: "campaigns", search: a.campaign_name } }));
-                                    }}
-                                    title="Перейти к кампании"
-                                    style={{ fontSize:10, color:"var(--ac2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1, cursor:"pointer", textDecoration:"underline dotted" }}>
+                                  <a
+                                    href={`${window.location.origin}/?page=campaigns&search=${encodeURIComponent(a.campaign_name)}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Открыть кампанию в новой вкладке"
+                                    style={{ display:"block", fontSize:10, color:"var(--ac2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1, cursor:"pointer", textDecoration:"underline dotted" }}>
                                     {a.campaign_name}
-                                  </div>
+                                  </a>
                                 )}
                               </div>
-                              <span className={`badge ${badgeCls}`} style={{ fontSize:10, justifySelf:"start" }}>{actionLabel}</span>
+                              <span className={`badge ${badgeCls}`}
+                                title={a.auto_routed
+                                  ? "Search-term — это маскированный ASIN. Действие автоматически конвертировано из NEG-keyword в NEG-target (Amazon не матчит ASIN-запросы по keyword-строке)."
+                                  : undefined}
+                                style={{ fontSize:10, justifySelf:"start" }}>{actionLabel}</span>
                               <span style={{ textAlign:"right", fontFamily:"var(--mono)", fontSize:12,
                                 color: clicks === 0 ? "var(--tx3)" : "var(--tx)" }}>
                                 {clicks != null ? clicks : "—"}
@@ -14722,7 +14900,21 @@ export default function App() {
   const [authed, setAuthed] = useState(!!localStorage.getItem("af_token"));
   const [user, setUser] = useState(null);
   const [workspace, setWorkspace] = useState(null);
-  const [active, setActive] = useState(() => localStorage.getItem("af_page") || "overview");
+  const [active, setActive] = useState(() => {
+    // Deep-link support: open?page=campaigns&search=NAME from another tab/window.
+    // Read once on mount, queue search via sessionStorage (same key the
+    // af:navigate handler already uses), then clean the URL so reload doesn't
+    // re-trigger.
+    const params = new URLSearchParams(window.location.search);
+    const urlPage = params.get("page");
+    if (urlPage) {
+      const search = params.get("search");
+      if (search) sessionStorage.setItem(`af:pending_search:${urlPage}`, search);
+      window.history.replaceState({}, "", window.location.pathname);
+      return urlPage;
+    }
+    return localStorage.getItem("af_page") || "overview";
+  });
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [toast, setToast] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem("af_theme") || "dark");
