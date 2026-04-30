@@ -109,6 +109,15 @@ PARAMS SCHEMA — use exactly these field names, never invent others:
 - Pause/enable a specific keyword:
   { "state": "paused" }  or  { "state": "enabled" }
 
+CRITICAL CONSTRAINTS — every recommendation MUST result in a real state change:
+- The campaign/keyword data includes a "state" field ("enabled" | "paused" | "archived"). READ IT before recommending.
+- NEVER recommend pause/pause_campaign for an entity whose current state is "paused" or "archived".
+- NEVER recommend enable/enable_campaign for an entity whose current state is "enabled".
+- NEVER recommend a bid value equal to the entity's current "bid".
+- NEVER recommend a daily_budget value equal to the entity's current "daily_budget".
+- NEVER recommend a bid_adjustment_pct of 0 (or values that round to the same final bid).
+- If the only action you can think of would be a no-op, do NOT include that recommendation at all.
+
 Rules:
 - Return 3-8 recommendations max, ordered by priority (1 = most urgent)
 - Be specific: cite exact campaign names, ACOS values, spend amounts from the data
@@ -320,6 +329,54 @@ ${JSON.stringify(keywordData.slice(0, 20), null, 2)}`;
         raw: rawResponse.slice(0, 500)
       });
     }
+
+    // 7b. Strip no-op actions (defense in depth — LLM occasionally violates the
+    // CRITICAL CONSTRAINTS in the prompt). For each action, resolve the entity's
+    // current state from the DB and drop redundant ones. Recommendations that
+    // end up with zero valid actions are dropped entirely.
+    const noOpStats = { dropped_actions: 0, dropped_recs: 0 };
+    const isPauseAction  = t => ["pause", "pause_campaign"].includes(t);
+    const isEnableAction = t => ["enable", "enable_campaign"].includes(t);
+    const sameNumber = (a, b) => a != null && b != null && Math.abs(parseFloat(a) - parseFloat(b)) < 0.005;
+
+    const validatedRecs = [];
+    for (const rec of recommendations) {
+      const actions = Array.isArray(rec.actions) ? rec.actions : [];
+      const kept = [];
+      for (const a of actions) {
+        if (!a.entity_id || !a.entity_type) { kept.push(a); continue; }
+        try {
+          let entity = null;
+          if (a.entity_type === "campaign") {
+            const r = await query("SELECT state, daily_budget FROM campaigns WHERE id=$1 AND workspace_id=$2", [a.entity_id, req.workspaceId]);
+            entity = r.rows[0];
+          } else if (a.entity_type === "keyword") {
+            const r = await query("SELECT state, bid FROM keywords WHERE id=$1 AND workspace_id=$2", [a.entity_id, req.workspaceId]);
+            entity = r.rows[0];
+          }
+          if (!entity) { kept.push(a); continue; } // entity not found — let downstream handle
+          const p = a.params || {};
+          // No-op detection
+          const wantsPause   = isPauseAction(a.action_type)  || p.state === "paused";
+          const wantsEnable  = isEnableAction(a.action_type) || p.state === "enabled";
+          if (wantsPause  && (entity.state === "paused"  || entity.state === "archived")) { noOpStats.dropped_actions++; continue; }
+          if (wantsEnable && entity.state === "enabled")                                  { noOpStats.dropped_actions++; continue; }
+          if (p.bid != null          && sameNumber(p.bid, entity.bid))                    { noOpStats.dropped_actions++; continue; }
+          if (p.daily_budget != null && sameNumber(p.daily_budget, entity.daily_budget))  { noOpStats.dropped_actions++; continue; }
+          if (p.bid_adjustment_pct != null && parseFloat(p.bid_adjustment_pct) === 0)     { noOpStats.dropped_actions++; continue; }
+          kept.push(a);
+        } catch (err) {
+          logger.warn("AI no-op validation query failed", { entity_id: a.entity_id, entity_type: a.entity_type, error: err.message });
+          kept.push(a);
+        }
+      }
+      if (kept.length === 0) { noOpStats.dropped_recs++; continue; }
+      validatedRecs.push({ ...rec, actions: kept });
+    }
+    if (noOpStats.dropped_actions || noOpStats.dropped_recs) {
+      logger.warn("AI no-op recommendations stripped", { workspaceId: req.workspaceId, ...noOpStats });
+    }
+    recommendations = validatedRecs;
 
     // 8. Invalidate previous pending recs + save new ones
     await query(

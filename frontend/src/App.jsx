@@ -198,7 +198,7 @@ const AI_PARAM_DISPLAY = {
   bid_adjustment:     'Изменение ставки',
   bid:                'Новая ставка',
   daily_budget:       'Новый бюджет/день',
-  state:              'Статус',
+  state:              'Новый статус',
 };
 const renderAiParams = (params) => {
   if (!params) return null;
@@ -2596,7 +2596,27 @@ const RankTrackerPage = ({ workspaceId }) => {
   const [editAdding, setEditAdding]   = useState(false);
   const [editingLabel, setEditingLabel] = useState(null); // asin being note-edited
   const [labelDraft, setLabelDraft]     = useState({});   // asin → draft text
-  const [productPopup, setProductPopup] = useState(null); // { asin, title, brand, image_url, label }
+  const [hoveredAsin, setHoveredAsin] = useState(null); // { asin, title, brand, image_url, anchor: DOMRect }
+  const hoverOpenTimerRef = useRef(null);
+  const hoverCloseTimerRef = useRef(null);
+  useEffect(() => () => {
+    if (hoverOpenTimerRef.current) clearTimeout(hoverOpenTimerRef.current);
+    if (hoverCloseTimerRef.current) clearTimeout(hoverCloseTimerRef.current);
+  }, []);
+  const onAsinHoverEnter = (e, asin, title, brand, image_url) => {
+    if (hoverCloseTimerRef.current) { clearTimeout(hoverCloseTimerRef.current); hoverCloseTimerRef.current = null; }
+    const anchor = e.currentTarget.getBoundingClientRect();
+    if (hoverOpenTimerRef.current) clearTimeout(hoverOpenTimerRef.current);
+    hoverOpenTimerRef.current = setTimeout(() => setHoveredAsin({ asin, title, brand, image_url, anchor }), 250);
+  };
+  const onAsinHoverLeave = () => {
+    if (hoverOpenTimerRef.current) { clearTimeout(hoverOpenTimerRef.current); hoverOpenTimerRef.current = null; }
+    if (hoverCloseTimerRef.current) clearTimeout(hoverCloseTimerRef.current);
+    hoverCloseTimerRef.current = setTimeout(() => setHoveredAsin(null), 120);
+  };
+  const onCardHoverEnter = () => {
+    if (hoverCloseTimerRef.current) { clearTimeout(hoverCloseTimerRef.current); hoverCloseTimerRef.current = null; }
+  };
   const [customOrder, setCustomOrder]   = useState(null); // null = use server order; string[] after first drag
 
   const { data: keywords, loading } = useAsync(
@@ -2903,71 +2923,51 @@ const RankTrackerPage = ({ workspaceId }) => {
 
   return (
     <div className="fade">
-      {/* Product popup */}
-      {productPopup && (() => {
-        const POP_W = 340, POP_H = 440, GAP = 8;
+      {/* Product hover card — anchored to the hovered ASIN link, auto-flips on viewport edges */}
+      {hoveredAsin && createPortal((() => {
+        const POP_W = 320, POP_H_EST = 360, GAP = 10;
         const vw = window.innerWidth, vh = window.innerHeight;
-        const { x: cx, y: cy } = productPopup;
-        // Default: below-right of click
-        let left = cx + GAP, top = cy + GAP;
-        // Flip left if overflows right
-        if (left + POP_W > vw - GAP) left = cx - POP_W - GAP;
-        // Flip up if overflows bottom
-        if (top + POP_H > vh - GAP) top = cy - POP_H - GAP;
-        // Clamp
-        left = Math.max(GAP, Math.min(left, vw - POP_W - GAP));
-        top  = Math.max(GAP, Math.min(top,  vh - POP_H - GAP));
+        const r = hoveredAsin.anchor;
+        // Prefer below + aligned with anchor's left edge
+        let left = r.left;
+        let top = r.bottom + GAP;
+        // Flip up if not enough room below
+        if (top + POP_H_EST > vh - GAP && r.top - POP_H_EST - GAP > GAP) top = r.top - POP_H_EST - GAP;
+        // Shift horizontally if overflows right
+        if (left + POP_W > vw - GAP) left = vw - POP_W - GAP;
+        left = Math.max(GAP, left);
+        top = Math.max(GAP, top);
         return (
-        <div onClick={() => setProductPopup(null)}
-          style={{ position: "fixed", inset: 0, zIndex: 9000, background: "transparent" }}>
-          <div onClick={e => e.stopPropagation()}
-            style={{ position: "fixed", left, top, width: POP_W,
-              background: "var(--bg)", borderRadius: 12, padding: 18,
-              boxShadow: "0 8px 40px rgba(0,0,0,.28)", display: "flex", flexDirection: "column", gap: 12 }}>
-            {/* Image */}
-            {productPopup.image_url ? (
-              <img src={productPopup.image_url} alt={productPopup.title}
-                style={{ width: "100%", maxHeight: 160, objectFit: "contain", borderRadius: 8, background: "#fff", padding: 6 }} />
+          <div
+            onMouseEnter={onCardHoverEnter}
+            onMouseLeave={onAsinHoverLeave}
+            style={{
+              position: "fixed", left, top, width: POP_W, zIndex: 9000,
+              background: "var(--bg)", borderRadius: 12, padding: 16,
+              boxShadow: "0 8px 32px rgba(0,0,0,.24)",
+              border: "1px solid var(--b1)", pointerEvents: "auto",
+            }}>
+            {hoveredAsin.image_url ? (
+              <img src={hoveredAsin.image_url} alt={hoveredAsin.title || hoveredAsin.asin}
+                style={{ width: "100%", maxHeight: 160, objectFit: "contain", borderRadius: 8, background: "#fff", padding: 6, marginBottom: 12 }} />
             ) : (
-              <div style={{ width: "100%", height: 120, borderRadius: 8, background: "var(--b1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <div style={{ width: "100%", height: 100, borderRadius: 8, background: "var(--b1)", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
                 <span style={{ fontSize: 12, color: "var(--tx3)" }}>Нет фото</span>
               </div>
             )}
-            {/* Info */}
-            <div>
-              <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--ac2)", marginBottom: 6 }}>{productPopup.asin}</div>
-              {productPopup.brand && (
-                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em" }}>{productPopup.brand}</div>
-              )}
-              {productPopup.title && (
-                <div style={{ fontSize: 13, color: "var(--tx)", lineHeight: 1.5 }}>{productPopup.title}</div>
-              )}
-              {!productPopup.title && !productPopup.brand && (
-                <div style={{ fontSize: 13, color: "var(--tx3)" }}>Товар не найден в базе данных</div>
-              )}
-            </div>
-            {/* Note */}
-            <div>
-              <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6 }}>Примечание</div>
-              <input
-                value={labelDraft[productPopup.asin] ?? productPopup.label ?? ""}
-                onChange={e => setLabelDraft(d => ({ ...d, [productPopup.asin]: e.target.value }))}
-                onKeyDown={e => { if (e.key === "Enter") saveLabel(productPopup.asin).then(() => setProductPopup(p => p ? { ...p, label: (labelDraft[p.asin] ?? p.label ?? "").trim() } : null)); }}
-                placeholder="Название товара или SKU…"
-                style={{ width: "100%", boxSizing: "border-box", fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid var(--b2)", outline: "none", fontFamily: "var(--ui)" }}
-              />
-            </div>
-            {/* Buttons */}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setProductPopup(null)}
-                className="btn btn-ghost" style={{ flex: 1, fontSize: 13, padding: "7px 12px", minWidth: 0 }}>Закрыть</button>
-              <button onClick={() => saveLabel(productPopup.asin).then(() => setProductPopup(p => p ? { ...p, label: (labelDraft[p.asin] ?? p.label ?? "").trim() } : null))}
-                className="btn btn-primary" style={{ flex: 1, fontSize: 13, padding: "7px 12px", minWidth: 0 }}>Сохранить</button>
-            </div>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--ac2)", marginBottom: 6 }}>{hoveredAsin.asin}</div>
+            {hoveredAsin.brand && (
+              <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em" }}>{hoveredAsin.brand}</div>
+            )}
+            {hoveredAsin.title && (
+              <div style={{ fontSize: 13, color: "var(--tx)", lineHeight: 1.5 }}>{hoveredAsin.title}</div>
+            )}
+            {!hoveredAsin.title && !hoveredAsin.brand && (
+              <div style={{ fontSize: 13, color: "var(--tx3)" }}>Товар не найден в базе</div>
+            )}
           </div>
-        </div>
         );
-      })()}
+      })(), document.body)}
 
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
@@ -3057,10 +3057,14 @@ const RankTrackerPage = ({ workspaceId }) => {
                           <Ic icon={GripVertical} size={14} />
                         </div>
 
-                        <span
-                          onClick={e => setProductPopup({ asin, title: kws[0]?.product_title, brand: kws[0]?.product_brand, image_url: kws[0]?.product_image_url, label: kws[0]?.asin_label || "", x: e.clientX, y: e.clientY })}
+                        <a
+                          href={amazonProductUrl(asin, kws[0]?.marketplace_id)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onMouseEnter={e => onAsinHoverEnter(e, asin, kws[0]?.product_title, kws[0]?.product_brand, kws[0]?.product_image_url)}
+                          onMouseLeave={onAsinHoverLeave}
                           style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)", cursor: "pointer", textDecoration: "underline dotted" }}
-                          title="Открыть карточку товара">{asin}</span>
+                          title={`Открыть на Amazon: ${asin}`}>{asin}</a>
                         <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
 
                         {/* ASIN note/label */}
@@ -8463,6 +8467,7 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stHarvestModal, setStHarvestModal] = useState(null); // { terms: [], mode: 'keyword'|'negative' }
   const [stHarvestLevel, setStHarvestLevel] = useState('campaign'); // 'account'|'campaign'|'adgroup'
   const [stHarvestCampaigns, setStHarvestCampaigns] = useState([]);
+  const [stHarvestPreselCampaign, setStHarvestPreselCampaign] = useState(null);
   const [stHarvestSelCampaign, setStHarvestSelCampaign] = useState('');
   const [stHarvestSelAdGroup, setStHarvestSelAdGroup] = useState('');
   const [stHarvestMatchType, setStHarvestMatchType] = useState('exact');
@@ -8539,6 +8544,19 @@ const KeywordsPage = ({ workspaceId }) => {
       .finally(() => setStLoading(false));
   }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds, stPortfolioIds, stCampaignType]);
 
+  // Debounced server-side campaign search inside Harvest modal
+  useEffect(() => {
+    if (!stHarvestModal) return;
+    const id = setTimeout(async () => {
+      const q = stHarvestCampaignSearch.trim();
+      try {
+        const camps = await apiFetch(`/search-terms/campaigns${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+        setStHarvestCampaigns(Array.isArray(camps) ? camps : []);
+      } catch {}
+    }, 300);
+    return () => clearTimeout(id);
+  }, [stHarvestCampaignSearch, stHarvestModal]);
+
   const stRecommendation = (term) => {
     const acos = parseFloat(term.sales) > 0 ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100 : null;
     const clicks = parseInt(term.clicks || 0);
@@ -8568,9 +8586,16 @@ const KeywordsPage = ({ workspaceId }) => {
     // Default to adgroup level; fall back to campaign if no shared campaign found
     setStHarvestLevel(sharedCampaign ? 'adgroup' : 'campaign');
     setStHarvestSaving(false);
+    setStHarvestPreselCampaign(null);
     try {
-      const camps = await apiFetch('/search-terms/campaigns');
+      const [camps, presel] = await Promise.all([
+        apiFetch('/search-terms/campaigns'),
+        sharedCampaign
+          ? apiFetch(`/search-terms/campaigns?ids=${encodeURIComponent(sharedCampaign)}`)
+          : Promise.resolve([]),
+      ]);
       setStHarvestCampaigns(Array.isArray(camps) ? camps : []);
+      if (Array.isArray(presel) && presel.length) setStHarvestPreselCampaign(presel[0]);
     } catch { setStHarvestCampaigns([]); }
   };
 
@@ -8864,7 +8889,8 @@ const KeywordsPage = ({ workspaceId }) => {
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>Campaign</div>
                 {stHarvestSelCampaign && (() => {
-                  const selCamp = stHarvestCampaigns.find(c => c.id === stHarvestSelCampaign);
+                  const selCamp = stHarvestCampaigns.find(c => c.id === stHarvestSelCampaign)
+                    || (stHarvestPreselCampaign?.id === stHarvestSelCampaign ? stHarvestPreselCampaign : null);
                   return selCamp ? (
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6,
                       padding: "5px 10px", background: "rgba(96,165,250,0.12)",
@@ -8884,7 +8910,13 @@ const KeywordsPage = ({ workspaceId }) => {
                     background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 6, color: "var(--tx)" }}
                 />
                 <div style={{ maxHeight: 160, overflowY: "auto", border: "1px solid var(--b2)", borderRadius: 6, background: "var(--s2)" }}>
-                  {stHarvestCampaigns
+                  {(() => {
+                    const list = [...stHarvestCampaigns];
+                    if (stHarvestPreselCampaign && !list.some(c => c.id === stHarvestPreselCampaign.id)) {
+                      list.unshift(stHarvestPreselCampaign);
+                    }
+                    return list;
+                  })()
                     .filter(c => !stHarvestCampaignSearch || c.name.toLowerCase().includes(stHarvestCampaignSearch.toLowerCase()))
                     .map(c => (
                       <div key={c.id} onClick={() => { setStHarvestSelCampaign(c.id); setStHarvestSelAdGroup(''); }}
@@ -8906,7 +8938,8 @@ const KeywordsPage = ({ workspaceId }) => {
 
             {/* Ad Group picker */}
             {stHarvestLevel === 'adgroup' && stHarvestSelCampaign && (() => {
-              const camp = stHarvestCampaigns.find(c => c.id === stHarvestSelCampaign);
+              const camp = stHarvestCampaigns.find(c => c.id === stHarvestSelCampaign)
+                || (stHarvestPreselCampaign?.id === stHarvestSelCampaign ? stHarvestPreselCampaign : null);
               const adGroups = camp?.ad_groups || [];
               return (
                 <div style={{ marginBottom: 14 }}>
@@ -10235,7 +10268,7 @@ const RULE_TEMPLATES = [
 ];
 
 const RuleWizardModal = ({
-  form, setForm, editRule, campaigns, adGroups,
+  form, setForm, editRule, campaigns, campSearch, setCampSearch, adGroups,
   ruleMetrics, ruleActionsList, ruleCampTypes,
   condOperators, setCondOperators,
   updCond, remCond, addCond,
@@ -10248,7 +10281,6 @@ const RuleWizardModal = ({
   const [nameErr, setNameErr] = useState(false);
   const [condErr, setCondErr] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(true);
-  const [campSearch, setCampSearch] = useState("");
   // S1-2: preview state
   const [previewData, setPreviewData] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -12320,14 +12352,22 @@ const RulesPage = ({ workspaceId }) => {
   const [historyRule, setHistoryRule] = useState(null);
 
   const [page, setPage] = useState(1);
+  const [campSearch, setCampSearch] = useState("");
+  const [debouncedCampSearch, setDebouncedCampSearch] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedCampSearch(campSearch.trim()), 300);
+    return () => clearTimeout(id);
+  }, [campSearch]);
 
   const { data: rulesData, loading, reload } = useAsync(
     () => workspaceId ? get("/rules", { page, limit: 25 }) : Promise.resolve({ data: [], pagination: {} }),
     [workspaceId, page]
   );
   const { data: campaigns } = useAsync(
-    () => workspaceId ? get("/rules/campaigns") : Promise.resolve([]),
-    [workspaceId]
+    () => workspaceId
+      ? get("/rules/campaigns", debouncedCampSearch ? { q: debouncedCampSearch } : {})
+      : Promise.resolve([]),
+    [workspaceId, debouncedCampSearch]
   );
   const rules      = rulesData?.data       || [];
   const pagination = rulesData?.pagination || {};
@@ -12339,7 +12379,7 @@ const RulesPage = ({ workspaceId }) => {
       .then(results => setAdGroups(results.flat())).catch(() => {});
   }, [JSON.stringify(form.scope?.campaign_ids)]);
 
-  const openNew = () => { setForm(EMPTY_RULE_FORM); setEditRule(null); setShowForm(true); setCondOperators([]); };
+  const openNew = () => { setForm(EMPTY_RULE_FORM); setEditRule(null); setShowForm(true); setCondOperators([]); setCampSearch(""); };
   const openEdit = (rule) => {
     const parse = (v, fb) => { if (!v) return fb; if (typeof v === "string") { try { return JSON.parse(v); } catch { return fb; } } return v; };
     const parsedScope = parse(rule.scope, EMPTY_RULE_FORM.scope);
@@ -12355,7 +12395,7 @@ const RulesPage = ({ workspaceId }) => {
       scope:       { ...EMPTY_RULE_FORM.scope, ...parsedScope, dayparting },
       safety:      parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
-    setEditRule(rule); setShowForm(true);
+    setEditRule(rule); setShowForm(true); setCampSearch("");
     const parsedConds = parse(rule.conditions, EMPTY_RULE_FORM.conditions);
     setCondOperators(parsedConds.slice(1).map(() => 'AND'));
   };
@@ -12458,6 +12498,8 @@ const RulesPage = ({ workspaceId }) => {
           form={form} setForm={setForm}
           editRule={editRule}
           campaigns={campaigns || []}
+          campSearch={campSearch}
+          setCampSearch={setCampSearch}
           adGroups={adGroups}
           ruleMetrics={ruleMetrics}
           ruleActionsList={ruleActionsList}
@@ -12469,7 +12511,7 @@ const RulesPage = ({ workspaceId }) => {
           toggleAdGroup={toggleAdGroup}
           toggleMatchType={toggleMatchType}
           onSave={saveRule}
-          onClose={() => setShowForm(false)}
+          onClose={() => { setShowForm(false); setCampSearch(""); }}
         />,
       document.body
       )}
@@ -14318,11 +14360,23 @@ function AIPage({ workspaceId }) {
                           };
                           const actionLabel = ACTION_LABEL[a.action_type] || a.action_type?.replace(/_/g," ");
                           const hasParams = a.params && Object.keys(a.params).filter(k => a.params[k] !== '' && a.params[k] !== null).length > 0;
+                          const entityIsCampaign = a.entity_type === "campaign" && a.entity_name;
                           return (
                             <div key={ai} style={{ fontSize:11, color:"var(--tx3)", padding:"3px 0",
                               display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
                               <ChevronRight size={11} strokeWidth={1.75} color="var(--ac2)" />
-                              <span style={{ color:"var(--tx2)", fontWeight:500 }}>{entityDisplay}</span>
+                              {entityIsCampaign ? (
+                                <a
+                                  href={`${window.location.origin}/?page=campaigns&search=${encodeURIComponent(a.entity_name)}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color:"var(--ac2)", fontWeight:500, textDecoration:"underline dotted" }}
+                                  title="Открыть кампанию">
+                                  {entityDisplay}
+                                </a>
+                              ) : (
+                                <span style={{ color:"var(--tx2)", fontWeight:500 }}>{entityDisplay}</span>
+                              )}
                               <span style={{ color:"var(--tx3)" }}>—</span>
                               <span style={{ color:"var(--tx3)" }}>{actionLabel}</span>
                               {hasParams && renderAiParams(a.params)}
@@ -14901,20 +14955,26 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [workspace, setWorkspace] = useState(null);
   const [active, setActive] = useState(() => {
-    // Deep-link support: open?page=campaigns&search=NAME from another tab/window.
-    // Read once on mount, queue search via sessionStorage (same key the
-    // af:navigate handler already uses), then clean the URL so reload doesn't
-    // re-trigger.
+    // Deep-link support: open ?page=campaigns&search=NAME from another tab.
+    // IMPORTANT: this initializer must be idempotent — React StrictMode (dev)
+    // calls it twice; doing the URL cleanup here would make the 2nd call see
+    // an empty URL and fall through to localStorage. URL cleanup is moved to
+    // a one-shot useEffect below.
     const params = new URLSearchParams(window.location.search);
     const urlPage = params.get("page");
     if (urlPage) {
       const search = params.get("search");
       if (search) sessionStorage.setItem(`af:pending_search:${urlPage}`, search);
-      window.history.replaceState({}, "", window.location.pathname);
       return urlPage;
     }
     return localStorage.getItem("af_page") || "overview";
   });
+  // Clean the deep-link query string after mount so reload doesn't re-trigger.
+  // Runs once; StrictMode's double-invoke is harmless because replaceState is idempotent.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("page")) window.history.replaceState({}, "", window.location.pathname);
+  }, []);
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [toast, setToast] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem("af_theme") || "dark");

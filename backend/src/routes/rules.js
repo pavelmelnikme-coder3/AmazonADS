@@ -831,11 +831,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 // ── GET /rules/campaigns — MUST be before /:id to avoid param capture ─────────
 router.get("/campaigns", async (req, res, next) => {
   try {
+    const q = (req.query.q || "").trim();
+    const params = [req.workspaceId];
+    let where = "workspace_id = $1 AND state != 'archived'";
+    if (q) {
+      params.push(`%${q}%`);
+      where += ` AND name ILIKE $${params.length}`;
+    }
     const { rows } = await query(
       `SELECT id, name, campaign_type, state FROM campaigns
-       WHERE workspace_id = $1 AND state != 'archived'
-       ORDER BY name ASC LIMIT 200`,
-      [req.workspaceId]
+       WHERE ${where} ORDER BY name ASC LIMIT 200`,
+      params
     );
     res.json(rows);
   } catch (err) { next(err); }

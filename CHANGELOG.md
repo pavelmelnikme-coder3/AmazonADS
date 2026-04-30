@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-04-30
+
+### Added — Server-side campaign search for picker selectors
+
+- **`GET /rules/campaigns`** now accepts `?q=<substring>`. Previously the endpoint hardcoded `LIMIT 200 ORDER BY name ASC`, so on workspaces with 1 000+ active campaigns any campaign whose name sorted past the first 200 was unreachable — the rule wizard's picker silently filtered an incomplete list. Frontend (`RulesPage`) hoists `campSearch` to parent and debounces 300 ms before requesting `?q=`.
+- **`GET /search-terms/campaigns`** now accepts `?q=<substring>` and `?ids=<csv UUIDs>`. The "Add as Negative / Keyword" modal in Search Terms had the same picker-truncation bug at `LIMIT 500`. The new `?ids=` mode lets the modal explicitly pull a preselected campaign by ID even when it sorts past the first 500 — needed because the modal pre-fills the campaign that the source search term lives in. UUIDs in `ids` are validated against a regex before reaching `pg`, so malformed input returns 200 with the unfiltered list instead of 500.
+- Modal preserves the picker chip and the ad-group sub-picker for a preselected campaign via a new `stHarvestPreselCampaign` state — no longer dependent on whether the campaign is in the loaded top-N list.
+
+### Added — Clickable campaign names + Rankings ASIN hover card
+
+- **AI Assistant recommendation cards**: campaign entity name (when `entity_type === "campaign"`) is now an `<a target="_blank">` deep-link to `/?page=campaigns&search=<encoded-name>`, mirroring the Stage 9 simulation pattern. Keyword entities remain plain text (no deep-link target page).
+- **Rankings page ASIN**: replaced the static click-to-open card with a hover-on-anchor card pattern (Radix `HoverCard`-style, vanilla React, no extra deps). Click on the ASIN now opens `https://www.amazon.{tld}/dp/{ASIN}` in a new tab; hovering for ≥ 250 ms shows a portal-rendered card with image, ASIN, brand, title, anchored to the link's `getBoundingClientRect()` with auto-flip on viewport edges. Note editing keeps its existing inline `+ Примечание` UI — no duplicate-edit surface.
+- The old `productPopup` state and click-modal in `RankingsPage` are removed.
+
+### Fixed — AI Assistant generated no-op recommendations (defense in depth)
+
+- **Prompt-level constraint**: `buildSystemPrompt` (`backend/src/routes/ai.js`) now contains a `CRITICAL CONSTRAINTS` section explicitly forbidding `pause` for already-paused, `enable` for already-enabled, bid/budget values equal to current, or `bid_adjustment_pct: 0`. The `state` field is already in the per-campaign and per-keyword JSON sent to Claude — the constraints just teach the model to read it.
+- **Post-process validation**: every action returned by Claude is now verified against the live DB row before saving to `ai_recommendations`. No-ops are dropped (counted in a `dropped_actions` log line); recommendations that end up with zero valid actions are dropped entirely. Catch-block logs the entity_id on validation-query failure for debuggability.
+- Symptom this fixes: cards like "приостановить кампанию X — Статус: paused" where X was already in `paused` state.
+
+### Fixed — `Статус: paused` UI label was misread as current state
+
+- `AI_PARAM_DISPLAY.state` in `frontend/src/App.jsx` renamed `'Статус'` → `'Новый статус'`. The value rendered next to it comes from `action.params.state` (the **target** state after applying), not the entity's current state — the old label encouraged users to read it as the current status. Mirrors the existing `'Новая ставка'` / `'Новый бюджет/день'` pattern.
+
+### Fixed — Deep-link `?page=campaigns&search=` redirected to source page in dev
+
+- The `useState(active)` initializer in `App` was non-idempotent: on first call it returned `urlPage` and **also** ran `window.history.replaceState({}, "", pathname)` to clear the query string. Under `<StrictMode>` (dev), React calls the initializer twice — the second call saw an already-cleaned URL and fell through to `localStorage.af_page`, so users opening `?page=campaigns&search=…` from another tab landed on whatever page they last visited (e.g. AI Assistant → AI Assistant).
+- URL cleanup moved to a one-shot `useEffect`. `replaceState` is idempotent, so StrictMode's double-invoke of the effect is harmless. Initializer is now pure-read.
+- Side-effect: this also retroactively fixes the simulation-modal deep-link from Stage 9 in dev (the bug was masked there because users typically opened the link from the same page they were navigating to).
+
+---
+
 ## [Unreleased] — 2026-04-28
 
 ### Fixed — Amazon Ads API v3 migration for SP entity sync

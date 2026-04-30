@@ -217,7 +217,7 @@ router.get("/", async (req, res, next) => {
 // GET /search-terms/campaigns — returns campaigns + ad groups for the harvest modal picker
 router.get("/campaigns", async (req, res, next) => {
   try {
-    const { campaignType } = req.query;
+    const { campaignType, q, ids } = req.query;
     const typeMap = { SP: "sponsoredProducts", SB: "sponsoredBrands", SD: "sponsoredDisplay" };
     const conditions = ["c.workspace_id = $1", "c.state != 'archived'"];
     const params = [req.workspaceId];
@@ -227,6 +227,20 @@ router.get("/campaigns", async (req, res, next) => {
       conditions.push(`c.campaign_type = $${pi++}`);
       params.push(typeMap[campaignType]);
     }
+
+    const orParts = [];
+    const qTrim = (q || "").trim();
+    if (qTrim) {
+      orParts.push(`c.name ILIKE $${pi++}`);
+      params.push(`%${qTrim}%`);
+    }
+    const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const idArr = (ids || "").split(",").map(s => s.trim()).filter(s => UUID_RX.test(s));
+    if (idArr.length) {
+      orParts.push(`c.id = ANY($${pi++}::uuid[])`);
+      params.push(idArr);
+    }
+    if (orParts.length) conditions.push(`(${orParts.join(" OR ")})`);
 
     const { rows: campaigns } = await query(
       `SELECT c.id, c.name, c.campaign_type,
