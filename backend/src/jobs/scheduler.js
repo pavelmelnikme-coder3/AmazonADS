@@ -113,15 +113,20 @@ async function startScheduler() {
   );
 
   // ─── Daily metrics backfill: every day at 06:30 UTC ──────────────────────
+  // Window = 14 days (matches Amazon's purchases14d / sales14d attribution window).
+  // Amazon attributes purchases to a click within 14 days of the click date and
+  // updates the report retroactively. Re-fetching the last 14 days every day
+  // ensures late-attributed purchases land in our DB instead of being frozen
+  // at the orders=0 / sales=0 state captured 1-2 days after the click.
   const metricsBackfillJob = new CronJob(
     "30 6 * * *",
     async () => {
-      logger.info("Cron: Queuing daily metrics backfill (last 2 days) for all workspaces");
+      logger.info("Cron: Queuing daily metrics backfill (last 14 days, attribution window) for all workspaces");
       try {
         const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
-        const twoDaysAgo = new Date(); twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+        const fourteenDaysAgo = new Date(); fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
         const dateTo   = yesterday.toISOString().split("T")[0];
-        const dateFrom = twoDaysAgo.toISOString().split("T")[0];
+        const dateFrom = fourteenDaysAgo.toISOString().split("T")[0];
         const { rows } = await query(
           `SELECT DISTINCT p.workspace_id FROM amazon_profiles p
            JOIN amazon_connections c ON c.id = p.connection_id

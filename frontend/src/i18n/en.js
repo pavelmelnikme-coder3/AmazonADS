@@ -256,6 +256,8 @@ export default {
       productAds: "Product Ads",
       settings: "Settings",
       negatives: "Negatives",
+      searchTerms: "Search Terms",
+      noSearchTerms: "No search terms found",
       defBid: "Def. Bid",
       items: "Items",
       noAdGroups: "No ad groups found",

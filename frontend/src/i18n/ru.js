@@ -256,6 +256,8 @@ export default {
       productAds: "Товарные объявления",
       settings: "Настройки",
       negatives: "Минус-слова",
+      searchTerms: "Поисковые запросы",
+      noSearchTerms: "Поисковые запросы не найдены",
       defBid: "Ставка по умолч.",
       items: "Элементы",
       noAdGroups: "Группы объявлений не найдены",

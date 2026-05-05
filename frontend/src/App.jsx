@@ -1546,9 +1546,11 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
   const [kwSearch, setKwSearch]   = useState("");
   const [tgtSearch, setTgtSearch] = useState("");
   const [negSearch, setNegSearch] = useState("");
+  const [stSearch, setStSearch]   = useState("");
   const [kwSort, setKwSort]       = useState({ field: "spend", dir: "desc" });
   const [tgtSort, setTgtSort]     = useState({ field: "spend", dir: "desc" });
   const [agSort, setAgSort]       = useState({ field: "spend", dir: "desc" });
+  const [stSort, setStSort]       = useState({ field: "spend", dir: "desc" });
 
   // Bulk selection
   const [kwSelected, setKwSelected]   = useState(new Set());
@@ -1615,12 +1617,19 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     () => get("/negative-keywords", { campaignId: campaign.id, limit: 500, sortBy: "created_at", sortDir: "desc" }),
     [campaign.id]
   );
+  const { data: stData, loading: stLoading } = useAsync(
+    () => view === "adgroup" && selectedAg
+      ? get("/search-terms", { adGroupId: selectedAg.id, metricsDays: localDays, limit: 200, sortBy: stSort.field, sortDir: stSort.dir })
+      : get("/search-terms", { campaignIds: campaign.id, metricsDays: localDays, limit: 200, sortBy: stSort.field, sortDir: stSort.dir }),
+    [campaign.id, selectedAg?.id, view, localDays, stSort.field, stSort.dir]
+  );
 
-  const adGroups   = agData?.data   || [];
-  const keywords   = kwData?.data   || [];
-  const targets    = tgtData?.data  || [];
-  const productAds = adsData?.data  || [];
-  const negatives  = negData?.data  || [];
+  const adGroups    = agData?.data   || [];
+  const keywords    = kwData?.data   || [];
+  const targets     = tgtData?.data  || [];
+  const productAds  = adsData?.data  || [];
+  const negatives   = negData?.data  || [];
+  const searchTermsList = stData?.data || [];
 
   // Filtered + sorted data
   const numSort = (a, b, field, dir) => {
@@ -1646,6 +1655,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     return label.toLowerCase().includes(tgtSearch.toLowerCase());
   }), tgtSort);
   const filteredNegs = negatives.filter(nk => !negSearch || nk.keyword_text.toLowerCase().includes(negSearch.toLowerCase()));
+  const filteredSts  = searchTermsList.filter(s => !stSearch || (s.query || "").toLowerCase().includes(stSearch.toLowerCase()));
   // For ad-group view: show campaign + adgroup negatives; for campaign view: show campaign level
   const visibleNegs  = view === "adgroup" && selectedAg
     ? filteredNegs.filter(nk => nk.level === "campaign" || nk.ad_group_id === selectedAg.id)
@@ -2285,6 +2295,82 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     </div>
   );
 
+  // ── Search Terms tab ──
+  const stTH = (field, label, right) => {
+    const active = stSort.field === field;
+    return (
+      <th onClick={() => setStSort(s => ({ field, dir: s.field === field && s.dir === "desc" ? "asc" : "desc" }))}
+        style={{ padding: "8px 10px", textAlign: right ? "right" : "left", color: active ? "var(--ac2)" : "var(--tx3)",
+          fontWeight: 600, fontSize: 11, borderBottom: "1px solid var(--b1)", whiteSpace: "nowrap", cursor: "pointer", userSelect: "none" }}>
+        {label}{active ? (stSort.dir === "desc" ? " ↓" : " ↑") : ""}
+      </th>
+    );
+  };
+  const SearchTermsTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
+      <SearchBar value={stSearch} onChange={setStSearch} />
+      {stLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
+      : filteredSts.length === 0 ? (
+        <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
+          {t("campaigns.detail.noSearchTerms")}
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto", flex: 1 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr style={THEAD_ROW}>
+              {stTH("query",       t("rules.colSearchTerm"))}
+              <TH>{t("campaigns.detail.matchType")}</TH>
+              <TH>{t("keywords.colKeyword")}</TH>
+              {stTH("impressions", "Impr.", true)}
+              {stTH("clicks",      t("keywords.colClicks"), true)}
+              {stTH("orders",      t("keywords.colOrders"), true)}
+              {stTH("spend",       "Spend", true)}
+              <TH right>Sales</TH>
+              <TH right>ACOS</TH>
+            </tr></thead>
+            <tbody>
+              {filteredSts.map((term, i) => {
+                const acos = parseFloat(term.sales) > 0
+                  ? (parseFloat(term.spend) / parseFloat(term.sales)) * 100 : null;
+                return (
+                  <tr key={term.id || i} style={ROW(i)}>
+                    <TD style={{ fontWeight: 500, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <span title={term.query}>{term.query}</span>
+                    </TD>
+                    <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{term.match_type || "—"}</TD>
+                    <TD style={{ color: "var(--tx2)", fontSize: 11, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      title={term.keyword_text || ""}>
+                      {term.keyword_text || <span style={{ color: "var(--tx3)", opacity: 0.5 }}>—</span>}
+                    </TD>
+                    <TD style={{ textAlign: "right", color: "var(--tx2)" }}>
+                      {parseInt(term.impressions || 0).toLocaleString()}
+                    </TD>
+                    <TD style={{ textAlign: "right" }}>
+                      {parseInt(term.clicks || 0).toLocaleString()}
+                    </TD>
+                    <TD style={{ textAlign: "right",
+                      color: parseInt(term.orders || 0) > 0 ? "var(--grn)" : "var(--tx3)" }}>
+                      {parseInt(term.orders || 0) > 0 ? parseInt(term.orders).toLocaleString() : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right", color: "var(--ac2)" }}>
+                      {parseFloat(term.spend || 0) > 0 ? "$" + parseFloat(term.spend).toFixed(2) : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right", color: parseFloat(term.sales || 0) > 0 ? "var(--grn)" : "var(--tx3)" }}>
+                      {parseFloat(term.sales || 0) > 0 ? "$" + parseFloat(term.sales).toFixed(2) : "—"}
+                    </TD>
+                    <TD style={{ textAlign: "right", color: acos !== null ? acosColor(acos) : "var(--tx3)" }}>
+                      {acos !== null ? acos.toFixed(1) + "%" : "—"}
+                    </TD>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+
   // ── Negatives tab ──
   const NegativesTab = () => (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
@@ -2449,15 +2535,17 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
   });
 
   const campaignTabs = [
-    { id: "adgroups",  label: `${t("campaigns.detail.adGroups")} (${adGroups.length || "…"})` },
-    { id: "settings",  label: t("campaigns.detail.settings") },
-    { id: "negatives", label: `${t("campaigns.detail.negatives")} (${negatives.filter(n => n.level === "campaign").length || "0"})` },
+    { id: "adgroups",    label: `${t("campaigns.detail.adGroups")} (${adGroups.length || "…"})` },
+    { id: "searchterms", label: `${t("campaigns.detail.searchTerms")} (${searchTermsList.length || "…"})` },
+    { id: "settings",    label: t("campaigns.detail.settings") },
+    { id: "negatives",   label: `${t("campaigns.detail.negatives")} (${negatives.filter(n => n.level === "campaign").length || "0"})` },
   ];
   const agTabs = [
     ...(selectedAg?.targeting_type !== "auto" ? [{ id: "keywords", label: `${t("nav.keywords")} (${keywords.length || "…"})` }] : []),
-    { id: "targets",   label: `${t("campaigns.detail.targets")} (${targets.length || "…"})` },
-    { id: "ads",       label: `${t("campaigns.detail.productAds")} (${productAds.length || "…"})` },
-    { id: "negatives", label: `${t("campaigns.detail.negatives")}` },
+    { id: "targets",     label: `${t("campaigns.detail.targets")} (${targets.length || "…"})` },
+    { id: "ads",         label: `${t("campaigns.detail.productAds")} (${productAds.length || "…"})` },
+    { id: "searchterms", label: `${t("campaigns.detail.searchTerms")} (${searchTermsList.length || "…"})` },
+    { id: "negatives",   label: `${t("campaigns.detail.negatives")}` },
   ];
 
   const periodOptions = [7, 14, 30, 90];
@@ -2547,13 +2635,15 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
         </div>
         {/* Content */}
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-          {view === "campaign" && tab === "adgroups"  && <AdGroupsTab />}
-          {view === "campaign" && tab === "settings"  && <SettingsTab />}
-          {view === "campaign" && tab === "negatives" && <NegativesTab />}
-          {view === "adgroup"  && agTab === "keywords"  && <KeywordsTab />}
-          {view === "adgroup"  && agTab === "targets"   && <TargetsTab />}
-          {view === "adgroup"  && agTab === "ads"       && <ProductAdsTab />}
-          {view === "adgroup"  && agTab === "negatives" && <NegativesTab />}
+          {view === "campaign" && tab === "adgroups"    && <AdGroupsTab />}
+          {view === "campaign" && tab === "searchterms" && <SearchTermsTab />}
+          {view === "campaign" && tab === "settings"    && <SettingsTab />}
+          {view === "campaign" && tab === "negatives"   && <NegativesTab />}
+          {view === "adgroup"  && agTab === "keywords"    && <KeywordsTab />}
+          {view === "adgroup"  && agTab === "targets"     && <TargetsTab />}
+          {view === "adgroup"  && agTab === "ads"         && <ProductAdsTab />}
+          {view === "adgroup"  && agTab === "searchterms" && <SearchTermsTab />}
+          {view === "adgroup"  && agTab === "negatives"   && <NegativesTab />}
         </div>
       </div>
     </div>,
@@ -3504,6 +3594,17 @@ const ProductsPage = ({ workspaceId }) => {
   // appears with at most ~200ms delay on cold cache.
   const [bsrHover, setBsrHover] = useState(null);
   const bsrHoverFetching = useRef(new Set());
+  const bsrHoverCloseTimer = useRef(null);
+  const cancelBsrClose = () => {
+    if (bsrHoverCloseTimer.current) {
+      clearTimeout(bsrHoverCloseTimer.current);
+      bsrHoverCloseTimer.current = null;
+    }
+  };
+  const scheduleBsrClose = () => {
+    cancelBsrClose();
+    bsrHoverCloseTimer.current = setTimeout(() => setBsrHover(null), 120);
+  };
   const ensureBsrHistory = (id) => {
     if (history[id] || bsrHoverFetching.current.has(id)) return;
     bsrHoverFetching.current.add(id);
@@ -4039,8 +4140,8 @@ const ProductsPage = ({ workspaceId }) => {
                           const isHovered = bsrHover?.pid === p.id && bsrHover?.idx === i;
                           return (
                             <div key={i} style={{ position: "relative" }}
-                              onMouseEnter={() => { ensureBsrHistory(p.id); setBsrHover({ pid: p.id, idx: i }); }}
-                              onMouseLeave={() => setBsrHover(h => h?.pid === p.id && h?.idx === i ? null : h)}>
+                              onMouseEnter={() => { cancelBsrClose(); ensureBsrHistory(p.id); setBsrHover({ pid: p.id, idx: i }); }}
+                              onMouseLeave={scheduleBsrClose}>
                               <a
                                 href={r.link}
                                 target="_blank"
@@ -4063,13 +4164,16 @@ const ProductsPage = ({ workspaceId }) => {
                                 </span>
                               </a>
                               {isHovered && (
-                                <div style={{
-                                  position: "absolute", bottom: "calc(100% + 6px)", left: "50%",
-                                  transform: "translateX(-50%)", zIndex: 30,
-                                  background: "var(--s2)", border: "1px solid var(--b2)",
-                                  borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,.45)",
-                                  pointerEvents: "auto",
-                                }}>
+                                <div
+                                  onMouseEnter={cancelBsrClose}
+                                  onMouseLeave={scheduleBsrClose}
+                                  style={{
+                                    position: "absolute", bottom: "100%", left: "50%",
+                                    transform: "translateX(-50%)", zIndex: 30,
+                                    background: "var(--s2)", border: "1px solid var(--b2)",
+                                    borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,.45)",
+                                    pointerEvents: "auto",
+                                  }}>
                                   <BsrHoverChart
                                     history={history[p.id]}
                                     categoryTitle={r.title}
@@ -6082,6 +6186,20 @@ const CAMPAIGN_DEFAULT_FILTERS = {
 
 const CampaignsPage = ({ workspaceId }) => {
   const { t } = useI18n();
+  // Apply pending deep-link search BEFORE useSavedFilters reads localStorage,
+  // so the very first fetch uses the new search. Without this, two fetches
+  // race (one with old saved search, one with new), and the late-resolving
+  // request can overwrite the correct results.
+  useMemo(() => {
+    const pending = sessionStorage.getItem("af:pending_search:campaigns");
+    if (!pending) return;
+    sessionStorage.removeItem("af:pending_search:campaigns");
+    try {
+      const cur = JSON.parse(localStorage.getItem("af:campaigns:active") || "null") || {};
+      cur.search = pending;
+      localStorage.setItem("af:campaigns:active", JSON.stringify(cur));
+    } catch {}
+  }, []);
   const {
     filters: campFilters, updateFilter: setCampFilter,
     resetFilters: resetCampFilters,
@@ -6130,16 +6248,6 @@ const CampaignsPage = ({ workspaceId }) => {
     };
     window.addEventListener("af:navigate", handler);
     return () => window.removeEventListener("af:navigate", handler);
-  }, []);
-
-  // Fallback: apply pending campaign search if this page mounts after the af:navigate event fired.
-  useEffect(() => {
-    const pending = sessionStorage.getItem("af:pending_search:campaigns");
-    if (pending) {
-      sessionStorage.removeItem("af:pending_search:campaigns");
-      setCampFilter("search", pending);
-      setPage(1);
-    }
   }, []);
 
   // S1-7: connections for last-sync timestamp
@@ -6351,14 +6459,26 @@ const CampaignsPage = ({ workspaceId }) => {
                     {campaigns.map(c => (
                       <tr key={c.id} className={`tbl-row${selected.has(c.id) ? ' row-selected' : ''}`}>
                         <td><input type="checkbox" checked={selected.has(c.id)} onChange={() => toggleSelect(c.id)} /></td>
-                        {campCV("name") && <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 500 }}>
-                          <span
-                            onClick={(e) => { e.stopPropagation(); setDetailCampaign(c); }}
-                            style={{ cursor: 'pointer', color: 'var(--ac2)' }}
-                            onMouseEnter={e => e.target.style.textDecoration = 'underline'}
-                            onMouseLeave={e => e.target.style.textDecoration = 'none'}
-                            title="View campaign details"
-                          >{c.name}</span>
+                        {campCV("name") && <td style={{ maxWidth: 200, fontWeight: 500 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                            <span
+                              onClick={(e) => { e.stopPropagation(); setDetailCampaign(c); }}
+                              style={{ cursor: 'pointer', color: 'var(--ac2)', overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}
+                              onMouseEnter={e => e.currentTarget.style.textDecoration = 'underline'}
+                              onMouseLeave={e => e.currentTarget.style.textDecoration = 'none'}
+                              title="View campaign details"
+                            >{c.name}</span>
+                            {amazonAdsCampaignUrl(c) && (
+                              <a href={amazonAdsCampaignUrl(c)} target="_blank" rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                title={t("campaigns.detail.openInAmazonAdsTip")}
+                                style={{ display: "inline-flex", alignItems: "center", color: "var(--tx3)", flexShrink: 0, padding: 2, borderRadius: 3 }}
+                                onMouseEnter={e => e.currentTarget.style.color = 'var(--ac2)'}
+                                onMouseLeave={e => e.currentTarget.style.color = 'var(--tx3)'}>
+                                <ExternalLink size={12} strokeWidth={1.75} />
+                              </a>
+                            )}
+                          </div>
                         </td>}
                         {campCV("type") && <td><span className="badge bg-bl">{typeLabel(c.campaign_type)}</span></td>}
                         {campCV("status") && <td>
@@ -9223,10 +9343,30 @@ const KeywordsPage = ({ workspaceId }) => {
                               </span>
                             )}
                           </td>
-                          <td style={{ padding: "7px 10px", fontSize: 11, color: "var(--tx2)",
-                            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                          <td style={{ padding: "7px 10px", fontSize: 11, maxWidth: 240 }}
                             title={term.campaign_name}>
-                            {term.campaign_name || "—"}
+                            <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                              {term.campaign_name ? (
+                                <a href={`${window.location.origin}/?page=campaigns&search=${encodeURIComponent(term.campaign_name)}`}
+                                  target="_blank" rel="noopener noreferrer"
+                                  style={{ color: "var(--ac2)", textDecoration: "none",
+                                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                    flex: 1, minWidth: 0 }}
+                                  onMouseEnter={e => e.currentTarget.style.textDecoration = "underline"}
+                                  onMouseLeave={e => e.currentTarget.style.textDecoration = "none"}>
+                                  {term.campaign_name}
+                                </a>
+                              ) : <span style={{ color: "var(--tx3)" }}>—</span>}
+                              {amazonAdsCampaignUrl(term) && (
+                                <a href={amazonAdsCampaignUrl(term)} target="_blank" rel="noopener noreferrer"
+                                  title={t("campaigns.detail.openInAmazonAdsTip")}
+                                  style={{ display: "inline-flex", alignItems: "center", color: "var(--tx3)", flexShrink: 0, padding: 2, borderRadius: 3 }}
+                                  onMouseEnter={e => e.currentTarget.style.color = "var(--ac2)"}
+                                  onMouseLeave={e => e.currentTarget.style.color = "var(--tx3)"}>
+                                  <ExternalLink size={11} strokeWidth={1.75} />
+                                </a>
+                              )}
+                            </div>
                           </td>
                           <td style={{ padding: "7px 10px", fontSize: 11, color: "var(--tx2)",
                             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}

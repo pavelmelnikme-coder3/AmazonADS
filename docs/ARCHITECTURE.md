@@ -206,3 +206,39 @@ POST /keyword-research/add-to-adgroup
 ### Frontend code structure unchanged
 - All edits stay inside the single-file `App.jsx` and 3 i18n files (EN/RU/DE) per existing convention.
 - 28 new keys in `products.export*` namespace, 12 new keys for rule skip reasons, plus `tacosCoverage*` and `kpiAdSales*`.
+
+## 2026-05-05 changes (attribution window, rank-check fix, search-terms, UX)
+
+### Metrics backfill attribution window (14 days)
+- `scheduler.js` `metricsBackfillJob`: window extended from 2 days to **14 days**.
+- Amazon attributes purchases to a click within 14 days of the click date and updates report rows retroactively. Re-fetching the last 14 days every night ensures late-attributed purchases land in the DB instead of freezing at `orders=0`.
+- New log message: `"last 14 days, attribution window"`.
+
+### Rank-check BullMQ jobId — day-scoped deduplication fix
+- `workers.js` `queueRankCheck()` and `queueProductMetaSync()`: static `jobId = rank_${workspaceId}` changed to `rank_${workspaceId}_${YYYYMMDD}`.
+- Root cause: BullMQ's `jobId` dedup key persists even after `removeOnComplete`, so a static ID caused every subsequent same-day invocation to be silently dropped (job already seen). Day-scoped IDs allow one execution per workspace per calendar day.
+
+### Search Terms — new filter and response fields
+- `routes/searchTerms.js` GET `/search-terms`:
+  - New query param `adGroupId` — filters to a single ad group (used by the Search Terms tab inside `CampaignDetailModal`).
+  - New response fields: `campaign_type` (`SP`/`SB`/`SD`) and `marketplace_id` — sourced from a LEFT JOIN on `amazon_profiles`.
+  - Both fields added to the GROUP BY clause to avoid aggregation conflicts.
+
+### Search Terms tab in CampaignDetailModal
+- `App.jsx`: new `SearchTermsTab` component renders inside the campaign drill-down modal alongside existing Keywords and Targets tabs.
+- Fetches `GET /search-terms?campaignId=…&adGroupId=…` on tab open; shows sortable table with query, impressions, clicks, spend, orders, ACoS, match type.
+- i18n keys: `campaigns.detail.searchTerms` / `campaigns.detail.noSearchTerms` in all 3 locales.
+
+### Drill-down links on Search Terms page
+- Each row in the Search Terms page now has:
+  - An internal link (campaign name) → deep-links to Campaigns page with that campaign pre-searched.
+  - An ExternalLink icon button → opens the campaign in the Amazon Ads console (region-aware URL via `amazonAdsCampaignUrl(term)`).
+
+### BSR hover sparkline — gap fix
+- `App.jsx` `BsrHoverChart`: tooltip `bottom` changed from `calc(100% + 6px)` to `100%` (removes 6px gap).
+- Added 120 ms close timer + `bsrHoverCloseTimer` ref; `onMouseEnter`/`onMouseLeave` on tooltip div itself so the pointer can travel from badge into tooltip without it closing.
+
+### Race condition fix — pending search auto-apply
+- Root cause: `useSavedFilters` initializes from `localStorage` on first render; a `useEffect` that wrote to `localStorage` ran *after* the hook had already captured the stale value.
+- Fix: `useMemo([], ...)` block (intentionally run once, before hook init) migrates the pending search from `sessionStorage` to `localStorage` synchronously, so `useSavedFilters` sees the correct value on its very first call.
+- No `useEffect` cleanup needed — the memo is idempotent under React StrictMode (second call finds `sessionStorage` already empty).

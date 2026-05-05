@@ -96,13 +96,20 @@ async function queueRuleExecution(workspaceId, ruleId = null) {
 
 async function queueRankCheck(workspaceId) {
   const queue = getQueue(QUEUES.RANK_CHECK);
-  const jobId = `rank_${workspaceId}`;
+  // Day-scoped jobId: dedupes within a single UTC day (so the cron + a manual
+  // trigger on the same day don't run twice) but lets each new day re-queue.
+  // A static jobId like `rank_${workspaceId}` was being silently dropped by
+  // BullMQ on every subsequent day, leaving the rank-history chart with only
+  // the few days where the queue was cleared (restart / removeOnComplete window).
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const jobId = `rank_${workspaceId}_${day}`;
   return queue.add("check", { workspaceId }, { jobId });
 }
 
 async function queueProductMetaSync(workspaceId) {
   const queue = getQueue(QUEUES.PRODUCT_META);
-  const jobId = `meta_${workspaceId}`;
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const jobId = `meta_${workspaceId}_${day}`;
   return queue.add("sync", { workspaceId }, { jobId });
 }
 

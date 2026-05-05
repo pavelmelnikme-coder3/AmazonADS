@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-05-05
+
+### Added — Search Terms tab inside the campaign drill-down modal
+
+- **`CampaignDetailModal` → new `Поисковые запросы` (Search Terms) tab**, available in both the campaign-level view (filters `campaignIds=<id>`) and the ad-group-level view (filters `adGroupId=<id>`). Renders a sortable read-only table — Query, Match Type, Keyword, Impr, Clicks, Orders, Spend, Sales, ACOS — over the period selected in the modal header (`localDays`). Plain `t("rules.colSearchTerm")` / `keywords.col*` keys reused for headers; only `campaigns.detail.searchTerms` + `noSearchTerms` are new in RU/EN/DE i18n. Eager fetch on modal open (consistent with adjacent tabs); client-side filter on the search box across the loaded rows (limit 200).
+- **`GET /search-terms` accepts `?adGroupId=<uuid>`**. Single-AG predicate added before the existing `campaignIds = ANY(...)` clause. Used by the modal's ad-group view; the dedicated `/search-terms` page still passes `campaignIds`. Parameterised — no SQL-injection vector.
+- **`GET /search-terms` response now carries `campaign_type` and `marketplace_id`** (joined via `amazon_profiles ap ON ap.id = COALESCE(c1.profile_id, c2.profile_id)`). Both are needed by the frontend `amazonAdsCampaignUrl(term)` helper to build region-aware Amazon Ads console deep links — without `marketplace_id` a DE seller's session would be lost on `.com` redirect to the public registration page (Stage 9 lesson). Rows that resolve to no campaign in our DB (orphan search terms) get `null` for both fields and the icon hides.
+
+### Added — Drill-down on campaign columns in three places
+
+- **`CampaignsPage` row** — inline `ExternalLink` icon next to each campaign name (region-aware, via `amazonAdsCampaignUrl(c)`). The column is `display: flex` with `flex: 1, minWidth: 0` on the name span so the name truncates first and the icon never gets clipped. `onClick` on the icon `stopPropagation()`s so it doesn't trigger the row's `setDetailCampaign` handler.
+- **`KeywordsPage / Search Terms` tab — `CAMPAIGN` column** — campaign name is now an `<a target="_blank">` to `/?page=campaigns&search=<encoded>`, plus the same `ExternalLink` Amazon icon. Both elements share a `flex` wrapper so the layout collapses gracefully when the row width is constrained.
+- All three drill-down patterns (this row, AI Assistant cards, rule simulation modal) use the same URL shape — `?page=campaigns&search=NAME` opened in a new tab — so the deep-link handler in `App.jsx` is the single source of truth.
+
+### Fixed — Race condition: stale data after deep-link to Campaigns page
+
+- A new tab opened from rules / Search Terms / AI Assistant (`?page=campaigns&search=NAME`) used to show **the right name in the search input but the wrong rows in the table**.
+- Root cause: `useSavedFilters("af:campaigns", …)` lazy-initialises from `localStorage` (old saved search) → first `useAsync` fetch fires with the **stale** filter → only **then** does the mount `useEffect` read `sessionStorage["af:pending_search:campaigns"]` and call `setCampFilter("search", pending)` → a second fetch fires with the **new** filter. With BullMQ-style late-resolving HTTP requests, whichever fetch resolved last won — usually the stale one.
+- Fix: a `useMemo([], …)` block runs **before** `useSavedFilters` is called and migrates `sessionStorage["af:pending_search:campaigns"]` directly into `localStorage["af:campaigns:active"].search`, so the very first render of `useSavedFilters` already has the right value. Idempotent under React StrictMode (second invocation finds `null` and no-ops). The post-mount fallback `useEffect` is removed (no longer needed; was the source of the race).
+
+### Fixed — BSR hover sparkline closed when moving the cursor onto it
+
+- The 7-day sparkline tooltip on the Products page sat 6 px above the BSR badge. Crossing that gap counted as `mouseleave` on the wrapper, which dropped `bsrHover` state. Reaching a specific data point on the chart was therefore frame-perfect.
+- Fix follows the Floating UI `safePolygon` / Radix Tooltip / Mantine HoverCard pattern:
+  1. Tooltip moved to `bottom: 100%` (no gap — the tooltip touches the badge).
+  2. `onMouseEnter` / `onMouseLeave` mounted on the **tooltip itself** as well as the wrapper, so hovering the chart cancels close.
+  3. Close is deferred via a 120 ms `setTimeout` (`bsrHoverCloseTimer` ref); `cancelBsrClose()` aborts the timer when the cursor lands on either the badge or the tooltip, and `scheduleBsrClose()` re-arms it on leave. 120 ms is the same delay Radix and Mantine use for hover cards.
+
+### Fixed — SP search-term metrics frozen at orders=0 (sync window too narrow)
+
+- The hourly cron `Cron: Queuing daily metrics backfill` was re-fetching only the **last 2 days** (`scheduler.js`). Amazon SP attributes purchases up to **14 days** after the click via `purchases14d` / `sales14d` (the only attribution fields we ingest). A click on day N might receive an attributed purchase on day N+5, but our row was last fetched on day N+1 with `orders=0` and was never re-pulled — the row stayed at zero forever, even after Amazon finalised its attribution.
+- Reproduction: in production data, 14 / 15 search-term rows for `query='footrest', ad_group_id=91a6c9e8-…` over 04-04..04-22 had `updated_at` 1-2 days after `date_start` and `orders=0`, while Amazon Ads UI for the same period showed 1 purchase / €23.99 sales — the canonical late-attribution signature.
+- Fix: backfill window in `scheduler.js` raised from 2 days to 14 days (matches `purchases14d`). Daily cron at 06:30 UTC now re-fetches the entire attribution window for **all 11 report-type/level combinations** (SP campaign / keyword / target / searchTerm / advertised_product, SB campaign / keyword / ad_group, SD campaign / ad_group / target). Each row is now re-pulled 14 times across its attribution lifetime, so any late-arriving order lands in our DB. `fact_metrics_daily` (campaign-/keyword-/target-level) and `search_term_metrics` both benefit because they're upserted from the same report stream.
+- Operational note: Amazon's report-pipeline runs at concurrency 1 (Amazon throttles concurrent report-create calls). Daily volume rises from 11 → 11 × 1 chunk-of-14-days. Each chunk is one report (Amazon's max date range is 31 days), so total reports/day stays at 11 — only the date span widens. Backfill processing time ≈ 1-2 hours/day.
+- One-time recovery: 30-day backfill (`POST /jobs/backfill-metrics`) queued for the affected workspace to repair the existing zero-attribution rows.
+
+### Fixed — Rank-check cron silently skipped after first run (BullMQ jobId dedup)
+
+- `tracked_keywords` were only getting rank snapshots on **7 of the last 30 days** despite the `Cron: Rank check queued` log line firing daily. The chart on the Rankings page therefore showed **2 dots over 30 days** (start + end) instead of a daily curve.
+- Root cause: `queueRankCheck(workspaceId)` and `queueProductMetaSync(workspaceId)` used a static `jobId = "${prefix}_${workspaceId}"`. BullMQ deduplicates by `jobId`: once the first day's job moved to `completed`, every subsequent `queue.add(..., { jobId })` call returned the cached completed job without enqueueing anything. With `removeOnComplete: { count: 100 }`, the dedup record never expired. The only days that produced snapshots were the days the queue was cleared by a backend restart or by a manual `/keyword-ranks/check-all` POST (which calls `jsCheckWorkspaceRanks` directly, bypassing BullMQ).
+- Fix: jobIds now carry a UTC date suffix — `rank_${workspaceId}_YYYYMMDD`. Within a single day they still deduplicate (cron + a manual trigger don't double-fire); each new day creates a fresh job. Same fix in `queueProductMetaSync`. Verified: triggering the cron path inserted 28 fresh `keyword_rank_snapshots` rows within 10 minutes; the previously-stuck `gasbrenner B0CQK96CV5` keyword went from 2 historical snapshots to 3 (added 2026-05-05 #20).
+- Note: the rule-execution queue intentionally keeps a static `jobId` so concurrent triggers within the same hour collapse — that dedup is desired and was left untouched.
+
+---
+
 ## [Unreleased] — 2026-04-30
 
 ### Added — Server-side campaign search for picker selectors

@@ -78,6 +78,60 @@ Update campaign status or budget.
 
 ---
 
+## Search Terms *(updated 2026-05-05)*
+
+### GET /search-terms
+Aggregated search-term metrics for the workspace, grouped by `(query, campaign, ad_group, match_type)`.
+
+```
+Query:
+  ?campaignId=uuid        — filter to one campaign
+  ?adGroupId=uuid         — filter to one ad group (new 2026-05-05)
+  ?portfolioIds=1,2       — filter by portfolio
+  ?search=keyword         — text search on query
+  ?minClicks=N            — HAVING clicks >= N
+  ?minSpend=N             — HAVING spend >= N
+  ?hasOrders=1            — HAVING orders > 0
+  ?noOrders=1             — HAVING orders = 0
+  ?page=1&limit=50
+  ?sortBy=spend&sortDir=desc
+```
+
+```json
+// Response
+{
+  "terms": [
+    {
+      "id": "123",
+      "query": "footrest ergonomic",
+      "campaign_id": "uuid",
+      "campaign_name": "SP - Footrest Auto",
+      "campaign_type": "SP",
+      "marketplace_id": "A1PA6795UKMFR9",
+      "ad_group_id": "uuid",
+      "ad_group_name": "Auto Targets",
+      "keyword_text": null,
+      "match_type": "broad",
+      "impressions": 4820,
+      "clicks": 88,
+      "spend": "43.12",
+      "orders": 3,
+      "sales": "167.97",
+      "acos": "25.67",
+      "day_rows": 13
+    }
+  ],
+  "total": 287
+}
+```
+
+**Notes:**
+- `campaign_type` and `marketplace_id` were added 2026-05-05; older rows without a joined profile will have `null`.
+- `day_rows` = count of underlying daily metric rows merged into this aggregate (useful for data-quality hints).
+- `id` = `MIN(stm.id::text)` — stable React key for row selection; not a real PK.
+
+---
+
 ## Keywords
 
 ### GET /keywords

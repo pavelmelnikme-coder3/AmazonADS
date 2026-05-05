@@ -47,6 +47,12 @@ router.get("/", async (req, res, next) => {
       params.push(campaignIds);
     }
 
+    // Single ad-group filter (used from CampaignDetailModal ad-group view)
+    if (req.query.adGroupId) {
+      conditions.push(`stm.ad_group_id = $${pi++}`);
+      params.push(req.query.adGroupId);
+    }
+
     // Portfolio filter
     const rawPortfolioIds = req.query['portfolioIds[]'] || req.query.portfolioIds;
     const portfolioIds = rawPortfolioIds
@@ -129,6 +135,8 @@ router.get("/", async (req, res, next) => {
         ON c2.amazon_campaign_id = stm.amazon_campaign_id
        AND c2.workspace_id = stm.workspace_id
        AND stm.campaign_id IS NULL
+      LEFT JOIN amazon_profiles ap
+        ON ap.id = COALESCE(c1.profile_id, c2.profile_id)
       LEFT JOIN (
         SELECT k.workspace_id,
                LOWER(k.keyword_text) AS kw,
@@ -153,6 +161,8 @@ router.get("/", async (req, res, next) => {
         stm.match_type,
         stm.amazon_campaign_id,
         COALESCE(c1.name, c2.name, stm.campaign_name, kw_c.campaign_name),
+        COALESCE(c1.campaign_type, c2.campaign_type),
+        ap.marketplace_id,
         stm.ad_group_name,
         stm.workspace_id`;
 
@@ -169,6 +179,8 @@ router.get("/", async (req, res, next) => {
            stm.keyword_text,
            stm.match_type,
            COALESCE(c1.name, c2.name, stm.campaign_name, kw_c.campaign_name) AS campaign_name,
+           COALESCE(c1.campaign_type, c2.campaign_type) AS campaign_type,
+           ap.marketplace_id,
            stm.ad_group_name,
            SUM(stm.impressions)::bigint AS impressions,
            SUM(stm.clicks)::bigint      AS clicks,
