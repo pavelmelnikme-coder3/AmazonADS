@@ -14,7 +14,7 @@ router.get("/", async (req, res, next) => {
     const { rows } = await query(
       `SELECT
          tk.id, tk.asin, tk.keyword, tk.marketplace_id, tk.created_at,
-         tk.search_volume,
+         tk.search_volume, tk.display_order,
          latest.position          AS position,
          latest.found             AS found,
          latest.blocked           AS blocked,
@@ -22,6 +22,7 @@ router.get("/", async (req, res, next) => {
          prev.position            AS prev_position,
          COALESCE(al.label, '')   AS asin_label,
          al.display_order         AS asin_display_order,
+         al.portfolio_id          AS asin_portfolio_id,
          pr.title                 AS product_title,
          pr.brand                 AS product_brand,
          pr.image_url             AS product_image_url
@@ -43,24 +44,28 @@ router.get("/", async (req, res, next) => {
        LEFT JOIN asin_labels al ON al.workspace_id = tk.workspace_id AND al.asin = tk.asin
        LEFT JOIN products pr ON pr.asin = tk.asin AND pr.workspace_id = tk.workspace_id
        WHERE tk.workspace_id = $1 AND tk.is_active = TRUE
-       ORDER BY tk.asin, tk.search_volume DESC NULLS LAST, tk.keyword`,
+       ORDER BY tk.asin, tk.display_order NULLS LAST, tk.search_volume DESC NULLS LAST, tk.keyword`,
       [req.workspaceId]
     );
     res.json(rows);
   } catch (err) { next(err); }
 });
 
-// PATCH /keyword-ranks/labels/:asin — save ASIN label
+// PATCH /keyword-ranks/labels/:asin — save ASIN label and/or portfolio_id
 router.patch("/labels/:asin", async (req, res, next) => {
   try {
     const { asin } = req.params;
-    const { label = "" } = req.body;
+    const { label, portfolio_id } = req.body;
     if (!/^[A-Z0-9]{10}$/.test(asin)) return res.status(400).json({ error: "Invalid ASIN" });
+    const hasPortfolio = "portfolio_id" in req.body;
     await query(
-      `INSERT INTO asin_labels (workspace_id, asin, label, updated_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (workspace_id, asin) DO UPDATE SET label = EXCLUDED.label, updated_at = NOW()`,
-      [req.workspaceId, asin, label.trim()]
+      `INSERT INTO asin_labels (workspace_id, asin, label, portfolio_id, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (workspace_id, asin) DO UPDATE SET
+         label        = CASE WHEN $3 IS NOT NULL THEN EXCLUDED.label        ELSE asin_labels.label END,
+         portfolio_id = CASE WHEN $5            THEN EXCLUDED.portfolio_id  ELSE asin_labels.portfolio_id END,
+         updated_at   = NOW()`,
+      [req.workspaceId, asin, label !== undefined ? label.trim() : null, hasPortfolio ? portfolio_id : null, hasPortfolio]
     );
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -122,6 +127,21 @@ router.post("/", async (req, res, next) => {
         }
       })();
     }
+  } catch (err) { next(err); }
+});
+
+// PATCH /keyword-ranks/kw-order — save keyword display order within an ASIN group
+router.patch("/kw-order", async (req, res, next) => {
+  try {
+    const { order } = req.body; // [{ id, display_order }, ...]
+    if (!Array.isArray(order)) return res.status(400).json({ error: "order must be an array" });
+    for (const { id, display_order } of order) {
+      await query(
+        `UPDATE tracked_keywords SET display_order = $1 WHERE id = $2 AND workspace_id = $3`,
+        [display_order, id, req.workspaceId]
+      );
+    }
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 

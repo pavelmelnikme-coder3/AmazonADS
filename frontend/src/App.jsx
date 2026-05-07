@@ -25,6 +25,7 @@ import {
   HelpCircle, Info, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
   FlaskConical, Briefcase, GripVertical, ExternalLink,
+  Folder,
 } from 'lucide-react';
 
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -1513,7 +1514,7 @@ const DEFAULT_LAYOUT = [
 const RANK_DAYS = [7, 30];
 
 function positionBadge(position, found) {
-  if (!found || position === null) return { label: "—", bg: "var(--s2)", color: "var(--tx3)", border: "var(--b2)" };
+  if (!found || position === null || position === 0) return { label: "—", bg: "var(--s2)", color: "var(--tx3)", border: "var(--b2)" };
   if (position <= 3)  return { label: `#${position}`, bg: "rgba(234,179,8,.15)",  color: "#ca8a04", border: "rgba(234,179,8,.4)" };
   if (position <= 10) return { label: `#${position}`, bg: "rgba(34,197,94,.15)",  color: "var(--grn)", border: "rgba(34,197,94,.4)" };
   if (position <= 20) return { label: `#${position}`, bg: "rgba(20,184,166,.12)", color: "#0d9488", border: "rgba(20,184,166,.35)" };
@@ -1522,7 +1523,7 @@ function positionBadge(position, found) {
 }
 
 function rankDelta(current, prev) {
-  if (current === null || prev === null) return null;
+  if (current === null || current === 0 || prev === null || prev === 0) return null;
   const d = prev - current; // positive = improved (moved up)
   return d;
 }
@@ -2668,11 +2669,114 @@ function SortableAsinGroup({ id, children }) {
   );
 }
 
+function SortableKeyword({ id, children }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: DndCSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    position: isDragging ? "relative" : undefined,
+    zIndex: isDragging ? 5 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      {children({ dragHandleProps: { ...listeners, ...attributes } })}
+    </div>
+  );
+}
+
+function KwRankMiniChart({ data }) {
+  const [hovIdx, setHovIdx] = React.useState(null);
+  const series = React.useMemo(() => {
+    if (!data?.length) return [];
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const byDay = new Map();
+    for (const snap of data) {
+      if (!snap.found || !snap.position || snap.position === 0) continue;
+      const t = new Date(snap.captured_at).getTime();
+      if (t < cutoff) continue;
+      const dayKey = snap.captured_at.slice(0, 10);
+      const prev = byDay.get(dayKey);
+      if (!prev || prev.t < t) byDay.set(dayKey, { t, captured_at: snap.captured_at, position: snap.position });
+    }
+    return [...byDay.values()].sort((a, b) => a.t - b.t);
+  }, [data]);
+
+  if (!data) return <div style={{ padding: "10px 12px", fontSize: 11, color: "var(--tx3)" }}>Загрузка…</div>;
+  if (series.length < 2) return (
+    <div style={{ padding: "10px 12px", fontSize: 11, color: "var(--tx3)" }}>Недостаточно данных</div>
+  );
+
+  const W = 180, H = 56, PAD = 6;
+  const positions = series.map(p => p.position);
+  const minP = Math.min(...positions), maxP = Math.max(...positions);
+  const spread = (maxP - minP) || 1;
+  const xOf = i => PAD + (i / (series.length - 1)) * (W - PAD * 2);
+  // Inverted y: lower position (better rank) maps to top of chart
+  const yOf = p => PAD + ((maxP - p) / spread) * (H - PAD * 2);
+  const linePoints = series.map((p, i) => `${xOf(i)},${yOf(p.position)}`).join(" ");
+  const areaPoints = `${xOf(0)},${H} ${linePoints} ${xOf(series.length - 1)},${H}`;
+  const trend = positions[positions.length - 1] - positions[0]; // negative = improved
+  const hovPt = hovIdx !== null ? series[hovIdx] : null;
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+        padding: "7px 10px 2px", fontSize: 10, color: "var(--tx3)" }}>
+        <span style={{ fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase" }}>7 дней</span>
+        <span style={{ color: trend < 0 ? "var(--grn)" : trend > 0 ? "var(--red)" : "var(--tx3)",
+          fontFamily: "var(--mono)", fontWeight: 700, fontSize: 11 }}>
+          {trend === 0 ? "−" : trend < 0 ? `▲${Math.abs(trend)}` : `▼${trend}`}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`}
+        onMouseMove={e => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+          setHovIdx(Math.round(pct * (series.length - 1)));
+        }}
+        onMouseLeave={() => setHovIdx(null)}
+        style={{ width: W, height: H, display: "block", cursor: "crosshair" }}>
+        <defs>
+          <linearGradient id="kwRankGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#6366f1" stopOpacity="0.3" />
+            <stop offset="100%" stopColor="#6366f1" stopOpacity="0.03" />
+          </linearGradient>
+        </defs>
+        <polygon points={areaPoints} fill="url(#kwRankGrad)" />
+        <polyline points={linePoints} fill="none" stroke="#6366f1" strokeWidth="1.5" />
+        {series.map((p, i) => (
+          <circle key={i} cx={xOf(i)} cy={yOf(p.position)} r={hovIdx === i ? 4 : 2}
+            fill={hovIdx === i ? "#fff" : "#6366f1"} stroke="#6366f1" strokeWidth="1.5" />
+        ))}
+        {hovIdx !== null && (
+          <line x1={xOf(hovIdx)} x2={xOf(hovIdx)} y1={PAD} y2={H - PAD}
+            stroke="#6366f1" strokeWidth="0.5" strokeDasharray="2,2" opacity="0.7" />
+        )}
+      </svg>
+      <div style={{ padding: "3px 10px 7px", fontSize: 10, fontFamily: "var(--mono)",
+        color: "var(--tx)", display: "flex", justifyContent: "space-between", minHeight: 20 }}>
+        {hovPt ? (
+          <>
+            <span style={{ fontWeight: 700 }}>#{hovPt.position}</span>
+            <span style={{ color: "var(--tx3)" }}>
+              {new Date(hovPt.captured_at).toLocaleDateString("de", { day: "2-digit", month: "short" })}
+            </span>
+          </>
+        ) : (
+          <span style={{ color: "var(--tx3)" }}>Best: #{minP}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const RankTrackerPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [tick, setTick]           = useState(0);
   const [newAsin, setNewAsin]     = useState("");
   const [newKw, setNewKw]         = useState("");
+  const [newNote, setNewNote]     = useState("");
   const [adding, setAdding]       = useState(false);
   const [addError, setAddError]   = useState(null);
   const [checking, setChecking]   = useState(false);
@@ -2686,6 +2790,17 @@ const RankTrackerPage = ({ workspaceId }) => {
   const [editAdding, setEditAdding]   = useState(false);
   const [editingLabel, setEditingLabel] = useState(null); // asin being note-edited
   const [labelDraft, setLabelDraft]     = useState({});   // asin → draft text
+  const [kwCustomOrder, setKwCustomOrder] = useState({}); // asin → id[]
+  const [collapsedPortfolios, setCollapsedPortfolios] = useState(new Set());
+  const [showPortfolioForm, setShowPortfolioForm] = useState(false);
+  const [portfolioFormName, setPortfolioFormName] = useState("");
+  const [assigningAsin, setAssigningAsin] = useState(null);
+  useEffect(() => {
+    if (!assigningAsin) return;
+    const close = () => setAssigningAsin(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [assigningAsin]);
   const [hoveredAsin, setHoveredAsin] = useState(null); // { asin, title, brand, image_url, anchor: DOMRect }
   const hoverOpenTimerRef = useRef(null);
   const hoverCloseTimerRef = useRef(null);
@@ -2708,10 +2823,41 @@ const RankTrackerPage = ({ workspaceId }) => {
     if (hoverCloseTimerRef.current) { clearTimeout(hoverCloseTimerRef.current); hoverCloseTimerRef.current = null; }
   };
   const [customOrder, setCustomOrder]   = useState(null); // null = use server order; string[] after first drag
+  const [kwRankHover, setKwRankHover]   = useState(null); // { kwId, anchor: DOMRect }
+  const kwHoverOpenTimer  = useRef(null);
+  const kwHoverCloseTimer = useRef(null);
+  const kwHoverFetching   = useRef(new Set());
+  const onKwBadgeEnter = (e, kwId) => {
+    if (kwHoverCloseTimer.current) { clearTimeout(kwHoverCloseTimer.current); kwHoverCloseTimer.current = null; }
+    const anchor = e.currentTarget.getBoundingClientRect();
+    if (kwHoverOpenTimer.current) clearTimeout(kwHoverOpenTimer.current);
+    kwHoverOpenTimer.current = setTimeout(() => {
+      setKwRankHover({ kwId, anchor });
+      const key = `${kwId}_7`;
+      if (!histData[key] && !kwHoverFetching.current.has(kwId)) {
+        kwHoverFetching.current.add(kwId);
+        get(`/keyword-ranks/${kwId}/history?days=7`)
+          .then(data => setHistData(h => ({ ...h, [key]: data })))
+          .finally(() => kwHoverFetching.current.delete(kwId));
+      }
+    }, 200);
+  };
+  const onKwBadgeLeave = () => {
+    if (kwHoverOpenTimer.current) { clearTimeout(kwHoverOpenTimer.current); kwHoverOpenTimer.current = null; }
+    if (kwHoverCloseTimer.current) clearTimeout(kwHoverCloseTimer.current);
+    kwHoverCloseTimer.current = setTimeout(() => setKwRankHover(null), 150);
+  };
+  const onKwHoverCardEnter = () => {
+    if (kwHoverCloseTimer.current) { clearTimeout(kwHoverCloseTimer.current); kwHoverCloseTimer.current = null; }
+  };
 
-  const { data: keywords, loading } = useAsync(
+  const { data: keywords, loading, mutate: mutateKeywords } = useAsync(
     () => workspaceId ? get("/keyword-ranks") : Promise.resolve([]),
     [workspaceId, tick]
+  );
+  const { data: portfolios, mutate: mutatePortfolios } = useAsync(
+    () => workspaceId ? get("/rank-portfolios") : Promise.resolve([]),
+    [workspaceId]
   );
 
   const reload = () => setTick(t => t + 1);
@@ -2757,6 +2903,34 @@ const RankTrackerPage = ({ workspaceId }) => {
     });
   }, [grouped, customOrder]);
 
+  // asin → portfolio_id map derived from keywords
+  const asinPortfolioMap = useMemo(() => {
+    if (!keywords) return {};
+    const map = {};
+    for (const kw of keywords) {
+      if (kw.asin && kw.asin_portfolio_id != null && !map[kw.asin])
+        map[kw.asin] = kw.asin_portfolio_id;
+    }
+    return map;
+  }, [keywords]);
+
+  const ungroupedAsins = useMemo(
+    () => sortedAsins.filter(a => asinPortfolioMap[a] == null),
+    [sortedAsins, asinPortfolioMap]
+  );
+
+  const portfolioAsinGroups = useMemo(() => {
+    const map = {};
+    for (const asin of sortedAsins) {
+      const pfId = asinPortfolioMap[asin];
+      if (pfId != null) {
+        if (!map[pfId]) map[pfId] = [];
+        map[pfId].push(asin);
+      }
+    }
+    return map;
+  }, [sortedAsins, asinPortfolioMap]);
+
   // DnD sensors
   const dndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -2765,18 +2939,73 @@ const RankTrackerPage = ({ workspaceId }) => {
 
   const handleDragEnd = async ({ active, over }) => {
     if (!over || active.id === over.id) return;
-    const oldIndex = sortedAsins.indexOf(active.id);
-    const newIndex = sortedAsins.indexOf(over.id);
-    const newOrder = arrayMove(sortedAsins, oldIndex, newIndex);
+    const oldIndex = ungroupedAsins.indexOf(active.id);
+    const newIndex = ungroupedAsins.indexOf(over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const newUngrouped = arrayMove(ungroupedAsins, oldIndex, newIndex);
+    // Rebuild full sortedAsins order: portfolio ASINs keep positions, ungrouped slots replaced
+    let uIdx = 0;
+    const newOrder = sortedAsins.map(a => asinPortfolioMap[a] != null ? a : newUngrouped[uIdx++]);
     setCustomOrder(newOrder);
     try {
       await patch("/keyword-ranks/asin-order", {
-        order: newOrder.map((asin, idx) => ({ asin, display_order: idx }))
+        order: newUngrouped.map((asin, idx) => ({ asin, display_order: idx }))
       });
     } catch (e) {
-      setCustomOrder(null); // revert on error
+      setCustomOrder(null);
       showToast(e.message, "err");
     }
+  };
+
+  const handleKwDragEnd = async (asin, { active, over }) => {
+    if (!over || active.id === over.id) return;
+    const kws = grouped[asin];
+    const currentOrder = kwCustomOrder[asin] || kws.map(k => k.id);
+    const oldIdx = currentOrder.indexOf(active.id);
+    const newIdx = currentOrder.indexOf(over.id);
+    if (oldIdx === -1 || newIdx === -1) return;
+    const newOrder = arrayMove(currentOrder, oldIdx, newIdx);
+    setKwCustomOrder(prev => ({ ...prev, [asin]: newOrder }));
+    try {
+      await patch("/keyword-ranks/kw-order", {
+        order: newOrder.map((id, idx) => ({ id, display_order: idx }))
+      });
+    } catch (e) {
+      setKwCustomOrder(prev => ({ ...prev, [asin]: currentOrder }));
+      showToast(e.message, "err");
+    }
+  };
+
+  const handleCreatePortfolio = async () => {
+    const name = portfolioFormName.trim();
+    if (!name) return;
+    try {
+      const pf = await post("/rank-portfolios", { name });
+      mutatePortfolios(ps => (ps || []).find(p => p.id === pf.id) ? ps : [...(ps || []), pf]);
+      setPortfolioFormName(""); setShowPortfolioForm(false);
+      showToast(t("rankings.portfolioSaved"));
+    } catch (e) { showToast(e.message, "err"); }
+  };
+
+  const handleDeletePortfolio = async (id) => {
+    try {
+      await del(`/rank-portfolios/${id}`);
+      mutatePortfolios(ps => (ps || []).filter(p => p.id !== id));
+      mutateKeywords(kws => (kws || []).map(kw =>
+        kw.asin_portfolio_id === id ? { ...kw, asin_portfolio_id: null } : kw
+      ));
+      showToast(t("rankings.portfolioDeleted"));
+    } catch (e) { showToast(e.message, "err"); }
+  };
+
+  const handleAssignPortfolio = async (asin, portfolioId) => {
+    try {
+      await patch(`/keyword-ranks/labels/${asin}`, { portfolio_id: portfolioId });
+      mutateKeywords(kws => (kws || []).map(kw =>
+        kw.asin === asin ? { ...kw, asin_portfolio_id: portfolioId } : kw
+      ));
+      setAssigningAsin(null);
+    } catch (e) { showToast(e.message, "err"); }
   };
 
   const handleAdd = async () => {
@@ -2787,7 +3016,12 @@ const RankTrackerPage = ({ workspaceId }) => {
     setAdding(true); setAddError(null);
     try {
       await Promise.all(asins.flatMap(asin => keywords.map(kw => post("/keyword-ranks", { asin, keyword: kw }))));
-      setNewAsin(""); setNewKw(""); reload();
+      const note = newNote.trim();
+      if (note) {
+        await Promise.all(asins.map(asin => patch(`/keyword-ranks/labels/${asin}`, { label: note })));
+        setLabelDraft(d => { const n = { ...d }; asins.forEach(a => { n[a] = note; }); return n; });
+      }
+      setNewAsin(""); setNewKw(""); setNewNote(""); reload();
       const total = asins.length * keywords.length;
       showToast(total > 1 ? `${total} ${t("rankings.keywordsAdded")}` : t("rankings.added"));
     } catch (e) { setAddError(e.message); }
@@ -2795,13 +3029,31 @@ const RankTrackerPage = ({ workspaceId }) => {
   };
 
   const handleAddToAsin = async (asin) => {
-    const keywords = editKwsText.split("\n").map(k => k.trim().toLowerCase()).filter(k => k.length >= 2);
-    if (!keywords.length) return;
+    const kwTexts = editKwsText.split("\n").map(k => k.trim().toLowerCase()).filter(k => k.length >= 2);
+    if (!kwTexts.length) return;
     setEditAdding(true);
     try {
-      await Promise.all(keywords.map(kw => post("/keyword-ranks", { asin, keyword: kw })));
-      setEditingAsin(null); setEditKwsText(""); reload();
-      showToast(`${keywords.length} ${t("rankings.keywordsAdded")}`);
+      const results = await Promise.all(kwTexts.map(kw => post("/keyword-ranks", { asin, keyword: kw })));
+      setEditingAsin(null); setEditKwsText("");
+      // Optimistic update: add new rows to local state using the existing group's metadata
+      mutateKeywords(kws => {
+        const existing = (kws || []);
+        const ref = existing.find(k => k.asin === asin) || {};
+        const newRows = results.map(r => ({
+          ...r,
+          position: null, found: false, blocked: false,
+          checked_at: null, prev_position: null,
+          asin_label: ref.asin_label || "",
+          asin_display_order: ref.asin_display_order ?? null,
+          product_title: ref.product_title || null,
+          product_brand: ref.product_brand || null,
+          product_image_url: ref.product_image_url || null,
+        }));
+        // Only add rows whose id isn't already in state (ON CONFLICT re-activates existing)
+        const existingIds = new Set(existing.map(k => k.id));
+        return [...existing, ...newRows.filter(r => !existingIds.has(r.id))];
+      });
+      showToast(`${kwTexts.length} ${t("rankings.keywordsAdded")}`);
     } catch (e) { showToast(e.message, "err"); }
     finally { setEditAdding(false); }
   };
@@ -2810,8 +3062,13 @@ const RankTrackerPage = ({ workspaceId }) => {
     try {
       await del(`/keyword-ranks/${id}`);
       if (expanded === id) setExpanded(null);
-      reload();
-    } catch (e) { showToast(e.message, "error"); }
+      mutateKeywords(kws => (kws || []).filter(k => k.id !== id));
+      setKwCustomOrder(prev => {
+        const next = { ...prev };
+        for (const asin of Object.keys(next)) next[asin] = next[asin].filter(kid => kid !== id);
+        return next;
+      });
+    } catch (e) { showToast(e.message, "err"); }
   };
 
   const handleCheckOne = async (id) => {
@@ -3011,8 +3268,253 @@ const RankTrackerPage = ({ workspaceId }) => {
     );
   };
 
+  const renderAsinCard = (asin, dragHandleProps = null) => {
+    const kws = grouped[asin];
+    if (!kws) return null;
+    const currentPortfolioId = asinPortfolioMap[asin] ?? null;
+    return (
+      <div className="card" style={{ padding: "14px 16px", overflow: "visible" }}>
+        {/* ASIN header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: editingAsin === asin ? 8 : 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
+          {dragHandleProps ? (
+            <div {...dragHandleProps}
+              style={{ cursor: "grab", color: "var(--tx3)", display: "flex", alignItems: "center", flexShrink: 0, touchAction: "none" }}
+              title="Перетащить для изменения порядка">
+              <Ic icon={GripVertical} size={14} />
+            </div>
+          ) : <div style={{ width: 14 }} />}
+
+          <a
+            href={amazonProductUrl(asin, kws[0]?.marketplace_id)}
+            target="_blank"
+            rel="noopener noreferrer"
+            onMouseEnter={e => onAsinHoverEnter(e, asin, kws[0]?.product_title, kws[0]?.product_brand, kws[0]?.product_image_url)}
+            onMouseLeave={onAsinHoverLeave}
+            style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)", cursor: "pointer", textDecoration: "underline dotted" }}
+            title={`Открыть на Amazon: ${asin}`}>{asin}</a>
+          <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
+
+          {/* ASIN note/label */}
+          {editingLabel === asin ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1 }}>
+              <input
+                autoFocus
+                value={labelDraft[asin] ?? ""}
+                onChange={e => setLabelDraft(d => ({ ...d, [asin]: e.target.value }))}
+                onKeyDown={e => { if (e.key === "Enter") saveLabel(asin); if (e.key === "Escape") setEditingLabel(null); }}
+                placeholder={t("rankings.notePlaceholder")}
+                style={{ flex: 1, fontSize: 12, padding: "2px 7px", borderRadius: 5, border: "1px solid var(--ac2)", outline: "none", fontFamily: "var(--ui)" }}
+              />
+              <button onClick={() => saveLabel(asin)} className="btn btn-primary" style={{ fontSize: 11, padding: "2px 10px" }}>✓</button>
+              <button onClick={() => setEditingLabel(null)} className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}>✕</button>
+            </div>
+          ) : (
+            <span
+              onClick={() => { setEditingLabel(asin); setLabelDraft(d => ({ ...d, [asin]: kws[0]?.asin_label || "" })); }}
+              title={t("rankings.noteLabel")}
+              style={{ fontSize: 12, color: kws[0]?.asin_label ? "var(--tx2)" : "var(--tx3)", cursor: "pointer",
+                borderBottom: "1px dashed var(--b3)", paddingBottom: 1, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {kws[0]?.asin_label || `+ ${t("rankings.noteLabel")}`}
+            </span>
+          )}
+
+          {/* Portfolio assign dropdown */}
+          <div style={{ position: "relative" }}>
+            <button
+              onClick={e => { e.stopPropagation(); setAssigningAsin(assigningAsin === asin ? null : asin); }}
+              className="btn btn-ghost"
+              style={{ fontSize: 11, padding: "2px 6px", color: currentPortfolioId ? "var(--ac2)" : "var(--tx3)" }}
+              title={t("rankings.portfolioAssign")}>
+              <Ic icon={Folder} size={12} />
+            </button>
+            {assigningAsin === asin && (
+              <div style={{ position: "absolute", right: 0, top: "calc(100% + 4px)", zIndex: 100,
+                background: "var(--bg)", border: "1px solid var(--b2)", borderRadius: 8,
+                boxShadow: "0 4px 16px rgba(0,0,0,.18)", minWidth: 180, overflow: "hidden" }}>
+                {(portfolios || []).map(pf => (
+                  <button key={pf.id}
+                    onClick={() => handleAssignPortfolio(asin, pf.id)}
+                    style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 12px", fontSize: 13,
+                      background: pf.id === currentPortfolioId ? "var(--b1)" : "transparent",
+                      color: "var(--tx)", border: "none", cursor: "pointer" }}>
+                    {pf.id === currentPortfolioId ? "✓ " : ""}{pf.name}
+                  </button>
+                ))}
+                {currentPortfolioId && (
+                  <button
+                    onClick={() => handleAssignPortfolio(asin, null)}
+                    style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 12px", fontSize: 13,
+                      background: "transparent", color: "var(--red)", border: "none", cursor: "pointer",
+                      borderTop: "1px solid var(--b1)" }}>
+                    {t("rankings.portfolioUnassign")}
+                  </button>
+                )}
+                {!(portfolios || []).length && (
+                  <div style={{ padding: "8px 12px", fontSize: 12, color: "var(--tx3)" }}>
+                    {t("rankings.portfolioCreate")}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={() => { setEditingAsin(editingAsin === asin ? null : asin); setEditKwsText(""); }}
+            className="btn btn-ghost"
+            style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", color: "var(--ac2)" }}
+            title={t("rankings.addToGroup")}>
+            {editingAsin === asin ? "✕" : "+ " + t("rankings.addToGroup")}
+          </button>
+        </div>
+
+        {/* Inline add-keywords form */}
+        {editingAsin === asin && (
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, padding: "8px 0", borderBottom: "1px solid var(--b1)" }}>
+            <textarea value={editKwsText} onChange={e => setEditKwsText(e.target.value)}
+              placeholder={t("rankings.keywordPlaceholderMulti")}
+              rows={2}
+              style={{ flex: 1, fontSize: 12, resize: "vertical", minHeight: 48, fontFamily: "var(--ui)", lineHeight: 1.6 }} />
+            <button onClick={() => handleAddToAsin(asin)} disabled={editAdding || !editKwsText.trim()}
+              className="btn btn-primary" style={{ fontSize: 12, padding: "6px 14px", alignSelf: "flex-end" }}>
+              {editAdding ? "…" : t("rankings.addBtn")}
+            </button>
+          </div>
+        )}
+
+        {/* Keyword rows — sortable */}
+        {(() => {
+          const customKwIds = kwCustomOrder[asin];
+          const sortedKws = customKwIds
+            ? customKwIds.map(id => kws.find(k => k.id === id)).filter(Boolean)
+                .concat(kws.filter(k => !customKwIds.includes(k.id)))
+            : kws;
+          return (
+            <DndContext sensors={dndSensors} collisionDetection={closestCenter}
+              onDragEnd={e => handleKwDragEnd(asin, e)}>
+              <SortableContext items={sortedKws.map(k => k.id)} strategy={verticalListSortingStrategy}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                  {sortedKws.map(kw => {
+                    const badge  = positionBadge(kw.position, kw.found);
+                    const delta  = rankDelta(kw.position, kw.prev_position);
+                    const isExp  = expanded === kw.id;
+                    const isChk  = checkingId === kw.id;
+                    const checkedAt = kw.checked_at
+                      ? new Date(kw.checked_at).toLocaleString("de", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+                      : null;
+                    return (
+                      <SortableKeyword key={kw.id} id={kw.id}>
+                        {({ dragHandleProps: kwDragHandle }) => (
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+                              borderBottom: isExp ? "none" : "1px solid var(--b1)" }}>
+                              <div {...kwDragHandle}
+                                style={{ cursor: "grab", color: "var(--tx3)", display: "flex", alignItems: "center", flexShrink: 0, touchAction: "none" }}
+                                title="Перетащить для изменения порядка">
+                                <Ic icon={GripVertical} size={12} />
+                              </div>
+                              <div
+                                onMouseEnter={e => onKwBadgeEnter(e, kw.id)}
+                                onMouseLeave={onKwBadgeLeave}
+                                style={{
+                                  minWidth: 52, padding: "3px 8px", borderRadius: 20, textAlign: "center",
+                                  background: badge.bg, border: `1px solid ${badge.border}`,
+                                  fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: badge.color,
+                                  cursor: "default",
+                                }}>{badge.label}</div>
+                              <div style={{ width: 36, fontSize: 11, fontWeight: 600, textAlign: "center" }}>
+                                {delta === null ? <span style={{ color: "var(--tx3)" }}>—</span>
+                                  : delta > 0 ? <span style={{ color: "var(--grn)" }}>↑{delta}</span>
+                                  : delta < 0 ? <span style={{ color: "var(--red)" }}>↓{Math.abs(delta)}</span>
+                                  : <span style={{ color: "var(--tx3)" }}>=</span>}
+                              </div>
+                              <div style={{ flex: 1, fontSize: 13, color: "var(--tx)", display: "flex", alignItems: "center", gap: 6 }}>
+                                <span>{kw.keyword}</span>
+                                {kw.search_volume != null && (
+                                  <span style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
+                                    background: "var(--b1)", borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap" }}
+                                    title="Jungle Scout: ежемесячный объём поиска">
+                                    {kw.search_volume >= 1000
+                                      ? `${(kw.search_volume / 1000).toFixed(kw.search_volume >= 10000 ? 0 : 1)}K`
+                                      : kw.search_volume}
+                                    /мес
+                                  </span>
+                                )}
+                              </div>
+                              {checkedAt && (
+                                <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{checkedAt}</div>
+                              )}
+                              <div style={{ display: "flex", gap: 4 }}>
+                                <button onClick={() => toggleExpand(kw.id)} className="btn btn-ghost"
+                                  style={{ fontSize: 11, padding: "3px 8px" }}>
+                                  <Ic icon={isExp ? ChevronUp : ChevronDown} size={12} />
+                                </button>
+                                <button onClick={() => handleCheckOne(kw.id)} disabled={isChk} className="btn btn-ghost"
+                                  style={{ fontSize: 11, padding: "3px 8px" }} title={t("rankings.checkNow")}>
+                                  {isChk ? <span className="loader" style={{ width: 10, height: 10 }} /> : <Ic icon={RefreshCw} size={12} />}
+                                </button>
+                                <button onClick={() => handleDelete(kw.id)} className="btn btn-ghost"
+                                  style={{ fontSize: 11, padding: "3px 8px", color: "var(--red)" }} title={t("rankings.remove")}>
+                                  <Ic icon={X} size={12} />
+                                </button>
+                              </div>
+                            </div>
+                            {isExp && (
+                              <div style={{ padding: "12px 0 8px", borderBottom: "1px solid var(--b1)" }}>
+                                <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+                                  {RANK_DAYS.map(d => (
+                                    <button key={d} onClick={() => switchDays(d)}
+                                      className={`btn ${histDays === d ? "btn-primary" : "btn-ghost"}`}
+                                      style={{ fontSize: 11, padding: "3px 10px" }}>
+                                      {d === 7 ? t("rankings.week") : t("rankings.month")}
+                                    </button>
+                                  ))}
+                                </div>
+                                <HistoryBars data={currentHist} />
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </SortableKeyword>
+                    );
+                  })}
+                </div>
+              </SortableContext>
+            </DndContext>
+          );
+        })()}
+      </div>
+    );
+  };
+
   return (
     <div className="fade">
+      {/* Keyword rank mini-chart hover popup */}
+      {kwRankHover && createPortal((() => {
+        const { kwId, anchor } = kwRankHover;
+        const histKey = `${kwId}_7`;
+        const data = histData[histKey] || null;
+        const POP_W = 198, GAP = 8;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        let left = anchor.left - 4;
+        let top = anchor.bottom + GAP;
+        if (top + 110 > vh - GAP && anchor.top - 110 - GAP > GAP) top = anchor.top - 110 - GAP;
+        if (left + POP_W > vw - GAP) left = vw - POP_W - GAP;
+        left = Math.max(GAP, left);
+        return (
+          <div
+            onMouseEnter={onKwHoverCardEnter}
+            onMouseLeave={onKwBadgeLeave}
+            style={{
+              position: "fixed", left, top, width: POP_W, zIndex: 9000,
+              background: "var(--bg)", borderRadius: 10,
+              boxShadow: "0 6px 24px rgba(0,0,0,.22)",
+              border: "1px solid var(--b1)", pointerEvents: "auto", overflow: "hidden",
+            }}>
+            <KwRankMiniChart data={data} />
+          </div>
+        );
+      })(), document.body)}
+
       {/* Product hover card — anchored to the hovered ASIN link, auto-flips on viewport edges */}
       {hoveredAsin && createPortal((() => {
         const POP_W = 320, POP_H_EST = 360, GAP = 10;
@@ -3067,12 +3569,36 @@ const RankTrackerPage = ({ workspaceId }) => {
           </h1>
           <div style={{ fontSize: 12, color: "var(--tx3)" }}>{t("rankings.subtitle")}</div>
         </div>
-        <button onClick={handleCheckAll} disabled={checking || loading || !keywords?.length}
-          className="btn" style={{ fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6, background: "#16a34a", color: "#fff", border: "none", opacity: (checking || loading || !keywords?.length) ? 0.6 : 1 }}>
-          <Ic icon={RefreshCw} size={13} />
-          {checking ? t("rankings.checking") : t("rankings.checkAll")}
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => { setShowPortfolioForm(true); setPortfolioFormName(""); }}
+            className="btn btn-ghost" style={{ fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 }}>
+            <Ic icon={Folder} size={13} />
+            {t("rankings.portfolioCreate")}
+          </button>
+          <button onClick={handleCheckAll} disabled={checking || loading || !keywords?.length}
+            className="btn" style={{ fontSize: 12, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6, background: "#16a34a", color: "#fff", border: "none", opacity: (checking || loading || !keywords?.length) ? 0.6 : 1 }}>
+            <Ic icon={RefreshCw} size={13} />
+            {checking ? t("rankings.checking") : t("rankings.checkAll")}
+          </button>
+        </div>
       </div>
+
+      {/* Inline create-portfolio form */}
+      {showPortfolioForm && (
+        <div className="card" style={{ padding: "10px 14px", marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
+          <Ic icon={Folder} size={14} style={{ color: "var(--ac2)", flexShrink: 0 }} />
+          <input autoFocus value={portfolioFormName}
+            onChange={e => setPortfolioFormName(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleCreatePortfolio(); if (e.key === "Escape") setShowPortfolioForm(false); }}
+            placeholder={t("rankings.portfolioPlaceholder")}
+            style={{ flex: 1, fontSize: 13, padding: "5px 10px", borderRadius: 6,
+              border: "1px solid var(--b2)", outline: "none", background: "var(--bg)", color: "var(--tx)" }} />
+          <button onClick={handleCreatePortfolio} className="btn btn-primary" style={{ fontSize: 12, padding: "5px 14px" }}>
+            {t("rankings.addBtn")}
+          </button>
+          <button onClick={() => setShowPortfolioForm(false)} className="btn btn-ghost" style={{ fontSize: 12, padding: "5px 10px" }}>✕</button>
+        </div>
+      )}
 
       {/* Toast */}
       {toast && (
@@ -3089,9 +3615,20 @@ const RankTrackerPage = ({ workspaceId }) => {
         <div style={{ fontSize: 12, fontWeight: 600, color: "var(--tx2)", marginBottom: 10 }}>{t("rankings.addTitle")}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div>
-            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
               {t("rankings.asinLabel")}
-              <span style={{ color: "var(--tx3)", marginLeft: 6 }}>({t("rankings.asinHint")})</span>
+              <span>({t("rankings.asinHint")})</span>
+              {(() => {
+                const cnt = newAsin.split("\n").map(a => a.trim().toUpperCase()).filter(a => /^[A-Z0-9]{10}$/.test(a)).length;
+                return cnt > 0 ? (
+                  <span style={{ background: cnt > 1 ? "rgba(245,158,11,.15)" : "rgba(34,197,94,.12)",
+                    color: cnt > 1 ? "var(--amb)" : "var(--grn)",
+                    border: `1px solid ${cnt > 1 ? "rgba(245,158,11,.4)" : "rgba(34,197,94,.35)"}`,
+                    borderRadius: 4, padding: "0 5px", fontSize: 10, fontWeight: 600 }}>
+                    {cnt} ASIN{cnt > 1 ? "s" : ""}
+                  </span>
+                ) : null;
+              })()}
             </div>
             <textarea value={newAsin} onChange={e => setNewAsin(e.target.value.toUpperCase())}
               placeholder={t("rankings.asinPlaceholderMulti")}
@@ -3109,6 +3646,14 @@ const RankTrackerPage = ({ workspaceId }) => {
               rows={3}
               style={{ width: "100%", fontSize: 13, resize: "vertical", minHeight: 64,
                 fontFamily: "var(--ui)", lineHeight: 1.6 }} />
+          </div>
+          <div style={{ width: 180 }}>
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 4 }}>{t("rankings.noteLabel")}</div>
+            <textarea value={newNote} onChange={e => setNewNote(e.target.value)}
+              placeholder={t("rankings.notePlaceholder")}
+              rows={3}
+              style={{ width: "100%", fontSize: 12, resize: "vertical", minHeight: 64,
+                fontFamily: "var(--ui)", lineHeight: 1.6, color: "var(--tx2)" }} />
           </div>
           <button onClick={handleAdd} disabled={adding} className="btn btn-primary"
             style={{ fontSize: 12, padding: "6px 16px", alignSelf: "flex-end" }}>
@@ -3128,177 +3673,59 @@ const RankTrackerPage = ({ workspaceId }) => {
           <p style={{ fontSize: 13, color: "var(--tx3)", maxWidth: 340, margin: "0 auto" }}>{t("rankings.emptyDesc")}</p>
         </div>
       ) : (
-        <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={sortedAsins} strategy={verticalListSortingStrategy}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {sortedAsins.map(asin => {
-                const kws = grouped[asin];
-                if (!kws) return null;
-                return (
-                  <SortableAsinGroup key={asin} id={asin}>
-                    {({ dragHandleProps }) => (
-                    <div className="card" style={{ padding: "14px 16px" }}>
-                      {/* ASIN header */}
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: editingAsin === asin ? 8 : 10, paddingBottom: 10, borderBottom: "1px solid var(--b1)" }}>
-                        {/* Drag handle */}
-                        <div {...dragHandleProps}
-                          style={{ cursor: "grab", color: "var(--tx3)", display: "flex", alignItems: "center", flexShrink: 0, touchAction: "none" }}
-                          title="Перетащить для изменения порядка">
-                          <Ic icon={GripVertical} size={14} />
-                        </div>
-
-                        <a
-                          href={amazonProductUrl(asin, kws[0]?.marketplace_id)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onMouseEnter={e => onAsinHoverEnter(e, asin, kws[0]?.product_title, kws[0]?.product_brand, kws[0]?.product_image_url)}
-                          onMouseLeave={onAsinHoverLeave}
-                          style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--ac2)", cursor: "pointer", textDecoration: "underline dotted" }}
-                          title={`Открыть на Amazon: ${asin}`}>{asin}</a>
-                        <span style={{ fontSize: 11, color: "var(--tx3)" }}>{kws.length} {t("rankings.keywordCount")}</span>
-
-                        {/* ASIN note/label */}
-                        {editingLabel === asin ? (
-                          <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1 }}>
-                            <input
-                              autoFocus
-                              value={labelDraft[asin] ?? ""}
-                              onChange={e => setLabelDraft(d => ({ ...d, [asin]: e.target.value }))}
-                              onKeyDown={e => { if (e.key === "Enter") saveLabel(asin); if (e.key === "Escape") setEditingLabel(null); }}
-                              placeholder={t("rankings.notePlaceholder")}
-                              style={{ flex: 1, fontSize: 12, padding: "2px 7px", borderRadius: 5, border: "1px solid var(--ac2)", outline: "none", fontFamily: "var(--ui)" }}
-                            />
-                            <button onClick={() => saveLabel(asin)} className="btn btn-primary" style={{ fontSize: 11, padding: "2px 10px" }}>✓</button>
-                            <button onClick={() => setEditingLabel(null)} className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}>✕</button>
-                          </div>
-                        ) : (
-                          <span
-                            onClick={() => { setEditingLabel(asin); setLabelDraft(d => ({ ...d, [asin]: kws[0]?.asin_label || "" })); }}
-                            title={t("rankings.noteLabel")}
-                            style={{ fontSize: 12, color: kws[0]?.asin_label ? "var(--tx2)" : "var(--tx3)", cursor: "pointer",
-                              borderBottom: "1px dashed var(--b3)", paddingBottom: 1, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            {kws[0]?.asin_label || `+ ${t("rankings.noteLabel")}`}
-                          </span>
-                        )}
-
-                        <button
-                          onClick={() => { setEditingAsin(editingAsin === asin ? null : asin); setEditKwsText(""); }}
-                          className="btn btn-ghost"
-                          style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", color: "var(--ac2)" }}
-                          title={t("rankings.addToGroup")}>
-                          {editingAsin === asin ? "✕" : "+ " + t("rankings.addToGroup")}
-                        </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Portfolio groups */}
+          {(portfolios || []).map(pf => {
+            const pfAsins = portfolioAsinGroups[pf.id] || [];
+            const isCollapsed = collapsedPortfolios.has(pf.id);
+            return (
+              <div key={pf.id} className="card" style={{ overflow: "visible" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", cursor: "pointer",
+                  borderBottom: isCollapsed ? "none" : "1px solid var(--b1)" }}
+                  onClick={() => setCollapsedPortfolios(s => { const n = new Set(s); n.has(pf.id) ? n.delete(pf.id) : n.add(pf.id); return n; })}>
+                  <Ic icon={isCollapsed ? ChevronRight : ChevronDown} size={14} style={{ color: "var(--tx3)", flexShrink: 0 }} />
+                  <Ic icon={Folder} size={14} style={{ color: "var(--ac2)", flexShrink: 0 }} />
+                  <span style={{ fontWeight: 700, fontSize: 14, flex: 1 }}>{pf.name}</span>
+                  <span style={{ fontSize: 11, color: "var(--tx3)" }}>{pfAsins.length} ASIN{pfAsins.length !== 1 ? "s" : ""}</span>
+                  <button onClick={e => { e.stopPropagation(); handleDeletePortfolio(pf.id); }}
+                    className="btn btn-ghost"
+                    style={{ fontSize: 11, padding: "2px 6px", color: "var(--red)" }}>
+                    <Ic icon={X} size={12} />
+                  </button>
+                </div>
+                {!isCollapsed && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px 14px" }}>
+                    {pfAsins.length === 0 ? (
+                      <div style={{ fontSize: 12, color: "var(--tx3)", textAlign: "center", padding: "12px 0" }}>
+                        {t("rankings.portfolioEmpty")}
                       </div>
+                    ) : pfAsins.map(asin => <div key={asin}>{renderAsinCard(asin)}</div>)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
 
-                      {/* Inline add-keywords form */}
-                      {editingAsin === asin && (
-                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, padding: "8px 0", borderBottom: "1px solid var(--b1)" }}>
-                          <textarea value={editKwsText} onChange={e => setEditKwsText(e.target.value)}
-                            placeholder={t("rankings.keywordPlaceholderMulti")}
-                            rows={2}
-                            style={{ flex: 1, fontSize: 12, resize: "vertical", minHeight: 48,
-                              fontFamily: "var(--ui)", lineHeight: 1.6 }} />
-                          <button onClick={() => handleAddToAsin(asin)} disabled={editAdding || !editKwsText.trim()}
-                            className="btn btn-primary" style={{ fontSize: 12, padding: "6px 14px", alignSelf: "flex-end" }}>
-                            {editAdding ? "…" : t("rankings.addBtn")}
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Keyword rows */}
-                      <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-                        {kws.map(kw => {
-                          const badge  = positionBadge(kw.position, kw.found);
-                          const delta  = rankDelta(kw.position, kw.prev_position);
-                          const isExp  = expanded === kw.id;
-                          const isChk  = checkingId === kw.id;
-                          const checkedAt = kw.checked_at
-                            ? new Date(kw.checked_at).toLocaleString("de", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-                            : null;
-
-                          return (
-                            <div key={kw.id}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
-                                borderBottom: isExp ? "none" : "1px solid var(--b1)" }}>
-                                {/* Position badge */}
-                                <div style={{
-                                  minWidth: 52, padding: "3px 8px", borderRadius: 20, textAlign: "center",
-                                  background: badge.bg, border: `1px solid ${badge.border}`,
-                                  fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: badge.color,
-                                }}>{badge.label}</div>
-
-                                {/* Delta */}
-                                <div style={{ width: 36, fontSize: 11, fontWeight: 600, textAlign: "center" }}>
-                                  {delta === null ? <span style={{ color: "var(--tx3)" }}>—</span>
-                                    : delta > 0 ? <span style={{ color: "var(--grn)" }}>↑{delta}</span>
-                                    : delta < 0 ? <span style={{ color: "var(--red)" }}>↓{Math.abs(delta)}</span>
-                                    : <span style={{ color: "var(--tx3)" }}>=</span>}
-                                </div>
-
-                                {/* Keyword text */}
-                                <div style={{ flex: 1, fontSize: 13, color: "var(--tx)", display: "flex", alignItems: "center", gap: 6 }}>
-                                  <span>{kw.keyword}</span>
-                                  {kw.search_volume != null && (
-                                    <span style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)",
-                                      background: "var(--b1)", borderRadius: 4, padding: "1px 5px", whiteSpace: "nowrap" }}
-                                      title="Jungle Scout: ежемесячный объём поиска">
-                                      {kw.search_volume >= 1000
-                                        ? `${(kw.search_volume / 1000).toFixed(kw.search_volume >= 10000 ? 0 : 1)}K`
-                                        : kw.search_volume}
-                                      /мес
-                                    </span>
-                                  )}
-                                </div>
-
-                                {/* Last checked */}
-                                {checkedAt && (
-                                  <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{checkedAt}</div>
-                                )}
-
-                                {/* Actions */}
-                                <div style={{ display: "flex", gap: 4 }}>
-                                  <button onClick={() => toggleExpand(kw.id)} className="btn btn-ghost"
-                                    style={{ fontSize: 11, padding: "3px 8px" }}>
-                                    <Ic icon={isExp ? ChevronUp : ChevronDown} size={12} />
-                                  </button>
-                                  <button onClick={() => handleCheckOne(kw.id)} disabled={isChk} className="btn btn-ghost"
-                                    style={{ fontSize: 11, padding: "3px 8px" }} title={t("rankings.checkNow")}>
-                                    {isChk ? <span className="loader" style={{ width: 10, height: 10 }} /> : <Ic icon={RefreshCw} size={12} />}
-                                  </button>
-                                  <button onClick={() => handleDelete(kw.id)} className="btn btn-ghost"
-                                    style={{ fontSize: 11, padding: "3px 8px", color: "var(--red)" }} title={t("rankings.remove")}>
-                                    <Ic icon={X} size={12} />
-                                  </button>
-                                </div>
-                              </div>
-
-                              {/* Expanded history */}
-                              {isExp && (
-                                <div style={{ padding: "12px 0 8px", borderBottom: "1px solid var(--b1)" }}>
-                                  <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-                                    {RANK_DAYS.map(d => (
-                                      <button key={d} onClick={() => switchDays(d)}
-                                        className={`btn ${histDays === d ? "btn-primary" : "btn-ghost"}`}
-                                        style={{ fontSize: 11, padding: "3px 10px" }}>
-                                        {d === 7 ? t("rankings.week") : t("rankings.month")}
-                                      </button>
-                                    ))}
-                                  </div>
-                                  <HistoryBars data={currentHist} />
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                    )}
-                  </SortableAsinGroup>
-                );
-              })}
+          {/* Ungrouped label */}
+          {(portfolios || []).length > 0 && ungroupedAsins.length > 0 && (
+            <div style={{ fontSize: 10, color: "var(--tx3)", padding: "4px 2px", fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase" }}>
+              {t("rankings.portfolioUngrouped")}
             </div>
-          </SortableContext>
-        </DndContext>
+          )}
+
+          {/* Ungrouped ASINs — DnD for reorder */}
+          <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+            <SortableContext items={ungroupedAsins} strategy={verticalListSortingStrategy}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {ungroupedAsins.map(asin => (
+                  <SortableAsinGroup key={asin} id={asin}>
+                    {({ dragHandleProps }) => renderAsinCard(asin, dragHandleProps)}
+                  </SortableAsinGroup>
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
+        </div>
       )}
     </div>
   );
@@ -8597,6 +9024,7 @@ const KeywordsPage = ({ workspaceId }) => {
   const [stHarvestBid, setStHarvestBid] = useState('0.50');
   const [stHarvestCampaignSearch, setStHarvestCampaignSearch] = useState('');
   const [stHarvestSaving, setStHarvestSaving] = useState(false);
+  const [stHideNegated, setStHideNegated] = useState(true);
 
   const { colgroup: kwColgroup, resizeHandle: kwRH, resetCols: kwResetCols } = useResizableColumns(
     "keywords", [36, 220, 90, 100, 90, 170, 65, 65, 75, 80, 90]
@@ -8658,11 +9086,12 @@ const KeywordsPage = ({ workspaceId }) => {
     stCampaignIds.forEach(id => params.append('campaignIds[]', id));
     stPortfolioIds.forEach(id => params.append('portfolioIds[]', id));
     if (stCampaignType) params.set('campaignType', stCampaignType);
+    if (stHideNegated) params.set('hideNegated', 'true');
     apiFetch(`/search-terms?${params}`)
       .then(d => { setSearchTerms(d?.data || []); setStTotal(d?.pagination?.total || 0); setStSelected(new Set()); })
       .catch(() => setSearchTerms([]))
       .finally(() => setStLoading(false));
-  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds, stPortfolioIds, stCampaignType]);
+  }, [kwTab, stSortCol, stSortDir, stSearch, stFilter, stDateFrom, stDateTo, stMetricsDays, stCampaignIds, stPortfolioIds, stCampaignType, stHideNegated]);
 
   // Debounced server-side campaign search inside Harvest modal
   useEffect(() => {
@@ -9202,6 +9631,15 @@ const KeywordsPage = ({ workspaceId }) => {
               selectedIds={stPortfolioIds}
               onChange={setStPortfolioIds}
             />
+            <div style={{ width: 1, height: 20, background: "var(--b2)", margin: "0 2px" }} />
+            <button
+              onClick={() => setStHideNegated(v => !v)}
+              className={`btn ${stHideNegated ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize: 11, padding: "5px 12px", display: "flex", alignItems: "center", gap: 5 }}
+              title={stHideNegated ? "Показывать уже добавленные в негативы" : "Скрывать уже добавленные в негативы"}>
+              <Ic icon={Ban} size={11} />
+              {stHideNegated ? "Негативы скрыты" : "Показать негативы"}
+            </button>
             <span style={{ fontSize: 11, color: "var(--tx3)", marginLeft: "auto" }}>
               {stTotal.toLocaleString()} queries
             </span>
@@ -9272,9 +9710,9 @@ const KeywordsPage = ({ workspaceId }) => {
                         />
                       </th>
                       {[
-                        { col: "query",        label: "Query",      align: "left",   rhIdx: 1 },
+                        { col: "query",        label: t("rules.colSearchTerm"), align: "left",   rhIdx: 1 },
                         { col: "campaign",     label: "Campaign",   align: "left",   rhIdx: 2, noSort: true },
-                        { col: "keyword_text", label: "Keyword",    align: "left",   rhIdx: 3, noSort: true },
+                        { col: "keyword_text", label: t("rules.colKeyword"),    align: "left",   rhIdx: 3, noSort: true },
                         { col: "impressions",  label: "Impr.",      align: "right",  rhIdx: 4 },
                         { col: "clicks",       label: "Clicks",     align: "right",  rhIdx: 5 },
                         { col: "orders",       label: "Orders",     align: "right",  rhIdx: 6 },
@@ -9315,13 +9753,16 @@ const KeywordsPage = ({ workspaceId }) => {
                       return (
                         <tr key={term.id || i} style={{
                           borderBottom: "1px solid var(--b1)",
-                          background: isSel
-                            ? "rgba(59,130,246,0.08)"
-                            : rec === "harvest"
-                              ? "rgba(34,197,94,0.04)"
-                              : rec === "negate"
-                                ? "rgba(239,68,68,0.04)"
-                                : "transparent",
+                          background: term.is_negated
+                            ? "rgba(239,68,68,0.04)"
+                            : isSel
+                              ? "rgba(59,130,246,0.08)"
+                              : rec === "harvest"
+                                ? "rgba(34,197,94,0.04)"
+                                : rec === "negate"
+                                  ? "rgba(239,68,68,0.04)"
+                                  : "transparent",
+                          opacity: term.is_negated ? 0.6 : 1,
                           cursor: "default",
                         }}>
                           <td style={{ padding: "7px 10px" }}>
@@ -9333,10 +9774,18 @@ const KeywordsPage = ({ workspaceId }) => {
                               }} />
                           </td>
                           <td style={{ padding: "7px 10px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            <span title={term.query} style={{
-                              display: "block",
-                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                            }}>{term.query}</span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <span title={term.query} style={{
+                                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                textDecoration: term.is_negated ? "line-through" : "none",
+                              }}>{term.query}</span>
+                              {term.is_negated && (
+                                <span style={{ fontSize: 9, fontWeight: 700, color: "var(--red)",
+                                  background: "rgba(239,68,68,.12)", border: "1px solid rgba(239,68,68,.3)",
+                                  borderRadius: 3, padding: "1px 4px", letterSpacing: ".04em", flexShrink: 0 }}
+                                  title="Добавлен в негативные ключи">NEG</span>
+                              )}
+                            </div>
                             {term.match_type && (
                               <span style={{ fontSize: 10, color: "var(--tx3)", marginTop: 1, display: "block" }}>
                                 {term.match_type}
@@ -11163,8 +11612,8 @@ const RuleWizardModal = ({
                   {/* Summary stats */}
                   <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginBottom:20 }}>
                     {[
-                      { label: t("rules.entitiesMatched"), value: previewData.matched_count ?? previewData.actions_taken ?? "—" },
-                      { label: t("rules.actionsPlanned"),  value: previewData.actions_planned ?? previewData.actions_taken ?? "—" },
+                      { label: t("rules.entitiesMatched"), value: previewData.matched_count ?? "—" },
+                      { label: t("rules.actionsPlanned"),  value: previewData.applied_count ?? "—" },
                       { label: t("rules.previewModeLabel"), value: previewData.dry_run ? t("rules.modeDryRun") : t("rules.modeLive") },
                     ].map(stat => (
                       <div key={stat.label} style={{ background:"var(--s2)", border:"1px solid var(--b2)",
@@ -11177,7 +11626,7 @@ const RuleWizardModal = ({
                   </div>
 
                   {/* Sample matches table */}
-                  {Array.isArray(previewData.sample_matches) && previewData.sample_matches.length > 0 && (
+                  {Array.isArray(previewData.applied) && previewData.applied.length > 0 && (
                     <div>
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:8, textTransform:"uppercase",
                         letterSpacing:"0.06em", fontWeight:600 }}>
@@ -11196,18 +11645,22 @@ const RuleWizardModal = ({
                             </tr>
                           </thead>
                           <tbody>
-                            {previewData.sample_matches.slice(0, 10).map((m, i) => (
+                            {previewData.applied.slice(0, 10).map((m, i) => (
                               <tr key={i} style={{ borderTop:"1px solid var(--b1)" }}>
                                 <td style={{ padding:"7px 12px", color:"var(--tx2)", maxWidth:260,
                                   overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                                  {m.keyword_text || m.target_text || m.entity_id}
+                                  {m.keyword_text || (m.expression
+                                    ? (typeof m.expression === "object"
+                                        ? (m.expression[0]?.value || JSON.stringify(m.expression))
+                                        : m.expression)
+                                    : m.entity_id)}
                                 </td>
                                 <td style={{ padding:"7px 12px", textAlign:"right", color:"var(--tx3)" }}>
-                                  {m.action_type?.replace(/_/g," ")}
+                                  {m.action?.replace(/_/g," ")}
                                 </td>
                                 <td style={{ padding:"7px 12px", textAlign:"right",
-                                  color: m.action_value ? "var(--ac2)" : "var(--tx3)" }}>
-                                  {m.action_value ?? "—"}
+                                  color:"var(--ac2)" }}>
+                                  {m.new_state ?? m.match_type ?? m.change_pct ?? (m.new_bid != null ? m.new_bid+"€" : null) ?? "—"}
                                 </td>
                               </tr>
                             ))}
@@ -11218,8 +11671,8 @@ const RuleWizardModal = ({
                   )}
 
                   {/* No matches */}
-                  {(previewData.matched_count === 0 || previewData.actions_taken === 0) &&
-                    (!previewData.sample_matches || previewData.sample_matches.length === 0) && (
+                  {(previewData.matched_count === 0 || previewData.applied_count === 0) &&
+                    (!previewData.applied || previewData.applied.length === 0) && (
                     <div style={{ padding:"20px", textAlign:"center", color:"var(--tx3)", fontSize:13,
                       background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
                       {t("rules.noMatchDesc")}

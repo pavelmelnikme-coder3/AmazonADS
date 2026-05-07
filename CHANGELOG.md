@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-05-07
+
+### Added — Rank Tracker: portfolio (group) support for ASINs
+
+- **`rank_portfolios` table** (migration `025_rank_portfolios.sql`): `id, workspace_id, name, display_order, created_at`. Unique constraint on `(workspace_id, name)`.
+- **`asin_labels.portfolio_id`** column added (FK → `rank_portfolios.id ON DELETE SET NULL`).
+- **`GET/POST/PATCH/DELETE /rank-portfolios`** new route (`rankPortfolios.js`). POST uses `ON CONFLICT DO UPDATE` so duplicate names are idempotent.
+- **`GET /keyword-ranks`** now returns `asin_portfolio_id` (from `asin_labels.portfolio_id`) and `display_order` (keyword-level) for sorting.
+- **`PATCH /keyword-ranks/labels/:asin`** extended to accept optional `portfolio_id` (updates only when key is present in request body, preserving existing label).
+- **`PATCH /keyword-ranks/kw-order`** new endpoint — saves per-keyword `display_order` within an ASIN group.
+- **RankTrackerPage UI**: portfolio cards rendered above ungrouped ASINs. Each card collapses/expands with chevron. Folder-icon dropdown on each ASIN header assigns or removes from a group. "+ New group" inline form with Enter/Escape keyboard support. Ungrouped label shown when at least one portfolio exists. DnD reorder applies only to ungrouped ASINs; portfolio ASINs show a spacer in place of the drag handle.
+
+### Added — Rank Tracker: keyword position 7-day sparkline on hover
+
+- **`KwRankMiniChart` component**: 180×56 SVG sparkline, inverted Y-axis (lower position = top). Series: latest snapshot per day over the last 7 days. Interactive crosshair — hover shows `#position · DD MMM` tooltip.
+- Trend badge: `▲N` green (rank improved) / `▼N` red (worsened) / `−` flat.
+- Lazy fetch on first hover (200 ms delay): `GET /keyword-ranks/:id/history?days=7`. `kwHoverFetching` ref dedupes concurrent fetches. Portal-rendered popup follows the badge with viewport-edge clamping.
+- Hover card stays open when cursor moves from badge to card (close-timer pattern, same as BSR sparkline).
+
+### Added — Search Terms: hide already-negated terms
+
+- **`GET /search-terms` LEFT JOIN `negative_keywords nk_check`** on `(workspace_id, campaign_id, keyword_text/query, match_type)`. Match types covered: `negativeExact`, `negative_exact` (exact match), `negativePhrase`, `negative_phrase` (phrase/contains match).
+- `BOOL_OR(nk_check.id IS NOT NULL) AS is_negated` aggregated per search-term group.
+- `?hideNegated=true` adds `HAVING BOOL_OR(nk_check.id IS NOT NULL) = FALSE` — hides terms already negated in that campaign.
+- **Frontend**: `stHideNegated` state (default `true`). Toggle button "Негативы скрыты / Показать негативы" with Ban icon. Negated rows (when visible) rendered with red strikethrough, 0.6 opacity, and a red `NEG` badge.
+
+### Fixed — Rules simulation preview: wrong field names (preview never showed data)
+
+- Frontend preview step read `previewData.actions_planned` (backend returns `applied_count`) → "Actions planned" always showed "—".
+- Frontend read `previewData.sample_matches` (backend returns `applied[]`) → matches table never rendered.
+- Frontend read `m.action_type` (backend returns `m.action`) → action column was blank.
+- Frontend read `m.action_value` (non-existent) for the value column → always showed "—". Now resolves `new_state ?? match_type ?? change_pct ?? new_bid+"€"` depending on action type.
+- Entity column displayed `m.target_text` (non-existent) for targets → now uses `expression[0].value` pattern consistent with run-result modal.
+
+### Fixed — Search Terms negated detection: wrong match type values
+
+- `nk_check` JOIN used `IN ('negativeExact','exact')` / `IN ('negativePhrase','phrase')` — `'exact'` and `'phrase'` are positive match types that don't exist in `negative_keywords`, so rows stored as `negative_exact` / `negative_phrase` were never detected as negated. Corrected to `IN ('negativeExact','negative_exact')` / `IN ('negativePhrase','negative_phrase')`.
+
+### Fixed — Portfolio dropdown stays open after clicking outside
+
+- Folder-icon ASIN assignment dropdown had no outside-click handler. Now a `document.addEventListener("click", close)` effect is added/removed whenever `assigningAsin` is non-null, closing the dropdown on any outside click.
+
+### Fixed — Duplicate portfolio entry in UI on conflict
+
+- Creating a portfolio with a name that already exists (server `ON CONFLICT DO UPDATE` returns the existing row) caused a duplicate entry in the local `portfolios` list. Now deduplicates by `id` before appending.
+
+---
+
 ## [Unreleased] — 2026-05-05
 
 ### Added — Search Terms tab inside the campaign drill-down modal

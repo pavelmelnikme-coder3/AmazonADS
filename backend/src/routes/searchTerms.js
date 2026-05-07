@@ -115,6 +115,12 @@ router.get("/", async (req, res, next) => {
       havingClauses.push(`SUM(stm.orders) > 0`);
     }
 
+    // Hide search terms already negated in the same campaign
+    const hideNegated = req.query.hideNegated === "true";
+    if (hideNegated) {
+      havingClauses.push(`BOOL_OR(nk_check.id IS NOT NULL) = FALSE`);
+    }
+
     const allowedSort = {
       spend:       "SUM(stm.spend)",
       clicks:      "SUM(stm.clicks)",
@@ -151,7 +157,15 @@ router.get("/", async (req, res, next) => {
        AND kw_c.kw = LOWER(stm.keyword_text)
        AND kw_c.mt = LOWER(stm.match_type)
        AND stm.campaign_id IS NULL
-       AND stm.keyword_text IS NOT NULL`;
+       AND stm.keyword_text IS NOT NULL
+      LEFT JOIN negative_keywords nk_check
+        ON nk_check.workspace_id = stm.workspace_id
+       AND nk_check.campaign_id = COALESCE(stm.campaign_id, c2.id)
+       AND (
+         (nk_check.match_type IN ('negativeExact','negative_exact') AND LOWER(nk_check.keyword_text) = LOWER(stm.query))
+         OR
+         (nk_check.match_type IN ('negativePhrase','negative_phrase') AND LOWER(stm.query) LIKE '%' || LOWER(nk_check.keyword_text) || '%')
+       )`;
 
     const groupBy = `GROUP BY
         stm.query,
@@ -193,7 +207,8 @@ router.get("/", async (req, res, next) => {
            END AS acos,
            MIN(stm.date_start) AS date_start,
            MAX(stm.date_end)   AS date_end,
-           COUNT(*)::int       AS day_rows
+           COUNT(*)::int       AS day_rows,
+           BOOL_OR(nk_check.id IS NOT NULL) AS is_negated
          ${fromAndJoins}
          WHERE ${where}
          ${groupBy}
