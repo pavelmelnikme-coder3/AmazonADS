@@ -25,7 +25,7 @@ import {
   HelpCircle, Info, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
   FlaskConical, Briefcase, GripVertical, ExternalLink,
-  Folder,
+  Folder, Users,
 } from 'lucide-react';
 
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -1158,6 +1158,34 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
     } catch (e) { showToast(e.message, "error"); }
   }
 
+  const [profilesModal, setProfilesModal] = useState(null); // { connId, profiles, loading }
+  const [profilesAttaching, setProfilesAttaching] = useState(false);
+
+  async function openManageProfiles(connId) {
+    setProfilesModal({ connId, profiles: null, loading: true });
+    try {
+      const rows = await get(`/connections/${connId}/profiles`);
+      setProfilesModal({ connId, profiles: rows, loading: false });
+    } catch (e) {
+      setProfilesModal(null);
+      showToast(e.message, "error");
+    }
+  }
+
+  async function attachNewProfile(connId, profileDbId) {
+    setProfilesAttaching(true);
+    try {
+      await post(`/connections/${connId}/profiles/attach`, { profileIds: [profileDbId], workspaceId });
+      const rows = await get(`/connections/${connId}/profiles`);
+      setProfilesModal(m => ({ ...m, profiles: rows }));
+      get("/connections").then(setConnections).catch(() => {});
+      showToast(t("connect.profileAttached"), "success");
+    } catch (e) {
+      showToast(e.message, "error");
+    }
+    setProfilesAttaching(false);
+  }
+
   function setRow(id, patch) {
     setRowState(s => ({ ...s, [id]: { ...s[id], ...patch } }));
   }
@@ -1332,6 +1360,22 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
                                 ? <span style={{ width: 10, height: 10, border: "2px solid rgba(20,184,166,.3)", borderTopColor: "var(--teal)", borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />
                                 : <Download size={13} strokeWidth={1.75} />}
                             </button>
+                            {/* Manage profiles button */}
+                            <button
+                              title={t("connect.manageProfiles")}
+                              disabled={!!rs.loading}
+                              onClick={() => openManageProfiles(c.id)}
+                              style={{
+                                width: 28, height: 28, padding: 0, borderRadius: 6,
+                                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                background: "rgba(139,92,246,.1)", color: "var(--pur)",
+                                border: "1px solid rgba(139,92,246,.2)",
+                                cursor: rs.loading ? "not-allowed" : "pointer",
+                                opacity: rs.loading ? .5 : 1, fontSize: 13, transition: "all .15s",
+                              }}
+                            >
+                              <Users size={13} strokeWidth={1.75} />
+                            </button>
                             {/* Disconnect button */}
                             <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => revokeConnection(c.id)}>{t("connect.disconnect")}</button>
                           </div>
@@ -1473,6 +1517,45 @@ const ConnectPage = ({ workspaceId, onConnected, onSyncStarted }) => {
           <div style={{ fontFamily: "var(--disp)", fontSize: 18, fontWeight: 700, marginBottom: 8 }}>{t("connect.done")}</div>
           <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 20 }}>{msg}</div>
           <button className="btn btn-primary" onClick={() => setStep("list")}>{t("connect.toConnections")}</button>
+        </div>
+      )}
+
+      {/* Manage Profiles Modal */}
+      {profilesModal && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.55)" }}
+          onClick={e => e.target === e.currentTarget && setProfilesModal(null)}>
+          <div className="card" style={{ width: 520, maxHeight: "80vh", overflow: "auto", padding: "24px 28px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700 }}>{t("connect.manageProfilesTitle")}</div>
+              <button style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx2)", lineHeight: 1 }} onClick={() => setProfilesModal(null)}><X size={18} strokeWidth={1.75} /></button>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--tx3)", marginBottom: 16 }}>{t("connect.manageProfilesDesc")}</div>
+            {profilesModal.loading ? (
+              <div style={{ textAlign: "center", padding: "40px 0" }}><span className="loader" style={{ width: 24, height: 24 }} /></div>
+            ) : (profilesModal.profiles || []).length === 0 ? (
+              <div style={{ color: "var(--tx2)", fontSize: 13 }}>{t("connect.noProfiles")}</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {(profilesModal.profiles || []).map(p => (
+                  <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", background: "var(--s2)", borderRadius: 8, border: `1px solid ${p.is_attached && p.workspace_id === workspaceId ? "rgba(34,197,94,.3)" : "var(--b1)"}` }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{p.account_name || `Profile ${p.profile_id}`}</div>
+                      <div style={{ fontSize: 11, color: "var(--tx3)" }}>ID: {p.profile_id} · {p.account_type || "advertiser"} · {p.currency_code} · {p.country_code}</div>
+                    </div>
+                    {p.is_attached && p.workspace_id === workspaceId ? (
+                      <span className="badge bg-grn" style={{ fontSize: 11, whiteSpace: "nowrap" }}><Check size={9} strokeWidth={2} style={{ display: "inline", verticalAlign: "middle", marginRight: 3 }} />{t("connect.profileActive")}</span>
+                    ) : (
+                      <button className="btn btn-primary" style={{ fontSize: 11, padding: "4px 12px", whiteSpace: "nowrap" }}
+                        disabled={profilesAttaching}
+                        onClick={() => attachNewProfile(profilesModal.connId, p.id)}>
+                        {profilesAttaching ? <span className="loader" style={{ width: 10, height: 10, borderWidth: 2 }} /> : t("connect.profileAttach")}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -1856,6 +1939,11 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     if (!expr) return "—";
     const arr = Array.isArray(expr) ? expr : [expr];
     const f = arr[0] || {};
+    // v3 API stores types as UPPER_UNDERSCORE (e.g. ASIN_SAME_AS); normalize to camelCase
+    const rawType = f.type || "";
+    const normType = rawType.includes("_")
+      ? rawType.toLowerCase().replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+      : rawType;
     const map = {
       queryHighRelMatches: t("campaigns.detail.autoClose"),
       queryBroadRelMatches: t("campaigns.detail.autoLoose"),
@@ -1865,7 +1953,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
       asinCategorySameAs: `Category: ${f.value || ""}`,
       asinBrandSameAs: `Brand: ${f.value || ""}`,
     };
-    return map[f.type] || f.type || JSON.stringify(f);
+    return map[normType] || map[rawType] || rawType || JSON.stringify(f);
   }
 
   const stateLabel = (s) => ({ enabled: t("common.statusEnabled"), paused: t("common.statusPaused"), archived: t("common.statusArchived") }[s] || s);
@@ -2199,8 +2287,8 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                         style={{ cursor: "pointer" }} />
                     </TD>
                     <TD style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>{label}</TD>
-                    <TD style={{ color: tgt.expression_type === "auto" ? "var(--teal)" : "var(--tx3)", fontSize: 10 }}>
-                      {tgt.expression_type === "auto" ? t("rules.targetingAutoShort") : tgt.expression_type === "manual" ? t("rules.targetingManualShort") : tgt.expression_type || "—"}
+                    <TD style={{ color: tgt.expression_type?.toLowerCase() === "auto" ? "var(--teal)" : "var(--tx3)", fontSize: 10 }}>
+                      {tgt.expression_type?.toLowerCase() === "auto" ? t("rules.targetingAutoShort") : tgt.expression_type?.toLowerCase() === "manual" ? t("rules.targetingManualShort") : tgt.expression_type || "—"}
                     </TD>
                     <TD>{isEditing
                       ? <StateSelect value={editTgt.state} onChange={v => setEditTgt(prev => ({ ...prev, state: v }))} />
@@ -2320,6 +2408,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead><tr style={THEAD_ROW}>
               {stTH("query",       t("rules.colSearchTerm"))}
+              <TH>Added as</TH>
               <TH>{t("campaigns.detail.matchType")}</TH>
               <TH>{t("keywords.colKeyword")}</TH>
               {stTH("impressions", "Impr.", true)}
@@ -2337,6 +2426,18 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                   <tr key={term.id || i} style={ROW(i)}>
                     <TD style={{ fontWeight: 500, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       <span title={term.query}>{term.query}</span>
+                    </TD>
+                    <TD>
+                      {term.is_negated ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10,
+                          color: "var(--red)", background: "rgba(239,68,68,.1)",
+                          border: "1px solid rgba(239,68,68,.25)", borderRadius: 4,
+                          padding: "2px 6px", whiteSpace: "nowrap" }}
+                          title={`Negative ${(term.neg_match_type || "").replace(/^negative_?/i, "").toLowerCase()} keyword`}>
+                          <Ban size={10} strokeWidth={2.5} />
+                          Neg. keyw.
+                        </span>
+                      ) : <span style={{ color: "var(--tx3)" }}>—</span>}
                     </TD>
                     <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{term.match_type || "—"}</TD>
                     <TD style={{ color: "var(--tx2)", fontSize: 11, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
@@ -4070,7 +4171,9 @@ const ProductsPage = ({ workspaceId }) => {
       list = list.filter(p =>
         p.asin.toLowerCase().includes(q) ||
         (p.title || "").toLowerCase().includes(q) ||
-        (p.brand || "").toLowerCase().includes(q)
+        (p.brand || "").toLowerCase().includes(q) ||
+        (p.internal_sku || "").toLowerCase().includes(q) ||
+        (p.seller_skus || []).some(s => s.toLowerCase().includes(q))
       );
     }
     if (filterBrand !== "all") {
@@ -4397,7 +4500,7 @@ const ProductsPage = ({ workspaceId }) => {
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search ASIN, title, brand…"
+              placeholder="Search ASIN, title, brand, SKU…"
               style={{
                 width: "100%", boxSizing: "border-box",
                 padding: "6px 12px 6px 30px", borderRadius: 7, fontSize: 12,
@@ -4555,11 +4658,29 @@ const ProductsPage = ({ workspaceId }) => {
                       )}
                     </div>
                     {p.title && (
-                      <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 10,
+                      <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 6,
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {p.title}
                       </div>
                     )}
+                    {(() => {
+                      const allSkus = [
+                        ...(p.seller_skus || []),
+                        ...(p.internal_sku ? [p.internal_sku] : []),
+                      ].filter((s, i, arr) => s && arr.indexOf(s) === i);
+                      return allSkus.length > 0 ? (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+                          {allSkus.map(sku => (
+                            <span key={sku} style={{
+                              fontSize: 10, fontFamily: "var(--mono)",
+                              padding: "1px 6px", borderRadius: 4,
+                              background: "var(--s2)", border: "1px solid var(--b2)",
+                              color: "var(--tx3)",
+                            }}>{sku}</span>
+                          ))}
+                        </div>
+                      ) : null;
+                    })()}
 
                     {allRanks.length > 0 ? (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -9780,10 +9901,14 @@ const KeywordsPage = ({ workspaceId }) => {
                                 textDecoration: term.is_negated ? "line-through" : "none",
                               }}>{term.query}</span>
                               {term.is_negated && (
-                                <span style={{ fontSize: 9, fontWeight: 700, color: "var(--red)",
-                                  background: "rgba(239,68,68,.12)", border: "1px solid rgba(239,68,68,.3)",
-                                  borderRadius: 3, padding: "1px 4px", letterSpacing: ".04em", flexShrink: 0 }}
-                                  title="Добавлен в негативные ключи">NEG</span>
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 3,
+                                  fontSize: 10, color: "var(--red)", background: "rgba(239,68,68,.1)",
+                                  border: "1px solid rgba(239,68,68,.25)", borderRadius: 4,
+                                  padding: "2px 5px", flexShrink: 0 }}
+                                  title={`Negative ${(term.neg_match_type || "").replace(/^negative_?/i, "").toLowerCase()} keyword`}>
+                                  <Ban size={10} strokeWidth={2.5} />
+                                  Neg. keyw.
+                                </span>
                               )}
                             </div>
                             {term.match_type && (

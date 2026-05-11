@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-05-11
+
+### Added — Full test coverage: campaigns wizard, rules engine
+
+- **Unit tests** — `campaigns.test.js` fully rewritten (+4 new describe blocks, 68 tests total): `PATCH /campaigns/:id` (16 tests — state/budget/bidding/placements for SP/SB/SD, UPPERCASE enforcement, fire-and-forget placement path, 400/404/500), `GET /campaigns/:id` (404 + workspace isolation), `GET /campaigns/:id/placement` (v3 format, v2 format, empty, v3-priority), `GET /campaigns/:id/metrics` (time-series, date range).
+- **`adGroups.test.js`** new file (26 tests): `GET`, `POST`, `PATCH` for ad groups — SP/SB/SD endpoint routing, bid clamping ≥ 0.02, Amazon failure non-fatal, limit clamped to 1000.
+- **`keywords.test.js`** extended (+21 tests): `POST /keywords` (create single: all match types, 409 dedup, bid clamping, pushNewKeywords UPPERCASE), `PATCH /keywords/bulk` (single/multi update, skip not-found, loadKeywordContext).
+- **`campaigns.integration.test.js`** new file (48 integration tests with real PostgreSQL): full wizard flow campaign→ad-group→keywords with FK-hierarchy verification, state transitions in DB, audit events written, bulk keyword update, PATCH non-fatal Amazon failure.
+- **`jest.config.js`** new default config that excludes `tests/integration/` from `npm test` — prevents integration tests running without Docker.
+- **`seed.js` `cleanMutable()`** extended: now deletes dynamically created campaigns/ad_groups/keywords (not seeded) between tests; resets seeded campaigns/ad_groups to initial state.
+
+### Fixed — Integration tests: audit_events trigger
+
+- `globalSetup.js` was disabling trigger `prevent_audit_modification` (wrong name). Actual trigger is `audit_immutable`. Fixed → `cleanMutable` DELETE FROM audit_events now works between test runs.
+
+---
+
 ## [Unreleased] — 2026-05-07
 
 ### Added — Rank Tracker: portfolio (group) support for ASINs

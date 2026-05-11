@@ -45,7 +45,7 @@ router.get("/", async (req, res, next) => {
         CASE WHEN SUM(clicks)    > 0 THEN SUM(cost)/SUM(clicks)        END AS cpc
       FROM fact_metrics_daily
       WHERE workspace_id = $1
-        AND date >= NOW() - INTERVAL '${mInterval} days'
+        AND date >= (CURRENT_DATE - INTERVAL '${mInterval + 1} days') AND date <= (CURRENT_DATE - INTERVAL '1 day')
         AND entity_type = 'target'
       GROUP BY amazon_id
     ) m ON m.amazon_id = t.amazon_target_id`;

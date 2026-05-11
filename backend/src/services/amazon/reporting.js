@@ -32,6 +32,14 @@ const REPORT_CONFIGS = {
         "purchases1d","purchases7d","purchases14d","purchases30d",
         "sales1d","sales7d","sales14d","sales30d","date"],
     },
+    ad_group: {
+      reportType: "spAdGroups",
+      groupBy: ["adGroup"],
+      metrics: ["adGroupId","adGroupName","campaignId","campaignName",
+        "impressions","clicks","cost",
+        "purchases1d","purchases7d","purchases14d","purchases30d",
+        "sales1d","sales7d","sales14d","sales30d","date"],
+    },
     keyword: {
       reportType: "spKeywords",
       groupBy: ["adGroup"],
@@ -82,7 +90,8 @@ const REPORT_CONFIGS = {
       // NOTE: SB API still uses "keywordText" (not "keyword" like SP)
       reportType: "sbSearchTerm",
       groupBy: ["searchTerm"],
-      metrics: ["searchTerm","keywordId","keywordText","matchType",
+      metrics: ["campaignId","campaignName","adGroupId","adGroupName",
+        "searchTerm","keywordId","keywordText","matchType",
         "impressions","clicks","cost",
         "purchases","sales","purchasesClicks","salesClicks","unitsSold","date"],
     },
@@ -615,6 +624,7 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
 
   const reportTypes = [
     ["SP", "campaign"],
+    ["SP", "ad_group"],
     ["SP", "keyword"],
     ["SP", "searchTerm"],
     ["SP", "target"],
@@ -660,7 +670,7 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
     searchTerm: { SP: "spSearchTerm", SB: null, SD: null },
     target:   { SP: "spTargeting", SB: null, SD: "sdTargeting" },
     advertised_product: { SP: "spAdvertisedProduct", SB: null, SD: null },
-    ad_group: { SB: "sbAdGroup", SD: "sdAdGroup", SP: null },
+    ad_group: { SB: "sbAdGroup", SD: "sdAdGroup", SP: "spAdGroups" },
   };
 
   let jobsQueued = 0;

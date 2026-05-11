@@ -308,3 +308,237 @@ describe("PATCH /keywords/:id", () => {
     expect(res.body.error).toMatch(/not found/i);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  POST /keywords — create a single keyword
+// ─────────────────────────────────────────────────────────────────────────────
+describe("POST /keywords", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  const AG_ID = "ag---0001-0000-0000-000000000001";
+
+  const AG_DB_ROW = {
+    id: AG_ID,
+    amazon_ag_id: "AZ-AG-001",
+    campaign_id: CAMP_ID,
+    amazon_campaign_id: "AMZ001",
+    campaign_type: "sponsoredProducts",
+    profile_db_id: "prof-0001",
+    amazon_profile_id: "123456789",
+    connection_id: "conn-0001",
+    marketplace_id: "A1PA6795UKMFR9",
+  };
+
+  const KW_PAYLOAD = {
+    adGroupId: AG_ID,
+    keywordText: "running shoes",
+    matchType: "exact",
+    bid: 0.90,
+  };
+
+  function mockCreate(kwRow = { id: KW_ID, keyword_text: "running shoes", match_type: "exact", bid: "0.90", state: "enabled" }) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [AG_DB_ROW] })  // ad group SELECT
+      .mockResolvedValueOnce({ rows: [] })             // dedup check (no existing)
+      .mockResolvedValueOnce({ rows: [kwRow] });       // INSERT keyword
+  }
+
+  it("creates a keyword with exact match type", async () => {
+    mockCreate();
+    const res = await request(app).post("/keywords").send(KW_PAYLOAD);
+    expect(res.status).toBe(200);
+    expect(res.body.data.keyword_text).toBe("running shoes");
+    expect(res.body.data.match_type).toBe("exact");
+  });
+
+  it("creates a keyword with phrase match type", async () => {
+    mockCreate({ id: KW_ID, keyword_text: "running shoes", match_type: "phrase", bid: "0.80", state: "enabled" });
+    const res = await request(app).post("/keywords").send({ ...KW_PAYLOAD, matchType: "phrase" });
+    expect(res.status).toBe(200);
+    expect(res.body.data.match_type).toBe("phrase");
+  });
+
+  it("creates a keyword with broad match type", async () => {
+    mockCreate({ id: KW_ID, keyword_text: "running shoes", match_type: "broad", bid: "0.60", state: "enabled" });
+    const res = await request(app).post("/keywords").send({ ...KW_PAYLOAD, matchType: "broad" });
+    expect(res.status).toBe(200);
+    expect(res.body.data.match_type).toBe("broad");
+  });
+
+  it("defaults matchType to 'broad' when not provided", async () => {
+    mockCreate();
+    await request(app).post("/keywords").send({ adGroupId: AG_ID, keywordText: "test kw", bid: 0.5 });
+    const params = dbQuery.mock.calls[2][1];
+    expect(params).toContain("broad");
+  });
+
+  it("returns 400 when adGroupId is missing", async () => {
+    const res = await request(app).post("/keywords").send({ keywordText: "test" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/adGroupId.*required/i);
+  });
+
+  it("returns 400 when keywordText is missing", async () => {
+    const res = await request(app).post("/keywords").send({ adGroupId: AG_ID });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/keywordText.*required/i);
+  });
+
+  it("returns 400 for invalid matchType", async () => {
+    const res = await request(app).post("/keywords").send({ ...KW_PAYLOAD, matchType: "fuzzy" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/matchType must be/i);
+  });
+
+  it("returns 404 when ad group not found", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app).post("/keywords").send(KW_PAYLOAD);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/ad group not found/i);
+  });
+
+  it("returns 409 when keyword already exists in same ad group + match type", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [AG_DB_ROW] })
+      .mockResolvedValueOnce({ rows: [{ id: "existing-kw" }] }); // dedup hit
+    const res = await request(app).post("/keywords").send(KW_PAYLOAD);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/already exists/i);
+  });
+
+  it("clamps bid to minimum 0.02", async () => {
+    mockCreate();
+    await request(app).post("/keywords").send({ ...KW_PAYLOAD, bid: 0.001 });
+    const insertParams = dbQuery.mock.calls[2][1];
+    expect(insertParams).toContain(0.02);
+  });
+
+  it("defaults bid to 0.50 when not provided", async () => {
+    mockCreate();
+    await request(app).post("/keywords").send({ adGroupId: AG_ID, keywordText: "test" });
+    const insertParams = dbQuery.mock.calls[2][1];
+    expect(insertParams).toContain(0.5);
+  });
+
+  it("matchType is normalized to lowercase in DB insert", async () => {
+    mockCreate();
+    await request(app).post("/keywords").send({ ...KW_PAYLOAD, matchType: "EXACT" });
+    const insertParams = dbQuery.mock.calls[2][1];
+    expect(insertParams).toContain("exact");
+  });
+
+  it("calls pushNewKeywords after successful insert", async () => {
+    const { pushNewKeywords } = require("../src/services/amazon/writeback");
+    mockCreate();
+    await request(app).post("/keywords").send(KW_PAYLOAD);
+    expect(pushNewKeywords).toHaveBeenCalledTimes(1);
+    const [kwList] = pushNewKeywords.mock.calls[0];
+    expect(kwList[0].keywordText).toBe("running shoes");
+    expect(kwList[0].matchType).toBe("EXACT");
+  });
+
+  it("sends matchType UPPERCASE to Amazon via pushNewKeywords", async () => {
+    const { pushNewKeywords } = require("../src/services/amazon/writeback");
+    mockCreate();
+    await request(app).post("/keywords").send({ ...KW_PAYLOAD, matchType: "phrase" });
+    const [kwList] = pushNewKeywords.mock.calls[0];
+    expect(kwList[0].matchType).toBe("PHRASE");
+  });
+
+  it("writes audit event after create", async () => {
+    const { writeAudit } = require("../src/routes/audit");
+    mockCreate();
+    await request(app).post("/keywords").send(KW_PAYLOAD);
+    expect(writeAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "keyword.added" })
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PATCH /keywords/bulk — bulk bid/state updates
+// ─────────────────────────────────────────────────────────────────────────────
+describe("PATCH /keywords/bulk", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  const KW_ID2 = "kw---0002-0000-0000-000000000001";
+
+  function mockBulk(kwRows = [SAMPLE_KW]) {
+    for (const kw of kwRows) {
+      dbQuery
+        .mockResolvedValueOnce({ rows: [kw] })  // SELECT keyword
+        .mockResolvedValueOnce({ rows: [] });     // UPDATE keyword
+    }
+    // loadKeywordContext returns empty (write-back is fire-and-forget)
+  }
+
+  it("returns 400 when updates array is missing", async () => {
+    const res = await request(app).patch("/keywords/bulk").send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/updates required/i);
+  });
+
+  it("returns 400 when updates array is empty", async () => {
+    const res = await request(app).patch("/keywords/bulk").send({ updates: [] });
+    expect(res.status).toBe(400);
+  });
+
+  it("updates a single keyword bid", async () => {
+    mockBulk();
+    const res = await request(app).patch("/keywords/bulk").send({
+      updates: [{ id: KW_ID, bid: 1.50 }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(1);
+  });
+
+  it("updates multiple keywords in one call", async () => {
+    mockBulk([SAMPLE_KW, { ...SAMPLE_KW, id: KW_ID2 }]);
+    const res = await request(app).patch("/keywords/bulk").send({
+      updates: [
+        { id: KW_ID,  bid: 1.00 },
+        { id: KW_ID2, bid: 2.00 },
+      ],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(2);
+  });
+
+  it("skips keywords not found in this workspace", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] }); // keyword not found
+    const res = await request(app).patch("/keywords/bulk").send({
+      updates: [{ id: "no-such-id", bid: 1.0 }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(0);
+  });
+
+  it("updates state to paused in bulk", async () => {
+    mockBulk();
+    const res = await request(app).patch("/keywords/bulk").send({
+      updates: [{ id: KW_ID, state: "paused" }],
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(1);
+  });
+
+  it("calls loadKeywordContext for write-back after update", async () => {
+    const { loadKeywordContext } = require("../src/services/amazon/writeback");
+    mockBulk();
+    await request(app).patch("/keywords/bulk").send({
+      updates: [{ id: KW_ID, bid: 1.50 }],
+    });
+    expect(loadKeywordContext).toHaveBeenCalledWith(WS_ID, [KW_ID]);
+  });
+
+  it("skips entry when neither bid nor state is provided", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [SAMPLE_KW] }); // SELECT found
+    const res = await request(app).patch("/keywords/bulk").send({
+      updates: [{ id: KW_ID }], // no bid, no state
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toBe(0);
+  });
+});

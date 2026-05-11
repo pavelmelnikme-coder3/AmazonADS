@@ -365,6 +365,55 @@ router.post("/:id/sync", requireAuth, requireWorkspace, async (req, res, next) =
   }
 });
 
+// GET /connections/debug/sb-campaigns — test raw SB campaign API for each attached profile
+router.get("/debug/sb-campaigns", requireWorkspace, async (req, res, next) => {
+  try {
+    const { getValidAccessToken } = require("../services/amazon/lwa");
+    const axios = require("axios");
+
+    const { rows: profiles } = await query(
+      `SELECT p.id, p.profile_id, p.connection_id, p.marketplace_id, p.country_code, p.account_name, p.account_type
+       FROM amazon_profiles p
+       JOIN amazon_connections c ON c.id = p.connection_id
+       WHERE p.workspace_id = $1 AND p.is_attached = TRUE AND c.status = 'active'`,
+      [req.workspaceId]
+    );
+
+    const REGION_URLS = {
+      NA: process.env.AMAZON_ADS_API_URL    || "https://advertising-api.amazon.com",
+      EU: process.env.AMAZON_ADS_API_EU_URL || "https://advertising-api-eu.amazon.com",
+      FE: process.env.AMAZON_ADS_API_FE_URL || "https://advertising-api-fe.amazon.com",
+    };
+    const COUNTRY_REGION = { US:"NA",CA:"NA",GB:"EU",UK:"EU",DE:"EU",FR:"EU",IT:"EU",ES:"EU",NL:"EU",SE:"EU",PL:"EU",TR:"EU",AU:"FE",JP:"FE" };
+
+    const results = [];
+    for (const p of profiles) {
+      const region = COUNTRY_REGION[(p.country_code||"").toUpperCase()] || "EU";
+      const baseUrl = (REGION_URLS[region] || "https://advertising-api-eu.amazon.com").replace(/^http:/,"https:");
+      let result = {};
+      try {
+        const token = await getValidAccessToken(p.connection_id);
+        const resp = await axios.get(`${baseUrl}/sb/v4/campaigns`, {
+          params: { stateFilter: "enabled,paused,archived", count: 100, startIndex: 0 },
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+            "Amazon-Advertising-API-Scope": String(p.profile_id),
+            Accept: "application/json",
+          },
+          timeout: 15000,
+          validateStatus: null,
+        });
+        result = { status: resp.status, topLevelKeys: Object.keys(resp.data||{}), campaignCount: resp.data?.campaigns?.length ?? resp.data?.length ?? "N/A", sample: JSON.stringify(resp.data).slice(0,800) };
+      } catch (e) {
+        result = { error: e.message, code: e.code };
+      }
+      results.push({ profileId: p.profile_id, accountName: p.account_name, accountType: p.account_type, country: p.country_code, region, ...result });
+    }
+    res.json({ profiles: results });
+  } catch (err) { next(err); }
+});
+
 // DELETE /connections/:id
 router.delete("/:id", requireRole("owner", "admin"), async (req, res, next) => {
   try {

@@ -203,17 +203,17 @@ async function fetchCampaigns(profile) {
       return campaigns;
     })(),
     // SB Campaigns (GET-based, v4)
-    getAll({ ...base, path: "/sb/v4/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
+    getAll({ ...base, path: "/sb/v4/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns", debug: true })
       .then(r => r.map(c => ({ ...c, campaignType: "sponsoredBrands" })))
       .catch(err => {
-        logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message });
+        logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message, status: err.status, amazonResponse: err.amazonResponse ? JSON.stringify(err.amazonResponse).slice(0, 800) : undefined });
         return [];
       }),
     // SD Campaigns (GET-based)
-    getAll({ ...base, path: "/sd/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns" })
+    getAll({ ...base, path: "/sd/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns", debug: true })
       .then(r => r.map(c => ({ ...c, campaignType: "sponsoredDisplay" })))
       .catch(err => {
-        logger.warn("SD campaigns failed", { profileId: profile.profile_id, error: err.message });
+        logger.warn("SD campaigns failed", { profileId: profile.profile_id, error: err.message, status: err.status, amazonResponse: err.amazonResponse ? JSON.stringify(err.amazonResponse).slice(0, 800) : undefined });
         return [];
       }),
   ]);

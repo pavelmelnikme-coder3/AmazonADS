@@ -2,7 +2,7 @@ const express = require("express");
 const { query, withTransaction } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit } = require("./audit");
-const { post: apiPost, patch: apiPatch } = require("../services/amazon/adsClient");
+const { post: apiPost, put: apiPut } = require("../services/amazon/adsClient");
 const logger = require("../config/logger");
 
 const router = express.Router();
@@ -91,7 +91,7 @@ router.get("/", async (req, res, next) => {
           CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 END as acos_14d,
           CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas_14d
         FROM fact_metrics_daily
-        WHERE workspace_id = $1 AND date >= NOW() - INTERVAL '${metricsInterval} days' AND entity_type = 'campaign'
+        WHERE workspace_id = $1 AND date >= (CURRENT_DATE - INTERVAL '${metricsInterval + 1} days') AND date <= (CURRENT_DATE - INTERVAL '1 day') AND entity_type = 'campaign'
         GROUP BY amazon_id
       ) m ON m.amazon_id = c.amazon_campaign_id`;
 
@@ -174,10 +174,20 @@ router.patch("/:id", async (req, res, next) => {
 
     const before = { state: campaign.state, dailyBudget: campaign.daily_budget };
 
-    // Build Amazon API payload
+    // Build Amazon API payload — all APIs require uppercase state
+    const isSB = campaign.campaign_type === "sponsoredBrands";
+    const isSD = campaign.campaign_type === "sponsoredDisplay";
     const amazonPayload = { campaignId: campaign.amazon_campaign_id };
-    if (state) amazonPayload.state = state;
-    if (dailyBudget !== undefined) amazonPayload.dailyBudget = parseFloat(dailyBudget);
+    if (state) amazonPayload.state = state.toUpperCase();
+    if (dailyBudget !== undefined) {
+      const budget = parseFloat(dailyBudget);
+      if (isSB || isSD) {
+        // SB/SD use nested budget object with budgetType
+        amazonPayload.budget = { budget, budgetType: "DAILY" };
+      } else {
+        amazonPayload.dailyBudget = budget;
+      }
+    }
     if (biddingStrategy && !placements) amazonPayload.bidding = { strategy: biddingStrategy };
     if (placements) {
       amazonPayload.bidding = {
@@ -189,18 +199,18 @@ router.patch("/:id", async (req, res, next) => {
       };
     }
 
+    // SP uses the same v3-compatible path; SB/SD never had a /v2/ prefix
     const endpoint = {
-      sponsoredProducts: "/v2/sp/campaigns",
-      sponsoredBrands: "/v2/sb/campaigns",
-      sponsoredDisplay: "/v2/sd/campaigns",
+      sponsoredProducts: "/sp/campaigns",
+      sponsoredBrands:   "/sb/campaigns",
+      sponsoredDisplay:  "/sd/campaigns",
     }[campaign.campaign_type];
 
-    // Apply to Amazon
-    // Placement-only calls are non-fatal; budget/state/strategy changes surface errors to user
+    // Apply to Amazon — all three APIs use PUT for campaign mutations
     if (endpoint) {
       if (placements && !state && dailyBudget === undefined && !biddingStrategy) {
-        // Placement-only update: non-fatal
-        apiPatch({
+        // Placement-only update: non-fatal (SP-only feature)
+        apiPut({
           connectionId: campaign.connection_id,
           profileId: String(campaign.amazon_profile_id),
           marketplace: campaign.marketplace_id,
@@ -209,7 +219,7 @@ router.patch("/:id", async (req, res, next) => {
           group: "campaigns",
         }).catch(e => logger.warn("Placement write-back failed (non-fatal)", { error: e.message }));
       } else {
-        await apiPatch({
+        await apiPut({
           connectionId: campaign.connection_id,
           profileId: String(campaign.amazon_profile_id),
           marketplace: campaign.marketplace_id,

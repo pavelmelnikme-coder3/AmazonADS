@@ -76,6 +76,13 @@ export default {
     scheduleHourly: "Каждый час",
     scheduleDaily: "Каждый день",
     scheduleWeekly: "Каждую неделю",
+    manageProfiles: "Управление профилями",
+    manageProfilesTitle: "Профили Amazon",
+    manageProfilesDesc: "Все профили в этом подключении. Подключите дополнительные профили (например, Brand профиль для Sponsored Brands).",
+    noProfiles: "Профили не найдены.",
+    profileActive: "Активен",
+    profileAttach: "Подключить",
+    profileAttached: "Профиль подключён и синхронизация поставлена в очередь.",
   },
   overview: {
     title: "Обзор",

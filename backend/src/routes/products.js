@@ -20,7 +20,9 @@ router.get("/", async (req, res, next) => {
          s.best_category,
          s.classification_ranks,
          s.display_group_ranks,
-         s.captured_at as bsr_updated_at
+         s.captured_at as bsr_updated_at,
+         COALESCE(sm.sku, '') AS internal_sku,
+         COALESCE(inv.seller_skus, ARRAY[]::text[]) AS seller_skus
        FROM products p
        LEFT JOIN LATERAL (
          SELECT best_rank, best_category, classification_ranks, display_group_ranks, captured_at
@@ -29,6 +31,15 @@ router.get("/", async (req, res, next) => {
          ORDER BY captured_at DESC
          LIMIT 1
        ) s ON true
+       LEFT JOIN sku_mapping sm
+         ON sm.workspace_id = p.workspace_id AND sm.asin = p.asin
+       LEFT JOIN LATERAL (
+         SELECT ARRAY_AGG(DISTINCT si.seller_sku) FILTER (WHERE si.seller_sku != '') AS seller_skus
+         FROM sp_inventory si
+         WHERE si.workspace_id = p.workspace_id
+           AND si.asin = p.asin
+           AND si.marketplace_id = p.marketplace_id
+       ) inv ON true
        WHERE p.workspace_id = $1 AND p.is_active = true
        ORDER BY s.best_rank ASC NULLS LAST, p.created_at DESC`,
       [req.workspaceId]

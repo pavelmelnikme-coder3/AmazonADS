@@ -76,6 +76,13 @@ export default {
     scheduleHourly: "Jede Stunde",
     scheduleDaily: "Jeden Tag",
     scheduleWeekly: "Jede Woche",
+    manageProfiles: "Profile verwalten",
+    manageProfilesTitle: "Amazon-Profile",
+    manageProfilesDesc: "Alle Profile in dieser Verbindung. Zusätzliche Profile anhängen (z.B. Brand-Profil für Sponsored Brands Kampagnen).",
+    noProfiles: "Keine Profile gefunden.",
+    profileActive: "Aktiv",
+    profileAttach: "Anhängen",
+    profileAttached: "Profil angehängt und Synchronisierung in die Warteschlange gestellt.",
   },
   overview: {
     title: "Übersicht",

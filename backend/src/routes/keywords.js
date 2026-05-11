@@ -111,7 +111,7 @@ router.get("/", async (req, res, next) => {
       params.push(dateFrom, dateTo);
     } else {
       const days = Math.min(Math.max(parseInt(metricsDays) || 30, 1), 365);
-      dateCondition = `AND date >= NOW() - INTERVAL '${days} days'`;
+      dateCondition = `AND date >= (CURRENT_DATE - INTERVAL '${days + 1} days') AND date <= (CURRENT_DATE - INTERVAL '1 day')`;
     }
 
     const metricsJoin = `LEFT JOIN (

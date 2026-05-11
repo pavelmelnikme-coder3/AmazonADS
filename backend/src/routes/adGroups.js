@@ -32,6 +32,7 @@ router.get("/", async (req, res, next) => {
 
     const where = "WHERE " + conditions.join(" AND ");
 
+    // Direct ad_group metrics (populated for SB/SD, and SP after spAdGroups report is synced)
     const metricsJoin = `LEFT JOIN (
       SELECT amazon_id,
         SUM(impressions)  AS impressions,
@@ -44,23 +45,51 @@ router.get("/", async (req, res, next) => {
         CASE WHEN SUM(clicks)    > 0 THEN SUM(cost)/SUM(clicks)        END AS cpc
       FROM fact_metrics_daily
       WHERE workspace_id = $1
-        AND date >= NOW() - INTERVAL '${mInterval} days'
+        AND date >= (CURRENT_DATE - INTERVAL '${mInterval + 1} days') AND date <= (CURRENT_DATE - INTERVAL '1 day')
         AND entity_type = 'ad_group'
       GROUP BY amazon_id
-    ) m ON m.amazon_id = ag.amazon_ag_id`;
+    ) m ON m.amazon_id = ag.amazon_ag_id
+    LEFT JOIN (
+      SELECT kw.ad_group_id,
+        SUM(fm.impressions) AS impressions,
+        SUM(fm.clicks)      AS clicks,
+        SUM(fm.cost)        AS cost,
+        SUM(fm.sales_14d)   AS sales_14d,
+        SUM(fm.orders_14d)  AS orders_14d
+      FROM fact_metrics_daily fm
+      JOIN keywords kw ON kw.id = fm.entity_id AND kw.workspace_id = fm.workspace_id
+      WHERE fm.workspace_id = $1
+        AND fm.date >= (CURRENT_DATE - INTERVAL '${mInterval + 1} days') AND fm.date <= (CURRENT_DATE - INTERVAL '1 day')
+        AND fm.entity_type = 'keyword'
+      GROUP BY kw.ad_group_id
+    ) kw_m ON kw_m.ad_group_id = ag.id
+    LEFT JOIN (
+      SELECT t.ad_group_id,
+        SUM(fm.impressions) AS impressions,
+        SUM(fm.clicks)      AS clicks,
+        SUM(fm.cost)        AS cost,
+        SUM(fm.sales_14d)   AS sales_14d,
+        SUM(fm.orders_14d)  AS orders_14d
+      FROM fact_metrics_daily fm
+      JOIN targets t ON t.id = fm.entity_id AND t.workspace_id = fm.workspace_id
+      WHERE fm.workspace_id = $1
+        AND fm.date >= (CURRENT_DATE - INTERVAL '${mInterval + 1} days') AND fm.date <= (CURRENT_DATE - INTERVAL '1 day')
+        AND fm.entity_type = 'target'
+      GROUP BY t.ad_group_id
+    ) tgt_m ON tgt_m.ad_group_id = ag.id`;
 
     const allowedSort = {
-      spend:       "COALESCE(m.cost,0)",
-      sales:       "COALESCE(m.sales_14d,0)",
-      acos:        "m.acos_14d",
-      roas:        "m.roas_14d",
+      spend:       `CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.cost,0)       ELSE COALESCE(kw_m.cost,0)      +COALESCE(tgt_m.cost,0)       END`,
+      sales:       `CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.sales_14d,0)  ELSE COALESCE(kw_m.sales_14d,0) +COALESCE(tgt_m.sales_14d,0)  END`,
+      clicks:      `CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.clicks,0)     ELSE COALESCE(kw_m.clicks,0)    +COALESCE(tgt_m.clicks,0)     END`,
+      orders:      `CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.orders_14d,0) ELSE COALESCE(kw_m.orders_14d,0)+COALESCE(tgt_m.orders_14d,0) END`,
+      acos:        `CASE WHEN m.amazon_id IS NOT NULL THEN m.acos_14d WHEN (COALESCE(kw_m.sales_14d,0)+COALESCE(tgt_m.sales_14d,0))>0 THEN (COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0))/(COALESCE(kw_m.sales_14d,0)+COALESCE(tgt_m.sales_14d,0))*100 END`,
+      roas:        `CASE WHEN m.amazon_id IS NOT NULL THEN m.roas_14d WHEN (COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0))>0 THEN (COALESCE(kw_m.sales_14d,0)+COALESCE(tgt_m.sales_14d,0))/(COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0)) END`,
       name:        "ag.name",
       state:       "ag.state",
-      clicks:      "COALESCE(m.clicks,0)",
-      orders:      "COALESCE(m.orders_14d,0)",
       default_bid: "ag.default_bid",
     };
-    const orderField = allowedSort[sortBy] || "COALESCE(m.cost,0)";
+    const orderField = allowedSort[sortBy] || allowedSort.spend;
     const orderDir   = sortDir === "asc" ? "ASC" : "DESC";
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
@@ -78,14 +107,23 @@ router.get("/", async (req, res, next) => {
             WHERE k.ad_group_id = ag.id AND k.state != 'archived') AS keyword_count,
            (SELECT COUNT(*) FROM targets  t
             WHERE t.ad_group_id = ag.id AND t.state != 'archived') AS target_count,
-           COALESCE(m.impressions,0) AS impressions,
-           COALESCE(m.clicks,0)     AS clicks,
-           COALESCE(m.cost,0)       AS spend,
-           COALESCE(m.sales_14d,0)  AS sales,
-           COALESCE(m.orders_14d,0) AS orders,
-           m.acos_14d AS acos,
-           m.roas_14d AS roas,
-           m.cpc
+           CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.impressions,0) ELSE COALESCE(kw_m.impressions,0)+COALESCE(tgt_m.impressions,0) END AS impressions,
+           CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.clicks,0)     ELSE COALESCE(kw_m.clicks,0)    +COALESCE(tgt_m.clicks,0)      END AS clicks,
+           CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.cost,0)       ELSE COALESCE(kw_m.cost,0)      +COALESCE(tgt_m.cost,0)        END AS spend,
+           CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.sales_14d,0)  ELSE COALESCE(kw_m.sales_14d,0) +COALESCE(tgt_m.sales_14d,0)   END AS sales,
+           CASE WHEN m.amazon_id IS NOT NULL THEN COALESCE(m.orders_14d,0) ELSE COALESCE(kw_m.orders_14d,0)+COALESCE(tgt_m.orders_14d,0)  END AS orders,
+           CASE WHEN m.amazon_id IS NOT NULL THEN m.acos_14d
+                WHEN (COALESCE(kw_m.sales_14d,0)+COALESCE(tgt_m.sales_14d,0)) > 0
+                THEN (COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0))/(COALESCE(kw_m.sales_14d,0)+COALESCE(tgt_m.sales_14d,0))*100
+           END AS acos,
+           CASE WHEN m.amazon_id IS NOT NULL THEN m.roas_14d
+                WHEN (COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0)) > 0
+                THEN (COALESCE(kw_m.sales_14d,0)+COALESCE(tgt_m.sales_14d,0))/(COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0))
+           END AS roas,
+           CASE WHEN m.amazon_id IS NOT NULL THEN m.cpc
+                WHEN (COALESCE(kw_m.clicks,0)+COALESCE(tgt_m.clicks,0)) > 0
+                THEN (COALESCE(kw_m.cost,0)+COALESCE(tgt_m.cost,0))/(COALESCE(kw_m.clicks,0)+COALESCE(tgt_m.clicks,0))
+           END AS cpc
          FROM ad_groups ag
          JOIN campaigns c           ON c.id    = ag.campaign_id
          JOIN amazon_profiles p     ON p.id    = ag.profile_id
@@ -226,7 +264,9 @@ router.patch("/:id", async (req, res, next) => {
     };
 
     // Amazon write-back (non-fatal)
-    const endpoint  = ag.campaign_type === "sponsoredDisplay" ? "/sd/adGroups" : "/sp/adGroups";
+    const endpoint  = ag.campaign_type === "sponsoredDisplay" ? "/sd/adGroups"
+                    : ag.campaign_type === "sponsoredBrands"  ? "/sb/adGroups"
+                    : "/sp/adGroups";
     const agPayload = { adGroupId: ag.amazon_ag_id };
     if (state      !== undefined) agPayload.state      = state.toUpperCase();
     if (defaultBid !== undefined) agPayload.defaultBid = parseFloat(defaultBid);

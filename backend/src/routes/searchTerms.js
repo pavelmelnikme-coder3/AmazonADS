@@ -85,7 +85,12 @@ router.get("/", async (req, res, next) => {
     } else {
       const parsedDays = parseInt(metricsDays);
       const days = Math.min(Math.max(isNaN(parsedDays) ? 30 : parsedDays, 1), 365);
-      conditions.push(`stm.date_start >= (NOW() - INTERVAL '${days} days')::date`);
+      // Match Amazon's convention: "last N days" = yesterday - N days to yesterday
+      // (today's data is always partial, and Amazon counts from yesterday back N days)
+      conditions.push(
+        `stm.date_start >= (CURRENT_DATE - INTERVAL '${days + 1} days')::date` +
+        ` AND stm.date_start <= (CURRENT_DATE - INTERVAL '1 day')::date`
+      );
     }
 
     if (search) {
@@ -208,7 +213,8 @@ router.get("/", async (req, res, next) => {
            MIN(stm.date_start) AS date_start,
            MAX(stm.date_end)   AS date_end,
            COUNT(*)::int       AS day_rows,
-           BOOL_OR(nk_check.id IS NOT NULL) AS is_negated
+           BOOL_OR(nk_check.id IS NOT NULL) AS is_negated,
+           MIN(nk_check.match_type) FILTER (WHERE nk_check.id IS NOT NULL) AS neg_match_type
          ${fromAndJoins}
          WHERE ${where}
          ${groupBy}

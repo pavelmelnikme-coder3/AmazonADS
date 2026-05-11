@@ -895,10 +895,10 @@ router.get("/", async (req, res, next) => {
 
     const [{ rows }, { rows: [cnt] }] = await Promise.all([
       query(
-        "SELECT * FROM rules WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        "SELECT * FROM rules WHERE workspace_id = $1 AND name NOT LIKE '\\_\\_%' ORDER BY created_at DESC LIMIT $2 OFFSET $3",
         [req.workspaceId, limit, offset]
       ),
-      query("SELECT COUNT(*)::int AS count FROM rules WHERE workspace_id = $1", [req.workspaceId]),
+      query("SELECT COUNT(*)::int AS count FROM rules WHERE workspace_id = $1 AND name NOT LIKE '\\_\\_%'", [req.workspaceId]),
     ]);
 
     res.json({

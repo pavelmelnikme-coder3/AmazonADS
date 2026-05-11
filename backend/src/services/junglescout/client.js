@@ -182,7 +182,7 @@ async function getRanksByAsin(asin, marketplaceId) {
     for (const item of (data?.data || [])) {
       const attrs = item.attributes || {};
       const kw = attrs.name;
-      if (kw && attrs.organic_rank != null) {
+      if (kw && attrs.organic_rank != null && attrs.organic_rank > 0) {
         rankMap.set(kw.toLowerCase(), {
           position: attrs.organic_rank,
           page: Math.ceil(attrs.organic_rank / 16),

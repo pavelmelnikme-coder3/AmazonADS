@@ -8,7 +8,8 @@
     "start": "node src/app.js",
     "migrate": "node src/db/migrate.js",
     "test": "jest --runInBand",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "test:integration": "jest --config jest.integration.config.js --runInBand"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
