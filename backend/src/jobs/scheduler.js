@@ -99,7 +99,9 @@ async function startScheduler() {
         const { rows } = await query(
           `SELECT DISTINCT w.id FROM workspaces w
            JOIN rules r ON r.workspace_id = w.id
-           WHERE r.is_active = TRUE`
+           WHERE r.is_active = TRUE
+             AND r.name NOT LIKE '\\_\\_%'
+             AND (r.next_run_at IS NULL OR r.next_run_at <= NOW())`
         );
         for (const { id } of rows) {
           await queueRuleExecution(id);

@@ -19,6 +19,7 @@ const {
 const { runReportingPipeline, queueMetricsBackfillJobs } = require("../services/amazon/reporting");
 const { generateRecommendations } = require("../services/ai/orchestrator");
 const { executeRules } = require("../services/rules/engine");
+const { executeAllDueRules } = require("../routes/rules");
 const { query } = require("../db/pool");
 
 // ─── Queue definitions ────────────────────────────────────────────────────────
@@ -371,8 +372,8 @@ async function startWorkers() {
 
       try {
         logger.info("Rule execution started", { workspaceId, ruleId });
-        const result = await executeRules(workspaceId, ruleId || null);
-        logger.info("Rule execution completed", { workspaceId, ruleId, ...result });
+        const result = await executeAllDueRules(workspaceId);
+        logger.info("Rule execution completed", { workspaceId, rules_executed: result.rules_executed });
         return result;
       } finally {
         // Release lock only if we still own it (guards against TTL expiry edge case)

@@ -18,6 +18,7 @@ const { writeAudit } = require("./audit");
 const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates } = require("../services/amazon/writeback");
 const { put } = require("../services/amazon/adsClient");
 const logger  = require("../config/logger");
+const { getRedis } = require("../config/redis");
 
 router.use(requireAuth, requireWorkspace);
 
@@ -138,7 +139,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
          k.id, k.keyword_text, k.match_type, k.state, k.bid,
          k.amazon_keyword_id,
          k.campaign_id, k.ad_group_id,
-         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id,
+         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id, c.state AS campaign_state,
          ag.name AS ad_group_name, ag.amazon_ag_id AS amazon_ad_group_id,
          p.id    AS profile_db_id,
          p.profile_id  AS amazon_profile_id,
@@ -168,7 +169,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
        WHERE ${kConds.join(" AND ")}
        GROUP BY k.id, k.keyword_text, k.match_type, k.state, k.bid,
                 k.amazon_keyword_id, k.campaign_id, k.ad_group_id,
-                c.name, c.campaign_type, c.amazon_campaign_id,
+                c.name, c.campaign_type, c.amazon_campaign_id, c.state,
                 ag.name, ag.amazon_ag_id,
                 p.id, p.profile_id, p.connection_id, p.marketplace_id`,
       [...kParams, startDate, endDate]
@@ -219,7 +220,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       `SELECT
          t.id, t.amazon_target_id, t.expression, t.expression_type,
          t.state, t.bid, t.campaign_id, t.ad_group_id, t.profile_id,
-         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id,
+         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id, c.state AS campaign_state,
          ag.name AS ad_group_name, ag.amazon_ag_id AS amazon_ad_group_id,
          p.profile_id  AS amazon_profile_id,
          p.connection_id,
@@ -248,7 +249,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
        WHERE ${tConds.join(" AND ")}
        GROUP BY t.id, t.amazon_target_id, t.expression, t.expression_type,
                 t.state, t.bid, t.campaign_id, t.ad_group_id, t.profile_id,
-                c.name, c.campaign_type, c.amazon_campaign_id,
+                c.name, c.campaign_type, c.amazon_campaign_id, c.state,
                 ag.name, ag.amazon_ag_id,
                 p.profile_id, p.connection_id, p.marketplace_id`,
       [...tParams, startDate, endDate]
@@ -296,7 +297,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
          stm.query AS keyword_text,
          stm.campaign_id, stm.ad_group_id,
          stm.match_type AS source_match_type,
-         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id,
+         c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id, c.state AS campaign_state,
          ag.name AS ad_group_name, ag.amazon_ag_id AS amazon_ad_group_id,
          p.id    AS profile_db_id,
          p.profile_id  AS amazon_profile_id,
@@ -322,7 +323,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
        JOIN amazon_profiles p  ON p.id  = stm.profile_id
        WHERE ${sConds.join(" AND ")}
        GROUP BY stm.query, stm.campaign_id, stm.ad_group_id, stm.match_type,
-                c.name, c.campaign_type, c.amazon_campaign_id,
+                c.name, c.campaign_type, c.amazon_campaign_id, c.state,
                 ag.name, ag.amazon_ag_id,
                 p.id, p.profile_id, p.connection_id, p.marketplace_id`,
       sParams
@@ -359,6 +360,9 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   for (const entity of matched) {
     for (const action of actions) {
       try {
+        if (entity.campaign_state && entity.campaign_state !== "enabled") {
+          recordSkip(entity, action, "campaign_not_enabled"); continue;
+        }
 
         // ── pause_keyword ───────────────────────────────────────────────────
         if (action.type === "pause_keyword") {
@@ -738,6 +742,92 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         } else if (action.type === "add_negative_target") {
           if (entity.entity_type !== "target") { recordSkip(entity, action, "wrong_entity_type"); continue; }
           if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
+
+          // QUERY_HIGH/BROAD_REL_MATCHES are auto-targeting clauses — Amazon has
+          // no "negative query" concept. Instead, drill into search_term_metrics
+          // for this campaign/ad_group during the rule period, find ASIN queries,
+          // and add each as an ASIN_SAME_AS negative target.
+          const exprArrRaw = (() => {
+            try { return Array.isArray(entity.expression) ? entity.expression : JSON.parse(entity.expression || "[]"); }
+            catch { return []; }
+          })();
+          const exprType0 = (exprArrRaw[0]?.type || "").toUpperCase();
+          const isQueryAutoType = exprType0 === "QUERY_BROAD_REL_MATCHES" || exprType0 === "QUERY_HIGH_REL_MATCHES";
+
+          if (isQueryAutoType) {
+            const { rows: asinTerms } = await query(
+              `SELECT UPPER(stm.query) AS asin
+               FROM search_term_metrics stm
+               WHERE stm.workspace_id = $1
+                 AND stm.campaign_id  = $2
+                 AND stm.ad_group_id  = $3
+                 AND stm.date_start  >= $4
+                 AND stm.date_end    <= $5
+                 AND stm.query       ~* '^B0[A-Z0-9]{8,9}$'
+               GROUP BY stm.query`,
+              [workspaceId, entity.campaign_id, entity.ad_group_id, startDate, endDate]
+            );
+            if (!asinTerms.length) { recordSkip(entity, action, "no_asin_search_terms"); continue; }
+
+            for (const { asin: asinUpper } of asinTerms) {
+              const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
+              const { rows: dupTgt } = await query(
+                `SELECT id FROM negative_targets
+                 WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
+                [workspaceId, entity.campaign_id, exprUpperJson]
+              );
+              if (dupTgt.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+
+              let insertedNtId = null;
+              if (!dryRun) {
+                const { rows: ntRows } = await query(
+                  `INSERT INTO negative_targets
+                     (workspace_id, profile_id, campaign_id, ad_group_id,
+                      amazon_neg_target_id, expression, expression_type, level)
+                   VALUES ($1,
+                     (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
+                     $2, $3, $4, $5::jsonb, $6, $7)
+                   ON CONFLICT DO NOTHING
+                   RETURNING id`,
+                  [workspaceId, entity.campaign_id, entity.ad_group_id,
+                    `rule-neg-asin-qt-${entity.id}-${asinUpper}`,
+                    exprUpperJson, "asinSameAs", "ad_group"]
+                );
+                insertedNtId = ntRows[0]?.id || null;
+
+                await writeAudit({
+                  orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
+                  action: "target.add_negative_asin_via_query", entityType: "target",
+                  entityId: entity.id, entityName: `${exprType0} → ASIN_SAME_AS:${asinUpper}`,
+                  beforeData: {}, afterData: { added_as_negative_target: true, asin: asinUpper, auto_routed: true },
+                  source: "rule",
+                });
+
+                if (insertedNtId && entity.connection_id) {
+                  pushNegativeAsin({
+                    localId: insertedNtId,
+                    connectionId: entity.connection_id,
+                    profileId: String(entity.amazon_profile_id),
+                    marketplaceId: entity.marketplace_id,
+                    campaignType: entity.campaign_type,
+                    amazonCampaignId: entity.amazon_campaign_id,
+                    amazonAdGroupId: entity.amazon_ad_group_id || null,
+                    asinValue: asinUpper,
+                    level: "ad_group",
+                  }).catch(e => logger.warn("Rule query-type neg_target write-back failed", { error: e.message }));
+                }
+              }
+              applied.push({
+                entity_type: entity.entity_type, entity_id: entity.id,
+                expression: [{ type: "ASIN_SAME_AS", value: asinUpper }],
+                campaign_name: entity.campaign_name, action: "add_negative_target",
+                auto_routed: true, level: "ad_group",
+                metrics: { clicks: entity.clicks, orders: entity.orders, acos: entity.acos, spend: entity.spend },
+              });
+            }
+            continue; // entity loop — query-type fully handled above
+          }
+
           const exprJson = typeof entity.expression === "string"
             ? entity.expression : JSON.stringify(entity.expression);
 
@@ -828,6 +918,48 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   };
 }
 
+// ── PATCH /rules/reorder — bulk sort_order update ────────────────────────────
+router.patch("/reorder", async (req, res, next) => {
+  try {
+    const { order } = req.body; // [{ id, sort_order }]
+    if (!Array.isArray(order) || !order.length) return res.status(400).json({ error: "order required" });
+    await Promise.all(
+      order.map(({ id, sort_order }) =>
+        query("UPDATE rules SET sort_order = $1 WHERE id = $2 AND workspace_id = $3", [sort_order, id, req.workspaceId])
+      )
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── POST /rules/:id/duplicate ─────────────────────────────────────────────────
+router.post("/:id/duplicate", async (req, res, next) => {
+  try {
+    const { rows: [src] } = await query(
+      "SELECT * FROM rules WHERE id = $1 AND workspace_id = $2",
+      [req.params.id, req.workspaceId]
+    );
+    if (!src) return res.status(404).json({ error: "Not found" });
+    const { rows: [newRule] } = await query(
+      `INSERT INTO rules
+         (workspace_id, name, description, conditions, actions, schedule, schedule_type, run_hour, scope, safety, dry_run, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [
+        req.workspaceId,
+        "Копия: " + src.name,
+        src.description || "",
+        typeof src.conditions === "string" ? src.conditions : JSON.stringify(src.conditions),
+        typeof src.actions    === "string" ? src.actions    : JSON.stringify(src.actions),
+        src.schedule, src.schedule_type, src.run_hour ?? 8,
+        typeof src.scope  === "string" ? src.scope  : JSON.stringify(src.scope  || {}),
+        typeof src.safety === "string" ? src.safety : JSON.stringify(src.safety || {}),
+        src.dry_run, req.user.id,
+      ]
+    );
+    res.status(201).json(newRule);
+  } catch (err) { next(err); }
+});
+
 // ── GET /rules/campaigns — MUST be before /:id to avoid param capture ─────────
 router.get("/campaigns", async (req, res, next) => {
   try {
@@ -895,7 +1027,7 @@ router.get("/", async (req, res, next) => {
 
     const [{ rows }, { rows: [cnt] }] = await Promise.all([
       query(
-        "SELECT * FROM rules WHERE workspace_id = $1 AND name NOT LIKE '\\_\\_%' ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        "SELECT * FROM rules WHERE workspace_id = $1 AND name NOT LIKE '\\_\\_%' ORDER BY COALESCE(sort_order, 99999) ASC, created_at ASC LIMIT $2 OFFSET $3",
         [req.workspaceId, limit, offset]
       ),
       query("SELECT COUNT(*)::int AS count FROM rules WHERE workspace_id = $1 AND name NOT LIKE '\\_\\_%'", [req.workspaceId]),
@@ -911,18 +1043,20 @@ router.get("/", async (req, res, next) => {
 // ── POST /rules — create ──────────────────────────────────────────────────────
 router.post("/", async (req, res, next) => {
   try {
-    const { name, description, conditions, actions, schedule, scope, safety, dry_run } = req.body;
+    const { name, description, conditions, actions, schedule, schedule_type, run_hour, scope, safety, dry_run } = req.body;
     if (!name || !conditions?.length || !actions?.length) {
       return res.status(400).json({ error: "name, conditions and actions required" });
     }
     const { rows: [rule] } = await query(
       `INSERT INTO rules
-         (workspace_id, name, description, conditions, actions, schedule, scope, safety, dry_run, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+         (workspace_id, name, description, conditions, actions, schedule, schedule_type, run_hour, scope, safety, dry_run, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [
         req.workspaceId, name, description || "",
         JSON.stringify(conditions), JSON.stringify(actions),
         schedule || "0 8 * * *",
+        schedule_type || "daily",
+        run_hour != null ? parseInt(run_hour) : 8,
         JSON.stringify(scope   || {}),
         JSON.stringify(safety  || { min_bid: 0.02, max_bid: 50 }),
         dry_run || false, req.user.id,
@@ -935,7 +1069,7 @@ router.post("/", async (req, res, next) => {
 // ── PATCH /rules/:id — update ─────────────────────────────────────────────────
 router.patch("/:id", async (req, res, next) => {
   try {
-    const { name, description, conditions, actions, schedule, scope, safety, dry_run, is_active } = req.body;
+    const { name, description, conditions, actions, schedule, schedule_type, run_hour, scope, safety, dry_run, is_active } = req.body;
     // If conditions/actions are explicitly provided, refuse to write empty
     // arrays — those would let executeRule treat every entity as matched.
     if (conditions !== undefined && (!Array.isArray(conditions) || conditions.length === 0)) {
@@ -944,29 +1078,37 @@ router.patch("/:id", async (req, res, next) => {
     if (actions !== undefined && (!Array.isArray(actions) || actions.length === 0)) {
       return res.status(400).json({ error: "actions cannot be empty when provided" });
     }
+    // Only reset next_run_at when the schedule itself changes — not on every save.
+    // Without this, editing a rule name after it ran would make it execute again immediately.
+    const scheduleChanged = schedule_type !== undefined || run_hour !== undefined;
     const { rows: [rule] } = await query(
       `UPDATE rules SET
-         name        = COALESCE($1, name),
-         description = COALESCE($2, description),
-         conditions  = COALESCE($3::jsonb, conditions),
-         actions     = COALESCE($4::jsonb, actions),
-         schedule    = COALESCE($5, schedule),
-         scope       = COALESCE($6::jsonb, scope),
-         safety      = COALESCE($7::jsonb, safety),
-         dry_run     = COALESCE($8, dry_run),
-         is_active   = COALESCE($9, is_active),
-         updated_at  = NOW()
-       WHERE id = $10 AND workspace_id = $11
+         name          = COALESCE($1, name),
+         description   = COALESCE($2, description),
+         conditions    = COALESCE($3::jsonb, conditions),
+         actions       = COALESCE($4::jsonb, actions),
+         schedule      = COALESCE($5, schedule),
+         schedule_type = COALESCE($6, schedule_type),
+         run_hour      = COALESCE($7, run_hour),
+         scope         = COALESCE($8::jsonb, scope),
+         safety        = COALESCE($9::jsonb, safety),
+         dry_run       = COALESCE($10, dry_run),
+         is_active     = COALESCE($11, is_active),
+         next_run_at   = CASE WHEN $14 THEN NULL ELSE next_run_at END,
+         updated_at    = NOW()
+       WHERE id = $12 AND workspace_id = $13
        RETURNING *`,
       [
         name, description,
         conditions ? JSON.stringify(conditions) : null,
         actions    ? JSON.stringify(actions)    : null,
-        schedule,
+        schedule, schedule_type,
+        run_hour != null ? parseInt(run_hour) : null,
         scope   ? JSON.stringify(scope)   : null,
         safety  ? JSON.stringify(safety)  : null,
         dry_run, is_active,
         req.params.id, req.workspaceId,
+        scheduleChanged,
       ]
     );
     if (!rule) return res.status(404).json({ error: "Rule not found" });
@@ -1025,11 +1167,48 @@ router.post("/:id/run", async (req, res, next) => {
     if (!rule) return res.status(404).json({ error: "Rule not found" });
 
     const effectiveDryRun = dry_run !== undefined ? dry_run : rule.dry_run;
-    const result = await executeRule(rule, req.workspaceId, effectiveDryRun, req.user.id, req.user.name);
 
+    // For real (non-dry) runs: check the workspace lock so manual runs
+    // can't race with the cron worker executing the same workspace's rules.
+    let ownedLock = false;
+    const workspaceLockKey = `rule_exec_lock:${req.workspaceId}`;
+    const manualLockKey    = `rule_exec_lock:manual:${req.params.id}`;
+    if (!effectiveDryRun) {
+      const redis = getRedis();
+      // Reject if the automated worker already holds the workspace lock.
+      const existing = await redis.get(workspaceLockKey);
+      if (existing) {
+        return res.status(409).json({
+          error: "rule_locked",
+          message: "Another rule execution is already in progress for this workspace. Please try again in a moment.",
+        });
+      }
+      // Acquire per-rule lock to prevent duplicate manual clicks.
+      const acquired = await redis.set(manualLockKey, req.user.id, "NX", "EX", 120);
+      if (!acquired) {
+        return res.status(409).json({
+          error: "rule_locked",
+          message: "This rule is already running. Please wait for it to finish.",
+        });
+      }
+      ownedLock = true;
+    }
+
+    let result;
+    try {
+      result = await executeRule(rule, req.workspaceId, effectiveDryRun, req.user.id, req.user.name);
+    } finally {
+      if (ownedLock) {
+        const redis = getRedis();
+        const current = await redis.get(manualLockKey);
+        if (current === req.user.id) await redis.del(manualLockKey);
+      }
+    }
+
+    const nextRunAt = effectiveDryRun ? null : computeNextRun(rule.schedule_type, rule.run_hour);
     await query(
-      "UPDATE rules SET last_run_at = NOW(), last_run_result = $1 WHERE id = $2",
-      [JSON.stringify(result), req.params.id]
+      "UPDATE rules SET last_run_at = NOW(), last_run_result = $1, next_run_at = $3 WHERE id = $2",
+      [JSON.stringify(result), req.params.id, nextRunAt]
     );
 
     logger.info("Rule executed", { ruleId: rule.id, ruleName: rule.name, ...result });
@@ -1053,4 +1232,45 @@ router.get("/:id/runs", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Schedule helpers ──────────────────────────────────────────────────────────
+const FREQ_DAYS = { daily: 1, every_2_days: 2, every_3_days: 3, weekly: 7, monthly: 30 };
+
+function computeNextRun(scheduleType, runHour) {
+  const days = FREQ_DAYS[scheduleType] ?? 1;
+  const hour = (runHour != null && runHour >= 0 && runHour <= 23) ? parseInt(runHour) : 8;
+  const next = new Date();
+  next.setUTCDate(next.getUTCDate() + days);
+  next.setUTCHours(hour, 0, 0, 0);
+  return next;
+}
+
+// Called by the RULE_EXECUTION worker — runs all keyword/target rules
+// that are due for this workspace and advances next_run_at.
+async function executeAllDueRules(workspaceId) {
+  const { rows: rules } = await query(
+    `SELECT * FROM rules
+     WHERE workspace_id = $1 AND is_active = TRUE
+       AND name NOT LIKE '\\_\\_%'
+       AND (next_run_at IS NULL OR next_run_at <= NOW())
+     ORDER BY COALESCE(sort_order, 99999) ASC, created_at ASC`,
+    [workspaceId]
+  );
+  const results = [];
+  for (const rule of rules) {
+    try {
+      const result = await executeRule(rule, workspaceId, rule.dry_run, null, "Rule Engine");
+      const nextRunAt = rule.dry_run ? null : computeNextRun(rule.schedule_type, rule.run_hour);
+      await query(
+        "UPDATE rules SET last_run_at = NOW(), last_run_result = $1, next_run_at = $2 WHERE id = $3",
+        [JSON.stringify(result), nextRunAt, rule.id]
+      );
+      results.push({ ruleId: rule.id, ruleName: rule.name, ...result });
+    } catch (e) {
+      logger.error("executeAllDueRules: rule failed", { ruleId: rule.id, error: e.message });
+    }
+  }
+  return { workspaceId, rules_executed: results.length, results };
+}
+
 module.exports = router;
+module.exports.executeAllDueRules = executeAllDueRules;

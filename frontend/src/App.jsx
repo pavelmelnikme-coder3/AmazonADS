@@ -2770,6 +2770,22 @@ function SortableAsinGroup({ id, children }) {
   );
 }
 
+function SortableRule({ id, children }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const style = {
+    transform: DndCSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.45 : 1,
+    position: "relative",
+    zIndex: isDragging ? 10 : undefined,
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      {children({ dragHandleProps: { ...listeners, ...attributes } })}
+    </div>
+  );
+}
+
 function SortableKeyword({ id, children }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
   const style = {
@@ -3835,6 +3851,31 @@ const RankTrackerPage = ({ workspaceId }) => {
 // ─── Products / BSR Page ──────────────────────────────────────────────────────
 const AMAZON_DOMAIN = { ATVPDKIKX0DER: "com", A2EUQ1WTGCTBG2: "ca", A1AM78C64UM0Y8: "com.mx", A1F83G8C2ARO7P: "co.uk", A1PA6795UKMFR9: "de", APJ6JRA9NG5V4: "it", A13V1IB3VIYZZH: "fr", A1RKKUPIHCS9HS: "es", A39IBJ37TRP1C6: "com.au", A1VC38T7YXB528: "co.jp", A21TJRUUN4KGV: "in" };
 const amazonProductUrl = (asin, marketplaceId) => "https://www.amazon." + (AMAZON_DOMAIN[marketplaceId] || "de") + "/dp/" + asin;
+
+// Human-readable label for a product target expression (handles both parsed objects and JSON strings)
+const TARGET_EXPR_LABELS = {
+  QUERY_BROAD_REL_MATCHES:  "Запрос (широкий)",
+  QUERY_HIGH_REL_MATCHES:   "Запрос (точный)",
+  ASIN_SUBSTITUTE_RELATED:  "Похожие товары",
+  ASIN_ACCESSORY_RELATED:   "Сопутствующие",
+  CLOSE_MATCH:              "Близкое совпадение",
+  LOOSE_MATCH:              "Широкое совпадение",
+  COMPLEMENTS:              "Сопутствующие",
+  SUBSTITUTES:              "Заменители",
+  similarProduct:           "Похожий товар (SD)",
+  views:                    "Просмотры (SD)",
+  purchases:                "Покупки (SD)",
+};
+const fmtTargetExpr = (expr) => {
+  if (!expr) return null;
+  const parsed = typeof expr === "string"
+    ? (() => { try { return JSON.parse(expr); } catch { return null; } })()
+    : expr;
+  if (!Array.isArray(parsed) || !parsed.length) return typeof expr === "string" ? expr : JSON.stringify(expr);
+  const { type, value } = parsed[0];
+  if (value) return value;
+  return TARGET_EXPR_LABELS[type] || type;
+};
 
 // Build a deep link to Amazon Advertising console for a specific campaign.
 // The console is regional — using the wrong TLD (.com for a DE seller) sends
@@ -6002,6 +6043,11 @@ const SortHeader = ({ field, label, currentSort, currentDir, onSort, align = "le
         textAlign: align,
         whiteSpace: "nowrap",
         color: active ? "var(--ac2)" : "var(--tx2)",
+        background: "var(--s2)",
+        borderBottom: "2px solid var(--b1)",
+        position: "sticky",
+        top: 0,
+        zIndex: 2,
       }}
     >
       {label}{" "}
@@ -9299,6 +9345,14 @@ const KeywordsPage = ({ workspaceId }) => {
       const msg = `Added ${totalAdded} ${what}${totalSkipped ? `, ${totalSkipped} skipped (duplicate)` : ''}`;
       setKwToast(msg);
       setTimeout(() => setKwToast(null), 4000);
+      if (mode === 'negative' && totalAdded > 0) {
+        const addedIds = new Set(terms.map(t => t.id));
+        setSearchTerms(prev => prev.map(t =>
+          addedIds.has(t.id)
+            ? { ...t, is_negated: true, neg_match_type: 'negative_' + stHarvestMatchType }
+            : t
+        ));
+      }
       setStHarvestModal(null);
       setStSelected(new Set());
     } catch (e) {
@@ -9817,12 +9871,12 @@ const KeywordsPage = ({ workspaceId }) => {
             </div>
           ) : (
             <div className="card" style={{ overflow: "hidden" }}>
-              <div style={{ overflowX: "auto" }}>
+              <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 260px)" }}>
                 <table className="resizable" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                   {stColgroup}
                   <thead>
                     <tr>
-                      <th style={{ width: 36, padding: "8px 10px", background: "var(--s2)", borderBottom: "2px solid var(--b1)" }}>
+                      <th style={{ width: 36, padding: "8px 10px", background: "var(--s2)", borderBottom: "2px solid var(--b1)", position: "sticky", top: 0, zIndex: 2 }}>
                         <input type="checkbox"
                           checked={searchTerms.length > 0 && stSelected.size === searchTerms.length}
                           onChange={() => stSelected.size === searchTerms.length
@@ -9854,6 +9908,7 @@ const KeywordsPage = ({ workspaceId }) => {
                             cursor: h.noSort ? "default" : "pointer",
                             whiteSpace: "nowrap",
                             background: "var(--s2)",
+                            position: "sticky", top: 0, zIndex: 2,
                           }}>
                           {h.label}
                           {!h.noSort && stSortCol === h.col && (
@@ -10158,12 +10213,12 @@ const KeywordsPage = ({ workspaceId }) => {
           : !keywords?.length
             ? <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)" }}>{t("keywords.noKeywords")}</div>
             : (
-              <div style={{ overflowX: "auto" }}>
+              <div style={{ overflowX: "auto", overflowY: "auto", maxHeight: "calc(100vh - 260px)" }}>
                 <table className="resizable">
                   {kwColgroup}
                   <thead>
                     <tr>
-                      <th style={{ width: 36 }}>
+                      <th style={{ width: 36, background: "var(--s2)", borderBottom: "2px solid var(--b1)", position: "sticky", top: 0, zIndex: 2 }}>
                         <input type="checkbox" checked={selected.size === keywords.length && keywords.length > 0} onChange={toggleAll} />
                       </th>
                       <SortHeader field="keyword_text" label={t("keywords.colKeyword")} currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} rh={kwRH(1)} />
@@ -10175,7 +10230,7 @@ const KeywordsPage = ({ workspaceId }) => {
                       {kwCV("orders")   && <SortHeader field="orders"     label={t("keywords.colOrders")}  currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(7)} />}
                       {kwCV("acos")     && <SortHeader field="acos"       label="ACOS"                     currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(8)} />}
                       {kwCV("spend")    && <SortHeader field="spend"      label={t("keywords.colSpend")}   currentSort={sortBy} currentDir={sortDir} onSort={handleKwSort} align="right" rh={kwRH(9)} />}
-                      <th>{kwRH(10)}</th>
+                      <th style={{ background: "var(--s2)", borderBottom: "2px solid var(--b1)", position: "sticky", top: 0, zIndex: 2 }}>{kwRH(10)}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -10885,6 +10940,7 @@ const DP_DAYS = [['Mo',1],['Tu',2],['We',3],['Th',4],['Fr',5],['Sa',6],['Su',0]]
 
 const EMPTY_RULE_FORM = {
   name: "", description: "", dry_run: false, is_active: true,
+  schedule_type: "daily", run_hour: 8,
   conditions: [{ metric: "clicks", op: "gte", value: "30" }],
   actions:    [{ type: "pause_keyword", value: "" }],
   scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_targeting_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", campaign_name_mode: "include", dayparting: null },
@@ -11321,68 +11377,33 @@ const RuleWizardModal = ({
                 </label>
               </div>
 
-              {/* Dayparting */}
+              {/* Frequency */}
               <div style={{ marginTop:16 }}>
-                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-                  <div style={{ ...LABEL, marginBottom:0 }}>{t("rules.dayparting")}</div>
-                  <span style={{ fontSize:11, color:"var(--tx3)" }}>({t("rules.daypartingHint")})</span>
-                </div>
-                <div style={{ padding:"12px 14px", background:"var(--s2)", borderRadius:8, border:"1px solid var(--b2)" }}>
-                  <div style={{ display:"flex", gap:4, marginBottom:10 }}>
-                    {DP_DAYS.map(([lbl, val]) => {
-                      const sel = form.scope?.dayparting?.days?.includes(val);
-                      return (
-                        <button key={val}
-                          onClick={() => {
-                            const curr = form.scope?.dayparting || { days:[], hour:null };
-                            const days = curr.days || [];
-                            const nd = days.includes(val) ? days.filter(d => d !== val) : [...days, val];
-                            const ndp = (nd.length === 0 && curr.hour == null) ? null : { ...curr, days: nd };
-                            setForm(f => ({ ...f, scope: { ...f.scope, dayparting: ndp } }));
-                          }}
-                          style={{ flex:1, padding:"5px 0", fontSize:11, fontWeight: sel ? 600 : 400,
-                            background: sel ? "var(--ac)" : "var(--s3)",
-                            color: sel ? "#fff" : "var(--tx3)",
-                            border:`1px solid ${sel ? "var(--ac)" : "var(--b2)"}`,
-                            borderRadius:6, cursor:"pointer" }}>
-                          {lbl}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                    <span style={{ fontSize:11, color:"var(--tx3)", whiteSpace:"nowrap" }}>{t("rules.runAtHour")}</span>
-                    <select
-                      value={form.scope?.dayparting?.hour ?? ""}
-                      onChange={e => {
-                        const hour = e.target.value === "" ? null : parseInt(e.target.value);
-                        const curr = form.scope?.dayparting || { days:[], hour:null };
-                        const ndp = ((curr.days?.length || 0) === 0 && hour == null) ? null : { ...curr, hour };
-                        setForm(f => ({ ...f, scope: { ...f.scope, dayparting: ndp } }));
-                      }}
-                      style={{ ...SEL_SM, width:120 }}>
-                      <option value="">{t("rules.anyHour")}</option>
-                      {Array.from({ length:24 }, (_,h) => (
-                        <option key={h} value={h}>{String(h).padStart(2,"0")}:00</option>
-                      ))}
-                    </select>
-                    {form.scope?.dayparting && (() => {
-                      const cron = dayparthingToCron(form.scope.dayparting);
-                      return cron ? (
-                        <span style={{ fontSize:11, color:"var(--tx3)", fontFamily:"var(--mono)" }}>
-                          → <strong style={{ color:"var(--tx)" }}>{cron}</strong>
-                        </span>
-                      ) : null;
-                    })()}
-                    {form.scope?.dayparting && (
-                      <button
-                        onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, dayparting: null } }))}
-                        style={{ marginLeft:"auto", background:"none", border:"none", cursor:"pointer",
-                          color:"var(--tx3)", fontSize:11, padding:"2px 6px" }}>
-                        {t("rules.clear")}
+                <div style={{ ...LABEL, marginBottom:8 }}>{t("rules.frequency")}</div>
+                <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                  {[["daily","rules.freqDaily"],["every_2_days","rules.freqEvery2Days"],["every_3_days","rules.freqEvery3Days"],["weekly","rules.freqWeekly"],["monthly","rules.freqMonthly"]].map(([val, key]) => {
+                    const sel = (form.schedule_type || "daily") === val;
+                    return (
+                      <button key={val}
+                        onClick={() => setForm(f => ({ ...f, schedule_type: val }))}
+                        style={{ padding:"6px 14px", fontSize:12, fontWeight: sel ? 600 : 400,
+                          background: sel ? "var(--ac)" : "var(--s3)",
+                          color: sel ? "#fff" : "var(--tx2)",
+                          border:`1px solid ${sel ? "var(--ac)" : "var(--b2)"}`,
+                          borderRadius:8, cursor:"pointer" }}>
+                        {t(key)}
                       </button>
-                    )}
-                  </div>
+                    );
+                  })}
+                  <span style={{ fontSize:11, color:"var(--tx3)", marginLeft:8 }}>{t("rules.runAtHour")}</span>
+                  <select
+                    value={form.run_hour ?? 8}
+                    onChange={e => setForm(f => ({ ...f, run_hour: parseInt(e.target.value) }))}
+                    style={{ ...SEL_SM, width:100 }}>
+                    {Array.from({ length:24 }, (_,h) => (
+                      <option key={h} value={h}>{String(h).padStart(2,"0")}:00 UTC</option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
@@ -11641,11 +11662,11 @@ const RuleWizardModal = ({
                   <div>
                     <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>
                       {t("rules.campaigns")}
-                      {(form.scope.campaign_ids||[]).length > 0 && (
-                        <span style={{ marginLeft:6, color:"var(--ac2)" }}>
-                          ({t("rules.campaignsSelected", { count: (form.scope.campaign_ids||[]).length })})
-                        </span>
-                      )}
+                      <span style={{ marginLeft:6, color:(form.scope.campaign_ids||[]).length > 0 ? "var(--ac2)" : "var(--tx3)" }}>
+                        {(form.scope.campaign_ids||[]).length > 0
+                          ? `(${t("rules.campaignsSelected", { count: (form.scope.campaign_ids||[]).length })})`
+                          : `(${t("rules.campaignsEmptyAll")})`}
+                      </span>
                     </div>
                     <div style={{ position:"relative", marginBottom:6 }}>
                       <Search size={12} strokeWidth={1.75} style={{ position:"absolute", left:8,
@@ -11684,7 +11705,12 @@ const RuleWizardModal = ({
                   {adGroups.length > 0 && (
                     <div style={{ marginTop:10 }}>
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>
-                        {t("rules.adGroups")} ({t("rules.adGroupsSelected", { count: (form.scope.ad_group_ids||[]).length })})
+                        {t("rules.adGroups")}
+                        <span style={{ marginLeft:6, color:(form.scope.ad_group_ids||[]).length > 0 ? "var(--ac2)" : "var(--tx3)" }}>
+                          {(form.scope.ad_group_ids||[]).length > 0
+                            ? `(${t("rules.adGroupsSelected", { count: (form.scope.ad_group_ids||[]).length })})`
+                            : `(${t("rules.adGroupsEmptyAll")})`}
+                        </span>
                       </div>
                       <div style={{ maxHeight:100, overflowY:"auto", border:"1px solid var(--b2)",
                         borderRadius:6, padding:4, background:"var(--s1)" }}>
@@ -11761,34 +11787,46 @@ const RuleWizardModal = ({
                         <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                           <thead>
                             <tr style={{ background:"var(--s2)" }}>
-                              <th style={{ textAlign:"left", padding:"8px 12px", color:"var(--tx3)",
-                                fontWeight:600, fontSize:11 }}>{t("rules.colKeywordTarget")}</th>
-                              <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)",
-                                fontWeight:600, fontSize:11 }}>{t("rules.colAction")}</th>
-                              <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)",
-                                fontWeight:600, fontSize:11 }}>{t("rules.colValue")}</th>
+                              <th style={{ textAlign:"left", padding:"8px 12px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("rules.colKeywordTarget")}</th>
+                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiClicks")}</th>
+                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiOrders")}</th>
+                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>ACOS</th>
+                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiSpend")}</th>
+                              <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("rules.colAction")}</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {previewData.applied.slice(0, 10).map((m, i) => (
+                            {previewData.applied.slice(0, 10).map((m, i) => {
+                              const mx = m.metrics || {};
+                              const clicks = mx.clicks != null ? Number(mx.clicks) : null;
+                              const orders = mx.orders != null ? Number(mx.orders) : null;
+                              const acos   = mx.acos   != null ? parseFloat(mx.acos) : null;
+                              const spend  = mx.spend  != null ? parseFloat(mx.spend) : null;
+                              return (
                               <tr key={i} style={{ borderTop:"1px solid var(--b1)" }}>
-                                <td style={{ padding:"7px 12px", color:"var(--tx2)", maxWidth:260,
+                                <td style={{ padding:"7px 12px", color:"var(--tx2)", maxWidth:220,
                                   overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                                  {m.keyword_text || (m.expression
-                                    ? (typeof m.expression === "object"
-                                        ? (m.expression[0]?.value || JSON.stringify(m.expression))
-                                        : m.expression)
-                                    : m.entity_id)}
+                                  {m.keyword_text || fmtTargetExpr(m.expression) || m.entity_id}
                                 </td>
-                                <td style={{ padding:"7px 12px", textAlign:"right", color:"var(--tx3)" }}>
+                                <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                  {clicks != null ? clicks : "—"}
+                                </td>
+                                <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                  {orders != null ? orders : "—"}
+                                </td>
+                                <td style={{ padding:"7px 10px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11,
+                                  color: acos == null ? "var(--tx3)" : acos < 15 ? "var(--grn)" : acos < 30 ? "var(--amb)" : "var(--red)" }}>
+                                  {acos != null ? acos.toFixed(1)+"%" : "—"}
+                                </td>
+                                <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                  {spend != null ? spend.toFixed(2)+"€" : "—"}
+                                </td>
+                                <td style={{ padding:"7px 12px", textAlign:"right", color:"var(--tx3)", fontSize:11 }}>
                                   {m.action?.replace(/_/g," ")}
                                 </td>
-                                <td style={{ padding:"7px 12px", textAlign:"right",
-                                  color:"var(--ac2)" }}>
-                                  {m.new_state ?? m.match_type ?? m.change_pct ?? (m.new_bid != null ? m.new_bid+"€" : null) ?? "—"}
-                                </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -13072,10 +13110,16 @@ const RulesPage = ({ workspaceId }) => {
   const [page, setPage] = useState(1);
   const [campSearch, setCampSearch] = useState("");
   const [debouncedCampSearch, setDebouncedCampSearch] = useState("");
+  const [rulesOrder, setRulesOrder] = useState([]); // local drag order (ids)
   useEffect(() => {
     const id = setTimeout(() => setDebouncedCampSearch(campSearch.trim()), 300);
     return () => clearTimeout(id);
   }, [campSearch]);
+
+  const ruleDndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
 
   const { data: rulesData, loading, reload } = useAsync(
     () => workspaceId ? get("/rules", { page, limit: 25 }) : Promise.resolve({ data: [], pagination: {} }),
@@ -13087,8 +13131,18 @@ const RulesPage = ({ workspaceId }) => {
       : Promise.resolve([]),
     [workspaceId, debouncedCampSearch]
   );
-  const rules      = rulesData?.data       || [];
+  const rawRules   = rulesData?.data       || [];
   const pagination = rulesData?.pagination || {};
+
+  // Apply local drag order on top of server order
+  const rules = rulesOrder.length
+    ? rulesOrder.map(id => rawRules.find(r => r.id === id)).filter(Boolean)
+    : rawRules;
+
+  // Sync local order when server data changes (initial load / reload)
+  useEffect(() => {
+    if (rawRules.length) setRulesOrder(rawRules.map(r => r.id));
+  }, [JSON.stringify(rawRules.map(r => r.id))]);
 
   // Load ad groups when scope campaigns change
   useEffect(() => {
@@ -13104,14 +13158,16 @@ const RulesPage = ({ workspaceId }) => {
     // Restore dayparting from rule.schedule if scope doesn't have it
     const dayparting = parsedScope.dayparting || cronToDayparting(rule.schedule);
     setForm({
-      name:        rule.name,
-      description: rule.description || "",
-      dry_run:     !!rule.dry_run,
-      is_active:   rule.is_active !== false,
-      conditions:  parse(rule.conditions, EMPTY_RULE_FORM.conditions),
-      actions:     parse(rule.actions,    EMPTY_RULE_FORM.actions),
-      scope:       { ...EMPTY_RULE_FORM.scope, ...parsedScope, dayparting },
-      safety:      parse(rule.safety,     EMPTY_RULE_FORM.safety),
+      name:          rule.name,
+      description:   rule.description || "",
+      dry_run:       !!rule.dry_run,
+      is_active:     rule.is_active !== false,
+      schedule_type: rule.schedule_type || "daily",
+      run_hour:      rule.run_hour ?? 8,
+      conditions:    parse(rule.conditions, EMPTY_RULE_FORM.conditions),
+      actions:       parse(rule.actions,    EMPTY_RULE_FORM.actions),
+      scope:         { ...EMPTY_RULE_FORM.scope, ...parsedScope, dayparting },
+      safety:        parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
     setEditRule(rule); setShowForm(true); setCampSearch("");
     const parsedConds = parse(rule.conditions, EMPTY_RULE_FORM.conditions);
@@ -13121,14 +13177,14 @@ const RulesPage = ({ workspaceId }) => {
   const saveRule = async () => {
     if (!form.name) return alert(t("rules.alertName"));
     try {
-      const cronStr = dayparthingToCron(form.scope?.dayparting);
       const payload = {
         ...form,
         conditions: form.conditions.map((c, i) => ({
           ...c,
           ...(i < form.conditions.length - 1 ? { nextOperator: condOperators[i] || 'AND' } : {}),
         })),
-        ...(cronStr ? { schedule: cronStr, schedule_type: "cron" } : { schedule: null, schedule_type: "hourly" }),
+        schedule_type: form.schedule_type || "daily",
+        run_hour: form.run_hour ?? 8,
       };
       editRule ? await patch(`/rules/${editRule.id}`, payload) : await post("/rules", payload);
       setShowForm(false); reload();
@@ -13138,6 +13194,27 @@ const RulesPage = ({ workspaceId }) => {
   const deleteRule = async (id) => {
     if (!confirm(t("rules.confirmDelete"))) return;
     await del(`/rules/${id}`); reload();
+  };
+
+  const duplicateRule = async (rule) => {
+    try {
+      await post(`/rules/${rule.id}/duplicate`, {});
+      reload();
+    } catch (e) { alert(t("common.error") + e.message); }
+  };
+
+  const handleRulesDragEnd = async ({ active, over }) => {
+    if (!over || active.id === over.id) return;
+    const oldIdx = rulesOrder.indexOf(active.id);
+    const newIdx = rulesOrder.indexOf(over.id);
+    if (oldIdx === -1 || newIdx === -1) return;
+    const newOrder = arrayMove(rulesOrder, oldIdx, newIdx);
+    setRulesOrder(newOrder);
+    try {
+      await patch("/rules/reorder", { order: newOrder.map((id, i) => ({ id, sort_order: i })) });
+    } catch (e) {
+      setRulesOrder(rulesOrder); // rollback
+    }
   };
 
   const toggleActive = async (rule) => {
@@ -13303,11 +13380,7 @@ const RulesPage = ({ workspaceId }) => {
                         </div>
                         <div style={{ maxHeight:240, overflowY:"auto" }}>
                           {r.skipped.map((s, i) => {
-                            const entityLabel = s.keyword_text || (s.expression
-                              ? (typeof s.expression === "object"
-                                  ? (s.expression[0]?.value || JSON.stringify(s.expression))
-                                  : s.expression)
-                              : s.entity_id);
+                            const entityLabel = s.keyword_text || fmtTargetExpr(s.expression) || s.entity_id;
                             const reasonText = t(`rules.skipReason_${s.reason}`);
                             const reasonTip  = t(`rules.skipReason_${s.reason}_tip`);
                             return (
@@ -13351,11 +13424,7 @@ const RulesPage = ({ workspaceId }) => {
                       </div>
                       <div style={{ maxHeight:300, overflowY:"auto" }}>
                         {r.applied.map((a, i) => {
-                          const entityLabel = a.keyword_text || (a.expression
-                            ? (typeof a.expression === "object"
-                                ? (a.expression[0]?.value || JSON.stringify(a.expression))
-                                : a.expression)
-                            : a.entity_id);
+                          const entityLabel = a.keyword_text || fmtTargetExpr(a.expression) || a.entity_id;
                           const isTarget = !a.keyword_text;
                           const badgeCls = ["pause_keyword","pause_target"].includes(a.action) ? "bg-amb"
                             : ["enable_keyword","enable_target"].includes(a.action) ? "bg-grn" : "bg-bl";
@@ -13447,6 +13516,8 @@ const RulesPage = ({ workspaceId }) => {
         </div>
       ) : (
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <DndContext sensors={ruleDndSensors} collisionDetection={closestCenter} onDragEnd={handleRulesDragEnd}>
+          <SortableContext items={rulesOrder} strategy={verticalListSortingStrategy}>
           {rules.map(rule => {
             const parse = v => { if (!v) return []; if (typeof v === "string") { try { return JSON.parse(v); } catch { return []; } } return v; };
             const cond  = parse(rule.conditions);
@@ -13458,11 +13529,17 @@ const RulesPage = ({ workspaceId }) => {
             const isRunning = runningId === rule.id;
 
             return (
-              <div key={rule.id} className="card fade" style={{
+              <SortableRule key={rule.id} id={rule.id}>
+              {({ dragHandleProps }) => (
+              <div className="card fade" style={{
                 padding:"16px 20px", opacity:rule.is_active?1:0.55,
                 borderLeft:`3px solid ${rule.is_active?"var(--ac)":"var(--b2)"}`,
               }}>
                 <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+                  <div {...dragHandleProps} style={{ cursor:"grab", color:"var(--tx3)", paddingTop:2, flexShrink:0 }}
+                    title="Перетащить">
+                    <GripVertical size={15} strokeWidth={1.5} />
+                  </div>
                   <div style={{ flex:1, minWidth:0 }}>
                     {/* Title row */}
                     <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
@@ -13491,20 +13568,17 @@ const RulesPage = ({ workspaceId }) => {
                           {last.dry_run?" (sim)":""}
                         </span>
                       )}
-                      {rule.schedule && rule.schedule_type === "cron" && (() => {
-                        const dp = cronToDayparting(rule.schedule);
-                        if (!dp) return null;
-                        const DAY_SHORT = ['Su','Mo','Tu','We','Th','Fr','Sa'];
-                        const dayStr = dp.days && dp.days.length > 0 && dp.days.length < 7
-                          ? dp.days.sort((a,b) => { const ord = [1,2,3,4,5,6,0]; return ord.indexOf(a) - ord.indexOf(b); }).map(d => DAY_SHORT[d]).join(',')
-                          : null;
-                        const hourStr = dp.hour != null ? `${String(dp.hour).padStart(2,'0')}:00` : null;
-                        const label = [dayStr, hourStr].filter(Boolean).join(' · ');
-                        return label ? (
-                          <span className="badge" style={{ fontSize:9, background:"rgba(20,184,166,.12)", color:"var(--teal)", border:"1px solid rgba(20,184,166,.3)" }}>
-                            ⏰ {label}
+                      {(() => {
+                        const freqLabel = { daily: t("rules.freqDaily"), every_2_days: t("rules.freqEvery2Days"), every_3_days: t("rules.freqEvery3Days"), weekly: t("rules.freqWeekly"), monthly: t("rules.freqMonthly") }[rule.schedule_type] || t("rules.freqDaily");
+                        const hour = rule.run_hour ?? 8;
+                        const nextRun = rule.next_run_at ? new Date(rule.next_run_at) : null;
+                        const nextStr = nextRun ? nextRun.toLocaleString(undefined,{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"}) : null;
+                        return (
+                          <span className="badge" style={{ fontSize:9, background:"rgba(20,184,166,.12)", color:"var(--teal)", border:"1px solid rgba(20,184,166,.3)" }}
+                            title={nextStr ? `${t("rules.nextRun")}: ${nextStr}` : ""}>
+                            ⏰ {freqLabel} · {String(hour).padStart(2,"0")}:00{nextStr ? ` · → ${nextStr}` : ""}
                           </span>
-                        ) : null;
+                        );
                       })()}
                     </div>
 
@@ -13558,6 +13632,10 @@ const RulesPage = ({ workspaceId }) => {
                     </button>
                     <button onClick={() => openEdit(rule)} className="btn btn-ghost"
                       style={{ fontSize:11, padding:"5px 8px" }}><Ic icon={Edit2} size={13} /></button>
+                    <button onClick={() => duplicateRule(rule)} className="btn btn-ghost"
+                      style={{ fontSize:11, padding:"5px 8px" }} title={t("rules.duplicate")}>
+                      <Copy size={13} strokeWidth={1.75} />
+                    </button>
                     <button onClick={() => deleteRule(rule.id)} className="btn btn-red"
                       style={{ fontSize:11, padding:"5px 8px" }}><X size={13} strokeWidth={1.75} /></button>
                     <button onClick={() => setHistoryRule(rule)} className="btn btn-ghost"
@@ -13574,8 +13652,12 @@ const RulesPage = ({ workspaceId }) => {
                   </div>
                 </div>
               </div>
+              )}
+              </SortableRule>
             );
           })}
+          </SortableContext>
+          </DndContext>
         </div>
       )}
 
