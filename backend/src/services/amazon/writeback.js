@@ -265,7 +265,18 @@ async function pushNegativeAsin({
       || result?.[0];
     const realId = created?.negativeTargetId || created?.targetId;
 
-    if (realId && localId) {
+    if (!realId) {
+      const errors = result?.negativeTargetingClauses?.error || [];
+      if (errors.length > 0) {
+        const errMsg = errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
+        logger.warn("Negative ASIN rejected by Amazon", { profileId, path, amazonError: errMsg });
+        return { ok: false, error: errMsg };
+      }
+      logger.warn("Negative ASIN write-back: no realId in response", { profileId, path });
+      return { ok: false, error: "no realId in response" };
+    }
+
+    if (localId) {
       await query(
         "UPDATE negative_targets SET amazon_neg_target_id = $1 WHERE id = $2",
         [String(realId), localId]
@@ -350,4 +361,56 @@ async function pushNewKeywords(keywords) {
   return anyError ? { ok: false, error: anyError } : { ok: true };
 }
 
-module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext, pushNewKeywords };
+/**
+ * Archive (ARCHIVED state) a negative keyword in Amazon, then mark local row archived.
+ */
+async function archiveNegativeKeyword({ localId, connectionId, profileId, marketplaceId, campaignType, level, amazonNegKeywordId }) {
+  if (!connectionId || !profileId || !amazonNegKeywordId) return { ok: false, error: "Missing params" };
+  try {
+    const isAdGroup = level !== "campaign";
+    const isSB = campaignType === "sponsoredBrands" || campaignType === "SB";
+    const path = isAdGroup
+      ? (isSB ? "/sb/negativeKeywords" : "/sp/negativeKeywords")
+      : "/sp/campaignNegativeKeywords";
+    const dataKey = isAdGroup ? "negativeKeywords" : "campaignNegativeKeywords";
+    const idKey   = isAdGroup ? "negativeKeywordId" : "campaignNegativeKeywordId";
+    await put({
+      connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
+      path, data: { [dataKey]: [{ [idKey]: amazonNegKeywordId, state: "ARCHIVED" }] }, group: "keywords",
+    });
+    if (localId) {
+      await query("UPDATE negative_keywords SET state='archived' WHERE id=$1", [localId]);
+    }
+    logger.info("Negative keyword archived", { profileId, path, amazonNegKeywordId });
+    return { ok: true };
+  } catch (e) {
+    logger.warn("Archive negative keyword failed (non-fatal)", { profileId, error: e.message });
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * Archive (ARCHIVED state) a negative target in Amazon, then mark local row archived.
+ */
+async function archiveNegativeTarget({ localId, connectionId, profileId, marketplaceId, campaignType, amazonNegTargetId }) {
+  if (!connectionId || !profileId || !amazonNegTargetId) return { ok: false, error: "Missing params" };
+  try {
+    const path = campaignType === "sponsoredDisplay" || campaignType === "SD"
+      ? "/sd/negativeTargets" : "/sp/negativeTargets";
+    await put({
+      connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
+      path, data: { negativeTargetingClauses: [{ negativeTargetId: amazonNegTargetId, state: "ARCHIVED" }] },
+      group: "keywords",
+    });
+    if (localId) {
+      await query("UPDATE negative_targets SET state='archived' WHERE id=$1", [localId]);
+    }
+    logger.info("Negative target archived", { profileId, path, amazonNegTargetId });
+    return { ok: true };
+  } catch (e) {
+    logger.warn("Archive negative target failed (non-fatal)", { profileId, error: e.message });
+    return { ok: false, error: e.message };
+  }
+}
+
+module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext, pushNewKeywords, archiveNegativeKeyword, archiveNegativeTarget };

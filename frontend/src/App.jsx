@@ -25,7 +25,7 @@ import {
   HelpCircle, Info, LogOut, Plus, Sun, Moon, Copy,
   LineChart as LineChartIcon,
   FlaskConical, Briefcase, GripVertical, ExternalLink,
-  Folder, Users,
+  Folder, Users, ShieldOff,
 } from 'lucide-react';
 
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -82,12 +82,15 @@ const Styles = () => (
     @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
     @keyframes spin{to{transform:rotate(360deg)}}
     @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    @keyframes dot-pulse{0%,100%{box-shadow:0 0 0 0 rgba(34,197,94,.5)}70%{box-shadow:0 0 0 5px rgba(34,197,94,0)}}
     @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
     @keyframes syncProgress{0%{transform:translateX(-150%)}100%{transform:translateX(350%)}}
     @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(400%)}}
     @keyframes slideInRight{from{transform:translateX(100%);opacity:0}to{transform:none;opacity:1}}
     @keyframes slideInFromBottom{from{transform:translateX(-50%) translateY(16px);opacity:0}to{transform:translateX(-50%) translateY(0);opacity:1}}
     svg[class*="lucide"]{display:inline-block;vertical-align:middle;flex-shrink:0;}
+    input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+    input[type=number]{-moz-appearance:textfield}
     .fade{animation:fadeIn .3s ease both}
     .card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;transition:border-color .2s}
     .card:hover{border-color:var(--b2)}
@@ -1701,6 +1704,10 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     () => get("/negative-keywords", { campaignId: campaign.id, limit: 500, sortBy: "created_at", sortDir: "desc" }),
     [campaign.id]
   );
+  const { data: negAsinData, reload: reloadNegAsins } = useAsync(
+    () => get("/negative-asins", { campaignId: campaign.id, limit: 500, sortBy: "created_at", sortDir: "desc" }),
+    [campaign.id]
+  );
   const { data: stData, loading: stLoading } = useAsync(
     () => view === "adgroup" && selectedAg
       ? get("/search-terms", { adGroupId: selectedAg.id, metricsDays: localDays, limit: 200, sortBy: stSort.field, sortDir: stSort.dir })
@@ -1712,7 +1719,15 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
   const keywords    = kwData?.data   || [];
   const targets     = tgtData?.data  || [];
   const productAds  = adsData?.data  || [];
-  const negatives   = negData?.data  || [];
+  // Merge negative keywords + negative ASIN targets into one list
+  const negKws  = negData?.data || [];
+  const negAsinRows = (negAsinData?.data || []).map(r => ({
+    ...r,
+    keyword_text: r.asin || r.expression?.[0]?.value || "—",
+    match_type: "asin",
+    is_asin: true,
+  }));
+  const negatives = [...negKws, ...negAsinRows];
   const searchTermsList = stData?.data || [];
 
   // Filtered + sorted data
@@ -1738,12 +1753,12 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     const label = fmtTargetHelper(tg.resolved_expression || tg.expression);
     return label.toLowerCase().includes(tgtSearch.toLowerCase());
   }), tgtSort);
-  const filteredNegs = negatives.filter(nk => !negSearch || nk.keyword_text.toLowerCase().includes(negSearch.toLowerCase()));
+  const filteredNegs = negatives.filter(nk => !negSearch || (nk.keyword_text || "").toLowerCase().includes(negSearch.toLowerCase()));
   const filteredSts  = searchTermsList.filter(s => !stSearch || (s.query || "").toLowerCase().includes(stSearch.toLowerCase()));
-  // For ad-group view: show campaign + adgroup negatives; for campaign view: show campaign level
+  // For ad-group view: show campaign + adgroup negatives; for campaign view: show all campaign-scope
   const visibleNegs  = view === "adgroup" && selectedAg
     ? filteredNegs.filter(nk => nk.level === "campaign" || nk.ad_group_id === selectedAg.id)
-    : filteredNegs.filter(nk => nk.level === "campaign");
+    : filteredNegs;
 
   // Toggle sort
   const toggleSort = (sortState, setSortFn, field) => {
@@ -1887,10 +1902,15 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     } catch (e) { setAddError(e.message); }
     setAddSaving(false);
   }
-  async function deleteNegative(id) {
+  async function deleteNegative(id, isAsin) {
     try {
-      await del(`/negative-keywords/${id}`);
-      reloadNegs();
+      if (isAsin) {
+        await del(`/negative-asins/${id}`);
+        reloadNegAsins();
+      } else {
+        await del(`/negative-keywords/${id}`);
+        reloadNegs();
+      }
     } catch (e) { showToast(e.message, "err"); }
   }
 
@@ -2437,6 +2457,15 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                           <Ban size={10} strokeWidth={2.5} />
                           Neg. keyw.
                         </span>
+                      ) : term.is_neg_asin ? (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 10,
+                          color: "var(--pur)", background: "rgba(139,92,246,.1)",
+                          border: "1px solid rgba(139,92,246,.25)", borderRadius: 4,
+                          padding: "2px 6px", whiteSpace: "nowrap" }}
+                          title="Negated as ASIN target (ASIN_SAME_AS)">
+                          <Ban size={10} strokeWidth={2.5} />
+                          Neg. ASIN
+                        </span>
                       ) : <span style={{ color: "var(--tx3)" }}>—</span>}
                     </TD>
                     <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{term.match_type || "—"}</TD>
@@ -2491,15 +2520,22 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
             <tbody>
               {visibleNegs.map((nk, i) => (
                 <tr key={nk.id} style={ROW(i)}>
-                  <TD style={{ color: "var(--tx)" }}>{nk.keyword_text}</TD>
-                  <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{(nk.match_type || "").replace(/negative_?/, "")}</TD>
+                  <TD style={{ color: "var(--tx)" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                      {nk.is_asin && <span className="badge bg-pur" style={{ fontSize: 9, padding: "1px 4px" }}>ASIN</span>}
+                      {nk.keyword_text}
+                    </span>
+                  </TD>
+                  <TD style={{ color: "var(--tx3)", fontSize: 11 }}>
+                    {nk.is_asin ? "—" : (nk.match_type || "").replace(/negative_?/, "")}
+                  </TD>
                   <TD><span className={`badge ${nk.level === "campaign" ? "bg-bl" : "bg-amb"}`} style={{ fontSize: 10 }}>
                     {nk.level === "campaign" ? t("campaigns.detail.levelCampaign") : t("campaigns.detail.levelAdGroup")}
                   </span></TD>
                   <TD style={{ color: "var(--tx3)", fontSize: 11 }}>{nk.created_at ? new Date(nk.created_at).toLocaleDateString() : "—"}</TD>
                   <TD style={{ textAlign: "right" }}>
                     <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 8px", color: "var(--red)" }}
-                      onClick={() => deleteNegative(nk.id)}>{t("campaigns.detail.deleteNeg")}</button>
+                      onClick={() => deleteNegative(nk.id, nk.is_asin)}>{t("campaigns.detail.deleteNeg")}</button>
                   </TD>
                 </tr>
               ))}
@@ -2640,7 +2676,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     { id: "adgroups",    label: `${t("campaigns.detail.adGroups")} (${adGroups.length || "…"})` },
     { id: "searchterms", label: `${t("campaigns.detail.searchTerms")} (${searchTermsList.length || "…"})` },
     { id: "settings",    label: t("campaigns.detail.settings") },
-    { id: "negatives",   label: `${t("campaigns.detail.negatives")} (${negatives.filter(n => n.level === "campaign").length || "0"})` },
+    { id: "negatives",   label: `${t("campaigns.detail.negatives")} (${negatives.length || "0"})` },
   ];
   const agTabs = [
     ...(selectedAg?.targeting_type !== "auto" ? [{ id: "keywords", label: `${t("nav.keywords")} (${keywords.length || "…"})` }] : []),
@@ -4006,8 +4042,16 @@ const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
   const svgPoints = pts.map((s, i) => `${xOf(i)},${yOf(s.best_rank)}`).join(" ");
   const areaPoints = `0,${H} ${svgPoints} ${W},${H}`;
 
+  // Only show notes that fall within the visible date range (±1 day tolerance)
+  const firstMs = new Date(pts[0].captured_at).getTime() - 86400000;
+  const lastMs  = new Date(pts[pts.length - 1].captured_at).getTime() + 86400000;
+  const visibleNotes = notes.filter(n => {
+    const nd = new Date(n.note_date).getTime();
+    return nd >= firstMs && nd <= lastMs;
+  });
+
   // Map each note to a chart x% position by nearest snapshot
-  const notePositions = notes.map(n => {
+  const notePositions = visibleNotes.map(n => {
     const nd = new Date(n.note_date).getTime();
     let bestI = 0, bestDiff = Infinity;
     pts.forEach((s, i) => {
@@ -4119,9 +4163,9 @@ const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
       </div>
 
       {/* Notes list */}
-      {notes.length > 0 && (
+      {visibleNotes.length > 0 && (
         <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
-          {notes.map(n => (
+          {visibleNotes.map(n => (
             <div key={n.id} style={{
               display: "flex", alignItems: "center", gap: 8, fontSize: 11,
               padding: "4px 8px", borderRadius: 5,
@@ -4158,6 +4202,27 @@ const ProductsPage = ({ workspaceId }) => {
   // master "expand all / collapse all" toggle for sweeping BSR review.
   const [expandedIds, setExpandedIds] = useState(() => new Set());
   const [history, setHistory] = useState({});
+  const [histStart, setHistStart] = useState('');
+  const [histEnd, setHistEnd] = useState('');
+
+  const buildHistUrl = (id, start, end) => {
+    const qs = new URLSearchParams();
+    if (start) qs.set('start', start);
+    if (end)   qs.set('end', end);
+    return `/products/${id}/history${qs.toString() ? '?' + qs : ''}`;
+  };
+
+  const fetchHistory = (id, start, end) =>
+    get(buildHistUrl(id, start, end))
+      .then(d => setHistory(h => ({ ...h, [id]: d })))
+      .catch(() => {});
+
+  const handleHistRange = (start, end) => {
+    setHistStart(start);
+    setHistEnd(end);
+    setHistory({});
+    expandedIds.forEach(id => fetchHistory(id, start, end));
+  };
   // Hover sparkline state — { pid, idx } where idx is the BSR badge index
   // for that product. Lazy-fetches /:id/history on first hover so the chart
   // appears with at most ~200ms delay on cold cache.
@@ -4177,7 +4242,7 @@ const ProductsPage = ({ workspaceId }) => {
   const ensureBsrHistory = (id) => {
     if (history[id] || bsrHoverFetching.current.has(id)) return;
     bsrHoverFetching.current.add(id);
-    get(`/products/${id}/history`)
+    get(buildHistUrl(id, histStart, histEnd))
       .then(d => setHistory(h => ({ ...h, [id]: d })))
       .catch(() => {})
       .finally(() => bsrHoverFetching.current.delete(id));
@@ -4304,7 +4369,7 @@ const ProductsPage = ({ workspaceId }) => {
     });
     if (wasExpanded) { setAddingNote(null); return; }
     const tasks = [];
-    if (!history[id]) tasks.push(get(`/products/${id}/history`).then(d => setHistory(h => ({ ...h, [id]: d }))).catch(() => {}));
+    if (!history[id]) tasks.push(fetchHistory(id, histStart, histEnd));
     tasks.push(loadNotes(id));
     await Promise.all(tasks);
   };
@@ -4444,7 +4509,7 @@ const ProductsPage = ({ workspaceId }) => {
         for (let i = 0; i < missing.length; i += CHUNK) {
           const chunk = missing.slice(i, i + CHUNK);
           const results = await Promise.all(
-            chunk.map(id => get(`/products/${id}/history`).then(d => [id, d]).catch(() => [id, null]))
+            chunk.map(id => get(buildHistUrl(id, histStart, histEnd)).then(d => [id, d]).catch(() => [id, null]))
           );
           setHistory(h => {
             const next = { ...h };
@@ -4577,6 +4642,27 @@ const ProductsPage = ({ workspaceId }) => {
             <option value="asin">Sort: ASIN</option>
             <option value="updated">Sort: Last updated</option>
           </select>
+
+          {/* BSR history date range filter */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <span style={{ fontSize: 11, color: "var(--tx3)", whiteSpace: "nowrap" }}>BSR:</span>
+            <input
+              type="date"
+              value={histStart}
+              onChange={e => handleHistRange(e.target.value, histEnd)}
+              style={{ padding: "5px 7px", borderRadius: 6, fontSize: 11, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none", cursor: "pointer" }}
+            />
+            <span style={{ color: "var(--tx3)", fontSize: 11 }}>—</span>
+            <input
+              type="date"
+              value={histEnd}
+              onChange={e => handleHistRange(histStart, e.target.value)}
+              style={{ padding: "5px 7px", borderRadius: 6, fontSize: 11, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none", cursor: "pointer" }}
+            />
+            {(histStart || histEnd) && (
+              <button onClick={() => handleHistRange('', '')} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: "2px 4px", fontSize: 13, lineHeight: 1 }} title="Clear date filter">×</button>
+            )}
+          </div>
 
           {(() => {
             const anyOpen = (filteredProducts || []).some(p => expandedIds.has(p.id));
@@ -4779,6 +4865,59 @@ const ProductsPage = ({ workspaceId }) => {
                         No BSR data — configure SP_API_REFRESH_TOKEN in .env
                       </div>
                     )}
+
+                    {/* Product metrics strip */}
+                    {(() => {
+                      const fba = parseInt(p.fba_qty) || 0;
+                      const fbm = parseInt(p.fbm_qty) || 0;
+                      const price = parseFloat(p.sell_price) || 0;
+                      const cogs = parseFloat(p.cogs_per_unit) || 0;
+                      const ppcYest = parseFloat(p.ppc_yesterday) || 0;
+                      const ppc7d   = parseFloat(p.ppc_7d) || 0;
+                      const profYest = parseFloat(p.profit_yesterday) || 0;
+                      const prof7d   = parseFloat(p.profit_7d) || 0;
+                      const revYest  = parseFloat(p.revenue_yesterday) || 0;
+                      const rev7d    = parseFloat(p.revenue_7d) || 0;
+                      const hasAny = fba > 0 || fbm > 0 || price > 0 || ppcYest > 0 || ppc7d > 0 || revYest > 0 || rev7d > 0;
+                      if (!hasAny) return null;
+                      const chip = (label, val, color) => (
+                        <span style={{ display:"inline-flex", alignItems:"center", gap:3,
+                          fontSize:10, padding:"2px 7px", borderRadius:20,
+                          background:"var(--s2)", border:"1px solid var(--b2)",
+                          color: color || "var(--tx2)", whiteSpace:"nowrap" }}>
+                          <span style={{ color:"var(--tx3)", marginRight:1 }}>{label}</span>
+                          {val}
+                        </span>
+                      );
+                      const pairChip = (label, v1, v2, colored) => {
+                        const c1 = colored ? (v1 >= 0 ? "var(--grn)" : "var(--red)") : "var(--tx)";
+                        const c2 = colored ? (v2 >= 0 ? "var(--grn)" : "var(--red)") : "var(--tx)";
+                        return (
+                          <span style={{ display:"inline-flex", alignItems:"center", gap:3,
+                            fontSize:10, padding:"2px 7px", borderRadius:20,
+                            background:"var(--s2)", border:"1px solid var(--b2)",
+                            whiteSpace:"nowrap" }}>
+                            <span style={{ color:"var(--tx3)" }}>{label}</span>
+                            <span style={{ color:c1 }}>€{v1.toFixed(2)}</span>
+                            <span style={{ color:"var(--tx3)" }}>·</span>
+                            <span style={{ color:"var(--tx2)", fontSize:9 }}>7д</span>
+                            <span style={{ color:c2 }}>€{v2.toFixed(2)}</span>
+                          </span>
+                        );
+                      };
+                      return (
+                        <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:8 }}>
+                          {(fba > 0 || fbm > 0) && <>
+                            {chip("FBA", fba, fba > 0 ? "var(--grn)" : "var(--tx3)")}
+                            {chip("FBM", fbm, fbm > 0 ? "var(--ac2)" : "var(--tx3)")}
+                          </>}
+                          {price > 0 && chip("Цена", `€${price.toFixed(2)}`)}
+                          {cogs > 0 && chip("Себес.", `€${cogs.toFixed(2)}`)}
+                          {(ppcYest > 0 || ppc7d > 0) && pairChip("PPC", ppcYest, ppc7d, false)}
+                          {(revYest > 0 || rev7d > 0) && pairChip("Прибыль", profYest, prof7d, true)}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
@@ -6816,18 +6955,19 @@ const CampaignsPage = ({ workspaceId }) => {
   const [detailCampaign, setDetailCampaign] = useState(null);
   const [createCampOpen, setCreateCampOpen] = useState(false);
   const { colgroup: campColgroup, resizeHandle: campRH, resetCols: campResetCols } = useResizableColumns(
-    "campaigns", [36, 200, 80, 90, 95, 70, 85, 85, 75, 75, 60]
+    "campaigns", [36, 200, 80, 90, 120, 95, 70, 85, 85, 75, 75, 60]
   );
   const { isVisible: campCV, ColVisDropdown: CampColsBtn } = useColumnVisibility("campaigns", [
-    { key: "name",   label: t("campaigns.colName") },
-    { key: "type",   label: t("campaigns.colType") },
-    { key: "status", label: t("campaigns.colStatus") },
-    { key: "budget", label: t("campaigns.colBudget") },
-    { key: "clicks", label: "Clicks" },
-    { key: "spend",  label: "Spend" },
-    { key: "sales",  label: "Sales" },
-    { key: "acos",   label: "ACOS" },
-    { key: "roas",   label: "ROAS" },
+    { key: "name",      label: t("campaigns.colName") },
+    { key: "type",      label: t("campaigns.colType") },
+    { key: "status",    label: t("campaigns.colStatus") },
+    { key: "portfolio", label: "Portfolio" },
+    { key: "budget",    label: t("campaigns.colBudget") },
+    { key: "clicks",    label: "Clicks" },
+    { key: "spend",     label: "Spend" },
+    { key: "sales",     label: "Sales" },
+    { key: "acos",      label: "ACOS" },
+    { key: "roas",      label: "ROAS" },
   ]);
 
   // Listen for af:navigate — when navigating to campaigns with a search term, apply it immediately.
@@ -7037,15 +7177,16 @@ const CampaignsPage = ({ workspaceId }) => {
                       <th style={{ width: 36 }}>
                         <input type="checkbox" checked={selected.size === campaigns.length && campaigns.length > 0} onChange={toggleAll} />
                       </th>
-                      {campCV("name")   && <SortHeader field="name"   label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(1)} />}
-                      {campCV("type")   && <th>{t("campaigns.colType")}{campRH(2)}</th>}
-                      {campCV("status") && <SortHeader field="state"  label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(3)} />}
-                      {campCV("budget") && <SortHeader field="budget" label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(4)} />}
-                      {campCV("clicks") && <SortHeader field="clicks" label="Clicks" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />}
-                      {campCV("spend")  && <SortHeader field="spend"  label="Spend" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />}
-                      {campCV("sales")  && <SortHeader field="sales"  label="Sales" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />}
-                      {campCV("acos")   && <SortHeader field="acos"   label="ACOS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />}
-                      {campCV("roas")   && <SortHeader field="roas"   label="ROAS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(9)} />}
+                      {campCV("name")      && <SortHeader field="name"   label={t("campaigns.colName")}   currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(1)} />}
+                      {campCV("type")      && <th>{t("campaigns.colType")}{campRH(2)}</th>}
+                      {campCV("status")    && <SortHeader field="state"  label={t("campaigns.colStatus")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} rh={campRH(3)} />}
+                      {campCV("portfolio") && <th style={{ fontSize: 11, fontWeight: 600, color: "var(--tx3)", textTransform: "uppercase", letterSpacing: ".04em" }}>Portfolio{campRH(4)}</th>}
+                      {campCV("budget")    && <SortHeader field="budget" label={t("campaigns.colBudget")} currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(5)} />}
+                      {campCV("clicks")    && <SortHeader field="clicks" label="Clicks" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(6)} />}
+                      {campCV("spend")     && <SortHeader field="spend"  label="Spend" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(7)} />}
+                      {campCV("sales")     && <SortHeader field="sales"  label="Sales" currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(8)} />}
+                      {campCV("acos")      && <SortHeader field="acos"   label="ACOS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(9)} />}
+                      {campCV("roas")      && <SortHeader field="roas"   label="ROAS"  currentSort={sortBy} currentDir={sortDir} onSort={handleCampSort} align="right" rh={campRH(10)} />}
                       <th></th>
                     </tr>
                   </thead>
@@ -7095,6 +7236,11 @@ const CampaignsPage = ({ workspaceId }) => {
                               </span>
                             )
                           }
+                        </td>}
+                        {campCV("portfolio") && <td style={{ maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {c.portfolio_name
+                            ? <span style={{ fontSize: 11, color: "var(--tx2)" }} title={c.portfolio_name}>{c.portfolio_name}</span>
+                            : <span style={{ fontSize: 11, color: "var(--tx3)" }}>—</span>}
                         </td>}
                         {campCV("budget") && <td className="num" style={{ textAlign: "right", minWidth: 80 }}>
                           {(() => {
@@ -7528,12 +7674,22 @@ const AuditPage = ({ workspaceId }) => {
 
   const canRollback = (event) => {
     if (event.action?.endsWith(".rollback")) return false;
+    // Pure inserts (no before_data) that backend can delete
     if (event.action === "keyword.negative_added" &&
         ["negative_keyword", "negative_target"].includes(event.entity_type)) return true;
+    if (event.action === "keyword.add_negative"   && event.entity_type === "keyword") return true;
+    if (event.action === "target.add_negative"    && event.entity_type === "target")  return true;
+    // State/bid/budget changes — require before_data
     return !!(event.before_data &&
-      ["keyword", "campaign"].includes(event.entity_type) &&
-      ["keyword.bid_change","keyword.pause_keyword","keyword.enable_keyword",
-       "keyword.adjust_bid_pct","keyword.set_bid","keyword.state_change","campaign.update"].includes(event.action));
+      (
+        (event.entity_type === "keyword"  && ["keyword.bid_change","keyword.pause_keyword","keyword.enable_keyword",
+          "keyword.adjust_bid_pct","keyword.set_bid","keyword.state_change"].includes(event.action)) ||
+        (event.entity_type === "target"   && ["target.pause","target.enable","target.adjust_bid_pct"].includes(event.action)) ||
+        (event.entity_type === "campaign" && ["campaign.update","campaign.pause","campaign.enable",
+          "campaign.adjust_budget_pct","campaign.set_budget",
+          "rule.pause_campaign","rule.enable_campaign","rule.adjust_bid","rule.set_bid"].includes(event.action))
+      )
+    );
   };
 
   const INP = { fontSize: 12, padding: "6px 10px", borderRadius: 6,
@@ -7671,8 +7827,17 @@ const AuditPage = ({ workspaceId }) => {
                       {new Date(event.created_at).toLocaleString("ru", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                     </td>
                     <td style={{ fontSize: 12 }}>
-                      <span style={{ marginRight: 4, display:"inline-block", verticalAlign:"middle" }}>{SOURCE_ICONS[event.source] || <MoreHorizontal size={11} strokeWidth={1.75} color="var(--tx3)" />}</span>
-                      {event.actor_name || "—"}
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 5 }}>
+                        <span style={{ marginTop: 1, flexShrink: 0 }}>{SOURCE_ICONS[event.source] || <MoreHorizontal size={11} strokeWidth={1.75} color="var(--tx3)" />}</span>
+                        <div>
+                          <div>{event.actor_name || "—"}</div>
+                          {event.metadata?.rule_name && (
+                            <div style={{ fontSize: 10, color: "var(--pur)", marginTop: 1, fontFamily: "var(--mono)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 120 }} title={event.metadata.rule_name}>
+                              {event.metadata.rule_name}
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </td>
                     <td>
                       <span style={{ fontSize: 12, color: 'var(--tx)', fontWeight: 500 }}>
@@ -9965,6 +10130,16 @@ const KeywordsPage = ({ workspaceId }) => {
                                   Neg. keyw.
                                 </span>
                               )}
+                              {!term.is_negated && term.is_neg_asin && (
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: 3,
+                                  fontSize: 10, color: "var(--pur)", background: "rgba(139,92,246,.1)",
+                                  border: "1px solid rgba(139,92,246,.25)", borderRadius: 4,
+                                  padding: "2px 5px", flexShrink: 0 }}
+                                  title="Negated as ASIN target (ASIN_SAME_AS)">
+                                  <Ban size={10} strokeWidth={2.5} />
+                                  Neg. ASIN
+                                </span>
+                              )}
                             </div>
                             {term.match_type && (
                               <span style={{ fontSize: 10, color: "var(--tx3)", marginTop: 1, display: "block" }}>
@@ -10943,21 +11118,22 @@ const EMPTY_RULE_FORM = {
   schedule_type: "daily", run_hour: 8,
   conditions: [{ metric: "clicks", op: "gte", value: "30" }],
   actions:    [{ type: "pause_keyword", value: "" }],
-  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_targeting_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", campaign_name_mode: "include", dayparting: null },
+  scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_targeting_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", campaign_name_mode: "include", dayparting: null, search_term_subtype: "all" },
   safety: { min_bid: "0.02", max_bid: "50" },
 };
 
 const RULE_METRICS = (t) => [
-  { value:"clicks",      label:t("rules.metric.clicks") },
-  { value:"spend",       label:t("rules.metric.spend") },
-  { value:"sales",       label:t("rules.metric.sales") },
-  { value:"orders",      label:t("rules.metric.orders") },
-  { value:"impressions", label:t("rules.metric.impressions") },
-  { value:"acos",        label:t("rules.metric.acos") },
-  { value:"roas",        label:t("rules.metric.roas") },
-  { value:"ctr",         label:t("rules.metric.ctr") },
-  { value:"cpc",         label:t("rules.metric.cpc") },
-  { value:"bid",         label:t("rules.metric.bid") },
+  { value:"clicks",        label:t("rules.metric.clicks") },
+  { value:"spend",         label:t("rules.metric.spend") },
+  { value:"sales",         label:t("rules.metric.sales") },
+  { value:"orders",        label:t("rules.metric.orders") },
+  { value:"impressions",   label:t("rules.metric.impressions") },
+  { value:"acos",          label:t("rules.metric.acos") },
+  { value:"roas",          label:t("rules.metric.roas") },
+  { value:"ctr",           label:t("rules.metric.ctr") },
+  { value:"cpc",           label:t("rules.metric.cpc") },
+  { value:"bid",           label:t("rules.metric.bid"),          et:["keyword","target","ad_group"] },
+  { value:"daily_budget",  label:t("rules.metric.daily_budget"), et:["campaign"] },
 ];
 const RULE_OPS = [
   { value:"gte", label:"≥" },
@@ -10976,7 +11152,15 @@ const RULE_ACTIONS_LIST = (t) => [
   { value:"pause_target",          label:t("rules.pauseTarget"),          et:"target" },
   { value:"enable_target",         label:t("rules.enableTarget"),         et:"target" },
   { value:"adjust_target_bid_pct", label:t("rules.adjustTargetBidPct"),   et:"target" },
-  { value:"add_negative_target",   label:t("rules.addNegativeTarget"),    et:"target" },
+  { value:"add_negative_target",   label:t("rules.addNegativeTarget"),    et:["target","search_term"] },
+  { value:"pause_ad_group",        label:t("rules.pauseAdGroup"),         et:"ad_group" },
+  { value:"enable_ad_group",       label:t("rules.enableAdGroup"),        et:"ad_group" },
+  { value:"adjust_default_bid_pct",label:t("rules.adjustDefaultBidPct"),  et:"ad_group" },
+  { value:"set_default_bid",       label:t("rules.setDefaultBid"),        et:"ad_group" },
+  { value:"pause_campaign",        label:t("rules.pauseCampaign"),        et:"campaign" },
+  { value:"enable_campaign",       label:t("rules.enableCampaign"),       et:"campaign" },
+  { value:"adjust_budget_pct",     label:t("rules.adjustBudgetPct"),      et:"campaign" },
+  { value:"set_budget",            label:t("rules.setBudget"),            et:"campaign" },
 ];
 const RULE_MATCH_TYPES = [
   { value:"exact",  label:"Exact" },
@@ -11035,6 +11219,20 @@ const RULE_TEMPLATES = [
     conditions: [{ metric: 'roas', op: 'lt', value: '2' }, { metric: 'clicks', op: 'gte', value: '15' }],
     actions: [{ type: 'adjust_bid_pct', value: '-10' }], dry_run: true,
   },
+  {
+    id: 'boost_campaign_budget', icon: '💰', label: 'Boost budget on top campaigns',
+    description: 'Increase daily budget for campaigns with strong ROAS',
+    name: 'Budget +20% — ROAS > 4×, Active Orders', entityType: 'campaign', periodDays: 14,
+    conditions: [{ metric: 'roas', op: 'gt', value: '4' }, { metric: 'orders', op: 'gte', value: '5' }],
+    actions: [{ type: 'adjust_budget_pct', value: '20' }], dry_run: true,
+  },
+  {
+    id: 'cut_campaign_budget', icon: '✂️', label: 'Cut budget on losing campaigns',
+    description: 'Reduce daily budget when ACOS is too high',
+    name: 'Budget -20% — ACOS > 50%, Spend > €30', entityType: 'campaign', periodDays: 14,
+    conditions: [{ metric: 'acos', op: 'gt', value: '50' }, { metric: 'spend', op: 'gt', value: '30' }],
+    actions: [{ type: 'adjust_budget_pct', value: '-20' }], dry_run: true,
+  },
 ];
 
 const RuleWizardModal = ({
@@ -11073,7 +11271,7 @@ const RuleWizardModal = ({
     : t("rules.periodDays", { days: form.scope?.period_days || 14 });
 
   const METRIC_UNIT = {
-    spend:"€", sales:"€", bid:"€", cpc:"€",
+    spend:"€", sales:"€", bid:"€", cpc:"€", daily_budget:"€",
     acos:"%", ctr:"%",
     roas:"×",
   };
@@ -11116,8 +11314,10 @@ const RuleWizardModal = ({
         {showScope && (
           <div style={{ marginTop:2, fontSize:11, color:"var(--tx3)" }}>
             <span style={{ fontFamily:"var(--mono)", marginRight:6 }}>SCOPE</span>
-            {entityType === "search_term" ? t("rules.searchTerm")
+            {entityType === "search_term"    ? t("rules.searchTerm")
               : entityType === "product_target" ? t("rules.productTarget")
+              : entityType === "ad_group"       ? t("rules.adGroupEntity")
+              : entityType === "campaign"       ? t("rules.campaignEntity")
               : t("rules.keyword")}
             {" · "}{form.scope.campaign_type ? ruleCampTypes.find(c=>c.value===form.scope.campaign_type)?.label : t("rules.allTypes")}
             {" · "}{campCount > 0 ? t("rules.campaignsSelected", { count: campCount }) : t("rules.allEntities")}
@@ -11311,24 +11511,29 @@ const RuleWizardModal = ({
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16, marginBottom:16 }}>
                 <div>
                   <div style={LABEL}>{t("rules.entityType")}</div>
-                  <div style={{ display:"flex", gap:6 }}>
+                  <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
                     {[
                       { value:"keyword",        label: t("rules.keyword") },
                       { value:"product_target", label: t("rules.productTarget") },
                       { value:"search_term",    label: t("rules.searchTerm") },
+                      { value:"ad_group",       label: t("rules.adGroupEntity") },
+                      { value:"campaign",       label: t("rules.campaignEntity") },
                     ].map(et => (
                       <button key={et.value}
                         className={`btn ${(form.scope?.entity_type || "keyword") === et.value ? "btn-primary" : "btn-ghost"}`}
-                        style={{ fontSize:12, padding:"7px 12px", flex:1 }}
+                        style={{ fontSize:12, padding:"7px 12px" }}
                         onClick={() => {
-                          // Switching to/from search_term may invalidate prior actions; reset to a sensible default
                           setForm(f => {
                             const newType = et.value;
                             const allowedActionTypes = newType === "search_term"
                               ? ["add_negative_keyword"]
                               : newType === "product_target"
                                 ? ["pause_target","enable_target","adjust_target_bid_pct","add_negative_target"]
-                                : ["pause_keyword","enable_keyword","adjust_bid_pct","set_bid","add_negative_keyword"];
+                                : newType === "ad_group"
+                                  ? ["pause_ad_group","enable_ad_group","adjust_default_bid_pct","set_default_bid"]
+                                  : newType === "campaign"
+                                    ? ["pause_campaign","enable_campaign","adjust_budget_pct","set_budget"]
+                                    : ["pause_keyword","enable_keyword","adjust_bid_pct","set_bid","add_negative_keyword"];
                             const filteredActs = (f.actions || []).filter(a => allowedActionTypes.includes(a.type));
                             const safeActs = filteredActs.length ? filteredActs : [{ type: allowedActionTypes[0], value: "" }];
                             return { ...f, scope: { ...f.scope, entity_type: newType }, actions: safeActs };
@@ -11338,6 +11543,22 @@ const RuleWizardModal = ({
                       </button>
                     ))}
                   </div>
+                  {(form.scope?.entity_type || "keyword") === "search_term" && (
+                    <div style={{ display:"flex", gap:6, marginTop:8 }}>
+                      {[
+                        { value:"all",     label: t("common.all") },
+                        { value:"asin",    label: t("rules.subtypeAsin") },
+                        { value:"keyword", label: t("rules.subtypeKeyword") },
+                      ].map(st => (
+                        <button key={st.value}
+                          className={`btn ${(form.scope?.search_term_subtype || "all") === st.value ? "btn-primary" : "btn-ghost"}`}
+                          style={{ fontSize:11, padding:"5px 10px" }}
+                          onClick={() => setForm(f => ({ ...f, scope: { ...f.scope, search_term_subtype: st.value } }))}>
+                          {st.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div style={LABEL}>
@@ -11453,7 +11674,7 @@ const RuleWizardModal = ({
                   <div style={{ display:"flex", gap:8, marginBottom:6, alignItems:"center" }}>
                     <select value={cond.metric} onChange={e => updCond(i,"metric",e.target.value)}
                       style={{ flex:"1 1 0%", minWidth:0, ...SEL_SM }}>
-                      {ruleMetrics.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                      {ruleMetrics.filter(m => !m.et || (Array.isArray(m.et) ? m.et.includes(form.scope?.entity_type) : m.et === form.scope?.entity_type)).map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                     </select>
                     <select value={cond.op} onChange={e => updCond(i,"op",e.target.value)}
                       style={{ width:76, flexShrink:0, ...SEL_SM, textAlign:"center" }}>
@@ -11503,11 +11724,16 @@ const RuleWizardModal = ({
                       // apply to multiple entity types, like add_negative_keyword on both keyword + search_term).
                       const wantEt = curEntityType === "product_target" ? "target"
                                    : curEntityType === "search_term"    ? "search_term"
+                                   : curEntityType === "ad_group"       ? "ad_group"
+                                   : curEntityType === "campaign"       ? "campaign"
                                    : "keyword";
                       const filteredActions = ruleActionsList.filter(a =>
                         Array.isArray(a.et) ? a.et.includes(wantEt) : a.et === wantEt
                       );
-                      const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid" || act.type === "adjust_target_bid_pct";
+                      const isBidAct = act.type === "adjust_bid_pct" || act.type === "set_bid"
+                        || act.type === "adjust_target_bid_pct"
+                        || act.type === "adjust_default_bid_pct" || act.type === "set_default_bid"
+                        || act.type === "adjust_budget_pct" || act.type === "set_budget";
                       const isNegKw  = act.type === "add_negative_keyword";
                       return (
                         <div key={i} style={{ marginBottom:8 }}>
@@ -11527,10 +11753,10 @@ const RuleWizardModal = ({
                             <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:6 }}>
                               <input type="number" value={act.value}
                                 onChange={e => updAct(i,"value",e.target.value)}
-                                placeholder={act.type === "set_bid" ? "e.g. 0.50" : "e.g. -20"}
+                                placeholder={["set_bid","set_default_bid","set_budget"].includes(act.type) ? "e.g. 0.50" : "e.g. -20"}
                                 style={{ flex:1, ...INP_SM }} />
                               <span style={{ fontSize:12, color:"var(--tx3)", width:20 }}>
-                                {act.type === "set_bid" ? "€" : "%"}
+                                {["set_bid","set_default_bid","set_budget"].includes(act.type) ? "€" : "%"}
                               </span>
                             </div>
                           )}
@@ -11583,13 +11809,25 @@ const RuleWizardModal = ({
                   <div style={{ marginBottom:10 }}>
                     <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignType")}</div>
                     <select value={form.scope.campaign_type || ""}
-                      onChange={e => setForm(f => ({ ...f, scope:{ ...f.scope, campaign_type:e.target.value } }))}
+                      onChange={e => setForm(f => {
+                        const newCampType = e.target.value;
+                        const et = f.scope?.entity_type || "keyword";
+                        const tt = f.scope?.targeting_type || "";
+                        const spOpts = ["category","asin","auto_targeting"];
+                        const sdOpts = ["audience"];
+                        const validForNew = newCampType === "sponsoredProducts" ? spOpts
+                                         : newCampType === "sponsoredDisplay"   ? sdOpts
+                                         : [...spOpts, ...sdOpts];
+                        const resetTt = et === "product_target" && tt && !validForNew.includes(tt);
+                        return { ...f, scope:{ ...f.scope, campaign_type: newCampType, ...(resetTt ? { targeting_type: "" } : {}) } };
+                      })}
                       style={{ width:"100%", ...SEL_SM }}>
                       {ruleCampTypes.map(ct => <option key={ct.value} value={ct.value}>{ct.label}</option>)}
                     </select>
                   </div>
 
-                  {form.scope?.campaign_targeting_type !== "auto" && (
+                  {form.scope?.campaign_targeting_type !== "auto" &&
+                   !["ad_group","campaign","product_target"].includes(form.scope?.entity_type || "keyword") && (
                     <div style={{ marginBottom:10 }}>
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.matchTypes")}</div>
                       <div style={{ display:"flex", gap:5 }}>
@@ -11602,7 +11840,8 @@ const RuleWizardModal = ({
                     </div>
                   )}
 
-                  {(form.scope?.entity_type || "keyword") === "keyword" && (!form.scope?.campaign_type || form.scope?.campaign_type === "sponsoredProducts") && (
+                  {(!form.scope?.campaign_type || form.scope?.campaign_type === "sponsoredProducts") &&
+                   (form.scope?.entity_type || "keyword") !== "product_target" && (
                     <div style={{ marginBottom:10 }}>
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.campaignTargetingType")}</div>
                       <div style={{ display:"flex", gap:5 }}>
@@ -11646,15 +11885,38 @@ const RuleWizardModal = ({
                   {(form.scope?.entity_type || "keyword") === "product_target" && (
                     <div style={{ marginBottom:10 }}>
                       <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.targetingType")}</div>
-                      <select value={form.scope?.targeting_type || ""}
-                        onChange={e => setForm(f => ({ ...f, scope: { ...f.scope, targeting_type: e.target.value } }))}
-                        style={{ width:"100%", ...SEL_SM }}>
-                        <option value="">{t("rules.targetingAll")}</option>
-                        <option value="product">{t("rules.targetingProduct")}</option>
-                        <option value="views">{t("rules.targetingViews")}</option>
-                        <option value="audience">{t("rules.targetingAudience")}</option>
-                        <option value="auto">{t("rules.targetingAuto")}</option>
-                      </select>
+                      <div style={{ display:"flex", gap:5 }}>
+                        {[
+                          { value:"",         label: t("rules.targetingAll") },
+                          { value:"auto",     label: t("rules.targetingAutoShort") },
+                          { value:"product",  label: t("rules.targetingProduct") },
+                          { value:"category", label: t("rules.targetingCategory") },
+                        ].map(opt => {
+                          const ct = form.scope?.campaign_targeting_type || "";
+                          const tt = form.scope?.targeting_type || "";
+                          const cur = ct === "auto" ? "auto"
+                                    : ct === "manual" && tt === "asin" ? "product"
+                                    : ct === "manual" && tt === "category" ? "category"
+                                    : "";
+                          const TARGET_MAP = {
+                            "auto":     { campaign_targeting_type: "auto",   targeting_type: "auto_targeting" },
+                            "product":  { campaign_targeting_type: "manual", targeting_type: "asin" },
+                            "category": { campaign_targeting_type: "manual", targeting_type: "category" },
+                            "":         { campaign_targeting_type: "",       targeting_type: "" },
+                          };
+                          return (
+                            <button key={opt.value}
+                              className={`btn ${cur === opt.value ? "btn-primary" : "btn-ghost"}`}
+                              style={{ fontSize:11, padding:"5px 10px", flex:1 }}
+                              onClick={() => {
+                                const vals = TARGET_MAP[opt.value] || TARGET_MAP[""];
+                                setForm(f => ({ ...f, scope: { ...f.scope, ...vals } }));
+                              }}>
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
 
@@ -13134,6 +13396,58 @@ const RulesPage = ({ workspaceId }) => {
   const rawRules   = rulesData?.data       || [];
   const pagination = rulesData?.pagination || {};
 
+  // ── Campaign Exemptions ──────────────────────────────────────────────────
+  const [exemptions,      setExemptions]      = useState([]);
+  const [showExempForm,   setShowExempForm]   = useState(false);
+  const [exempSearch,     setExempSearch]     = useState("");
+  const [exempSearchDb,   setExempSearchDb]   = useState("");
+  const [exempSelectedC,  setExempSelectedC]  = useState(null); // {id, name}
+  const [exempDays,       setExempDays]       = useState(null); // null = permanent
+  const [exempCustom,     setExempCustom]     = useState(""); // raw string for custom input
+  const [exempCamps,      setExempCamps]      = useState([]);
+  const [exempOpen,       setExempOpen]       = useState(false); // dropdown open
+  const [exempSaving,     setExempSaving]     = useState(false);
+
+  useEffect(() => {
+    const id = setTimeout(() => setExempSearchDb(exempSearch), 280);
+    return () => clearTimeout(id);
+  }, [exempSearch]);
+
+  const loadExemptions = useCallback(() => {
+    if (!workspaceId) return;
+    get("/rules/exemptions").then(d => setExemptions(d || [])).catch(() => {});
+  }, [workspaceId]);
+
+  useEffect(() => { loadExemptions(); }, [loadExemptions]);
+
+  useEffect(() => {
+    if (!showExempForm || !workspaceId) return;
+    get("/rules/campaigns", exempSearchDb ? { q: exempSearchDb } : {})
+      .then(d => setExempCamps(d || [])).catch(() => {});
+  }, [showExempForm, workspaceId, exempSearchDb]);
+
+  const addExemption = async () => {
+    if (!exempSelectedC) return;
+    setExempSaving(true);
+    try {
+      const expiresAt = exempDays ? new Date(Date.now() + exempDays * 86400000).toISOString() : null;
+      await post("/rules/exemptions", {
+        campaign_id: exempSelectedC.id,
+        expires_at: expiresAt,
+      });
+      setShowExempForm(false); setExempSearch(""); setExempSelectedC(null); setExempDays(null); setExempCustom(""); setExempCamps([]); setExempOpen(false);
+      loadExemptions();
+    } catch (e) { alert(e.message); }
+    finally { setExempSaving(false); }
+  };
+
+  const removeExemption = async (id) => {
+    try {
+      await del(`/rules/exemptions/${id}`);
+      loadExemptions();
+    } catch (e) { alert(e.message); }
+  };
+
   // Apply local drag order on top of server order
   const rules = rulesOrder.length
     ? rulesOrder.map(id => rawRules.find(r => r.id === id)).filter(Boolean)
@@ -13166,7 +13480,8 @@ const RulesPage = ({ workspaceId }) => {
       run_hour:      rule.run_hour ?? 8,
       conditions:    parse(rule.conditions, EMPTY_RULE_FORM.conditions),
       actions:       parse(rule.actions,    EMPTY_RULE_FORM.actions),
-      scope:         { ...EMPTY_RULE_FORM.scope, ...parsedScope, dayparting },
+      scope:         { ...EMPTY_RULE_FORM.scope, ...parsedScope, dayparting,
+                       targeting_type: ({product:"asin",views:"audience",auto:"auto_targeting"})[parsedScope.targeting_type] ?? (parsedScope.targeting_type || "") },
       safety:        parse(rule.safety,     EMPTY_RULE_FORM.safety),
     });
     setEditRule(rule); setShowForm(true); setCampSearch("");
@@ -13246,7 +13561,11 @@ const RulesPage = ({ workspaceId }) => {
   // Action helpers
   const updAct = (i, f, v) => setForm(fm => { const a = [...fm.actions]; a[i] = { ...a[i], [f]: v }; return { ...fm, actions: a }; });
   const remAct = (i)       => setForm(f => ({ ...f, actions: f.actions.filter((_,idx) => idx !== i) }));
-  const addAct = ()        => setForm(f => ({ ...f, actions: [...f.actions, { type: (f.scope?.entity_type || "keyword") === "keyword" ? "pause_keyword" : "pause_target", value:"" }] }));
+  const addAct = ()        => setForm(f => {
+    const et = f.scope?.entity_type || "keyword";
+    const defType = et === "ad_group" ? "pause_ad_group" : et === "campaign" ? "pause_campaign" : et === "product_target" ? "pause_target" : "pause_keyword";
+    return { ...f, actions: [...f.actions, { type: defType, value: "" }] };
+  });
 
   // Scope toggle helpers
   const toggleCampaign  = id => setForm(f => { const ids = f.scope.campaign_ids||[]; return { ...f, scope: { ...f.scope, campaign_ids: ids.includes(id) ? ids.filter(x=>x!==id) : [...ids,id] } }; });
@@ -13265,6 +13584,8 @@ const RulesPage = ({ workspaceId }) => {
       if (only === "search_term") return t("rules.colSearchTerm");
       if (only === "target")      return t("rules.colTarget");
       if (only === "keyword")     return t("rules.colKeyword");
+      if (only === "ad_group")    return t("rules.colAdGroup");
+      if (only === "campaign")    return t("rules.colCampaign");
     }
     return t("rules.colKeywordTarget");
   };
@@ -13280,12 +13601,222 @@ const RulesPage = ({ workspaceId }) => {
       )}
 
       {/* ── Header ── */}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
         <h1 style={{ fontFamily:"var(--disp)", fontSize:22, fontWeight:700 }}>{t("rules.title")}</h1>
         <button onClick={openNew} className="btn btn-primary" style={{ fontSize:12, padding:"7px 16px" }}>
           + {t("rules.new")}
         </button>
       </div>
+
+      {/* ── Campaign Exemptions Bar ── */}
+      {(() => {
+        const activeExemptions = exemptions.filter(ex => !ex.expires_at || new Date(ex.expires_at) > new Date());
+        const expiredExemptions = exemptions.filter(ex => ex.expires_at && new Date(ex.expires_at) <= new Date());
+        const inputStyle = { background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:6,
+          padding:"6px 10px", fontSize:12, color:"var(--tx)", width:"100%", outline:"none" };
+        return (
+          <div className="card" style={{ padding:"14px 18px", marginBottom:20,
+            borderLeft:`3px solid ${activeExemptions.length > 0 ? "var(--amb)" : "var(--b2)"}` }}>
+
+            {/* Title row */}
+            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+              <ShieldOff size={14} color={activeExemptions.length > 0 ? "var(--amb)" : "var(--tx3)"} />
+              <span style={{ fontSize:13, fontWeight:600,
+                color: activeExemptions.length > 0 ? "var(--tx)" : "var(--tx3)" }}>
+                {t("rules.exemptionsTitle")}
+              </span>
+              {activeExemptions.length > 0 && (
+                <span style={{ fontSize:11, padding:"2px 9px", borderRadius:12, fontWeight:600,
+                  background:"rgba(245,158,11,.15)", color:"var(--amb)",
+                  border:"1px solid rgba(245,158,11,.3)" }}>
+                  {activeExemptions.length} {t("rules.exemptionsCount")}
+                </span>
+              )}
+              <div style={{ flex:1 }} />
+              {!showExempForm && (
+                <button onClick={() => setShowExempForm(true)} className="btn btn-ghost"
+                  style={{ fontSize:11, padding:"4px 12px" }}>
+                  {t("rules.exemptionsAdd")}
+                </button>
+              )}
+            </div>
+
+            {/* Active chips */}
+            {activeExemptions.length > 0 && (
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6, marginTop:10 }}>
+                {activeExemptions.map(ex => (
+                  <span key={ex.id} style={{ display:"inline-flex", alignItems:"center", gap:5,
+                    fontSize:11, padding:"4px 6px 4px 10px", borderRadius:20,
+                    background:"rgba(245,158,11,.1)", border:"1px solid rgba(245,158,11,.28)",
+                    color:"var(--amb)" }}>
+                    <span style={{ fontWeight:500 }}>{ex.campaign_name}</span>
+                    {ex.expires_at ? (
+                      <span style={{ color:"var(--tx3)", fontSize:10 }}>
+                        · {t("rules.exemptionsUntil")} {new Date(ex.expires_at).toLocaleDateString(undefined,{day:"numeric",month:"short"})}
+                      </span>
+                    ) : (
+                      <span style={{ color:"var(--tx3)", fontSize:10 }}>· {t("rules.exemptionsPermanent")}</span>
+                    )}
+                    <button onClick={() => removeExemption(ex.id)}
+                      style={{ background:"none", border:"none", cursor:"pointer", padding:"0 2px",
+                        color:"var(--tx3)", display:"flex", alignItems:"center", borderRadius:4 }}
+                      title={t("rules.exemptionsRemove")}>
+                      <X size={11} strokeWidth={2.5} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Expired chips (muted) */}
+            {expiredExemptions.length > 0 && (
+              <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginTop:8 }}>
+                {expiredExemptions.map(ex => (
+                  <span key={ex.id} style={{ display:"inline-flex", alignItems:"center", gap:5,
+                    fontSize:10, padding:"3px 6px 3px 9px", borderRadius:20,
+                    background:"var(--s3)", border:"1px solid var(--b2)", color:"var(--tx3)" }}>
+                    {ex.campaign_name}
+                    <span>· {t("rules.exemptionsExpired")}</span>
+                    <button onClick={() => removeExemption(ex.id)}
+                      style={{ background:"none", border:"none", cursor:"pointer", padding:"0 2px",
+                        color:"var(--tx3)", display:"flex", alignItems:"center" }}>
+                      <X size={10} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Add form */}
+            {showExempForm && (
+              <div style={{ marginTop:12, borderTop:"1px solid var(--b1)", paddingTop:12 }}>
+                <div style={{ display:"flex", gap:8, alignItems:"flex-start", flexWrap:"wrap" }}>
+                  {/* Campaign picker with always-open dropdown */}
+                  <div style={{ position:"relative", flex:"1 1 260px", minWidth:200 }}>
+                    <div style={{ position:"relative" }}>
+                      <Search size={12} strokeWidth={2}
+                        style={{ position:"absolute", left:9, top:8, color:"var(--tx3)", pointerEvents:"none" }} />
+                      <input
+                        placeholder={t("rules.exemptionsSearch")}
+                        value={exempSearch}
+                        onChange={e => { setExempSearch(e.target.value); setExempSelectedC(null); setExempOpen(true); }}
+                        onFocus={() => setExempOpen(true)}
+                        onBlur={() => setTimeout(() => setExempOpen(false), 150)}
+                        style={{ ...inputStyle, paddingLeft:28,
+                          borderColor: exempSelectedC ? "var(--grn)" : "var(--b2)",
+                          paddingRight: exempSelectedC ? 28 : 10 }}
+                        autoFocus
+                      />
+                      {exempSelectedC && (
+                        <Check size={12} strokeWidth={2.5} color="var(--grn)"
+                          style={{ position:"absolute", right:9, top:8, pointerEvents:"none" }} />
+                      )}
+                    </div>
+                    {exempOpen && !exempSelectedC && (() => {
+                      const filtered = exempCamps.filter(c =>
+                        !activeExemptions.find(ex => ex.campaign_id === c.id) &&
+                        (!exempSearch || c.name.toLowerCase().includes(exempSearch.toLowerCase()))
+                      );
+                      return filtered.length > 0 ? (
+                        <div style={{ position:"absolute", top:"100%", left:0, right:0, zIndex:400,
+                          background:"var(--s1)", border:"1px solid var(--b2)", borderRadius:6,
+                          maxHeight:240, overflowY:"auto", marginTop:2,
+                          boxShadow:"0 6px 20px rgba(0,0,0,.3)" }}>
+                          {filtered.map(c => (
+                            <div key={c.id}
+                              onMouseDown={e => { e.preventDefault(); setExempSelectedC(c); setExempSearch(c.name); setExempOpen(false); }}
+                              style={{ padding:"8px 12px", cursor:"pointer", fontSize:12,
+                                borderBottom:"1px solid var(--b1)", display:"flex", alignItems:"center", gap:8 }}>
+                              <span style={{ flex:1 }}>{c.name}</span>
+                              <span style={{ fontSize:10, color:"var(--tx3)",
+                                background:"var(--s2)", padding:"1px 6px", borderRadius:4 }}>
+                                {c.campaign_type?.replace("sponsored","").toUpperCase()}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : exempSearch ? (
+                        <div style={{ position:"absolute", top:"100%", left:0, right:0, zIndex:400,
+                          background:"var(--s1)", border:"1px solid var(--b2)", borderRadius:6,
+                          padding:"10px 12px", marginTop:2, fontSize:12, color:"var(--tx3)" }}>
+                          {t("common.noResults")}
+                        </div>
+                      ) : null;
+                    })()}
+                  </div>
+
+                  {/* Duration buttons */}
+                  <div style={{ flex:"0 0 auto", display:"flex", flexDirection:"column", gap:4 }}>
+                    <div style={{ fontSize:10, color:"var(--tx3)", marginBottom:1 }}>
+                      {t("rules.exemptionsDateHint")}
+                    </div>
+                    <div style={{ display:"flex", gap:4, alignItems:"center" }}>
+                      {[7, 14, 30, 60].map(d => (
+                        <button key={d}
+                          className={`btn ${exempDays === d && !exempCustom ? "btn-primary" : "btn-ghost"}`}
+                          onClick={() => { setExempDays(exempDays === d ? null : d); setExempCustom(""); }}
+                          style={{ fontSize:11, padding:"5px 10px", minWidth:42 }}>
+                          {d}{t("rules.exemptionsDaySuffix")}
+                        </button>
+                      ))}
+                      <button
+                        className={`btn ${exempDays === null && !exempCustom ? "btn-primary" : "btn-ghost"}`}
+                        onClick={() => { setExempDays(null); setExempCustom(""); }}
+                        style={{ fontSize:11, padding:"5px 10px", minWidth:36 }}>
+                        ∞
+                      </button>
+                      {/* Custom days input */}
+                      <div style={{ position:"relative", display:"flex", alignItems:"center" }}>
+                        <input
+                          type="number"
+                          min={1}
+                          max={3650}
+                          placeholder="…"
+                          value={exempCustom}
+                          onChange={e => {
+                            const raw = e.target.value;
+                            setExempCustom(raw);
+                            if (!raw) return; // don't change exempDays while typing is incomplete
+                            const v = parseInt(raw);
+                            if (!isNaN(v) && v >= 1) setExempDays(Math.min(3650, v));
+                          }}
+                          onFocus={() => { setExempCustom(![null,7,14,30,60].includes(exempDays) ? String(exempDays) : ""); }}
+                          style={{ ...inputStyle, width:52, fontSize:11, padding:"5px 22px 5px 7px",
+                            borderColor: exempCustom ? "var(--ac)" : "var(--b2)" }}
+                        />
+                        <span style={{ position:"absolute", right:6, fontSize:10, color:"var(--tx3)", pointerEvents:"none" }}>
+                          {t("rules.exemptionsDaySuffix")}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div style={{ display:"flex", gap:6, alignItems:"flex-end", paddingBottom:0 }}>
+                    <button onClick={addExemption}
+                      disabled={!exempSelectedC || exempSaving}
+                      className="btn btn-primary" style={{ fontSize:11, padding:"6px 16px" }}>
+                      {exempSaving ? "…" : t("rules.exemptionsSave")}
+                    </button>
+                    <button onClick={() => { setShowExempForm(false); setExempSearch(""); setExempSelectedC(null); setExempDays(null); setExempCustom(""); setExempCamps([]); setExempOpen(false); }}
+                      className="btn btn-ghost" style={{ fontSize:11, padding:"6px 12px" }}>
+                      {t("common.cancel")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Empty state hint */}
+            {exemptions.length === 0 && !showExempForm && (
+              <div style={{ fontSize:11, color:"var(--tx3)", marginTop:6 }}>
+                {t("rules.exemptionsNone")} — {t("rules.exemptionsNoneHint")}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
 
       {/* ── Rule Form Modal (3-step wizard) ── */}
       {showForm && createPortal(
@@ -13333,20 +13864,28 @@ const RulesPage = ({ workspaceId }) => {
                         {r.period?.start} – {r.period?.end}
                         {r.period?.days ? ` · ${r.period.days === 1 ? t("rules.yesterday") : t("rules.periodDays", { days: r.period.days })}` : ""}
                         {r.entity_counts
-                          ? ` · ${r.entity_counts.keywords || 0} kw + ${r.entity_counts.targets || 0} tgt`
+                          ? (() => {
+                              const ec = r.entity_counts;
+                              if (ec.ad_groups > 0)    return ` · ${ec.ad_groups} групп`;
+                              if (ec.campaigns > 0)   return ` · ${ec.campaigns} кампаний`;
+                              if (ec.search_terms > 0) return ` · ${ec.search_terms} запросов`;
+                              return ` · ${ec.keywords || 0} kw + ${ec.targets || 0} tgt`;
+                            })()
                           : ` · ${r.total_evaluated} ${t("rules.evaluated").toLowerCase()}`}
                       </div>
                     </div>
                     <button onClick={() => setShowResult(null)} className="btn btn-ghost" style={{ fontSize:12 }}><X size={13} strokeWidth={1.75} /></button>
                   </div>
 
-                  <div style={{ display:"grid", gridTemplateColumns:"repeat(4, minmax(0, 1fr))",
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(5, minmax(0, 1fr))",
                     gap:10, marginBottom:16 }}>
                     {[
                       { label:t("rules.evaluated"),       val:r.total_evaluated, color:"var(--tx2)", tip:t("rules.evaluatedTip") },
                       { label:t("rules.passedConditions"), val:r.matched_count,   color:"var(--amb)", tip:t("rules.passedConditionsTip") },
                       { label:t("rules.skipped"),          val:r.skipped_count ?? 0, color:"var(--tx3)", tip:t("rules.skippedTip") },
                       { label:r.dry_run ? t("rules.willChange") : t("rules.changed"), val:r.applied_count, color:"var(--grn)", tip:t("rules.willChangeTip") },
+                      { label:t("rules.removed"),          val:r.removed_count ?? 0, color:"var(--pur)", tip:t("rules.removedTip") },
+                      ...(r.exempted_count > 0 ? [{ label:t("rules.exemptedCount"), val:r.exempted_count, color:"var(--amb)", tip:t("rules.exemptedTip") }] : []),
                     ].map(s => (
                       <Tip key={s.label} text={s.tip} placement="bottom" width={220}
                         style={{ display:"block", width:"100%" }}>
@@ -13426,8 +13965,8 @@ const RulesPage = ({ workspaceId }) => {
                         {r.applied.map((a, i) => {
                           const entityLabel = a.keyword_text || fmtTargetExpr(a.expression) || a.entity_id;
                           const isTarget = !a.keyword_text;
-                          const badgeCls = ["pause_keyword","pause_target"].includes(a.action) ? "bg-amb"
-                            : ["enable_keyword","enable_target"].includes(a.action) ? "bg-grn" : "bg-bl";
+                          const badgeCls = ["pause_keyword","pause_target","pause_ad_group","pause_campaign"].includes(a.action) ? "bg-amb"
+                            : ["enable_keyword","enable_target","enable_ad_group","enable_campaign"].includes(a.action) ? "bg-grn" : "bg-bl";
                           const actionLabel =
                             a.action === "pause_keyword"           ? "PAUSE"
                             : a.action === "enable_keyword"        ? "ENABLE"
@@ -13437,6 +13976,14 @@ const RulesPage = ({ workspaceId }) => {
                             : a.action === "adjust_target_bid_pct" ? `TGT ${a.change_pct}`
                             : a.action === "add_negative_keyword"  ? `NEG-${(a.match_type||"EXACT").toUpperCase()}`
                             : a.action === "add_negative_target"   ? (a.auto_routed ? "NEG ASIN ↻" : "NEG TGT")
+                            : a.action === "pause_ad_group"        ? "PAUSE GRP"
+                            : a.action === "enable_ad_group"       ? "ENABLE GRP"
+                            : a.action === "adjust_default_bid_pct"? `GRP ${a.change_pct}`
+                            : a.action === "set_default_bid"       ? `GRP→${a.new_bid}€`
+                            : a.action === "pause_campaign"        ? "PAUSE CAMP"
+                            : a.action === "enable_campaign"       ? "ENABLE CAMP"
+                            : a.action === "adjust_budget_pct"     ? `BUDGET ${a.change_pct}`
+                            : a.action === "set_budget"            ? `BUDGET→${a.new_budget}€`
                             : `BID→${a.new_bid}€`;
                           const m = a.metrics || {};
                           const clicks  = m.clicks  != null ? Number(m.clicks)  : null;
@@ -13463,10 +14010,17 @@ const RulesPage = ({ workspaceId }) => {
                                     {a.campaign_name}
                                   </a>
                                 )}
+                                {a.ad_group_name && (
+                                  <span style={{ display:"block", fontSize:9, color:"var(--tx3)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1, fontFamily:"var(--mono)" }}>
+                                    {a.ad_group_name}
+                                  </span>
+                                )}
                               </div>
                               <span className={`badge ${badgeCls}`}
                                 title={a.auto_routed
                                   ? "Search-term — это маскированный ASIN. Действие автоматически конвертировано из NEG-keyword в NEG-target (Amazon не матчит ASIN-запросы по keyword-строке)."
+                                  : (a.action === "adjust_budget_pct" || a.action === "set_budget")
+                                    ? `${Number(a.previous_budget).toFixed(2)}€ → ${Number(a.new_budget).toFixed(2)}€`
                                   : undefined}
                                 style={{ fontSize:10, justifySelf:"start" }}>{actionLabel}</span>
                               <span style={{ textAlign:"right", fontFamily:"var(--mono)", fontSize:12,
@@ -13493,6 +14047,68 @@ const RulesPage = ({ workspaceId }) => {
                     <div style={{ padding:24, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
                       {t("rules.noMatches")}
                     </div>
+                  )}
+
+                  {r.removed?.length > 0 && (
+                    <details style={{ marginTop:12, background:"rgba(139,92,246,.06)", border:"1px solid rgba(139,92,246,.2)", borderRadius:8 }}
+                      open>
+                      <summary style={{ padding:"10px 14px", cursor:"pointer", fontSize:12,
+                        color:"var(--tx2)", display:"flex", alignItems:"center", gap:8, userSelect:"none" }}>
+                        <span style={{ fontWeight:600, color:"var(--pur)" }}>{t("rules.removedSection")}: {r.removed.length}</span>
+                        <span style={{ color:"var(--tx3)", fontSize:11 }}>— {t("rules.removedSubtitle")}</span>
+                      </summary>
+                      <div style={{ borderTop:"1px solid rgba(139,92,246,.2)" }}>
+                        <div style={{ display:"grid", gridTemplateColumns:"1fr 52px 52px 64px 48px", gap:"0 8px",
+                          padding:"6px 14px", borderBottom:"2px solid rgba(139,92,246,.15)", background:"rgba(139,92,246,.04)",
+                          fontSize:10, fontWeight:600, color:"var(--tx3)", textTransform:"uppercase", letterSpacing:".04em" }}>
+                          <span>{t("rules.colKeyword")}</span>
+                          <span style={{ textAlign:"right" }}>{t("overview.kpiClicks")}</span>
+                          <span style={{ textAlign:"right" }}>{t("overview.kpiOrders")}</span>
+                          <span style={{ textAlign:"right" }}>ACOS</span>
+                          <span style={{ textAlign:"right" }}>{t("overview.kpiSpend")}</span>
+                        </div>
+                        <div style={{ maxHeight:200, overflowY:"auto" }}>
+                          {r.removed.map((item, i) => {
+                            const lbl = item.keyword_text || fmtTargetExpr(item.expression) || item.id;
+                            const m   = item.metrics || {};
+                            const clicks = m.clicks != null ? Number(m.clicks) : null;
+                            const orders = m.orders != null ? Number(m.orders) : null;
+                            const acos   = m.acos   != null ? parseFloat(m.acos) : null;
+                            const spend  = m.spend  != null ? parseFloat(m.spend) : null;
+                            return (
+                              <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr 52px 52px 64px 48px", gap:"0 8px",
+                                padding:"6px 14px", borderBottom:"1px solid var(--b1)", alignItems:"center", fontSize:11 }}>
+                                <div style={{ overflow:"hidden", minWidth:0 }}>
+                                  <div style={{ fontFamily:"var(--mono)", fontSize:11, color:"var(--pur)",
+                                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                    {lbl}
+                                  </div>
+                                  {item.campaign_name && (
+                                    <span style={{ fontSize:10, color:"var(--tx3)", overflow:"hidden",
+                                      textOverflow:"ellipsis", whiteSpace:"nowrap", display:"block" }}>
+                                      {item.campaign_name}
+                                    </span>
+                                  )}
+                                </div>
+                                <span style={{ textAlign:"right", fontFamily:"var(--mono)", color:"var(--tx3)" }}>
+                                  {clicks != null ? clicks : "—"}
+                                </span>
+                                <span style={{ textAlign:"right", fontFamily:"var(--mono)", color:"var(--grn)", fontWeight:600 }}>
+                                  {orders != null ? orders : "—"}
+                                </span>
+                                <span style={{ textAlign:"right", fontFamily:"var(--mono)",
+                                  color: acos == null ? "var(--tx3)" : acos < 30 ? "var(--grn)" : "var(--amb)" }}>
+                                  {acos != null ? acos.toFixed(1)+"%" : "—"}
+                                </span>
+                                <span style={{ textAlign:"right", fontFamily:"var(--mono)", color:"var(--tx3)" }}>
+                                  {spend != null ? spend.toFixed(0)+"€" : "—"}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </details>
                   )}
                 </>
               );
@@ -13532,8 +14148,10 @@ const RulesPage = ({ workspaceId }) => {
               <SortableRule key={rule.id} id={rule.id}>
               {({ dragHandleProps }) => (
               <div className="card fade" style={{
-                padding:"16px 20px", opacity:rule.is_active?1:0.55,
-                borderLeft:`3px solid ${rule.is_active?"var(--ac)":"var(--b2)"}`,
+                padding:"16px 20px",
+                opacity: rule.is_active ? 1 : 0.58,
+                borderLeft: `4px solid ${rule.is_active ? "var(--grn)" : "var(--b2)"}`,
+                transition: "opacity 0.2s, border-color 0.2s",
               }}>
                 <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
                   <div {...dragHandleProps} style={{ cursor:"grab", color:"var(--tx3)", paddingTop:2, flexShrink:0 }}
@@ -13543,18 +14161,35 @@ const RulesPage = ({ workspaceId }) => {
                   <div style={{ flex:1, minWidth:0 }}>
                     {/* Title row */}
                     <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
+                      {/* Toggle switch */}
+                      <button onClick={() => toggleActive(rule)}
+                        title={rule.is_active ? "Поставить на паузу" : "Запустить правило"}
+                        style={{ position:"relative", width:32, height:18, borderRadius:9, border:"none",
+                          cursor:"pointer", padding:0, flexShrink:0,
+                          background: rule.is_active ? "var(--grn)" : "var(--b2)",
+                          transition:"background 0.2s", outline:"none" }}>
+                        <span style={{ position:"absolute", top:2,
+                          left: rule.is_active ? 16 : 2,
+                          width:14, height:14, borderRadius:"50%", background:"white",
+                          transition:"left 0.2s", boxShadow:"0 1px 3px rgba(0,0,0,.35)",
+                          display:"block" }} />
+                      </button>
+                      {/* Pulsing live dot — only for active non-sim rules */}
+                      {rule.is_active && !rule.dry_run && (
+                        <span style={{ width:7, height:7, borderRadius:"50%", flexShrink:0,
+                          background:"var(--grn)", animation:"dot-pulse 2s infinite" }} />
+                      )}
                       <span style={{ fontSize:14, fontWeight:600 }}>{rule.name}</span>
                       {rule.dry_run && (
                         <Tip text="Simulation mode — the rule evaluates conditions and logs matches but makes no actual changes to bids or statuses.">
                           <span className="badge bg-amb" style={{ fontSize:10 }}>SIM</span>
                         </Tip>
                       )}
-                      <span className={`badge ${rule.is_active?"bg-grn":"bg-red"}`} style={{ fontSize:10 }}>
-                        {rule.is_active ? t("rules.active") : t("rules.inactive")}
-                      </span>
                       <span className="badge bg-bl" style={{ fontSize:9 }}>
-                        {scope.entity_type === "search_term" ? t("rules.searchTerm")
+                        {scope.entity_type === "search_term"    ? t("rules.searchTerm")
                           : scope.entity_type === "product_target" ? t("rules.productTarget")
+                          : scope.entity_type === "ad_group"       ? t("rules.adGroupEntity")
+                          : scope.entity_type === "campaign"       ? t("rules.campaignEntity")
                           : t("rules.keyword")}
                       </span>
                       <span className="badge" style={{ fontSize:9, background:"var(--s3)", color:"var(--tx2)" }}>
@@ -13600,7 +14235,7 @@ const RulesPage = ({ workspaceId }) => {
                           background:"rgba(34,197,94,.1)", border:"1px solid rgba(34,197,94,.25)",
                           borderRadius:20, color:"var(--grn)" }}>
                           {ruleActionsList.find(al=>al.value===a.type)?.label}
-                          {a.value ? ` ${a.value}${a.type==="adjust_bid_pct"?"%":"€"}` : ""}
+                          {a.value ? ` ${a.value}${["adjust_bid_pct","adjust_target_bid_pct","adjust_default_bid_pct","adjust_budget_pct"].includes(a.type)?"%":"€"}` : ""}
                         </span>
                       ))}
                     </div>
@@ -13612,7 +14247,7 @@ const RulesPage = ({ workspaceId }) => {
                       {scope.match_types?.length ? ` · ${scope.match_types.join("/")}` : ""}
                       {scope.ad_group_ids?.length ? ` · ${t("rules.adGroups")}: ${scope.ad_group_ids.length}` : ""}
                       {scope.campaign_name_contains ? ` · "${scope.campaign_name_contains}"` : ""}
-                      {scope.targeting_type ? ` · ${scope.targeting_type}` : ""}
+                      {scope.targeting_type ? ` · ${({category:t("rules.targetingCategory"),asin:t("rules.targetingAsin"),auto_targeting:t("rules.targetingAuto"),audience:t("rules.targetingAudience"),auto:t("rules.targetingAuto"),product:t("rules.targetingAsin"),views:t("rules.targetingAudience")})[scope.targeting_type] || scope.targeting_type}` : ""}
                     </div>
                   </div>
 
@@ -13625,10 +14260,6 @@ const RulesPage = ({ workspaceId }) => {
                     <button onClick={() => runRule(rule.id, false)} disabled={isRunning}
                       className="btn btn-primary" style={{ fontSize:11, padding:"5px 10px" }}>
                       {isRunning ? "…" : <><Ic icon={Play} size={12} /> {t("rules.runNow")}</>}
-                    </button>
-                    <button onClick={() => toggleActive(rule)} className="btn btn-ghost"
-                      style={{ fontSize:11, padding:"5px 10px", color:rule.is_active?"var(--amb)":"var(--grn)" }}>
-                      {rule.is_active ? <Ic icon={Pause} size={13} /> : <Ic icon={Play} size={13} />}
                     </button>
                     <button onClick={() => openEdit(rule)} className="btn btn-ghost"
                       style={{ fontSize:11, padding:"5px 8px" }}><Ic icon={Edit2} size={13} /></button>

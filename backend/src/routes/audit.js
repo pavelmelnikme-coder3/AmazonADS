@@ -12,7 +12,7 @@ router.use(requireAuth, requireWorkspace);
 async function writeAudit({
   orgId, workspaceId, actorId, actorType = "user", actorName,
   action, entityType, entityId, entityName,
-  beforeData, afterData, source = "ui", requestId, amazonStatus = null,
+  beforeData, afterData, source = "ui", requestId, amazonStatus = null, metadata = null,
 }) {
   let diff = null;
   if (beforeData && afterData) {
@@ -28,8 +28,8 @@ async function writeAudit({
   const { rows } = await query(
     `INSERT INTO audit_events
        (org_id, workspace_id, actor_id, actor_type, actor_name, action,
-        entity_type, entity_id, entity_name, before_data, after_data, diff, source, request_id, amazon_status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        entity_type, entity_id, entity_name, before_data, after_data, diff, source, request_id, amazon_status, metadata)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
      RETURNING id`,
     [
       orgId, workspaceId || null, actorId || null, actorType, actorName || null,
@@ -38,6 +38,7 @@ async function writeAudit({
       afterData ? JSON.stringify(afterData) : null,
       diff ? JSON.stringify(diff) : null,
       source, requestId || null, amazonStatus,
+      metadata ? JSON.stringify(metadata) : null,
     ]
   );
   return rows[0].id;
@@ -99,7 +100,7 @@ router.get("/", async (req, res, next) => {
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(
         `SELECT id, actor_id, actor_name, actor_type, action, entity_type, entity_id, entity_name,
-                before_data, after_data, diff, source, created_at, amazon_status, amazon_error
+                before_data, after_data, diff, source, created_at, amazon_status, amazon_error, metadata
          FROM audit_events ${where}
          ORDER BY ${orderField} ${orderDir}
          LIMIT $${pi} OFFSET $${pi + 1}`,
@@ -219,13 +220,15 @@ router.post("/:id/rollback", async (req, res, next) => {
 
     } else if (event.entity_type === "keyword" && event.action === "keyword.add_negative") {
       // ── Rollback: delete the negative keyword that was added by rule ──
+      // audit stores match_type as camelCase ("negativeExact") but DB may store as snake_case
+      // ("negative_exact") — normalize by stripping underscores before comparing
       const afterData = typeof event.after_data === "string" ? JSON.parse(event.after_data) : event.after_data;
       const { rowCount } = await query(
         `DELETE FROM negative_keywords
          WHERE workspace_id = $1
            AND campaign_id = (SELECT campaign_id FROM keywords WHERE id = $2 LIMIT 1)
            AND LOWER(keyword_text) = LOWER($3)
-           AND match_type = $4`,
+           AND REPLACE(LOWER(match_type), '_', '') = REPLACE(LOWER($4), '_', '')`,
         [req.workspaceId, event.entity_id, event.entity_name, afterData?.match_type]
       );
       if (rowCount > 0) {
@@ -271,7 +274,8 @@ router.post("/:id/rollback", async (req, res, next) => {
       }
 
     } else if (event.entity_type === "campaign" &&
-               (event.action === "rule.pause_campaign" || event.action === "rule.enable_campaign")) {
+               (event.action === "rule.pause_campaign" || event.action === "rule.enable_campaign" ||
+                event.action === "campaign.pause"       || event.action === "campaign.enable")) {
       // ── Rollback: restore campaign state changed by rule engine ──
       const stateToRestore = before?.value ?? before?.state;
       if (!stateToRestore) return res.status(400).json({ error: "No state in audit before_data" });
@@ -283,9 +287,10 @@ router.post("/:id/rollback", async (req, res, next) => {
       message = `Campaign state restored to ${stateToRestore}`;
 
     } else if (event.entity_type === "campaign" &&
-               (event.action === "rule.adjust_budget" || event.action === "rule.set_budget")) {
+               (event.action === "rule.adjust_budget"     || event.action === "rule.set_budget" ||
+                event.action === "campaign.adjust_budget_pct" || event.action === "campaign.set_budget")) {
       // ── Rollback: restore campaign budget changed by rule engine ──
-      const budgetToRestore = before?.value ?? before?.dailyBudget;
+      const budgetToRestore = before?.value ?? before?.dailyBudget ?? before?.daily_budget;
       if (budgetToRestore === undefined) return res.status(400).json({ error: "No budget in audit before_data" });
       await query(
         "UPDATE campaigns SET daily_budget = $1, updated_at = NOW() WHERE id = $2 AND workspace_id = $3",

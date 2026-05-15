@@ -962,12 +962,13 @@ async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
         campId = campMap.get(String(kw.campaignId)) || null;
       }
 
-      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
       params.push(
         workspaceId, profileDbId, campId, agId,
         String(kw.keywordId), kw.keywordText,
         (kw.matchType || "NEGATIVE_EXACT").toLowerCase(),
         agId ? "ad_group" : "campaign",
+        (kw.state || "ENABLED").toLowerCase(),
         JSON.stringify(kw),
       );
     }
@@ -975,11 +976,12 @@ async function syncNegativeKeywords(profileDbRecord, amazonNegKeywords) {
     await query(
       `INSERT INTO negative_keywords
          (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_keyword_id,
-          keyword_text, match_type, level, raw_data, synced_at)
+          keyword_text, match_type, level, state, raw_data, synced_at)
        VALUES ${values.join(",")}
        ON CONFLICT (profile_id, amazon_neg_keyword_id) DO UPDATE SET
          keyword_text=EXCLUDED.keyword_text, match_type=EXCLUDED.match_type,
-         raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
+         state=EXCLUDED.state, raw_data=EXCLUDED.raw_data,
+         synced_at=NOW(), updated_at=NOW()`,
       params
     );
     upserted += values.length;

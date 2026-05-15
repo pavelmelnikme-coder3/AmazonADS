@@ -99,6 +99,8 @@ router.get("/", async (req, res, next) => {
       `SELECT
          c.id, c.amazon_campaign_id, c.name, c.campaign_type, c.state,
          c.daily_budget, c.start_date, c.end_date, c.bidding_strategy, c.synced_at,
+         c.amazon_portfolio_id,
+         pf.name AS portfolio_name,
          p.marketplace, p.marketplace_id, p.country_code, p.currency_code,
          COALESCE(m.impressions,0) as impressions,
          COALESCE(m.clicks,0) as clicks,
@@ -108,6 +110,7 @@ router.get("/", async (req, res, next) => {
          m.ctr, m.cpc, m.acos_14d as acos, m.roas_14d as roas
        FROM campaigns c
        JOIN amazon_profiles p ON p.id = c.profile_id
+       LEFT JOIN portfolios pf ON pf.amazon_portfolio_id = c.amazon_portfolio_id AND pf.workspace_id = c.workspace_id
        ${metricsJoin}
        ${where}
        ORDER BY ${orderField} ${orderDir} NULLS LAST

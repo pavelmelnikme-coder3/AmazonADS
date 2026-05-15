@@ -176,15 +176,15 @@ describe("GET /search-terms", () => {
     mockListQuery([], 0);
     await request(app).get("/search-terms?hasOrders=true");
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/orders\s*>\s*0/i);
+    expect(sql).toMatch(/SUM\(stm\.orders\)\s*>\s*0/i);
   });
 
   test("filters noOrders=true — SQL must check orders=0 AND clicks>0", async () => {
     mockListQuery([], 0);
     await request(app).get("/search-terms?noOrders=true");
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/orders\s*=\s*0/i);
-    expect(sql).toMatch(/clicks\s*>\s*0/i);
+    expect(sql).toMatch(/SUM\(stm\.orders\)\s*=\s*0/i);
+    expect(sql).toMatch(/SUM\(stm\.clicks\)\s*>\s*0/i);
   });
 
   test("date range filter with valid dateFrom/dateTo", async () => {
@@ -207,28 +207,30 @@ describe("GET /search-terms", () => {
     mockListQuery([], 0);
     await request(app).get("/search-terms?metricsDays=999");
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/365 days/i);
+    // days clamped to 365, window uses days+1 = 366 for the start interval
+    expect(sql).toMatch(/366 days/i);
   });
 
   test("metricsDays=0 clamps to 1 day (NaN-safe parseInt check)", async () => {
     mockListQuery([], 0);
     await request(app).get("/search-terms?metricsDays=0");
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/1 days/i);
+    // days clamped to 1, window uses days+1 = 2 for the start interval
+    expect(sql).toMatch(/2 days/i);
   });
 
   test("sortBy defaults to spend DESC", async () => {
     mockListQuery([], 0);
     await request(app).get("/search-terms");
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/stm\.spend\s+DESC/i);
+    expect(sql).toMatch(/SUM\(stm\.spend\)\s+DESC/i);
   });
 
   test("sortBy=clicks sortDir=asc", async () => {
     mockListQuery([], 0);
     await request(app).get("/search-terms?sortBy=clicks&sortDir=asc");
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/stm\.clicks\s+ASC/i);
+    expect(sql).toMatch(/SUM\(stm\.clicks\)\s+ASC/i);
   });
 
   test("invalid sortBy falls back to spend", async () => {

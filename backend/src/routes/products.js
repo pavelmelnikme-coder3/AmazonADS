@@ -9,7 +9,7 @@ const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
 
-// GET /products — list all products for workspace with latest BSR
+// GET /products — list all products for workspace with latest BSR + metrics
 router.get("/", async (req, res, next) => {
   try {
     const { rows } = await query(
@@ -22,7 +22,34 @@ router.get("/", async (req, res, next) => {
          s.display_group_ranks,
          s.captured_at as bsr_updated_at,
          COALESCE(sm.sku, '') AS internal_sku,
-         COALESCE(inv.seller_skus, ARRAY[]::text[]) AS seller_skus
+         COALESCE(inv.seller_skus, ARRAY[]::text[]) AS seller_skus,
+         -- cost / price metadata
+         COALESCE(sm.cogs_per_unit, 0)    AS cogs_per_unit,
+         COALESCE(sm.amazon_fee_pct, -0.15) AS amazon_fee_pct,
+         -- stock
+         COALESCE(stock.fba_qty, 0) AS fba_qty,
+         COALESCE(stock.fbm_qty, 0) AS fbm_qty,
+         -- sell price (buy-box preferred)
+         pricing.sell_price,
+         -- PPC spend
+         COALESCE(ppc.ppc_yesterday, 0) AS ppc_yesterday,
+         COALESCE(ppc.ppc_7d, 0)        AS ppc_7d,
+         -- orders / revenue
+         COALESCE(orders.revenue_yesterday, 0) AS revenue_yesterday,
+         COALESCE(orders.revenue_7d, 0)        AS revenue_7d,
+         COALESCE(orders.qty_yesterday, 0)     AS qty_yesterday,
+         COALESCE(orders.qty_7d, 0)            AS qty_7d,
+         -- net profit (revenue after Amazon fee minus COGS minus PPC)
+         ROUND((
+           COALESCE(orders.revenue_yesterday, 0) * (1 + COALESCE(sm.amazon_fee_pct, -0.15))
+           - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_yesterday, 0)
+           - COALESCE(ppc.ppc_yesterday, 0)
+         )::numeric, 2) AS profit_yesterday,
+         ROUND((
+           COALESCE(orders.revenue_7d, 0) * (1 + COALESCE(sm.amazon_fee_pct, -0.15))
+           - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_7d, 0)
+           - COALESCE(ppc.ppc_7d, 0)
+         )::numeric, 2) AS profit_7d
        FROM products p
        LEFT JOIN LATERAL (
          SELECT best_rank, best_category, classification_ranks, display_group_ranks, captured_at
@@ -40,6 +67,64 @@ router.get("/", async (req, res, next) => {
            AND si.asin = p.asin
            AND si.marketplace_id = p.marketplace_id
        ) inv ON true
+       -- FBA / FBM stock
+       LEFT JOIN LATERAL (
+         SELECT
+           COALESCE(SUM(CASE WHEN UPPER(si.fulfillment_channel) LIKE '%AMAZON%'
+                             THEN si.quantity_sellable ELSE 0 END), 0) AS fba_qty,
+           COALESCE(SUM(CASE WHEN UPPER(si.fulfillment_channel) NOT LIKE '%AMAZON%'
+                             THEN si.quantity_sellable ELSE 0 END), 0) AS fbm_qty
+         FROM sp_inventory si
+         WHERE si.workspace_id = p.workspace_id
+           AND si.asin = p.asin
+           AND si.marketplace_id = p.marketplace_id
+       ) stock ON true
+       -- Sell price (latest buy-box, fall back to listing price)
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(buy_box_price_amount, listing_price_amount) AS sell_price
+         FROM sp_pricing
+         WHERE workspace_id = p.workspace_id
+           AND asin = p.asin
+           AND marketplace_id = p.marketplace_id
+         ORDER BY captured_at DESC
+         LIMIT 1
+       ) pricing ON true
+       -- PPC spend via product_ads → fact_metrics_daily (campaign level, DISTINCT to avoid
+       -- multiplying spend when same ASIN appears in multiple ad groups of the same campaign)
+       LEFT JOIN LATERAL (
+         SELECT
+           COALESCE(SUM(CASE WHEN fmd.date = CURRENT_DATE - 1
+                             THEN fmd.cost ELSE 0 END), 0) AS ppc_yesterday,
+           COALESCE(SUM(CASE WHEN fmd.date >= CURRENT_DATE - 7 AND fmd.date <= CURRENT_DATE - 1
+                             THEN fmd.cost ELSE 0 END), 0) AS ppc_7d
+         FROM (SELECT DISTINCT campaign_id FROM product_ads
+               WHERE workspace_id = p.workspace_id AND asin = p.asin) pa_dist
+         JOIN fact_metrics_daily fmd
+           ON fmd.entity_id = pa_dist.campaign_id
+          AND fmd.workspace_id = p.workspace_id
+          AND fmd.entity_type = 'campaign'
+         WHERE fmd.date >= CURRENT_DATE - 7
+       ) ppc ON true
+       -- Orders revenue from SP Orders API
+       LEFT JOIN LATERAL (
+         SELECT
+           COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') = CURRENT_DATE - 1
+                             THEN oi.item_price_amount * oi.quantity_ordered ELSE 0 END), 0) AS revenue_yesterday,
+           COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') >= CURRENT_DATE - 7
+                              AND DATE(o.purchase_date AT TIME ZONE 'UTC') <= CURRENT_DATE - 1
+                             THEN oi.item_price_amount * oi.quantity_ordered ELSE 0 END), 0) AS revenue_7d,
+           COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') = CURRENT_DATE - 1
+                             THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_yesterday,
+           COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') >= CURRENT_DATE - 7
+                              AND DATE(o.purchase_date AT TIME ZONE 'UTC') <= CURRENT_DATE - 1
+                             THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_7d
+         FROM sp_order_items oi
+         JOIN sp_orders o ON o.id = oi.order_id
+         WHERE oi.workspace_id = p.workspace_id
+           AND oi.asin = p.asin
+           AND o.purchase_date >= NOW() - INTERVAL '8 days'
+           AND o.order_status NOT IN ('Cancelled', 'Pending')
+       ) orders ON true
        WHERE p.workspace_id = $1 AND p.is_active = true
        ORDER BY s.best_rank ASC NULLS LAST, p.created_at DESC`,
       [req.workspaceId]
@@ -162,18 +247,22 @@ router.post("/:id/refresh", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /products/:id/history — BSR history for chart (last 90 snapshots)
+// GET /products/:id/history — BSR history for chart (all snapshots, optional ?start=YYYY-MM-DD&end=YYYY-MM-DD)
 router.get("/:id/history", async (req, res, next) => {
   try {
+    const { start, end } = req.query;
+    const params = [req.params.id];
+    let conds = `WHERE product_id = $1`;
+    if (start) { params.push(start); conds += ` AND captured_at >= $${params.length}::date`; }
+    if (end)   { params.push(end);   conds += ` AND captured_at < ($${params.length}::date + INTERVAL '1 day')`; }
     const { rows } = await query(
       `SELECT captured_at, best_rank, best_category, classification_ranks, display_group_ranks
        FROM bsr_snapshots
-       WHERE product_id = $1
-       ORDER BY captured_at DESC
-       LIMIT 90`,
-      [req.params.id]
+       ${conds}
+       ORDER BY captured_at ASC`,
+      params
     );
-    res.json(rows.reverse()); // chronological order
+    res.json(rows);
   } catch (err) { next(err); }
 });
 

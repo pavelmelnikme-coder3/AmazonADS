@@ -70,6 +70,13 @@ jest.mock("../src/services/amazon/adsClient", () => ({
 jest.mock("../src/config/logger", () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
+jest.mock("../src/config/redis", () => ({
+  getRedis: jest.fn().mockReturnValue({
+    get: jest.fn().mockResolvedValue(null),   // no existing lock
+    set: jest.fn().mockResolvedValue("OK"),   // lock acquired
+    del: jest.fn().mockResolvedValue(1),
+  }),
+}));
 jest.mock("../src/middleware/auth", () => ({
   requireAuth: (req, _res, next) => {
     req.user  = { id: USER_ID, name: "Test User", role: "owner", org_id: ORG_ID };
@@ -167,16 +174,23 @@ function makeRule(overrides = {}) {
 // Mock the standard /run DB sequence for keyword entities
 //   1. SELECT rule
 //   2. SELECT org_id
-//   3. SELECT keywords → kwRows
+//   3. SELECT campaign_exemptions → []
+//   4. SELECT keywords → kwRows
 //   [extraMocks] — action-specific queries
-//   N. UPDATE last_run_at
+//   N-2. SELECT negative_keywords (reconciliation) → []
+//   N-1. SELECT negative_targets  (reconciliation) → []
+//   N.   UPDATE rules SET last_run_result
 function mockKeywordRun(rule, kwRows, extraMocks = []) {
   dbQuery
     .mockResolvedValueOnce({ rows: [rule] })
     .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+    .mockResolvedValueOnce({ rows: [] })           // campaign_exemptions
     .mockResolvedValueOnce({ rows: kwRows });
   extraMocks.forEach(m => dbQuery.mockResolvedValueOnce(m));
-  dbQuery.mockResolvedValueOnce({ rows: [] }); // UPDATE last_run_at
+  dbQuery
+    .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_keywords
+    .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_targets
+    .mockResolvedValueOnce({ rows: [] });          // UPDATE rules SET last_run_result
 }
 
 // Mock the standard /run DB sequence for target entities
@@ -184,9 +198,13 @@ function mockTargetRun(rule, tgtRows, extraMocks = []) {
   dbQuery
     .mockResolvedValueOnce({ rows: [rule] })
     .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+    .mockResolvedValueOnce({ rows: [] })           // campaign_exemptions
     .mockResolvedValueOnce({ rows: tgtRows });
   extraMocks.forEach(m => dbQuery.mockResolvedValueOnce(m));
-  dbQuery.mockResolvedValueOnce({ rows: [] });
+  dbQuery
+    .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_keywords
+    .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_targets
+    .mockResolvedValueOnce({ rows: [] });          // UPDATE
 }
 
 // Mock the standard /run DB sequence for search_term entities
@@ -194,9 +212,13 @@ function mockSearchTermRun(rule, stRows, extraMocks = []) {
   dbQuery
     .mockResolvedValueOnce({ rows: [rule] })
     .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+    .mockResolvedValueOnce({ rows: [] })           // campaign_exemptions
     .mockResolvedValueOnce({ rows: stRows });
   extraMocks.forEach(m => dbQuery.mockResolvedValueOnce(m));
-  dbQuery.mockResolvedValueOnce({ rows: [] });
+  dbQuery
+    .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_keywords
+    .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_targets
+    .mockResolvedValueOnce({ rows: [] });          // UPDATE
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -617,20 +639,26 @@ describe("POST /rules/preview", () => {
     // Preview calls executeRule directly — no rule SELECT, no UPDATE last_run_at
     dbQuery
       .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] }) // org_id
-      .mockResolvedValueOnce({ rows: [] });                  // keywords (empty)
+      .mockResolvedValueOnce({ rows: [] })                   // campaign_exemptions
+      .mockResolvedValueOnce({ rows: [] })                   // keywords (empty)
+      .mockResolvedValueOnce({ rows: [] })                   // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] });                  // reconcile: negative_targets
 
     const res = await request(app).post("/rules/preview").send(PREVIEW_BODY);
     expect(res.status).toBe(200);
     expect(res.body.dry_run).toBe(true);
     expect(res.body.matched_count).toBe(0);
-    expect(dbQuery).toHaveBeenCalledTimes(2); // org_id + keywords only
+    expect(dbQuery).toHaveBeenCalledTimes(5); // org_id + exemptions + keywords + 2 reconcile
   });
 
   it("shows applied action for a matching keyword", async () => {
     const kw = makeKeyword({ acos: "80", state: "enabled" });
     dbQuery
       .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
-      .mockResolvedValueOnce({ rows: [kw] });
+      .mockResolvedValueOnce({ rows: [] })  // campaign_exemptions
+      .mockResolvedValueOnce({ rows: [kw] })
+      .mockResolvedValueOnce({ rows: [] })  // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] }); // reconcile: negative_targets
 
     const res = await request(app).post("/rules/preview").send(PREVIEW_BODY);
     expect(res.status).toBe(200);
@@ -643,7 +671,10 @@ describe("POST /rules/preview", () => {
   it("shows period info in result", async () => {
     dbQuery
       .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] })  // campaign_exemptions
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })  // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] }); // reconcile: negative_targets
 
     const res = await request(app).post("/rules/preview").send(PREVIEW_BODY);
     expect(res.body.period).toHaveProperty("start");
@@ -1102,7 +1133,8 @@ describe("Action: add_negative_keyword — ASIN auto-routing", () => {
 
   it("ASIN-shaped search term → routes to add_negative_target (auto_routed=true)", async () => {
     mockSearchTermRun(asinRule(), [asinSearchTerm()], [
-      { rows: [] }, // ASIN dedup SELECT from negative_targets → not found
+      { rows: [] }, // activeTgt check → not an active positive target
+      { rows: [] }, // dedup SELECT from negative_targets → not found
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(1);
@@ -1114,7 +1146,8 @@ describe("Action: add_negative_keyword — ASIN auto-routing", () => {
 
   it("ASIN already in negative_targets → already_negative skip", async () => {
     mockSearchTermRun(asinRule(), [asinSearchTerm()], [
-      { rows: [{ id: "nt-existing" }] }, // ASIN dedup → found
+      { rows: [] },                      // activeTgt check → not an active target
+      { rows: [{ id: "nt-existing" }] }, // dedup → found
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(0);
@@ -1133,8 +1166,9 @@ describe("Action: add_negative_keyword — ASIN auto-routing", () => {
 
   it("non-dry-run ASIN auto-route: INSERT into negative_targets + pushNegativeAsin called", async () => {
     mockSearchTermRun(asinRule(), [asinSearchTerm()], [
-      { rows: [] },                       // ASIN dedup → not found
-      { rows: [{ id: "nt-ins-001" }] },   // INSERT into negative_targets
+      { rows: [] },                       // activeTgt check → not an active target
+      { rows: [] },                       // dedup → not found
+      { rows: [{ id: "nt-ins-001" }] },   // INSERT into negative_targets RETURNING id
     ]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
@@ -1201,10 +1235,10 @@ describe("Scope filters", () => {
     });
     mockKeywordRun(rule, []);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    // keywords query is the 3rd call (index 2)
-    const kwParams = dbQuery.mock.calls[2][1];
+    // keywords query is the 4th call (index 3) — after rule, org_id, exemptions
+    const kwParams = dbQuery.mock.calls[3][1];
     expect(kwParams).toContain("%TestCamp%");
-    expect(dbQuery.mock.calls[2][0]).not.toMatch(/NOT ILIKE/i);
+    expect(dbQuery.mock.calls[3][0]).not.toMatch(/NOT ILIKE/i);
   });
 
   it("campaign_name_contains exclude mode → NOT ILIKE in SQL", async () => {
@@ -1217,8 +1251,8 @@ describe("Scope filters", () => {
     });
     mockKeywordRun(rule, []);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    const kwSql = dbQuery.mock.calls[2][0];
-    const kwParams = dbQuery.mock.calls[2][1];
+    const kwSql = dbQuery.mock.calls[3][0];
+    const kwParams = dbQuery.mock.calls[3][1];
     expect(kwParams).toContain("%BadCamp%");
     expect(kwSql).toMatch(/NOT ILIKE/i);
   });
@@ -1232,9 +1266,9 @@ describe("Scope filters", () => {
     });
     mockKeywordRun(rule, []);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    const kwParams = dbQuery.mock.calls[2][1];
+    const kwParams = dbQuery.mock.calls[3][1];
     expect(kwParams).toContain("manual");
-    expect(dbQuery.mock.calls[2][0]).toMatch(/LOWER\(c\.targeting_type\)/i);
+    expect(dbQuery.mock.calls[3][0]).toMatch(/LOWER\(c\.targeting_type\)/i);
   });
 
   it("match_types filter → ANY array param in SQL", async () => {
@@ -1246,7 +1280,7 @@ describe("Scope filters", () => {
     });
     mockKeywordRun(rule, []);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    const kwParams = dbQuery.mock.calls[2][1];
+    const kwParams = dbQuery.mock.calls[3][1];
     expect(kwParams).toContainEqual(["exact", "phrase"]);
   });
 
@@ -1259,7 +1293,7 @@ describe("Scope filters", () => {
     });
     mockKeywordRun(rule, []);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    const kwParams = dbQuery.mock.calls[2][1];
+    const kwParams = dbQuery.mock.calls[3][1];
     expect(kwParams).toContainEqual([CAMP_ID]);
   });
 
@@ -1269,7 +1303,7 @@ describe("Scope filters", () => {
     });
     mockKeywordRun(rule, []);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    const kwParams = dbQuery.mock.calls[2][1];
+    const kwParams = dbQuery.mock.calls[3][1];
     // Last two params are [startDate, endDate]
     const startDate = kwParams[kwParams.length - 2];
     const endDate   = kwParams[kwParams.length - 1];
@@ -1294,8 +1328,8 @@ describe("Entity type routing", () => {
     mockTargetRun(rule, []);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.status).toBe(200);
-    // The 3rd query (index 2) should be the targets SELECT
-    expect(dbQuery.mock.calls[2][0]).toMatch(/FROM targets/i);
+    // The 4th query (index 3) should be the targets SELECT
+    expect(dbQuery.mock.calls[3][0]).toMatch(/FROM targets/i);
   });
 
   it("entity_type=search_term → queries search_term_metrics table", async () => {
@@ -1305,7 +1339,7 @@ describe("Entity type routing", () => {
     mockSearchTermRun(rule, []);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.status).toBe(200);
-    expect(dbQuery.mock.calls[2][0]).toMatch(/FROM search_term_metrics/i);
+    expect(dbQuery.mock.calls[3][0]).toMatch(/FROM search_term_metrics/i);
   });
 
   it("default entity_type (keyword) → queries keywords table", async () => {
@@ -1313,7 +1347,7 @@ describe("Entity type routing", () => {
     mockKeywordRun(SAMPLE_RULE, []);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.status).toBe(200);
-    expect(dbQuery.mock.calls[2][0]).toMatch(/FROM keywords/i);
+    expect(dbQuery.mock.calls[3][0]).toMatch(/FROM keywords/i);
   });
 });
 

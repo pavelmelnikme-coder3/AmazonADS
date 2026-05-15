@@ -123,7 +123,7 @@ router.get("/", async (req, res, next) => {
     // Hide search terms already negated in the same campaign
     const hideNegated = req.query.hideNegated === "true";
     if (hideNegated) {
-      havingClauses.push(`BOOL_OR(nk_check.id IS NOT NULL) = FALSE`);
+      havingClauses.push(`BOOL_OR(nk_check.id IS NOT NULL OR nt_check.id IS NOT NULL) = FALSE`);
     }
 
     const allowedSort = {
@@ -166,11 +166,18 @@ router.get("/", async (req, res, next) => {
       LEFT JOIN negative_keywords nk_check
         ON nk_check.workspace_id = stm.workspace_id
        AND nk_check.campaign_id = COALESCE(stm.campaign_id, c2.id)
+       AND nk_check.state = 'enabled'
        AND (
          (nk_check.match_type IN ('negativeExact','negative_exact') AND LOWER(nk_check.keyword_text) = LOWER(stm.query))
          OR
          (nk_check.match_type IN ('negativePhrase','negative_phrase') AND LOWER(stm.query) LIKE '%' || LOWER(nk_check.keyword_text) || '%')
-       )`;
+       )
+      LEFT JOIN negative_targets nt_check
+        ON nt_check.workspace_id = stm.workspace_id
+       AND nt_check.campaign_id = COALESCE(stm.campaign_id, c2.id)
+       AND nt_check.state = 'enabled'
+       AND stm.query ~* '^B0[A-Z0-9]{8,9}$'
+       AND nt_check.expression @> jsonb_build_array(jsonb_build_object('type', 'ASIN_SAME_AS', 'value', UPPER(stm.query)))`;
 
     const groupBy = `GROUP BY
         stm.query,
@@ -214,6 +221,7 @@ router.get("/", async (req, res, next) => {
            MAX(stm.date_end)   AS date_end,
            COUNT(*)::int       AS day_rows,
            BOOL_OR(nk_check.id IS NOT NULL) AS is_negated,
+           BOOL_OR(nt_check.id IS NOT NULL) AS is_neg_asin,
            MIN(nk_check.match_type) FILTER (WHERE nk_check.id IS NOT NULL) AS neg_match_type
          ${fromAndJoins}
          WHERE ${where}
@@ -391,8 +399,8 @@ router.post("/add-negative", async (req, res, next) => {
 
     // Amazon only supports negativeExact / negativePhrase for keywords (no broad)
     const amazonMatchType = isAsin ? null : (matchType === "phrase" ? "negativePhrase" : "negativeExact");
-    // level: "ad_group" when adGroupId provided, otherwise "campaign"
-    const level = adGroupId ? "ad_group" : "campaign";
+    // level: always "ad_group" for search-term harvest — SP campaign-level negatives are a different product
+    const level = "ad_group";
 
     let targets = [];
     if (campaignIds && Array.isArray(campaignIds) && campaignIds.length > 0) {

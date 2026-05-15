@@ -244,8 +244,8 @@ describe("GET /products/:id/history", () => {
       { captured_at: "2026-04-21T00:00:00Z", best_rank: 45, best_category: "Kitchen" },
       { captured_at: "2026-04-22T00:00:00Z", best_rank: 42, best_category: "Kitchen" },
     ];
-    // Query returns DESC, route reverses to chronological
-    dbQuery.mockResolvedValueOnce({ rows: [...snapshots].reverse() });
+    // Route queries ORDER BY captured_at ASC — mock provides chronological order
+    dbQuery.mockResolvedValueOnce({ rows: snapshots });
 
     const res = await request(app).get(`/products/${PRODUCT_ID}/history`);
     expect(res.status).toBe(200);
