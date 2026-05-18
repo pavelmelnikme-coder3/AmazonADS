@@ -190,6 +190,8 @@ router.get("/recommendations", async (req, res, next) => {
       const actions = typeof rec.actions === "string" ? JSON.parse(rec.actions) : (rec.actions || []);
       const enrichedActions = await Promise.all(actions.map(async action => {
         if (action.entity_name || !action.entity_id) return action;
+        const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(action.entity_id);
+        if (!validUuid) return action;
         let entityName = null;
         try {
           if (action.entity_type === "campaign") {

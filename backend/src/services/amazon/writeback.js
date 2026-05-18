@@ -390,7 +390,10 @@ async function archiveNegativeKeyword({ localId, connectionId, profileId, market
 }
 
 /**
- * Archive (ARCHIVED state) a negative target in Amazon, then mark local row archived.
+ * Deactivate a negative target in Amazon, then mark local row archived.
+ * SP negative targets do not support state=ARCHIVED via PUT (valid: ENABLED/PROPOSED/PAUSED).
+ * We set state=PAUSED which deactivates the target without requiring a separate DELETE endpoint.
+ * Field name in PUT body is "targetId" (not "negativeTargetId") per Amazon Ads API v3.
  */
 async function archiveNegativeTarget({ localId, connectionId, profileId, marketplaceId, campaignType, amazonNegTargetId }) {
   if (!connectionId || !profileId || !amazonNegTargetId) return { ok: false, error: "Missing params" };
@@ -399,13 +402,13 @@ async function archiveNegativeTarget({ localId, connectionId, profileId, marketp
       ? "/sd/negativeTargets" : "/sp/negativeTargets";
     await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
-      path, data: { negativeTargetingClauses: [{ negativeTargetId: amazonNegTargetId, state: "ARCHIVED" }] },
+      path, data: { negativeTargetingClauses: [{ targetId: amazonNegTargetId, state: "PAUSED" }] },
       group: "keywords",
     });
     if (localId) {
       await query("UPDATE negative_targets SET state='archived' WHERE id=$1", [localId]);
     }
-    logger.info("Negative target archived", { profileId, path, amazonNegTargetId });
+    logger.info("Negative target paused/archived", { profileId, path, amazonNegTargetId });
     return { ok: true };
   } catch (e) {
     logger.warn("Archive negative target failed (non-fatal)", { profileId, error: e.message });

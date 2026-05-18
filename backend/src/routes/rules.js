@@ -16,7 +16,7 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { writeAudit } = require("./audit");
 const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget } = require("../services/amazon/writeback");
-const { put } = require("../services/amazon/adsClient");
+const { put, post } = require("../services/amazon/adsClient");
 const logger  = require("../config/logger");
 const { getRedis } = require("../config/redis");
 
@@ -1130,7 +1130,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 ? JSON.parse(entity.expression) : entity.expression;
               const ntPath = entity.campaign_type === "sponsoredDisplay"
                 ? "/sd/negativeTargets" : "/sp/negativeTargets";
-              put({
+              post({
                 connectionId: entity.connection_id,
                 profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id,
@@ -1138,7 +1138,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 data: { negativeTargetingClauses: [{
                   expression: targetExpr,
                   expressionType: "manual",
-                  state: "enabled",
+                  state: "ENABLED",
                   campaignId: entity.amazon_campaign_id,
                   ...(entity.amazon_ad_group_id ? { adGroupId: entity.amazon_ad_group_id } : {}),
                 }] },
