@@ -330,6 +330,7 @@ export default {
       period7d: "7д",
       period14d: "14д",
       period30d: "30д",
+      period60d: "60д",
       period90d: "90д",
       openInAmazonAds: "Amazon Ads",
       openInAmazonAdsTip: "Открыть кампанию в кабинете Amazon Ads",

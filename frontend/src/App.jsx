@@ -2686,7 +2686,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     { id: "negatives",   label: `${t("campaigns.detail.negatives")}` },
   ];
 
-  const periodOptions = [7, 14, 30, 90];
+  const periodOptions = [7, 14, 30, 60, 90];
 
   return createPortal(
     <div>
