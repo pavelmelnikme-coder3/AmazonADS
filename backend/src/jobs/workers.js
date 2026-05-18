@@ -89,10 +89,12 @@ async function queueRuleEngine(workspaceId) {
 
 async function queueRuleExecution(workspaceId, ruleId = null) {
   const queue = getQueue(QUEUES.RULE_EXECUTION);
-  // jobId deduplication: if a job for this workspace is already pending/active,
-  // BullMQ will not enqueue a second one — preventing race conditions between cron ticks.
-  const jobId = ruleId ? `rule_${ruleId}_${workspaceId}` : `workspace_${workspaceId}`;
-  return queue.add("execute", { workspaceId, ruleId }, { jobId });
+  // deduplication (not jobId): prevents duplicate jobs while a job is waiting/active,
+  // but the dedup key is automatically deleted after completion — allowing the next
+  // hourly cron tick to queue a fresh job. Using a static jobId caused BullMQ to
+  // silently drop all subsequent adds once the first completed job was still in Redis.
+  const dedupId = ruleId ? `rule_${ruleId}_${workspaceId}` : `workspace_${workspaceId}`;
+  return queue.add("execute", { workspaceId, ruleId }, { deduplication: { id: dedupId } });
 }
 
 async function queueRankCheck(workspaceId) {
