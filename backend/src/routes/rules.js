@@ -1338,7 +1338,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const pct           = parseFloat(action.value || 0) / 100;
           const currentBudget = parseFloat(entity.daily_budget || 10);
-          const newBudget     = Math.round(Math.max(1, currentBudget * (1 + pct)) * 100) / 100;
+          const maxBudget     = safety?.max_budget ? parseFloat(safety.max_budget) : null;
+          const newBudget     = Math.round(Math.min(Math.max(1, currentBudget * (1 + pct)), maxBudget ?? Infinity) * 100) / 100;
           if (!dryRun) {
             await query("UPDATE campaigns SET daily_budget = $1, updated_at = NOW() WHERE id = $2", [newBudget, entity.id]);
             await writeRuleAudit({
@@ -1370,7 +1371,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (entity.entity_type !== "campaign") { recordSkip(entity, action, "wrong_entity_type"); continue; }
           if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const currentBudget = parseFloat(entity.daily_budget || 0);
-          const newBudget     = Math.round(Math.max(1, parseFloat(action.value || 10)) * 100) / 100;
+          const maxBudget     = safety?.max_budget ? parseFloat(safety.max_budget) : null;
+          const newBudget     = Math.round(Math.min(Math.max(1, parseFloat(action.value || 10)), maxBudget ?? Infinity) * 100) / 100;
           if (!dryRun) {
             await query("UPDATE campaigns SET daily_budget = $1, updated_at = NOW() WHERE id = $2", [newBudget, entity.id]);
             await writeRuleAudit({

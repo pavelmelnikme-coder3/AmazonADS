@@ -560,6 +560,7 @@ export default {
     adGroups: "Anzeigengruppen",
     minBid: "Min. Gebot (€)",
     maxBid: "Max. Gebot (€)",
+    maxBudget: "Max. Budget (€)",
     metric: {
       clicks: "Klicks",
       spend: "Ausgaben (€)",

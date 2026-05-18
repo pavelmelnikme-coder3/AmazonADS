@@ -555,6 +555,7 @@ export default {
     adGroups: "Группы объявлений",
     minBid: "Мин. ставка (€)",
     maxBid: "Макс. ставка (€)",
+    maxBudget: "Макс. бюджет (€)",
     metric: {
       clicks: "Клики",
       spend: "Расход (€)",

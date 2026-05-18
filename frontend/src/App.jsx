@@ -11119,7 +11119,7 @@ const EMPTY_RULE_FORM = {
   conditions: [{ metric: "clicks", op: "gte", value: "30" }],
   actions:    [{ type: "pause_keyword", value: "" }],
   scope:  { entity_type: "keyword", period_days: 14, campaign_type: "", campaign_targeting_type: "", campaign_ids: [], ad_group_ids: [], match_types: [], campaign_name_contains: "", campaign_name_mode: "include", dayparting: null, search_term_subtype: "all" },
-  safety: { min_bid: "0.02", max_bid: "50" },
+  safety: { min_bid: "0.02", max_bid: "50", max_budget: "" },
 };
 
 const RULE_METRICS = (t) => [
@@ -11797,6 +11797,12 @@ const RuleWizardModal = ({
                           onChange={e => setForm(f => ({...f, safety:{...f.safety, max_bid:e.target.value}}))}
                           placeholder="50" style={{ ...INP_SM }} />
                       </div>
+                      <div style={{ gridColumn:"1 / -1" }}>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }}>{t("rules.maxBudget")}</div>
+                        <input type="number" value={form.safety.max_budget || ""}
+                          onChange={e => setForm(f => ({...f, safety:{...f.safety, max_budget:e.target.value}}))}
+                          placeholder="500" style={{ ...INP_SM, width:"50%" }} />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -12046,51 +12052,72 @@ const RuleWizardModal = ({
                         {t("rules.sampleMatches")}
                       </div>
                       <div style={{ border:"1px solid var(--b2)", borderRadius:8, overflow:"hidden" }}>
-                        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-                          <thead>
-                            <tr style={{ background:"var(--s2)" }}>
-                              <th style={{ textAlign:"left", padding:"8px 12px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("rules.colKeywordTarget")}</th>
-                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiClicks")}</th>
-                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiOrders")}</th>
-                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>ACOS</th>
-                              <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiSpend")}</th>
-                              <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("rules.colAction")}</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {previewData.applied.slice(0, 10).map((m, i) => {
-                              const mx = m.metrics || {};
-                              const clicks = mx.clicks != null ? Number(mx.clicks) : null;
-                              const orders = mx.orders != null ? Number(mx.orders) : null;
-                              const acos   = mx.acos   != null ? parseFloat(mx.acos) : null;
-                              const spend  = mx.spend  != null ? parseFloat(mx.spend) : null;
-                              return (
-                              <tr key={i} style={{ borderTop:"1px solid var(--b1)" }}>
-                                <td style={{ padding:"7px 12px", color:"var(--tx2)", maxWidth:220,
-                                  overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                                  {m.keyword_text || fmtTargetExpr(m.expression) || m.entity_id}
-                                </td>
-                                <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
-                                  {clicks != null ? clicks : "—"}
-                                </td>
-                                <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
-                                  {orders != null ? orders : "—"}
-                                </td>
-                                <td style={{ padding:"7px 10px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11,
-                                  color: acos == null ? "var(--tx3)" : acos < 15 ? "var(--grn)" : acos < 30 ? "var(--amb)" : "var(--red)" }}>
-                                  {acos != null ? acos.toFixed(1)+"%" : "—"}
-                                </td>
-                                <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
-                                  {spend != null ? spend.toFixed(2)+"€" : "—"}
-                                </td>
-                                <td style={{ padding:"7px 12px", textAlign:"right", color:"var(--tx3)", fontSize:11 }}>
-                                  {m.action?.replace(/_/g," ")}
-                                </td>
+                        {(() => {
+                          const hasBudget = previewData.applied.some(m => m.previous_budget != null);
+                          return (
+                          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                            <thead>
+                              <tr style={{ background:"var(--s2)" }}>
+                                <th style={{ textAlign:"left", padding:"8px 12px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("rules.colKeywordTarget")}</th>
+                                <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiClicks")}</th>
+                                <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiOrders")}</th>
+                                <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>ACOS</th>
+                                <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("overview.kpiSpend")}</th>
+                                {hasBudget && <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("campaigns.colBudget")}</th>}
+                                {hasBudget && <th style={{ textAlign:"right", padding:"8px 10px", color:"var(--amb)", fontWeight:600, fontSize:11 }}>→ {t("campaigns.colBudget")}</th>}
+                                <th style={{ textAlign:"right", padding:"8px 12px", color:"var(--tx3)", fontWeight:600, fontSize:11 }}>{t("rules.colAction")}</th>
                               </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                            </thead>
+                            <tbody>
+                              {previewData.applied.slice(0, 10).map((m, i) => {
+                                const mx = m.metrics || {};
+                                const clicks = mx.clicks != null ? Number(mx.clicks) : null;
+                                const orders = mx.orders != null ? Number(mx.orders) : null;
+                                const acos   = mx.acos   != null ? parseFloat(mx.acos) : null;
+                                const spend  = mx.spend  != null ? parseFloat(mx.spend) : null;
+                                const prevBudget = m.previous_budget != null ? parseFloat(m.previous_budget) : null;
+                                const newBudget  = m.new_budget      != null ? parseFloat(m.new_budget)      : null;
+                                const budgetChanged = newBudget != null && prevBudget != null && newBudget !== prevBudget;
+                                return (
+                                <tr key={i} style={{ borderTop:"1px solid var(--b1)" }}>
+                                  <td style={{ padding:"7px 12px", color:"var(--tx2)", maxWidth:220,
+                                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                                    {m.keyword_text || fmtTargetExpr(m.expression) || m.entity_id}
+                                  </td>
+                                  <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                    {clicks != null ? clicks : "—"}
+                                  </td>
+                                  <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                    {orders != null ? orders : "—"}
+                                  </td>
+                                  <td style={{ padding:"7px 10px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11,
+                                    color: acos == null ? "var(--tx3)" : acos < 15 ? "var(--grn)" : acos < 30 ? "var(--amb)" : "var(--red)" }}>
+                                    {acos != null ? acos.toFixed(1)+"%" : "—"}
+                                  </td>
+                                  <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                    {spend != null ? spend.toFixed(2)+"€" : "—"}
+                                  </td>
+                                  {hasBudget && (
+                                    <td style={{ padding:"7px 10px", textAlign:"right", color:"var(--tx2)", fontFamily:"var(--mono)", fontSize:11 }}>
+                                      {prevBudget != null ? prevBudget.toFixed(2)+"€" : "—"}
+                                    </td>
+                                  )}
+                                  {hasBudget && (
+                                    <td style={{ padding:"7px 10px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11,
+                                      color: budgetChanged ? (newBudget > prevBudget ? "var(--grn)" : "var(--red)") : "var(--tx3)" }}>
+                                      {newBudget != null ? newBudget.toFixed(2)+"€" : "—"}
+                                    </td>
+                                  )}
+                                  <td style={{ padding:"7px 12px", textAlign:"right", color:"var(--tx3)", fontSize:11 }}>
+                                    {m.action?.replace(/_/g," ")}
+                                  </td>
+                                </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                          );
+                        })()}
                       </div>
                     </div>
                   )}
