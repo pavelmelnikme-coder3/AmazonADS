@@ -1866,7 +1866,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
     setAddSaving(false);
   }
   async function doAddTarget() {
-    if (!addTgtForm.value.trim()) return;
+    if (!selectedAg?.id || !addTgtForm.value.trim()) return;
     setAddSaving(true); setAddError(null);
     try {
       await post("/targets", { adGroupId: selectedAg.id, expressionType: addTgtForm.expressionType, expressionValue: addTgtForm.value.trim(), bid: parseFloat(addTgtForm.bid) || 0.5 });
@@ -2345,7 +2345,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
           </table>
         </div>
       )}
-      {addTgtModal && (
+      {addTgtModal && selectedAg && (
         <AddModal title={t("campaigns.detail.addTarget")} onClose={() => { setAddTgtModal(false); setAddError(null); }} onSave={doAddTarget}>
           <FormRow label={t("campaigns.detail.expressionType")}>
             <FormSelect value={addTgtForm.expressionType} onChange={v => setAddTgtForm(f => ({ ...f, expressionType: v }))} options={[
