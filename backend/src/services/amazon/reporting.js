@@ -663,22 +663,14 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
   const activeKey = (profileId, ct, rt, from, to) => `${profileId}|${ct}|${rt}|${from}|${to}`;
   const activeSet = new Set(activeReports.map(r => activeKey(r.profile_id, r.campaign_type, r.report_type, r.date_start, r.date_end)));
 
-  const REPORT_TYPE_MAP = {
-    campaign: { SP: "spCampaigns", SB: "sbCampaigns", SD: "sdCampaigns" },
-    keyword:  { SP: "spKeyword",   SB: "sbSearchTerm", SD: null },
-    searchTerm: { SP: "spSearchTerm", SB: null, SD: null },
-    target:   { SP: "spTargeting", SB: null, SD: "sdTargeting" },
-    advertised_product: { SP: "spAdvertisedProduct", SB: null, SD: null },
-    ad_group: { SB: "sbAdGroup", SD: "sdAdGroup", SP: null },
-  };
-
   let jobsQueued = 0;
   let jobsSkipped = 0;
   for (const { id: profileId } of profiles) {
     for (const [campaignType, reportLevel] of reportTypes) {
       for (const [chunkFrom, chunkTo] of dateChunks) {
-        const reportType = REPORT_TYPE_MAP[reportLevel]?.[campaignType];
-        if (reportType && activeSet.has(activeKey(profileId, campaignType, reportType, chunkFrom, chunkTo))) {
+        // report_requests stores reportLevel (e.g. "keyword"), not the Amazon reportTypeId string —
+        // so compare activeSet against reportLevel directly, not a mapped type ID.
+        if (activeSet.has(activeKey(profileId, campaignType, reportLevel, chunkFrom, chunkTo))) {
           logger.info("Skipping duplicate report job (already active)", { profileId, campaignType, reportLevel, chunkFrom, chunkTo });
           jobsSkipped++;
           continue;
