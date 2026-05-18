@@ -1691,8 +1691,8 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
   const { data: tgtData, loading: tgtLoading, reload: reloadTgts } = useAsync(
     () => selectedAg
       ? get("/targets", { adGroupId: selectedAg.id, metricsDays: localDays, limit: 500, sortBy: "spend", sortDir: "desc" })
-      : Promise.resolve({ data: [], pagination: {} }),
-    [selectedAg?.id, localDays]
+      : get("/targets", { campaignId: campaign.id, metricsDays: localDays, limit: 500, sortBy: "spend", sortDir: "desc" }),
+    [campaign.id, selectedAg?.id, localDays]
   );
   const { data: adsData, loading: adsLoading } = useAsync(
     () => selectedAg
@@ -2274,7 +2274,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
           onBidAdj={() => bulkUpdateTgt(null)} entityType="tgt" />
       )}
       <SearchBar value={tgtSearch} onChange={v => { setTgtSearch(v); setTgtSelected(new Set()); }}
-        onAdd={() => { setAddError(null); setAddTgtModal(true); }} addLabel={t("campaigns.detail.addTarget")} />
+        onAdd={selectedAg ? () => { setAddError(null); setAddTgtModal(true); } : null} addLabel={t("campaigns.detail.addTarget")} />
       {tgtLoading ? <div style={{ padding: 40, textAlign: "center" }}><span className="loader" /></div>
       : filteredTgts.length === 0 ? <div style={{ padding: 40, textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>{t("campaigns.detail.noTargets")}</div>
       : (
@@ -2286,6 +2286,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                 onChange={e => setTgtSelected(e.target.checked ? new Set(filteredTgts.map(t => t.id)) : new Set())}
                 style={{ cursor: "pointer" }} /></TH>
               <TH>{t("campaigns.detail.target")}</TH>
+              {!selectedAg && <TH>{t("campaigns.detail.adGroupShort") || t("campaigns.detail.adGroups")}</TH>}
               <SortTH field="expression_type" sortState={tgtSort} setSortFn={setTgtSort}>{t("campaigns.detail.expressionType")}</SortTH>
               <TH>{t("campaigns.colStatus")}</TH>
               <SortTH field="bid"    sortState={tgtSort} setSortFn={setTgtSort}>{t("keywords.colBid")}</SortTH>
@@ -2307,6 +2308,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                         style={{ cursor: "pointer" }} />
                     </TD>
                     <TD style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>{label}</TD>
+                    {!selectedAg && <TD style={{ color: "var(--tx3)", fontSize: 10, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={tgt.ad_group_name}>{tgt.ad_group_name || "—"}</TD>}
                     <TD style={{ color: tgt.expression_type?.toLowerCase() === "auto" ? "var(--teal)" : "var(--tx3)", fontSize: 10 }}>
                       {tgt.expression_type?.toLowerCase() === "auto" ? t("rules.targetingAutoShort") : tgt.expression_type?.toLowerCase() === "manual" ? t("rules.targetingManualShort") : tgt.expression_type || "—"}
                     </TD>
@@ -2674,6 +2676,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
 
   const campaignTabs = [
     { id: "adgroups",    label: `${t("campaigns.detail.adGroups")} (${adGroups.length || "…"})` },
+    { id: "targets",     label: `${t("campaigns.detail.targets")} (${targets.length || "…"})` },
     { id: "searchterms", label: `${t("campaigns.detail.searchTerms")} (${searchTermsList.length || "…"})` },
     { id: "settings",    label: t("campaigns.detail.settings") },
     { id: "negatives",   label: `${t("campaigns.detail.negatives")} (${negatives.length || "0"})` },
@@ -2774,6 +2777,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
         {/* Content */}
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
           {view === "campaign" && tab === "adgroups"    && <AdGroupsTab />}
+          {view === "campaign" && tab === "targets"     && <TargetsTab />}
           {view === "campaign" && tab === "searchterms" && <SearchTermsTab />}
           {view === "campaign" && tab === "settings"    && <SettingsTab />}
           {view === "campaign" && tab === "negatives"   && <NegativesTab />}

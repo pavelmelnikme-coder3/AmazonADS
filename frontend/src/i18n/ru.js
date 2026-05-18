@@ -268,6 +268,7 @@ export default {
     search: "Поиск кампаний…",
     detail: {
       adGroups: "Группы объявлений",
+      adGroupShort: "Группа",
       targets: "Таргеты",
       productAds: "Товарные объявления",
       settings: "Настройки",

@@ -268,6 +268,7 @@ export default {
     search: "Search campaigns…",
     detail: {
       adGroups: "Ad Groups",
+      adGroupShort: "Ad Group",
       targets: "Targets",
       productAds: "Product Ads",
       settings: "Settings",
