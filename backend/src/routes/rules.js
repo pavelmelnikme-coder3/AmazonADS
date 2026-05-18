@@ -1796,9 +1796,6 @@ router.patch("/:id", async (req, res, next) => {
     if (actions !== undefined && (!Array.isArray(actions) || actions.length === 0)) {
       return res.status(400).json({ error: "actions cannot be empty when provided" });
     }
-    // Only reset next_run_at when the schedule itself changes — not on every save.
-    // Without this, editing a rule name after it ran would make it execute again immediately.
-    const scheduleChanged = schedule_type !== undefined || run_hour !== undefined;
     const { rows: [rule] } = await query(
       `UPDATE rules SET
          name          = COALESCE($1, name),
@@ -1812,7 +1809,10 @@ router.patch("/:id", async (req, res, next) => {
          safety        = COALESCE($9::jsonb, safety),
          dry_run       = COALESCE($10, dry_run),
          is_active     = COALESCE($11, is_active),
-         next_run_at   = CASE WHEN $14 THEN NULL ELSE next_run_at END,
+         next_run_at   = CASE
+           WHEN ($6 IS NOT NULL AND $6 IS DISTINCT FROM schedule_type)
+             OR ($7 IS NOT NULL AND $7::int IS DISTINCT FROM run_hour)
+           THEN NULL ELSE next_run_at END,
          updated_at    = NOW()
        WHERE id = $12 AND workspace_id = $13
        RETURNING *`,
@@ -1826,7 +1826,6 @@ router.patch("/:id", async (req, res, next) => {
         safety  ? JSON.stringify(safety)  : null,
         dry_run, is_active,
         req.params.id, req.workspaceId,
-        scheduleChanged,
       ]
     );
     if (!rule) return res.status(404).json({ error: "Rule not found" });

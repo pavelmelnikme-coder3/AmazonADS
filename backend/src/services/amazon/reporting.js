@@ -624,7 +624,6 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
 
   const reportTypes = [
     ["SP", "campaign"],
-    ["SP", "ad_group"],
     ["SP", "keyword"],
     ["SP", "searchTerm"],
     ["SP", "target"],
@@ -670,7 +669,7 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
     searchTerm: { SP: "spSearchTerm", SB: null, SD: null },
     target:   { SP: "spTargeting", SB: null, SD: "sdTargeting" },
     advertised_product: { SP: "spAdvertisedProduct", SB: null, SD: null },
-    ad_group: { SB: "sbAdGroup", SD: "sdAdGroup", SP: "spAdGroups" },
+    ad_group: { SB: "sbAdGroup", SD: "sdAdGroup", SP: null },
   };
 
   let jobsQueued = 0;
