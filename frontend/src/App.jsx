@@ -10820,7 +10820,7 @@ const AnalyticsPage = ({ workspaceId }) => {
 
       {/* ── View tabs ── */}
       <div style={{ display:"flex", gap:2, marginBottom:12, borderBottom:"1px solid var(--b2)", paddingBottom:0 }}>
-        {[["detail", t("analytics.tabByProduct")],["summary", t("analytics.tabByGroup")]].map(([id, label]) => (
+        {[["detail", tr("analytics.tabByProduct")],["summary", tr("analytics.tabByGroup")]].map(([id, label]) => (
           <button key={id} onClick={() => setViewTab(id)}
             style={{ fontSize:12, padding:"7px 16px", background:"none", border:"none",
               borderBottom: viewTab===id ? "2px solid var(--ac)" : "2px solid transparent",
@@ -10835,30 +10835,30 @@ const AnalyticsPage = ({ workspaceId }) => {
       {viewTab === "detail" && (
         <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
           {reportLoading ? (
-            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>{t("analytics.loading")}</div>
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>{tr("analytics.loading")}</div>
           ) : !reportData?.rows?.length ? (
             <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
-              {t("analytics.noDataPeriod")}
+              {tr("analytics.noDataPeriod")}
             </div>
           ) : (
             <div style={{ overflowX:"auto" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>{t("analytics.colProduct")}</th>
-                    <SortTh label={t("analytics.colLabel")} k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} />
-                    <SortTh label={t("analytics.colUnits")} k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colSales")} k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>{tr("analytics.colProduct")}</th>
+                    <SortTh label={tr("analytics.colLabel")} k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} />
+                    <SortTh label={tr("analytics.colUnits")} k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colSales")} k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SP" k="sp_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SD" k="sd_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SB" k="sb_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colAdsTotal")} k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colAdsTotal")} k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="ACOS" k="acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="Real ACOS" k="real_acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="BSR" k="bsr_rank" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colNetProfit")} k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colMargin")} k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colNetProfit")} k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colMargin")} k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -10892,7 +10892,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                 {totals && (
                   <tfoot>
                     <tr style={{ borderTop:"2px solid var(--b2)", background:"var(--s2)", fontWeight:600 }}>
-                      <td style={{ padding:"7px 10px", fontSize:11, position:"sticky", left:0, background:"var(--s2)" }}>{t("analytics.totalRow", { n: reportData.rows.length })}</td>
+                      <td style={{ padding:"7px 10px", fontSize:11, position:"sticky", left:0, background:"var(--s2)" }}>{tr("analytics.totalRow", { n: reportData.rows.length })}</td>
                       <td></td>
                       <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtNum(totals.units)}</td>
                       <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.sales)}</td>
@@ -10919,28 +10919,28 @@ const AnalyticsPage = ({ workspaceId }) => {
       {viewTab === "summary" && (
         <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
           {reportLoading ? (
-            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>{t("analytics.loading")}</div>
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>{tr("analytics.loading")}</div>
           ) : !reportData?.summary?.length ? (
             <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
-              {t("analytics.noDataSummary")}
+              {tr("analytics.noDataSummary")}
             </div>
           ) : (
             <div style={{ overflowX:"auto" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <SortTh label={t("analytics.colGroup")} k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} />
-                    <SortTh label={t("analytics.colProducts")} k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colUnits")} k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colSales")} k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colGroup")} k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} />
+                    <SortTh label={tr("analytics.colProducts")} k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colUnits")} k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colSales")} k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SP+SD+SB" k="total_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="Google+FB" k="google_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colTotalBudget")} k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colTotalBudget")} k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="ACOS" k="acos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="TACOS" k="tacos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colNetProfit")} k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={t("analytics.colMargin")} k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colNetProfit")} k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colMargin")} k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                   </tr>
                 </thead>
                 <tbody>
