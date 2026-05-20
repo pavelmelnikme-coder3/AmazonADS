@@ -106,7 +106,7 @@ async function getInventory(marketplaceId, refreshToken) {
   let items = [];
   let nextToken = null;
   do {
-    const params = { details: true, granularity: "Marketplace", granularityId: marketplaceId, marketplaceIds: marketplaceId };
+    const params = { details: true, granularityType: "Marketplace", granularityId: marketplaceId, marketplaceIds: marketplaceId };
     if (nextToken) params.nextToken = nextToken;
     const data = await _spRequest(region, "/fba/inventory/v1/summaries", params, token);
     items = items.concat(data.payload?.inventorySummaries || []);

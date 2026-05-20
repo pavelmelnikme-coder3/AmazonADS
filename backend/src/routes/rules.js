@@ -1470,7 +1470,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             "UPDATE negative_keywords SET state='archived', amazon_neg_keyword_id=$1 WHERE id=$2",
             [newAmazonId, nk.id]
           );
-          const hasRealId = !nk.amazon_neg_keyword_id?.startsWith("rule-");
+          const hasRealId = nk.amazon_neg_keyword_id && !nk.amazon_neg_keyword_id.startsWith("rule-");
           if (hasRealId && nk.connection_id) {
             archiveNegativeKeyword({
               connectionId: nk.connection_id, profileId: String(nk.amazon_profile_id),
@@ -1835,10 +1835,21 @@ router.patch("/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── DELETE /rules/:id ─────────────────────────────────────────────────────────
+// ── DELETE /rules/:id — moves to trash (30-day soft delete) ──────────────────
 router.delete("/:id", async (req, res, next) => {
   try {
-    await query("DELETE FROM rules WHERE id = $1 AND workspace_id = $2", [req.params.id, req.workspaceId]);
+    const { rows: [rule] } = await query(
+      "SELECT * FROM rules WHERE id=$1 AND workspace_id=$2",
+      [req.params.id, req.workspaceId]
+    );
+    if (!rule) return res.status(404).json({ error: "Rule not found" });
+
+    await query(
+      `INSERT INTO trash (workspace_id, entity_type, entity_id, entity_name, data, deleted_by)
+       VALUES ($1, 'rule', $2, $3, $4::jsonb, $5)`,
+      [req.workspaceId, rule.id, rule.name, JSON.stringify(rule), req.user?.id ?? null]
+    );
+    await query("DELETE FROM rules WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

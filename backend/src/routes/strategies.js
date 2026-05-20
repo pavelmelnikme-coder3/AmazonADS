@@ -81,14 +81,20 @@ router.patch("/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── DELETE /strategies/:id ────────────────────────────────────────────────────
+// ── DELETE /strategies/:id — soft delete to trash ────────────────────────────
 router.delete("/:id", async (req, res, next) => {
   try {
-    const { rowCount } = await query(
-      "DELETE FROM strategies WHERE id = $1 AND workspace_id = $2",
+    const { rows: [strategy] } = await query(
+      "SELECT * FROM strategies WHERE id=$1 AND workspace_id=$2",
       [req.params.id, req.workspaceId]
     );
-    if (!rowCount) return res.status(404).json({ error: "Strategy not found" });
+    if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+    await query(
+      `INSERT INTO trash (workspace_id, entity_type, entity_id, entity_name, data, deleted_by)
+       VALUES ($1, 'strategy', $2, $3, $4::jsonb, $5)`,
+      [req.workspaceId, strategy.id, strategy.name, JSON.stringify(strategy), req.user?.id ?? null]
+    );
+    await query("DELETE FROM strategies WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

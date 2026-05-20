@@ -68,14 +68,20 @@ router.put("/configs/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /alerts/configs/:id
+// DELETE /alerts/configs/:id — soft delete to trash
 router.delete("/configs/:id", async (req, res, next) => {
   try {
-    const { rowCount } = await query(
-      "DELETE FROM alert_configs WHERE id = $1 AND workspace_id = $2",
+    const { rows: [alert] } = await query(
+      "SELECT * FROM alert_configs WHERE id=$1 AND workspace_id=$2",
       [req.params.id, req.workspaceId]
     );
-    if (!rowCount) return res.status(404).json({ error: "Alert config not found" });
+    if (!alert) return res.status(404).json({ error: "Alert config not found" });
+    await query(
+      `INSERT INTO trash (workspace_id, entity_type, entity_id, entity_name, data, deleted_by)
+       VALUES ($1, 'alert', $2, $3, $4::jsonb, $5)`,
+      [req.workspaceId, alert.id, alert.name, JSON.stringify(alert), req.user?.id ?? null]
+    );
+    await query("DELETE FROM alert_configs WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

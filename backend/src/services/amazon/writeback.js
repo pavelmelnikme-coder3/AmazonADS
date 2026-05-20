@@ -376,7 +376,7 @@ async function archiveNegativeKeyword({ localId, connectionId, profileId, market
     const idKey   = isAdGroup ? "negativeKeywordId" : "campaignNegativeKeywordId";
     await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
-      path, data: { [dataKey]: [{ [idKey]: amazonNegKeywordId, state: "ARCHIVED" }] }, group: "keywords",
+      path, data: { [dataKey]: [{ [idKey]: amazonNegKeywordId, state: "PAUSED" }] }, group: "keywords",
     });
     if (localId) {
       await query("UPDATE negative_keywords SET state='archived' WHERE id=$1", [localId]);

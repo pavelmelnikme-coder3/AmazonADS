@@ -51,7 +51,7 @@ async function requireWorkspace(req, res, next) {
   const { rows } = await query(
     `SELECT w.id, w.org_id, w.name, wm.role as workspace_role
      FROM workspaces w
-     LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $1
+     JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $1
      WHERE w.id = $2 AND w.org_id = $3`,
     [req.user.id, workspaceId, req.orgId]
   );

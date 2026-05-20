@@ -10820,7 +10820,7 @@ const AnalyticsPage = ({ workspaceId }) => {
 
       {/* ── View tabs ── */}
       <div style={{ display:"flex", gap:2, marginBottom:12, borderBottom:"1px solid var(--b2)", paddingBottom:0 }}>
-        {[["detail","По товарам"],["summary","По группам"]].map(([id, label]) => (
+        {[["detail", t("analytics.tabByProduct")],["summary", t("analytics.tabByGroup")]].map(([id, label]) => (
           <button key={id} onClick={() => setViewTab(id)}
             style={{ fontSize:12, padding:"7px 16px", background:"none", border:"none",
               borderBottom: viewTab===id ? "2px solid var(--ac)" : "2px solid transparent",
@@ -10835,30 +10835,30 @@ const AnalyticsPage = ({ workspaceId }) => {
       {viewTab === "detail" && (
         <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
           {reportLoading ? (
-            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>Загрузка данных…</div>
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>{t("analytics.loading")}</div>
           ) : !reportData?.rows?.length ? (
             <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
-              Нет данных за выбранный период. Настройте стоимость товаров ниже.
+              {t("analytics.noDataPeriod")}
             </div>
           ) : (
             <div style={{ overflowX:"auto" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>Товар / ASIN</th>
-                    <SortTh label="Гр" k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} />
-                    <SortTh label="Единиц" k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Продажи" k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>{t("analytics.colProduct")}</th>
+                    <SortTh label={t("analytics.colLabel")} k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} />
+                    <SortTh label={t("analytics.colUnits")} k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colSales")} k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SP" k="sp_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SD" k="sd_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SB" k="sb_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Ads всего" k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colAdsTotal")} k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="ACOS" k="acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="Real ACOS" k="real_acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="BSR" k="bsr_rank" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Вал. прибыль" k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Чист. прибыль" k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Маржа" k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colNetProfit")} k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colMargin")} k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -10892,7 +10892,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                 {totals && (
                   <tfoot>
                     <tr style={{ borderTop:"2px solid var(--b2)", background:"var(--s2)", fontWeight:600 }}>
-                      <td style={{ padding:"7px 10px", fontSize:11, position:"sticky", left:0, background:"var(--s2)" }}>ИТОГО ({reportData.rows.length} товаров)</td>
+                      <td style={{ padding:"7px 10px", fontSize:11, position:"sticky", left:0, background:"var(--s2)" }}>{t("analytics.totalRow", { n: reportData.rows.length })}</td>
                       <td></td>
                       <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtNum(totals.units)}</td>
                       <td style={{ padding:"7px 6px", textAlign:"right", fontFamily:"var(--mono)", fontSize:11 }}>{fmtEur(totals.sales)}</td>
@@ -10919,28 +10919,28 @@ const AnalyticsPage = ({ workspaceId }) => {
       {viewTab === "summary" && (
         <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
           {reportLoading ? (
-            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>Загрузка данных…</div>
+            <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>{t("analytics.loading")}</div>
           ) : !reportData?.summary?.length ? (
             <div style={{ padding:32, textAlign:"center", color:"var(--tx3)", fontSize:13 }}>
-              Нет данных. Добавьте товары и настройте Label в конфигурации ниже.
+              {t("analytics.noDataSummary")}
             </div>
           ) : (
             <div style={{ overflowX:"auto" }}>
               <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <SortTh label="Группа" k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} />
-                    <SortTh label="Товаров" k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Единиц" k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Продажи" k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colGroup")} k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} />
+                    <SortTh label={t("analytics.colProducts")} k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colUnits")} k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colSales")} k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="SP+SD+SB" k="total_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="Google+FB" k="google_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Весь бюджет" k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colTotalBudget")} k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="ACOS" k="acos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                     <SortTh label="TACOS" k="tacos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Вал. прибыль" k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Чист. прибыль" k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Маржа" k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colNetProfit")} k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={t("analytics.colMargin")} k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -11310,14 +11310,14 @@ const RuleWizardModal = ({
     return (
       <div style={{ background:"var(--s2)", border:"1px solid var(--b2)", borderRadius:8,
         padding:"10px 14px", fontSize:12, color:"var(--tx2)", marginBottom:20, lineHeight:1.7 }}>
-        <div><span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", marginRight:6 }}>IF</span>{condStr}
-          <span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", margin:"0 6px" }}>over</span>
+        <div><span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", marginRight:6 }}>{t("rules.previewIf")}</span>{condStr}
+          <span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", margin:"0 6px" }}>{t("rules.previewOver")}</span>
           <span style={{ color:"var(--ac2)", fontWeight:600 }}>{periodLabel}</span>
         </div>
-        <div><span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", marginRight:6 }}>THEN</span>{actStr}</div>
+        <div><span style={{ color:"var(--tx3)", fontFamily:"var(--mono)", marginRight:6 }}>{t("rules.previewThen")}</span>{actStr}</div>
         {showScope && (
           <div style={{ marginTop:2, fontSize:11, color:"var(--tx3)" }}>
-            <span style={{ fontFamily:"var(--mono)", marginRight:6 }}>SCOPE</span>
+            <span style={{ fontFamily:"var(--mono)", marginRight:6 }}>{t("rules.previewScope")}</span>
             {entityType === "search_term"    ? t("rules.searchTerm")
               : entityType === "product_target" ? t("rules.productTarget")
               : entityType === "ad_group"       ? t("rules.adGroupEntity")
@@ -13169,12 +13169,12 @@ const KeywordResearchPage = ({ workspaceId }) => {
             <div style={{ padding: "18px 24px", borderBottom: "1px solid var(--b1)", flexShrink: 0,
               display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div>
-                <div style={{ fontSize: 16, fontWeight: 700 }}>Добавить ключевые слова</div>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>{t("kwr.addTitle")}</div>
                 <div style={{ fontSize: 12, color: "var(--tx3)", marginTop: 3, display: "flex", gap: 12 }}>
-                  <span>{editModal.length} ключей</span>
-                  {dupCount > 0 && <span style={{ color: "var(--red)" }}>· {dupCount} уже в группе (пропустятся)</span>}
-                  {profileCount > 0 && <span style={{ color: "var(--amb)" }}>· {profileCount} есть в аккаунте</span>}
-                  {checkingDups && <span style={{ color: "var(--tx3)" }}>· проверка дублей…</span>}
+                  <span>{t("kwr.kwCountModal", { n: editModal.length })}</span>
+                  {dupCount > 0 && <span style={{ color: "var(--red)" }}>{t("kwr.dupInGroup", { n: dupCount })}</span>}
+                  {profileCount > 0 && <span style={{ color: "var(--amb)" }}>{t("kwr.inAccount", { n: profileCount })}</span>}
+                  {checkingDups && <span style={{ color: "var(--tx3)" }}>{t("kwr.checkingDups")}</span>}
                 </div>
               </div>
               <button onClick={() => setEditModal(null)}
@@ -13191,11 +13191,11 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
                 {/* Campaign section */}
                 <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 10 }}>Кампания</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 10 }}>{t("kwr.campaignLabel")}</div>
                   <div style={{ position: "relative" }}>
                     <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
                     <input value={campSearch} onChange={e => setCampSearch(e.target.value)}
-                      placeholder="Поиск кампании…"
+                      placeholder={t("kwr.searchCampaignPh")}
                       style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "8px 10px 8px 32px",
                         borderRadius: 8, border: "1px solid var(--b2)", background: "var(--s1)", color: "var(--tx)" }} />
                   </div>
@@ -13203,7 +13203,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 <div style={{ overflowY: "auto", flex: "0 0 40%", borderBottom: "1px solid var(--b1)" }}>
                   {modalCampaigns.length === 0 && (
                     <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)", fontStyle: "italic" }}>
-                      {campSearch ? "Не найдено" : "Нет кампаний"}
+                      {campSearch ? t("common.noResults") : t("kwr.noCampaigns")}
                     </div>
                   )}
                   {modalCampaigns.map(c => (
@@ -13223,11 +13223,11 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
                 {/* Ad group section */}
                 <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid var(--b1)", flexShrink: 0 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 10 }}>Группа объявлений</div>
+                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 10 }}>{t("kwr.adGroupLabel")}</div>
                   <div style={{ position: "relative" }}>
                     <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
                     <input value={agSearch} onChange={e => setAgSearch(e.target.value)}
-                      placeholder="Поиск группы…"
+                      placeholder={t("kwr.searchAdGroupPh")}
                       disabled={!targetCampaignId}
                       style={{ width: "100%", boxSizing: "border-box", fontSize: 13, padding: "8px 10px 8px 32px",
                         borderRadius: 8, border: "1px solid var(--b2)", background: targetCampaignId ? "var(--s1)" : "var(--s2)",
@@ -13237,7 +13237,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 <div style={{ overflowY: "auto", flex: 1 }}>
                   {!targetCampaignId && (
                     <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)", fontStyle: "italic" }}>
-                      Сначала выберите кампанию
+                      {t("kwr.selectCampaignFirst")}
                     </div>
                   )}
                   {modalAdGroups.map(ag => (
@@ -13254,7 +13254,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                     </div>
                   ))}
                   {targetCampaignId && modalAdGroups.length === 0 && (
-                    <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)" }}>Не найдено</div>
+                    <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--tx3)" }}>{t("common.noResults")}</div>
                   )}
                 </div>
               </div>
@@ -13265,10 +13265,10 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 16px",
                   borderBottom: "1px solid var(--b1)", background: "var(--s2)", flexShrink: 0,
                   fontSize: 10, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)" }}>
-                  <span style={{ flex: 1 }}>Ключевое слово</span>
-                  <span style={{ width: 168 }}>Тип совпадения</span>
-                  <span style={{ width: 80, textAlign: "right" }}>Ставка</span>
-                  <span style={{ width: 90, textAlign: "center" }}>Статус</span>
+                  <span style={{ flex: 1 }}>{t("kwr.colKeyword")}</span>
+                  <span style={{ width: 168 }}>{t("kwr.colMatchType")}</span>
+                  <span style={{ width: 80, textAlign: "right" }}>{t("kwr.colBid")}</span>
+                  <span style={{ width: 90, textAlign: "center" }}>{t("kwr.colStatus")}</span>
                   <span style={{ width: 24 }} />
                 </div>
 
@@ -13312,17 +13312,17 @@ const KeywordResearchPage = ({ workspaceId }) => {
                       {/* Status badge */}
                       <div style={{ width: 90, textAlign: "center", flexShrink: 0 }}>
                         {inGroup && (
-                          <span title="Уже есть в этой группе — будет пропущен"
+                          <span title={t("kwr.inGroupTip")}
                             style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 600,
                               background: "rgba(239,68,68,.12)", color: "var(--red)" }}>
-                            В группе
+                            {t("kwr.inGroupBadge")}
                           </span>
                         )}
                         {inAcct && (
                           <span title={dup.locations?.map(l => `${l.campaign} / ${l.ad_group}`).join("\n")}
                             style={{ fontSize: 10, padding: "2px 7px", borderRadius: 10, fontWeight: 600,
                               background: "rgba(245,158,11,.12)", color: "var(--amb)", cursor: "help" }}>
-                            В аккаунте
+                            {t("kwr.inAccountBadge")}
                           </span>
                         )}
                         {!dup && targetAdGroupId && !checkingDups && (
@@ -13339,7 +13339,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 })}
                 {editModal.length === 0 && (
                   <div style={{ padding: "40px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
-                    Все ключи удалены
+                    {t("kwr.allRemoved")}
                   </div>
                 )}
               </div>
@@ -13349,28 +13349,28 @@ const KeywordResearchPage = ({ workspaceId }) => {
             <div style={{ padding: "14px 24px", borderTop: "1px solid var(--b1)", flexShrink: 0,
               display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ fontSize: 12, color: "var(--tx3)", display: "flex", gap: 16 }}>
-                <span>{addableCount} будет добавлено</span>
-                {dupCount > 0 && <span style={{ color: "var(--red)" }}>{dupCount} пропустится (дубль)</span>}
-                {profileCount > 0 && <span style={{ color: "var(--amb)" }}>{profileCount} есть в др. группах</span>}
+                <span>{t("kwr.willBeAdded", { n: addableCount })}</span>
+                {dupCount > 0 && <span style={{ color: "var(--red)" }}>{t("kwr.willSkip", { n: dupCount })}</span>}
+                {profileCount > 0 && <span style={{ color: "var(--amb)" }}>{t("kwr.inOtherGroups", { n: profileCount })}</span>}
               </div>
               {error && <span style={{ fontSize: 12, color: "var(--red)", display: "flex", alignItems: "center", gap: 5 }}><AlertCircle size={12} />{error}</span>}
               {!targetAdGroupId && (
                 <span style={{ fontSize: 12, color: "var(--amb)", display: "flex", alignItems: "center", gap: 5 }}>
-                  <AlertCircle size={12} /> Выберите группу объявлений
+                  <AlertCircle size={12} /> {t("kwr.selectAdGroupWarn")}
                 </span>
               )}
               <div style={{ display: "flex", gap: 10 }}>
                 <button onClick={() => setEditModal(null)}
                   style={{ fontSize: 13, padding: "8px 16px", borderRadius: 8, border: "1px solid var(--b2)",
                     background: "transparent", color: "var(--tx2)", cursor: "pointer" }}>
-                  Отмена
+                  {t("common.cancel")}
                 </button>
                 <button onClick={() => confirmAdd(editModal, targetAdGroupId)} disabled={adding || !targetAdGroupId || addableCount === 0}
                   className="btn btn-primary"
                   style={{ padding: "8px 20px", fontSize: 13, gap: 7, opacity: (!targetAdGroupId || adding || addableCount === 0) ? 0.5 : 1 }}>
                   {adding
                     ? <><RefreshCw size={13} className="spin" /> {t("kwr.adding")}</>
-                    : <><Plus size={13} /> Добавить {addableCount} ключей</>}
+                    : <><Plus size={13} /> {t("kwr.addCountBtn", { n: addableCount })}</>}
                 </button>
               </div>
             </div>
@@ -13404,10 +13404,20 @@ const RulesPage = ({ workspaceId }) => {
   const [campSearch, setCampSearch] = useState("");
   const [debouncedCampSearch, setDebouncedCampSearch] = useState("");
   const [rulesOrder, setRulesOrder] = useState([]); // local drag order (ids)
+  const [showTrash,  setShowTrash]  = useState(false);
+  const [trashItems, setTrashItems] = useState([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+
   useEffect(() => {
     const id = setTimeout(() => setDebouncedCampSearch(campSearch.trim()), 300);
     return () => clearTimeout(id);
   }, [campSearch]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   const ruleDndSensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -13539,7 +13549,44 @@ const RulesPage = ({ workspaceId }) => {
 
   const deleteRule = async (id) => {
     if (!confirm(t("rules.confirmDelete"))) return;
-    await del(`/rules/${id}`); reload();
+    await del(`/rules/${id}`);
+    reload();
+    setToast({ msg: t("rules.movedToTrash"), type: "info" });
+  };
+
+  const loadTrash = async () => {
+    setTrashLoading(true);
+    try {
+      const data = await get("/trash?type=rule");
+      setTrashItems(Array.isArray(data) ? data : []);
+    } catch (e) {
+      setTrashItems([]);
+    } finally {
+      setTrashLoading(false);
+    }
+  };
+
+  const toggleTrash = () => {
+    const next = !showTrash;
+    setShowTrash(next);
+    if (next) loadTrash();
+  };
+
+  const restoreFromTrash = async (item) => {
+    try {
+      await post(`/trash/${item.id}/restore`, {});
+      setTrashItems(prev => prev.filter(i => i.id !== item.id));
+      reload();
+      setToast({ msg: t("rules.restoredFromTrash", { name: item.entity_name }), type: "success" });
+    } catch (e) {
+      alert(t("common.error") + e.message);
+    }
+  };
+
+  const deleteFromTrash = async (item) => {
+    if (!confirm(t("rules.confirmPermanentDelete"))) return;
+    await del(`/trash/${item.id}`);
+    setTrashItems(prev => prev.filter(i => i.id !== item.id));
   };
 
   const duplicateRule = async (rule) => {
@@ -13625,19 +13672,69 @@ const RulesPage = ({ workspaceId }) => {
     <div className="fade">
       {/* Toast */}
       {toast && (
-        <div style={{ position:"fixed", top:20, right:20, zIndex:9999, background:"var(--grn)",
+        <div style={{ position:"fixed", top:20, right:20, zIndex:9999,
+          background: toast.type === "error" ? "var(--red)" : toast.type === "info" ? "var(--primary)" : "var(--grn)",
           color:"#fff", padding:"10px 18px", borderRadius:8, fontSize:13, fontWeight:600 }}>
-          {toast}
+          {toast.msg ?? toast}
         </div>
       )}
 
       {/* ── Header ── */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
         <h1 style={{ fontFamily:"var(--disp)", fontSize:22, fontWeight:700 }}>{t("rules.title")}</h1>
-        <button onClick={openNew} className="btn btn-primary" style={{ fontSize:12, padding:"7px 16px" }}>
-          + {t("rules.new")}
-        </button>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={toggleTrash} className={`btn ${showTrash ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize:12, padding:"7px 14px", display:"flex", alignItems:"center", gap:6 }}>
+            <Trash2 size={14} strokeWidth={1.75} />
+            {t("rules.trash")}
+          </button>
+          <button onClick={openNew} className="btn btn-primary" style={{ fontSize:12, padding:"7px 16px" }}>
+            + {t("rules.new")}
+          </button>
+        </div>
       </div>
+
+      {/* ── Trash Panel ── */}
+      {showTrash && (
+        <div className="card" style={{ marginBottom:20, padding:"16px 20px", border:"1.5px solid var(--border)" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+            <span style={{ fontWeight:600, fontSize:14, display:"flex", alignItems:"center", gap:7 }}>
+              <Trash2 size={15} strokeWidth={1.75} /> {t("rules.trashTitle")}
+            </span>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>{t("rules.trashHint")}</span>
+          </div>
+          {trashLoading ? (
+            <div style={{ color:"var(--muted)", fontSize:13 }}>…</div>
+          ) : trashItems.length === 0 ? (
+            <div style={{ color:"var(--muted)", fontSize:13 }}>{t("rules.trashEmpty")}</div>
+          ) : (
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {trashItems.map(item => (
+                <div key={item.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                  padding:"9px 12px", background:"var(--bg2)", borderRadius:8, fontSize:13 }}>
+                  <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+                    <span style={{ fontWeight:600 }}>{item.entity_name}</span>
+                    <span style={{ fontSize:11, color:"var(--muted)" }}>
+                      {t("rules.deletedBy")}: {item.deleted_by_name || "—"} · {new Date(item.deleted_at).toLocaleDateString()} · {t("rules.expiresIn", { days: item.days_left })}
+                    </span>
+                  </div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={() => restoreFromTrash(item)} className="btn btn-ghost"
+                      style={{ fontSize:11, padding:"4px 10px", display:"flex", alignItems:"center", gap:5 }}>
+                      <RotateCcw size={12} strokeWidth={2} /> {t("rules.restore")}
+                    </button>
+                    <button onClick={() => deleteFromTrash(item)} className="btn btn-red"
+                      style={{ fontSize:11, padding:"4px 8px" }}
+                      title={t("rules.permanentDelete")}>
+                      <X size={12} strokeWidth={2} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Campaign Exemptions Bar ── */}
       {(() => {
@@ -13897,9 +13994,9 @@ const RulesPage = ({ workspaceId }) => {
                         {r.entity_counts
                           ? (() => {
                               const ec = r.entity_counts;
-                              if (ec.ad_groups > 0)    return ` · ${ec.ad_groups} групп`;
-                              if (ec.campaigns > 0)   return ` · ${ec.campaigns} кампаний`;
-                              if (ec.search_terms > 0) return ` · ${ec.search_terms} запросов`;
+                              if (ec.ad_groups > 0)    return ` · ${t("rules.countGroups", { n: ec.ad_groups })}`;
+                              if (ec.campaigns > 0)   return ` · ${t("rules.countCampaigns", { n: ec.campaigns })}`;
+                              if (ec.search_terms > 0) return ` · ${t("rules.countSearchTerms", { n: ec.search_terms })}`;
                               return ` · ${ec.keywords || 0} kw + ${ec.targets || 0} tgt`;
                             })()
                           : ` · ${r.total_evaluated} ${t("rules.evaluated").toLowerCase()}`}
@@ -13986,11 +14083,11 @@ const RulesPage = ({ workspaceId }) => {
                         padding:"5px 12px", borderBottom:"2px solid var(--b2)",
                         fontSize:10, fontWeight:600, color:"var(--tx3)", textTransform:"uppercase", letterSpacing:".04em" }}>
                         <span>{entityColLabel(r.applied)}</span>
-                        <span>Действие</span>
-                        <span style={{ textAlign:"right" }}>Клики</span>
-                        <span style={{ textAlign:"right" }}>Ордера</span>
-                        <span style={{ textAlign:"right" }}>АКОС</span>
-                        <span style={{ textAlign:"right" }}>Расход</span>
+                        <span>{t("rules.colResultAction")}</span>
+                        <span style={{ textAlign:"right" }}>{t("rules.colResultClicks")}</span>
+                        <span style={{ textAlign:"right" }}>{t("rules.colResultOrders")}</span>
+                        <span style={{ textAlign:"right" }}>{t("rules.colResultAcos")}</span>
+                        <span style={{ textAlign:"right" }}>{t("rules.colResultSpend")}</span>
                       </div>
                       <div style={{ maxHeight:300, overflowY:"auto" }}>
                         {r.applied.map((a, i) => {
@@ -14036,7 +14133,7 @@ const RulesPage = ({ workspaceId }) => {
                                     href={`${window.location.origin}/?page=campaigns&search=${encodeURIComponent(a.campaign_name)}`}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    title="Открыть кампанию в новой вкладке"
+                                    title={t("rules.openCampaignTab")}
                                     style={{ display:"block", fontSize:10, color:"var(--ac2)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginTop:1, cursor:"pointer", textDecoration:"underline dotted" }}>
                                     {a.campaign_name}
                                   </a>
@@ -14049,7 +14146,7 @@ const RulesPage = ({ workspaceId }) => {
                               </div>
                               <span className={`badge ${badgeCls}`}
                                 title={a.auto_routed
-                                  ? "Search-term — это маскированный ASIN. Действие автоматически конвертировано из NEG-keyword в NEG-target (Amazon не матчит ASIN-запросы по keyword-строке)."
+                                  ? t("rules.asinMaskingTip")
                                   : (a.action === "adjust_budget_pct" || a.action === "set_budget")
                                     ? `${Number(a.previous_budget).toFixed(2)}€ → ${Number(a.new_budget).toFixed(2)}€`
                                   : undefined}
@@ -14186,7 +14283,7 @@ const RulesPage = ({ workspaceId }) => {
               }}>
                 <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
                   <div {...dragHandleProps} style={{ cursor:"grab", color:"var(--tx3)", paddingTop:2, flexShrink:0 }}
-                    title="Перетащить">
+                    title={t("rules.drag")}>
                     <GripVertical size={15} strokeWidth={1.5} />
                   </div>
                   <div style={{ flex:1, minWidth:0 }}>
@@ -14194,7 +14291,7 @@ const RulesPage = ({ workspaceId }) => {
                     <div style={{ display:"flex", gap:8, alignItems:"center", marginBottom:6, flexWrap:"wrap" }}>
                       {/* Toggle switch */}
                       <button onClick={() => toggleActive(rule)}
-                        title={rule.is_active ? "Поставить на паузу" : "Запустить правило"}
+                        title={rule.is_active ? t("rules.pauseRule") : t("rules.resumeRule")}
                         style={{ position:"relative", width:32, height:18, borderRadius:9, border:"none",
                           cursor:"pointer", padding:0, flexShrink:0,
                           background: rule.is_active ? "var(--grn)" : "var(--b2)",
@@ -14254,7 +14351,7 @@ const RulesPage = ({ workspaceId }) => {
                         <span key={i} style={{ fontSize:11, padding:"3px 8px",
                           background:"rgba(99,102,241,.12)", border:"1px solid rgba(99,102,241,.25)",
                           borderRadius:20, color:"var(--ac2)", fontFamily:"var(--mono)" }}>
-                          {i > 0 && <span style={{ color:"var(--tx3)", marginRight:4 }}>AND</span>}
+                          {i > 0 && <span style={{ color:"var(--tx3)", marginRight:4 }}>{t("rules.condAnd")}</span>}
                           {ruleMetrics.find(m=>m.value===c.metric)?.label}
                           {" "}{RULE_OPS.find(o=>o.value===c.op)?.label}
                           {" "}{c.value}
@@ -14301,7 +14398,7 @@ const RulesPage = ({ workspaceId }) => {
                     <button onClick={() => deleteRule(rule.id)} className="btn btn-red"
                       style={{ fontSize:11, padding:"5px 8px" }}><X size={13} strokeWidth={1.75} /></button>
                     <button onClick={() => setHistoryRule(rule)} className="btn btn-ghost"
-                      style={{ fontSize:11, padding:"5px 8px" }} title="Run history">
+                      style={{ fontSize:11, padding:"5px 8px" }} title={t("rules.runHistoryTitle")}>
                       <Ic icon={History} size={13} />
                     </button>
                     {(last || runResult[rule.id]) && (
@@ -14350,6 +14447,9 @@ const StrategiesPage = ({ workspaceId }) => {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [runningId, setRunningId] = useState(null);
   const [toast, setToast] = useState(null);
+  const [showTrash,    setShowTrash]    = useState(false);
+  const [trashItems,   setTrashItems]   = useState([]);
+  const [trashLoading, setTrashLoading] = useState(false);
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type });
@@ -14394,11 +14494,39 @@ const StrategiesPage = ({ workspaceId }) => {
   };
 
   const deleteStrategy = async (s) => {
-    if (!confirm(t("strategies.deleteConfirm").replace("{name}", s.name))) return;
+    if (!confirm(t("trash.confirmDelete"))) return;
     try {
       await del(`/strategies/${s.id}`);
       load();
+      showToast(t("trash.movedToTrash"));
     } catch (e) { showToast(e.message, "error"); }
+  };
+
+  const loadStrategyTrash = async () => {
+    setTrashLoading(true);
+    try { setTrashItems(await get("/trash?type=strategy")); }
+    catch { setTrashItems([]); }
+    setTrashLoading(false);
+  };
+
+  const toggleStrategyTrash = () => {
+    const next = !showTrash; setShowTrash(next);
+    if (next) loadStrategyTrash();
+  };
+
+  const restoreStrategy = async (item) => {
+    try {
+      await post(`/trash/${item.id}/restore`, {});
+      setTrashItems(p => p.filter(i => i.id !== item.id));
+      load();
+      showToast(t("trash.restored", { name: item.entity_name }));
+    } catch (e) { showToast(e.message, "error"); }
+  };
+
+  const deleteStrategyFromTrash = async (item) => {
+    if (!confirm(t("trash.confirmPermanent"))) return;
+    await del(`/trash/${item.id}`);
+    setTrashItems(p => p.filter(i => i.id !== item.id));
   };
 
   const statusColor = (status) => {
@@ -14417,11 +14545,51 @@ const StrategiesPage = ({ workspaceId }) => {
           </h1>
           <p style={{ fontSize: 13, color: "var(--tx2)", maxWidth: 560 }}>{t("strategies.subtitle")}</p>
         </div>
-        <button className="btn btn-primary" style={{ fontSize: 13, padding: "8px 16px" }}
-          onClick={() => { setEditStrategy(null); setShowModal(true); }}>
-          + {t("strategies.new")}
-        </button>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={toggleStrategyTrash} className={`btn ${showTrash ? "btn-primary" : "btn-ghost"}`}
+            style={{ fontSize:12, padding:"7px 14px", display:"flex", alignItems:"center", gap:6 }}>
+            <Trash2 size={14} strokeWidth={1.75} /> {t("trash.label")}
+          </button>
+          <button className="btn btn-primary" style={{ fontSize: 13, padding: "8px 16px" }}
+            onClick={() => { setEditStrategy(null); setShowModal(true); }}>
+            + {t("strategies.new")}
+          </button>
+        </div>
       </div>
+
+      {showTrash && (
+        <div className="card" style={{ marginBottom:20, padding:"16px 20px", border:"1.5px solid var(--border)" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+            <span style={{ fontWeight:600, fontSize:14, display:"flex", alignItems:"center", gap:7 }}>
+              <Trash2 size={15} strokeWidth={1.75} /> {t("trash.title")}
+            </span>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>{t("trash.hint")}</span>
+          </div>
+          {trashLoading ? <div style={{ color:"var(--muted)", fontSize:13 }}>…</div>
+          : trashItems.length === 0 ? <div style={{ color:"var(--muted)", fontSize:13 }}>{t("trash.empty")}</div>
+          : trashItems.map(item => (
+            <div key={item.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+              padding:"9px 12px", background:"var(--bg2)", borderRadius:8, fontSize:13, marginBottom:6 }}>
+              <div>
+                <div style={{ fontWeight:600 }}>{item.entity_name}</div>
+                <div style={{ fontSize:11, color:"var(--muted)" }}>
+                  {t("trash.deletedBy")}: {item.deleted_by_name || "—"} · {new Date(item.deleted_at).toLocaleDateString()} · {t("trash.expiresIn", { days: item.days_left })}
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:6 }}>
+                <button onClick={() => restoreStrategy(item)} className="btn btn-ghost"
+                  style={{ fontSize:11, padding:"4px 10px", display:"flex", alignItems:"center", gap:5 }}>
+                  <RotateCcw size={12} strokeWidth={2} /> {t("trash.restore")}
+                </button>
+                <button onClick={() => deleteStrategyFromTrash(item)} className="btn btn-red"
+                  style={{ fontSize:11, padding:"4px 8px" }} title={t("trash.permanentDelete")}>
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Toast */}
       {toast && (
@@ -14468,7 +14636,7 @@ const StrategiesPage = ({ workspaceId }) => {
                 background: s.is_active ? "rgba(34,197,94,.15)" : "rgba(100,116,139,.15)",
                 color: s.is_active ? "var(--grn)" : "var(--tx3)",
               }}>
-                {s.is_active ? "Active" : "Inactive"}
+                {s.is_active ? t("strategies.statusActive") : t("strategies.statusInactive")}
               </span>
             </div>
 
@@ -14723,10 +14891,10 @@ const StrategyModal = ({ strategy, availableRules, onClose, onSave, t }) => {
               }}>
                 <span style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)", minWidth: 18 }}>{i + 1}.</span>
                 <span style={{ flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.name}</span>
-                <button className="btn btn-ghost" style={{ padding: "2px 5px" }} onClick={() => moveRule(i, -1)} disabled={i === 0} title="Move up">
+                <button className="btn btn-ghost" style={{ padding: "2px 5px" }} onClick={() => moveRule(i, -1)} disabled={i === 0} title={t("strategies.moveUp")}>
                   <ChevronUp size={11} />
                 </button>
-                <button className="btn btn-ghost" style={{ padding: "2px 5px" }} onClick={() => moveRule(i, 1)} disabled={i === selectedRulesOrdered.length - 1} title="Move down">
+                <button className="btn btn-ghost" style={{ padding: "2px 5px" }} onClick={() => moveRule(i, 1)} disabled={i === selectedRulesOrdered.length - 1} title={t("strategies.moveDown")}>
                   <ChevronDown size={11} />
                 </button>
                 <button className="btn btn-ghost" style={{ padding: "2px 5px", color: "var(--red)" }} onClick={() => removeRule(r.id)}>
@@ -14756,7 +14924,7 @@ const StrategyModal = ({ strategy, availableRules, onClose, onSave, t }) => {
 
         <div style={{ marginBottom: 20, display: "flex", alignItems: "center", gap: 8 }}>
           <input type="checkbox" id="strat-active" checked={isActive} onChange={e => setIsActive(e.target.checked)} />
-          <label htmlFor="strat-active" style={{ fontSize: 12, color: "var(--tx2)", cursor: "pointer" }}>Active</label>
+          <label htmlFor="strat-active" style={{ fontSize: 12, color: "var(--tx2)", cursor: "pointer" }}>{t("strategies.activeLabel")}</label>
         </div>
 
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
@@ -14787,6 +14955,16 @@ const AlertsPage = ({ workspaceId }) => {
   const { colgroup: alertInstColgroup, resizeHandle: alertInstRH } = useResizableColumns(
     "alerts-instances", [140, 180, 80, 160, 80, 100]
   );
+
+  const [showTrash,    setShowTrash]    = useState(false);
+  const [trashItems,   setTrashItems]   = useState([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [alertToast,   setAlertToast]   = useState(null);
+
+  const showAlertToast = (msg, type = "success") => {
+    setAlertToast({ msg, type });
+    setTimeout(() => setAlertToast(null), 3000);
+  };
 
   const [configPage, setConfigPage] = useState(1);
   const [configPageSize, setConfigPageSize] = useState(25);
@@ -14838,10 +15016,40 @@ const AlertsPage = ({ workspaceId }) => {
   }
 
   async function deleteConfig(id) {
-    if (!confirm(t("alerts.deleteConfirm"))) return;
-    await del(`/alerts/configs/${id}`);
-    reloadConfigs();
+    if (!confirm(t("trash.confirmDelete"))) return;
+    try {
+      await del(`/alerts/configs/${id}`);
+      reloadConfigs();
+      showAlertToast(t("trash.movedToTrash"));
+    } catch (e) { showAlertToast(e.message, "error"); }
   }
+
+  const loadAlertTrash = async () => {
+    setTrashLoading(true);
+    try { setTrashItems(await get("/trash?type=alert")); }
+    catch { setTrashItems([]); }
+    setTrashLoading(false);
+  };
+
+  const toggleAlertTrash = () => {
+    const next = !showTrash; setShowTrash(next);
+    if (next) loadAlertTrash();
+  };
+
+  const restoreAlert = async (item) => {
+    try {
+      await post(`/trash/${item.id}/restore`, {});
+      setTrashItems(p => p.filter(i => i.id !== item.id));
+      reloadConfigs();
+      showAlertToast(t("trash.restored", { name: item.entity_name }));
+    } catch (e) { showAlertToast(e.message, "error"); }
+  };
+
+  const deleteAlertFromTrash = async (item) => {
+    if (!confirm(t("trash.confirmPermanent"))) return;
+    await del(`/trash/${item.id}`);
+    setTrashItems(p => p.filter(i => i.id !== item.id));
+  };
 
   async function toggleConfig(id) {
     await patch(`/alerts/configs/${id}/toggle`);
@@ -14862,8 +15070,59 @@ const AlertsPage = ({ workspaceId }) => {
           <h1 style={{ fontFamily: "var(--disp)", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>{t("alerts.title")}</h1>
           <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("alerts.subtitle")}</div>
         </div>
-        {tab === "configs" && <button className="btn btn-primary" onClick={openCreate}>+ {t("alerts.newAlert")}</button>}
+        {tab === "configs" && (
+          <div style={{ display:"flex", gap:8 }}>
+            <button onClick={toggleAlertTrash} className={`btn ${showTrash ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize:12, padding:"7px 14px", display:"flex", alignItems:"center", gap:6 }}>
+              <Trash2 size={14} strokeWidth={1.75} /> {t("trash.label")}
+            </button>
+            <button className="btn btn-primary" onClick={openCreate}>+ {t("alerts.newAlert")}</button>
+          </div>
+        )}
       </div>
+
+      {showTrash && tab === "configs" && (
+        <div className="card" style={{ marginBottom:20, padding:"16px 20px", border:"1.5px solid var(--border)" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+            <span style={{ fontWeight:600, fontSize:14, display:"flex", alignItems:"center", gap:7 }}>
+              <Trash2 size={15} strokeWidth={1.75} /> {t("trash.title")}
+            </span>
+            <span style={{ fontSize:12, color:"var(--muted)" }}>{t("trash.hint")}</span>
+          </div>
+          {trashLoading ? <div style={{ color:"var(--muted)", fontSize:13 }}>…</div>
+          : trashItems.length === 0 ? <div style={{ color:"var(--muted)", fontSize:13 }}>{t("trash.empty")}</div>
+          : trashItems.map(item => (
+            <div key={item.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+              padding:"9px 12px", background:"var(--bg2)", borderRadius:8, fontSize:13, marginBottom:6 }}>
+              <div>
+                <div style={{ fontWeight:600 }}>{item.entity_name}</div>
+                <div style={{ fontSize:11, color:"var(--muted)" }}>
+                  {t("trash.deletedBy")}: {item.deleted_by_name || "—"} · {new Date(item.deleted_at).toLocaleDateString()} · {t("trash.expiresIn", { days: item.days_left })}
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:6 }}>
+                <button onClick={() => restoreAlert(item)} className="btn btn-ghost"
+                  style={{ fontSize:11, padding:"4px 10px", display:"flex", alignItems:"center", gap:5 }}>
+                  <RotateCcw size={12} strokeWidth={2} /> {t("trash.restore")}
+                </button>
+                <button onClick={() => deleteAlertFromTrash(item)} className="btn btn-red"
+                  style={{ fontSize:11, padding:"4px 8px" }} title={t("trash.permanentDelete")}>
+                  <X size={12} strokeWidth={2} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {alertToast && (
+        <div style={{
+          position:"fixed", top:20, right:24, zIndex:9000,
+          background: alertToast.type === "error" ? "var(--red)" : "var(--grn)",
+          color:"#fff", padding:"10px 18px", borderRadius:8, fontSize:13, fontWeight:500,
+          boxShadow:"0 4px 16px rgba(0,0,0,.18)",
+        }}>{alertToast.msg}</div>
+      )}
 
       <div style={{ display: "flex", gap: 4, marginBottom: 14 }}>
         {["configs", "instances"].map(tabId => (

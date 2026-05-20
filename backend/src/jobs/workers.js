@@ -581,6 +581,12 @@ async function startWorkers() {
     `UPDATE report_requests SET status = 'failed', error_message = 'Stale: interrupted by server restart', updated_at = NOW()
      WHERE status IN ('processing', 'requested') AND updated_at < NOW() - INTERVAL '2 hours'`
   ).catch(e => logger.warn("Stale report cleanup failed", { error: e.message }));
+
+  // Purge expired trash items daily
+  setInterval(async () => {
+    const { rowCount } = await query("DELETE FROM trash WHERE expires_at <= NOW()").catch(() => ({ rowCount: 0 }));
+    if (rowCount) logger.info("Trash purge: removed expired items", { count: rowCount });
+  }, 24 * 60 * 60 * 1000);
 }
 
 async function stopWorkers() {

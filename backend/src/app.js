@@ -43,6 +43,7 @@ const rankPortfoliosRoutes = require("./routes/rankPortfolios");
 const strategiesRoutes = require("./routes/strategies");
 const keywordResearchRoutes = require("./routes/keywordResearch");
 const portfoliosRoutes = require("./routes/portfolios");
+const trashRoutes = require("./routes/trash");
 
 const app = express();
 
@@ -125,6 +126,7 @@ app.use(`${API}/rank-portfolios`, rankPortfoliosRoutes);
 app.use(`${API}/strategies`, strategiesRoutes);
 app.use(`${API}/keyword-research`, keywordResearchRoutes);
 app.use(`${API}/portfolios`, portfoliosRoutes);
+app.use(`${API}/trash`, trashRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
