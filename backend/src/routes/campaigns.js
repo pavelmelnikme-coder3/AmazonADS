@@ -218,7 +218,7 @@ router.patch("/:id", async (req, res, next) => {
           profileId: String(campaign.amazon_profile_id),
           marketplace: campaign.marketplace_id,
           path: endpoint,
-          data: [amazonPayload],
+          data: { campaigns: [amazonPayload] },
           group: "campaigns",
         }).catch(e => logger.warn("Placement write-back failed (non-fatal)", { error: e.message }));
       } else {
@@ -227,7 +227,7 @@ router.patch("/:id", async (req, res, next) => {
           profileId: String(campaign.amazon_profile_id),
           marketplace: campaign.marketplace_id,
           path: endpoint,
-          data: [amazonPayload],
+          data: { campaigns: [amazonPayload] },
           group: "campaigns",
         });
       }

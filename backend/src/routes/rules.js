@@ -997,6 +997,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           const exprType0 = (exprArrRaw[0]?.type || "").toUpperCase();
           const isQueryAutoType = exprType0 === "QUERY_BROAD_REL_MATCHES" || exprType0 === "QUERY_HIGH_REL_MATCHES";
 
+          // Only ASIN_SAME_AS and ASIN_BRAND_SAME_AS are valid negative target expression types.
+          // Other auto-targeting types (KEYWORD_GROUP_SAME_AS, ASIN_SUBSTITUTE_RELATED, etc.)
+          // are handled above (query types) or cannot be negated — skip them.
+          const VALID_NEG_TARGET_TYPES = new Set(["ASIN_SAME_AS", "ASIN_BRAND_SAME_AS"]);
+          if (!isQueryAutoType && exprType0 && !VALID_NEG_TARGET_TYPES.has(exprType0)) {
+            recordSkip(entity, action, "non_negatable_expression_type"); continue;
+          }
+
           if (isQueryAutoType) {
             // Fetch ASIN queries with their own search-term metrics (not target-level aggregates)
             const { rows: asinTerms } = await query(
@@ -1296,7 +1304,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                              : "/sp/campaigns";
               put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: [{ campaignId: entity.amazon_campaign_id, state: "PAUSED" }], group: "campaigns",
+                data: { campaigns: [{ campaignId: entity.amazon_campaign_id, state: "PAUSED" }] }, group: "campaigns",
               }).catch(e => logger.warn("Rule campaign pause write-back failed", { error: e.message }));
             }
           }
@@ -1323,7 +1331,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                              : "/sp/campaigns";
               put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: [{ campaignId: entity.amazon_campaign_id, state: "ENABLED" }], group: "campaigns",
+                data: { campaigns: [{ campaignId: entity.amazon_campaign_id, state: "ENABLED" }] }, group: "campaigns",
               }).catch(e => logger.warn("Rule campaign enable write-back failed", { error: e.message }));
             }
           }
@@ -1357,7 +1365,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget };
               put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: [budgetPayload], group: "campaigns",
+                data: { campaigns: [budgetPayload] }, group: "campaigns",
               }).catch(e => logger.warn("Rule campaign budget write-back failed", { error: e.message }));
             }
           }
@@ -1390,7 +1398,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget };
               put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: [budgetPayload], group: "campaigns",
+                data: { campaigns: [budgetPayload] }, group: "campaigns",
               }).catch(e => logger.warn("Rule campaign set_budget write-back failed", { error: e.message }));
             }
           }
@@ -1548,7 +1556,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             "UPDATE negative_targets SET state='archived', amazon_neg_target_id=$1 WHERE id=$2",
             [newAmazonId, nt.id]
           );
-          const hasRealId = !nt.amazon_neg_target_id?.startsWith("rule-");
+          const hasRealId = nt.amazon_neg_target_id && !nt.amazon_neg_target_id.startsWith("rule-") && !nt.amazon_neg_target_id.startsWith("archived-");
           if (hasRealId && nt.connection_id) {
             archiveNegativeTarget({
               connectionId: nt.connection_id, profileId: String(nt.amazon_profile_id),

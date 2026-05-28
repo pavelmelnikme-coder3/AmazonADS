@@ -21,12 +21,22 @@ async function buildReportData(wid, start, end) {
     [wid]
   );
 
-  // 2. Metrics — extract ASIN from campaign name via regex (B0 + 8 alnum chars)
-  //    product_ads table is not populated; targets table has no asin column.
-  //    Campaign naming convention: "... grib B0XXXXXXXXX" or "AM - SP - B0XXXXXXXXX - ..."
+  // 2. Metrics — ASIN resolved via: 1) regex in campaign name, 2) product_ads lookup
   const { rows: metricsRows } = await query(
-    `SELECT
-       (regexp_match(c.name, 'B0[A-Z0-9]{8}'))[1] AS asin,
+    `WITH campaign_asin AS (
+       SELECT DISTINCT ON (ag.campaign_id)
+         ag.campaign_id,
+         pa.asin
+       FROM product_ads pa
+       JOIN ad_groups ag ON pa.ad_group_id = ag.id
+       WHERE pa.asin IS NOT NULL
+       ORDER BY ag.campaign_id, pa.asin
+     )
+     SELECT
+       COALESCE(
+         (regexp_match(c.name, 'B0[A-Z0-9]{8}'))[1],
+         ca.asin
+       ) AS asin,
        c.campaign_type,
        SUM(m.cost)        AS spend,
        SUM(m.sales_14d)   AS sales,
@@ -35,11 +45,17 @@ async function buildReportData(wid, start, end) {
        SUM(m.impressions) AS impressions
      FROM fact_metrics_daily m
      JOIN campaigns c ON m.entity_id = c.id AND m.entity_type = 'campaign'
+     LEFT JOIN campaign_asin ca ON ca.campaign_id = c.id
      WHERE c.workspace_id = $1
        AND m.date BETWEEN $2 AND $3
        AND m.entity_type = 'campaign'
-       AND c.name ~ 'B0[A-Z0-9]{8}'
-     GROUP BY (regexp_match(c.name, 'B0[A-Z0-9]{8}'))[1], c.campaign_type`,
+       AND COALESCE(
+         (regexp_match(c.name, 'B0[A-Z0-9]{8}'))[1],
+         ca.asin
+       ) IS NOT NULL
+     GROUP BY
+       COALESCE((regexp_match(c.name, 'B0[A-Z0-9]{8}'))[1], ca.asin),
+       c.campaign_type`,
     [wid, start, end]
   );
 

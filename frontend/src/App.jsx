@@ -10642,6 +10642,12 @@ const AnalyticsPage = ({ workspaceId }) => {
   const { colgroup: prodColgroup, resizeHandle: prodRH } = useResizableColumns(
     "products-config", [100, 80, 70, 140, 80, 80, 65, 55, 85, 80, 55]
   );
+  const { colgroup: detailColgroup, resizeHandle: detailRH } = useResizableColumns(
+    "analytics-detail", [200, 40, 65, 90, 80, 70, 70, 80, 70, 80, 70, 90, 90, 72]
+  );
+  const { colgroup: summaryColgroup, resizeHandle: summaryRH } = useResizableColumns(
+    "analytics-summary", [120, 60, 65, 90, 90, 80, 90, 72, 72, 90, 90, 72]
+  );
 
   const endDate   = rangeMode !== "custom" ? new Date().toISOString().split("T")[0] : customEnd;
   const startDate = rangeMode !== "custom"
@@ -10750,9 +10756,10 @@ const AnalyticsPage = ({ workspaceId }) => {
     });
   }, [reportData, sumSortKey, sumSortDir]);
 
-  const SortTh = ({ label, k, onSort, sortK, sortD, style={} }) => (
-    <th onClick={() => onSort(k)} style={{ cursor:"pointer", userSelect:"none", whiteSpace:"nowrap", ...style }}>
+  const SortTh = ({ label, k, onSort, sortK, sortD, style={}, handle }) => (
+    <th onClick={() => onSort(k)} style={{ cursor:"pointer", userSelect:"none", whiteSpace:"nowrap", position:"relative", ...style }}>
       {label}{sortK === k ? (sortD === "asc" ? " ↑" : " ↓") : ""}
+      {handle}
     </th>
   );
 
@@ -10761,19 +10768,25 @@ const AnalyticsPage = ({ workspaceId }) => {
     if (!reportData?.rows?.length) return null;
     const rows = reportData.rows;
     const sum = (key) => rows.reduce((acc, r) => acc + (parseFloat(r[key]) || 0), 0);
+    const sumInt = (key) => rows.reduce((acc, r) => acc + (parseInt(r[key]) || 0), 0);
     const sales = sum("sales");
     const total_ads = sum("total_ads");
     const total_spend = sum("total_spend");
     const gross_profit = sum("gross_profit");
     const net_profit = sum("net_profit");
-    const units = rows.reduce((acc, r) => acc + (parseInt(r.units) || 0), 0);
+    const units = sumInt("units");
+    const clicks = sumInt("clicks");
+    const impressions = sumInt("impressions");
     return {
       units, sales, sp_spend: sum("sp_spend"), sd_spend: sum("sd_spend"), sb_spend: sum("sb_spend"),
       total_ads, google_ads: sum("google_ads"), facebook_ads: sum("facebook_ads"), total_spend,
-      acos: sales > 0 ? total_ads / sales * 100 : 0,
+      acos:      sales > 0 ? total_ads   / sales * 100 : 0,
       real_acos: sales > 0 ? total_spend / sales * 100 : 0,
       gross_profit, net_profit,
-      margin: sales > 0 ? gross_profit / sales * 100 : 0,
+      margin:    sales > 0 ? gross_profit / sales * 100 : 0,
+      clicks, impressions,
+      ctr:       impressions > 0 ? clicks / impressions * 100 : 0,
+      amazon_fees: sum("amazon_fees"),
     };
   }, [reportData]);
 
@@ -10811,6 +10824,11 @@ const AnalyticsPage = ({ workspaceId }) => {
                   border:"1px solid var(--b2)", color:"var(--tx)", outline:"none", cursor:"pointer" }} />
             </>
           )}
+          <button onClick={() => setDataTick(t => t + 1)} disabled={reportLoading} className="btn btn-ghost"
+            style={{ fontSize:12, padding:"6px 12px", display:"flex", alignItems:"center", gap:5 }}>
+            <Ic icon={RefreshCw} size={13} style={{ animation: reportLoading ? "spin 1s linear infinite" : "none" }} />
+            Обновить
+          </button>
           <button onClick={handleDownload} disabled={generating} className="btn btn-primary"
             style={{ fontSize:12, padding:"6px 16px", display:"flex", alignItems:"center", gap:6 }}>
             {generating ? tr("analytics.generating") : <><Ic icon={Download} size={13} /> XLSX</>}
@@ -10831,6 +10849,48 @@ const AnalyticsPage = ({ workspaceId }) => {
         ))}
       </div>
 
+      {/* ── KPI Summary strip ── */}
+      {totals && !reportLoading && (() => {
+        const KpiCard = ({ label, value, sub, subColor, accent }) => (
+          <div style={{ flex: "1 1 0", minWidth: 90, padding: "12px 14px",
+            borderRight: "1px solid var(--b1)", lastChild: { borderRight: "none" } }}>
+            <div style={{ fontSize: 10, fontWeight: 600, color: "var(--tx3)", textTransform: "uppercase",
+              letterSpacing: ".06em", marginBottom: 4, whiteSpace: "nowrap" }}>{label}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: accent || "var(--tx)", fontFamily: "var(--mono)",
+              whiteSpace: "nowrap" }}>{value}</div>
+            {sub != null && (
+              <div style={{ fontSize: 11, color: subColor || "var(--tx3)", marginTop: 2,
+                fontFamily: "var(--mono)", fontWeight: 500 }}>{sub}</div>
+            )}
+          </div>
+        );
+        const ac = totals.acos;
+        const acColor = ac < 15 ? "var(--grn)" : ac < 30 ? "var(--amb)" : "var(--red)";
+        const mgColor = totals.margin > 20 ? "var(--grn)" : totals.margin > 5 ? "var(--amb)" : "var(--red)";
+        const prColor = totals.gross_profit >= 0 ? "var(--grn)" : "var(--red)";
+        return (
+          <div className="card" style={{ display: "flex", overflow: "hidden", marginBottom: 12, flexWrap: "wrap" }}>
+            <KpiCard label="Продажи"   value={fmtEur(totals.sales)}
+              sub={`${fmtNum(totals.units)} ед.`} />
+            <KpiCard label="SP расход" value={fmtEur(totals.sp_spend)}
+              sub={totals.sd_spend > 0 || totals.sb_spend > 0
+                ? `+SD ${fmtEur(totals.sd_spend)} +SB ${fmtEur(totals.sb_spend)}` : null} />
+            <KpiCard label="Всего реклама" value={fmtEur(totals.total_ads)}
+              sub={totals.total_spend > totals.total_ads ? `+ext ${fmtEur(totals.total_spend - totals.total_ads)}` : null} />
+            <KpiCard label="ACOS"      value={fmtPct(totals.acos)}      accent={acColor}
+              sub={`Real ${fmtPct(totals.real_acos)}`} subColor={acColor} />
+            <KpiCard label="Вал. прибыль" value={fmtEur(totals.gross_profit)} accent={prColor}
+              sub={`Нетто ${fmtEur(totals.net_profit)}`} subColor={prColor} />
+            <KpiCard label="Маржа"     value={fmtPct(totals.margin)}    accent={mgColor}
+              sub={`Amz fees ${fmtEur(totals.amazon_fees)}`} />
+            <KpiCard label="Клики"     value={fmtNum(totals.clicks)}
+              sub={`CTR ${totals.ctr.toFixed(2)}%`} />
+            <KpiCard label="Показы"    value={totals.impressions > 1000
+              ? `${(totals.impressions / 1000).toFixed(0)}K` : fmtNum(totals.impressions)} />
+          </div>
+        );
+      })()}
+
       {/* ── Detail table ── */}
       {viewTab === "detail" && (
         <div className="card" style={{ overflow:"hidden", marginBottom:12 }}>
@@ -10842,23 +10902,26 @@ const AnalyticsPage = ({ workspaceId }) => {
             </div>
           ) : (
             <div style={{ overflowX:"auto" }}>
-              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+              <table className="resizable" style={{ borderCollapse:"collapse", fontSize:12 }}>
+                {detailColgroup}
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>{tr("analytics.colProduct")}</th>
-                    <SortTh label={tr("analytics.colLabel")} k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} />
-                    <SortTh label={tr("analytics.colUnits")} k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colSales")} k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="SP" k="sp_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="SD" k="sd_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="SB" k="sb_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colAdsTotal")} k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="ACOS" k="acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Real ACOS" k="real_acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="BSR" k="bsr_rank" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colNetProfit")} k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colMargin")} k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1, position:"relative" }}>
+                      {tr("analytics.colProduct")}{detailRH(0)}
+                    </th>
+                    <SortTh label={tr("analytics.colLabel")} k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} handle={detailRH(1)} />
+                    <SortTh label={tr("analytics.colUnits")} k="units" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(2)} />
+                    <SortTh label={tr("analytics.colSales")} k="sales" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(3)} />
+                    <SortTh label="SP" k="sp_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(4)} />
+                    <SortTh label="SD" k="sd_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(5)} />
+                    <SortTh label="SB" k="sb_spend" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(6)} />
+                    <SortTh label={tr("analytics.colAdsTotal")} k="total_ads" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(7)} />
+                    <SortTh label="ACOS" k="acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(8)} />
+                    <SortTh label="Real ACOS" k="real_acos" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(9)} />
+                    <SortTh label="BSR" k="bsr_rank" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(10)} />
+                    <SortTh label={tr("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(11)} />
+                    <SortTh label={tr("analytics.colNetProfit")} k="net_profit" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(12)} />
+                    <SortTh label={tr("analytics.colMargin")} k="margin" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={detailRH(13)} />
                   </tr>
                 </thead>
                 <tbody>
@@ -10926,21 +10989,22 @@ const AnalyticsPage = ({ workspaceId }) => {
             </div>
           ) : (
             <div style={{ overflowX:"auto" }}>
-              <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+              <table className="resizable" style={{ borderCollapse:"collapse", fontSize:12 }}>
+                {summaryColgroup}
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <SortTh label={tr("analytics.colGroup")} k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} />
-                    <SortTh label={tr("analytics.colProducts")} k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colUnits")} k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colSales")} k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="SP+SD+SB" k="total_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="Google+FB" k="google_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colTotalBudget")} k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="ACOS" k="acos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label="TACOS" k="tacos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colNetProfit")} k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
-                    <SortTh label={tr("analytics.colMargin")} k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} />
+                    <SortTh label={tr("analytics.colGroup")} k="label" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 10px", textAlign:"left" }} handle={summaryRH(0)} />
+                    <SortTh label={tr("analytics.colProducts")} k="products" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(1)} />
+                    <SortTh label={tr("analytics.colUnits")} k="units" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(2)} />
+                    <SortTh label={tr("analytics.colSales")} k="sales" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(3)} />
+                    <SortTh label="SP+SD+SB" k="total_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(4)} />
+                    <SortTh label="Google+FB" k="google_ads" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(5)} />
+                    <SortTh label={tr("analytics.colTotalBudget")} k="total_spend" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(6)} />
+                    <SortTh label="ACOS" k="acos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(7)} />
+                    <SortTh label="TACOS" k="tacos" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(8)} />
+                    <SortTh label={tr("analytics.colGrossProfit")} k="gross_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(9)} />
+                    <SortTh label={tr("analytics.colNetProfit")} k="net_profit" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(10)} />
+                    <SortTh label={tr("analytics.colMargin")} k="margin" onSort={toggleSumSort} sortK={sumSortKey} sortD={sumSortDir} style={{ padding:"8px 6px", textAlign:"right" }} handle={summaryRH(11)} />
                   </tr>
                 </thead>
                 <tbody>
@@ -12271,6 +12335,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [adGroupId, setAdGroupId]       = useState("");
   const [urlInput, setUrlInput]         = useState("");
   const [urlParsed, setUrlParsed]       = useState(null); // { asin, tld, titleHint }
+  const [urlAsinCount, setUrlAsinCount] = useState(0);
   const [asins, setAsins]               = useState("");
   const [productTitle, setProductTitle] = useState("");
 
@@ -12283,7 +12348,8 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [loading, setLoading]           = useState(false);
   const [results, setResults]           = useState(null); // { keywords, product_title, sources_used, jungle_scout_available }
   const [selected, setSelected]         = useState(new Set());
-  const [matchOverrides, setMatchOverrides] = useState({}); // idx → match_type
+  const [matchOverrides, setMatchOverrides]         = useState({}); // idx → match_type
+  const [placementOverrides, setPlacementOverrides] = useState({}); // idx → placement section
   const [defaultBid, setDefaultBid]     = useState("0.50");
   const [adding, setAdding]             = useState(false);
   const [addResult, setAddResult]       = useState(null);
@@ -12316,6 +12382,21 @@ const KeywordResearchPage = ({ workspaceId }) => {
     if (src.includes("jungle_scout")) return t("kwr.srcLabelJS");
     if (src.includes("ai")) return t("kwr.srcLabelAI");
     return src;
+  };
+
+  const PLACEMENT_CYCLE = ["title", "bullets", "backend", "description"];
+  const PLACEMENT_STYLE = {
+    title:       { label: "Title",    color: "#3b82f6", bg: "#3b82f620" },
+    bullets:     { label: "Bullets",  color: "#8b5cf6", bg: "#8b5cf620" },
+    backend:     { label: "Backend",  color: "#64748b", bg: "#64748b20" },
+    description: { label: "Descr.",   color: "#f59e0b", bg: "#f59e0b20" },
+  };
+  const getPlacement = (kw, idx) => placementOverrides[idx] ?? kw.placement_hint ?? null;
+  const cyclePlacement = (kw, idx) => {
+    const cur = getPlacement(kw, idx);
+    const ci = PLACEMENT_CYCLE.indexOf(cur);
+    const next = ci < PLACEMENT_CYCLE.length - 1 ? PLACEMENT_CYCLE[ci + 1] : null;
+    setPlacementOverrides(p => ({ ...p, [idx]: next }));
   };
 
   const applyParsedUrl = (parsed, profs) => {
@@ -12354,9 +12435,30 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
   const handleUrlChange = (val) => {
     setUrlInput(val);
-    const parsed = parseAmazonUrl(val);
-    setUrlParsed(parsed);
-    if (parsed) applyParsedUrl(parsed, profiles);
+    const lines = val.split(/\n/).map(s => s.trim()).filter(Boolean);
+    const parsedList = lines.map(parseAmazonUrl).filter(Boolean);
+    const first = parsedList[0] || null;
+    setUrlParsed(first);
+    setUrlAsinCount(parsedList.filter(p => p.asin).length);
+    for (const p of parsedList) {
+      if (!p.asin) continue;
+      setAsins(a => {
+        const existing = a.trim().split(/[\s,\n]+/).filter(Boolean).map(s => s.toUpperCase());
+        return existing.includes(p.asin) ? a : existing.concat(p.asin).join("\n");
+      });
+    }
+    if (first) {
+      if (first.titleHint) setProductTitle(prev => prev || first.titleHint);
+      if (first.tld) {
+        const detectedLocale = TLD_TO_LOCALE[first.tld];
+        if (detectedLocale) setLocale(detectedLocale);
+        const mktId = AMAZON_TLD_TO_MARKETPLACE[first.tld];
+        if (mktId) {
+          const match = profiles.find(p => p.marketplace_id === mktId);
+          if (match) setProfileId(match.id);
+        }
+      }
+    }
   };
 
   useEffect(() => {
@@ -12386,6 +12488,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
     setResults(null);
     setSelected(new Set());
     setMatchOverrides({});
+    setPlacementOverrides({});
     setAddResult(null);
     setFilterText(""); setFilterMatch(""); setFilterMinRel(0); setFilterSource("");
     setSortBy("organic_rank_score"); setSortDir("desc"); setBulkMatch("");
@@ -12531,27 +12634,30 @@ const KeywordResearchPage = ({ workspaceId }) => {
     const rows = selected.size > 0
       ? displayedKws.filter(({ origIdx }) => selected.has(origIdx))
       : displayedKws;
-    const header = ["Keyword", "Source", "Match Type", "Organic Rank %", "Relevance", "Monthly Searches", "Impressions Share (Amazon)", "Ease of Ranking (JS)"];
-    const lines = [header.join(","), ...rows.map(({ kw, origIdx }) => [
+    const getPriority = (rel) => rel >= 90 ? "Обязателен" : rel >= 80 ? "Важен" : rel != null ? "Доп." : "";
+    const PLACEMENT_LABEL = { title: "Title", bullets: "Bullets", backend: "Backend", description: "Description" };
+    const header = ["#", "Ключевое слово", "Объём/мес (JS)", "Ease (JS)", "Релевантность", "Приоритет", "Размещение", "Статус", "Примечание"];
+    const lines = [header.join("\t"), ...rows.map(({ kw, origIdx }, i) => [
+      i + 1,
       `"${(kw.keyword_text || "").replace(/"/g, '""')}"`,
-      kw.source || "",
-      matchOverrides[origIdx] || kw.match_type || "broad",
-      kw.organic_rank_score != null ? kw.organic_rank_score + "%" : "",
+      kw.monthly_search_volume ?? "н/д",
+      kw.ease_of_ranking ?? "н/д",
       kw.relevance_score ?? "",
-      kw.monthly_search_volume ?? "",
-      kw.impressions_share ?? "",
-      kw.ease_of_ranking ?? "",
-    ].join(","))];
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
+      getPriority(kw.relevance_score),
+      PLACEMENT_LABEL[getPlacement(kw, origIdx)] || "",
+      "",
+      "",
+    ].join("\t"))];
+    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/tab-separated-values;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "keywords.csv"; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = "keywords.tsv"; a.click();
     URL.revokeObjectURL(url);
   };
 
   const expandKeyword = (kwText) => {
     setProductTitle(kwText);
     setAsins("");
-    setUrlInput(""); setUrlParsed(null);
+    setUrlInput(""); setUrlParsed(null); setUrlAsinCount(0);
     window.scrollTo({ top: 0, behavior: "smooth" });
     setExpandTrigger(kwText);
   };
@@ -12635,25 +12741,26 @@ const KeywordResearchPage = ({ workspaceId }) => {
         <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--b1)" }}>
           <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--tx3)", marginBottom: 14 }}>{t("kwr.sectionProduct")}</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            {/* URL input */}
+            {/* URL input — multiple competitor links */}
             <div style={{ gridColumn: "1 / -1" }}>
               <div style={{ position: "relative" }}>
-                <div style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none", color: "var(--tx3)" }}>
+                <div style={{ position: "absolute", left: 11, top: 10, pointerEvents: "none", color: "var(--tx3)" }}>
                   <Link size={14} />
                 </div>
-                <input
+                <textarea
                   value={urlInput}
                   onChange={e => handleUrlChange(e.target.value)}
-                  placeholder={t("kwr.urlPlaceholder")}
-                  style={{ width: "100%", boxSizing: "border-box", fontSize: 13,
-                    background: urlParsed?.asin ? "rgba(34,197,94,.05)" : "var(--s2)",
-                    border: `1.5px solid ${urlInput && !urlParsed ? "var(--red)" : urlParsed?.asin ? "var(--grn)" : "var(--b2)"}`,
-                    borderRadius: 8, padding: "9px 36px 9px 34px", color: "var(--tx)",
+                  placeholder={"https://www.amazon.de/dp/B0XXXXXXX\nhttps://www.amazon.de/dp/B0YYYYYYY\n(вставьте ссылки конкурентов — по одной в строке)"}
+                  rows={3}
+                  style={{ width: "100%", boxSizing: "border-box", resize: "none", fontSize: 13, lineHeight: 1.6,
+                    background: urlAsinCount > 0 ? "rgba(34,197,94,.05)" : "var(--s2)",
+                    border: `1.5px solid ${urlInput && !urlAsinCount ? "var(--red)" : urlAsinCount > 0 ? "var(--grn)" : "var(--b2)"}`,
+                    borderRadius: 8, padding: "8px 36px 8px 34px", color: "var(--tx)",
                     transition: "border-color .15s" }}
                 />
                 {urlInput && (
-                  <button onClick={() => { setUrlInput(""); setUrlParsed(null); }}
-                    style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                  <button onClick={() => { setUrlInput(""); setUrlParsed(null); setUrlAsinCount(0); }}
+                    style={{ position: "absolute", right: 10, top: 10,
                       background: "none", border: "none", cursor: "pointer", color: "var(--tx3)",
                       width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center",
                       borderRadius: 4, padding: 0 }}>
@@ -12661,13 +12768,14 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   </button>
                 )}
               </div>
-              {urlParsed?.asin && (
+              {urlAsinCount > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, color: "var(--grn)" }}>
                   <Check size={12} />
-                  <span dangerouslySetInnerHTML={{ __html: urlParsed.tld
-                    ? t("kwr.asinExtractedTld", { asin: urlParsed.asin, tld: urlParsed.tld }).replace(urlParsed.asin, `<strong>${urlParsed.asin}</strong>`)
-                    : t("kwr.asinExtracted", { asin: urlParsed.asin }).replace(urlParsed.asin, `<strong>${urlParsed.asin}</strong>`) }} />
+                  <span>Извлечено <strong>{urlAsinCount}</strong> ASIN из ссылок{urlParsed?.tld ? ` (amazon.${urlParsed.tld})` : ""}</span>
                 </div>
+              )}
+              {urlInput && !urlAsinCount && (
+                <div style={{ marginTop: 6, fontSize: 12, color: "var(--red)" }}>Ссылки Amazon не распознаны</div>
               )}
             </div>
 
@@ -12808,6 +12916,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
 
       {/* ── Results ── */}
       {!loading && results && (
+        <>
         <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
 
           {/* Results header */}
@@ -12917,6 +13026,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   {[
                     { key: "keyword_text",          label: "Ключевое слово",  align: "left",   sortable: true,  tip: null,   w: null },
                     { key: "source",                label: "Источник",         align: "left",   sortable: false, tip: null,   w: colWidths.source ?? 88 },
+                    { key: "_placement",            label: "Место",            align: "left",   sortable: false, tip: "Секция Amazon листинга: Title (наибольший вес в A9), Bullets, Backend, Description. Кликните для смены.", w: 84 },
                     { key: "match_type",            label: "Тип",              align: "left",   sortable: false, tip: "Exact — точное совпадение. Phrase — фраза с доп. словами. Broad — широкое соответствие. Выбирайте тип перед добавлением.", w: colWidths.match_type ?? 148 },
                     { key: "organic_rank_score",    label: "Органика",         align: "center", sortable: true,  tip: `Jungle Scout: сколько из введённых ASIN органически ранжируются по этому ключу в топ-${organicTopN}. Учитывается только органика без рекламы. Первая треть позиций = вес 1.0, вторая = 0.8, третья = 0.6. Чем выше % — тем более конкурентен запрос для вашей ниши.`, w: colWidths.organic_rank_score ?? 80 },
                     { key: "relevance_score",       label: "Релев.",           align: "center", sortable: true,  tip: "Оценка соответствия ключа вашему товару (0–100). AI: анализирует заголовок, 50–100. Jungle Scout: собственный алгоритм.", w: colWidths.relevance_score ?? 72 },
@@ -12987,6 +13097,24 @@ const KeywordResearchPage = ({ workspaceId }) => {
                           background: "var(--s3)", color: "var(--tx3)", fontWeight: 500, whiteSpace: "nowrap" }}>
                           {srcLabel(kw.source)}
                         </span>
+                      </td>
+
+                      <td style={{ padding: "10px 8px" }} onClick={e => e.stopPropagation()}>
+                        {(() => {
+                          const pl = getPlacement(kw, origIdx);
+                          const ps = pl ? PLACEMENT_STYLE[pl] : null;
+                          return (
+                            <button onClick={() => cyclePlacement(kw, origIdx)}
+                              title="Кликните для смены секции листинга"
+                              style={{ fontSize: 10, padding: "2px 8px", borderRadius: 10, cursor: "pointer", fontWeight: 600,
+                                border: `1.5px solid ${ps ? ps.color : "var(--b2)"}`,
+                                background: ps ? ps.bg : "transparent",
+                                color: ps ? ps.color : "var(--tx3)",
+                                whiteSpace: "nowrap", transition: "all .1s" }}>
+                              {ps ? ps.label : "—"}
+                            </button>
+                          );
+                        })()}
                       </td>
 
                       <td style={{ padding: "10px 12px" }} onClick={e => e.stopPropagation()}>
@@ -13071,7 +13199,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   );
                 })}
                 {displayedKws.length === 0 && (
-                  <tr><td colSpan={9} style={{ padding: "32px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
+                  <tr><td colSpan={11} style={{ padding: "32px", textAlign: "center", color: "var(--tx3)", fontSize: 13 }}>
                     Ничего не найдено по фильтрам
                   </td></tr>
                 )}
@@ -13086,6 +13214,76 @@ const KeywordResearchPage = ({ workspaceId }) => {
             </div>
           )}
         </div>
+
+        {/* ── Listing breakdown panel ── */}
+        {(() => {
+          const allKws = (results?.keywords || []).map((kw, i) => ({ kw, i, pl: getPlacement(kw, i) }));
+          const bySection = {
+            title:       allKws.filter(x => x.pl === "title"),
+            bullets:     allKws.filter(x => x.pl === "bullets"),
+            backend:     allKws.filter(x => x.pl === "backend"),
+            description: allKws.filter(x => x.pl === "description"),
+          };
+          const hasAny = Object.values(bySection).some(a => a.length > 0);
+          if (!hasAny) return null;
+          const byteLen = str => new TextEncoder().encode(str).length;
+          const joinBytes = arr => arr.reduce((s, x) => s + byteLen(x.kw.keyword_text) + (s > 0 ? 1 : 0), 0);
+          const LIMITS = { title: 200, backend: 250 };
+          const SECTIONS = ["title", "bullets", "backend", "description"];
+          return (
+            <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, marginTop: 12, overflow: "hidden" }}>
+              <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--b1)", display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "var(--tx2)" }}>Распределение по листингу</span>
+                <span style={{ fontSize: 11, color: "var(--tx3)" }}>— кликните чип «Место» в таблице для назначения ключа</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
+                {SECTIONS.map((sec, si) => {
+                  const ps = PLACEMENT_STYLE[sec];
+                  const kws = bySection[sec];
+                  const limit = LIMITS[sec];
+                  const used = limit ? joinBytes(kws) : null;
+                  const over = used != null && used > limit;
+                  return (
+                    <div key={sec} style={{ padding: "14px 16px", borderRight: si < 3 ? "1px solid var(--b1)" : "none" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: ps.color, textTransform: "uppercase", letterSpacing: ".07em" }}>
+                          {ps.label}
+                        </span>
+                        {used != null ? (
+                          <span style={{ fontSize: 10, fontFamily: "var(--mono)", fontWeight: over ? 700 : 400,
+                            color: over ? "var(--red)" : used > limit * 0.85 ? "var(--amb)" : "var(--tx3)" }}>
+                            {used} / {limit} б
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 10, color: "var(--tx3)" }}>{kws.length} ключей</span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5, minHeight: 40 }}>
+                        {kws.length === 0
+                          ? <span style={{ fontSize: 11, color: "var(--tx3)", fontStyle: "italic" }}>не назначено</span>
+                          : kws.map(({ kw, i }) => (
+                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <div style={{ width: 4, height: 4, borderRadius: "50%", background: ps.color, flexShrink: 0 }} />
+                              <span style={{ fontSize: 12, color: "var(--tx)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                title={kw.keyword_text}>{kw.keyword_text}</span>
+                            </div>
+                          ))
+                        }
+                      </div>
+                      {used != null && kws.length > 0 && (
+                        <div style={{ marginTop: 10, height: 3, background: "var(--b1)", borderRadius: 2, overflow: "hidden" }}>
+                          <div style={{ width: `${Math.min(100, (used / limit) * 100)}%`, height: "100%", borderRadius: 2,
+                            background: over ? "var(--red)" : used > limit * 0.85 ? "var(--amb)" : ps.color }} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+        </>
       )}
 
       {/* ── Floating action bar ── */}

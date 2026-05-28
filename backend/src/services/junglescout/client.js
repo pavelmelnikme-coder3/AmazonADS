@@ -127,7 +127,7 @@ async function getKeywordsByKeyword(keyword, marketplaceId) {
         data: {
           type: "keywords_by_keyword_query",
           attributes: {
-            search_terms: [keyword],
+            search_terms: keyword,
           },
         },
       },

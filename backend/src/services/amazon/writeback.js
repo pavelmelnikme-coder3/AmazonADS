@@ -373,10 +373,13 @@ async function archiveNegativeKeyword({ localId, connectionId, profileId, market
       ? (isSB ? "/sb/negativeKeywords" : "/sp/negativeKeywords")
       : "/sp/campaignNegativeKeywords";
     const dataKey = isAdGroup ? "negativeKeywords" : "campaignNegativeKeywords";
-    const idKey   = isAdGroup ? "negativeKeywordId" : "campaignNegativeKeywordId";
+    // Amazon SP/SB PUT body uses "keywordId" (not "negativeKeywordId") as the identifier field.
+    // Campaign-level negative keywords use "keywordId" as well per Amazon Ads API.
+    // State "archived" removes the negative; "PAUSED" is not valid for negative keywords.
+    const idKey   = "keywordId";
     await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
-      path, data: { [dataKey]: [{ [idKey]: amazonNegKeywordId, state: "PAUSED" }] }, group: "keywords",
+      path, data: { [dataKey]: [{ [idKey]: amazonNegKeywordId, state: "archived" }] }, group: "keywords",
     });
     if (localId) {
       await query("UPDATE negative_keywords SET state='archived' WHERE id=$1", [localId]);

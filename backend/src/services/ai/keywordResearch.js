@@ -38,26 +38,47 @@ async function generateSeedKeywords({ productTitle, productDescription, marketpl
   const langName = locale ? (LOCALE_NAMES[locale] || locale) : null;
 
   const langInstruction = langName
-    ? `Target language: ${langName}\nCRITICAL: ALL keywords MUST be written in ${langName}. Never use English if the target language is different.`
-    : `Target language: use the most natural language(s) for this product and marketplace. Include keywords in all relevant languages shoppers actually use.`;
+    ? `Target language: ${langName}. ALL keywords MUST be in ${langName} — the language shoppers actually type.`
+    : `Use the most natural language(s) for this product and marketplace.`;
 
-  const prompt = `You are an expert Amazon PPC keyword researcher. Generate highly relevant Amazon search keywords for this product.
+  const germanTip = locale === "de"
+    ? `\nGerman-specific: include BOTH compound and spaced forms (e.g. "Thermobehälter für Essen" AND "Thermo Behälter Essen"). Regional synonyms (Henkelmann, Speisegefäß, Vesperdose) are valuable.`
+    : "";
 
-Product: "${productTitle}"${productDescription ? `\nDescription: "${productDescription.slice(0, 500)}"` : ""}
-${langInstruction}
+  const prompt = `You are an Amazon SEO specialist optimizing product listings for organic ranking on Amazon's A9/A10 algorithm.
 
-Generate exactly 30 keywords that Amazon shoppers use when searching for this type of product.
-Cover:
-1. Exact product name variations (brand + product type)
-2. Feature-based queries (material, size, use case)
-3. Problem-solving queries ("best X for Y")
-4. Category browse terms
-5. Competitor/alternative terms
+Product description:
+"${productTitle}"
 
-Respond ONLY with valid JSON, no markdown, no explanation:
-{"keywords":[{"text":"keyword","match_type":"exact|phrase|broad","relevance":85}]}
+${langInstruction}${germanTip}
 
-relevance: 90-100 = core product keywords, 70-89 = highly relevant, 50-69 = relevant. Skip below 60.`;
+Goal: identify keywords that maximize organic discoverability. These keywords will be placed in the Amazon listing (title, bullet points, backend search terms, description) to rank organically — NOT for PPC ads.
+
+Amazon A9 ranking weight by section:
+- TITLE: highest weight (2×) — use highest-volume, most-searched exact terms
+- BULLETS: strong secondary signal — feature/benefit/use-case queries
+- BACKEND: indexed but hidden — synonyms, long-tail, alternative names, misspellings
+- DESCRIPTION: semantic context — storytelling phrases, problem-solution queries
+
+Generate exactly 40 keywords covering ALL of these categories:
+1. CORE product category terms (what IS this product — primary search queries)
+2. FEATURE keywords (material, capacity, size, technical specs)
+3. USE-CASE keywords (who uses it + when/where: für Kinder, fürs Büro, zum Wandern, für die Schule...)
+4. BENEFIT keywords (leakproof/auslaufsicher, dishwasher-safe/spülmaschinenfest, insulated/isoliert...)
+5. SYNONYM / ALTERNATIVE NAMES (different words for the same product type)
+6. LONG-TAIL combinations (specific phrases with lower competition but clear buyer intent)
+7. PROBLEM-SOLUTION queries ("Essen warm halten unterwegs", "thermobehälter ohne auslaufen"...)
+
+For each keyword assign placement:
+- "title" — if it would be a primary search a buyer uses to find exactly this product (highest volume)
+- "bullets" — feature/benefit/use-case specific
+- "backend" — long-tail, synonyms, regional terms, misspellings
+- "description" — contextual phrases, semantic enrichment
+
+Respond ONLY with valid JSON, no markdown:
+{"keywords":[{"text":"keyword","match_type":"exact|phrase|broad","placement":"title|bullets|backend|description","relevance":90}]}
+
+relevance: 90-100=critical for title, 75-89=important for bullets/backend, 60-74=useful for backend. Omit below 60.`;
 
   try {
     const response = await client.messages.create({
@@ -71,6 +92,7 @@ relevance: 90-100 = core product keywords, 70-89 = highly relevant, 50-69 = rele
     const jsonText = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
     const parsed = JSON.parse(jsonText);
 
+    const VALID_PLACEMENTS = new Set(["title", "bullets", "backend", "description"]);
     return (parsed.keywords || [])
       .filter(k => k.text && (k.relevance || 60) >= 60)
       .map(k => ({
@@ -80,6 +102,7 @@ relevance: 90-100 = core product keywords, 70-89 = highly relevant, 50-69 = rele
           ? ["exact", "phrase"]
           : k.match_type === "phrase" ? ["phrase", "broad"] : ["exact", "phrase", "broad"],
         relevance_score: k.relevance || 75,
+        placement_hint: VALID_PLACEMENTS.has(k.placement) ? k.placement : null,
         source: "ai_generated",
       }));
   } catch (e) {
@@ -109,18 +132,19 @@ async function scoreAndFilterKeywords({ keywords, productTitle, locale = "" }) {
     const batch = keywords.slice(i, i + 50);
     const marketplaceDesc = langName ? `${langName} marketplace` : "Amazon marketplace";
 
-    const prompt = `Rate these keywords for relevance to: "${productTitle}" on Amazon (${marketplaceDesc}).
+    const prompt = `You are an Amazon SEO specialist. Rate these keywords for organic listing relevance for: "${productTitle}" on Amazon (${marketplaceDesc}).
 
 For each keyword provide:
-- relevance_score: 0-100
-- suggested_match_types: array from ["exact","phrase","broad"] that make sense for this keyword
-- keep: false only if clearly wrong/irrelevant/nonsensical
+- relevance_score: 0-100 (how likely a buyer searching this keyword wants exactly this product)
+- suggested_match_types: array from ["exact","phrase","broad"]
+- placement: where in the listing this keyword belongs: "title" (high-volume core terms), "bullets" (feature/use-case), "backend" (long-tail/synonyms), "description" (contextual phrases)
+- keep: false ONLY if completely irrelevant or wrong product category
 
 Keywords:
 ${batch.map((k, idx) => `${idx + 1}. "${k.keyword_text}"`).join("\n")}
 
 Respond ONLY with valid JSON:
-{"scored":[{"index":1,"relevance_score":85,"suggested_match_types":["exact","phrase"],"keep":true}]}`;
+{"scored":[{"index":1,"relevance_score":85,"suggested_match_types":["exact","phrase"],"placement":"title","keep":true}]}`;
 
     try {
       const response = await client.messages.create({
@@ -138,12 +162,15 @@ Respond ONLY with valid JSON:
         if (idx < 0 || idx >= batch.length) continue;
         if (scored.keep === false) continue;
 
+        const VALID_PL = new Set(["title", "bullets", "backend", "description"]);
         results.push({
           ...batch[idx],
           relevance_score: scored.relevance_score ?? batch[idx].relevance_score ?? 50,
           suggested_match_types: scored.suggested_match_types?.length
             ? scored.suggested_match_types
             : batch[idx].suggested_match_types || [batch[idx].match_type || "broad"],
+          placement_hint: batch[idx].placement_hint
+            || (VALID_PL.has(scored.placement) ? scored.placement : null),
         });
       }
     } catch (e) {
