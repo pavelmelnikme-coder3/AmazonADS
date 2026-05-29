@@ -231,7 +231,10 @@ describe("DELETE /alerts/configs/:id", () => {
   beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
 
   it("deletes config and returns ok:true", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ id: CFG_ID, name: "Test", workspace_id: WS_ID }] }) // SELECT alert (for trash snapshot)
+      .mockResolvedValueOnce({ rows: [] })                  // INSERT into trash
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });    // DELETE alert_configs
 
     const res = await request(app).delete(`/alerts/configs/${CFG_ID}`);
     expect(res.status).toBe(200);
@@ -354,5 +357,22 @@ describe("PATCH /alerts/:id/acknowledge", () => {
     const params = dbQuery.mock.calls[0][1];
     expect(params).toContain(INST_ID);
     expect(params).toContain(WS_ID);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  POST /alerts/check  — manual evaluation run
+// ─────────────────────────────────────────────────────────────────────────────
+describe("POST /alerts/check", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  it("runs evaluation and returns a summary", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ name: "WS" }] }) // workspace name lookup
+      .mockResolvedValueOnce({ rows: [] });               // evaluate: no active configs
+    const res = await request(app).post("/alerts/check");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ evaluated: 0, triggered: 0, emailed: 0 });
   });
 });

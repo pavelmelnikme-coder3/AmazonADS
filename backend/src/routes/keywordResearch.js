@@ -6,6 +6,7 @@
  */
 
 const express = require("express");
+const ExcelJS = require("exceljs");
 const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
@@ -43,7 +44,8 @@ router.post("/discover", async (req, res, next) => {
 
     // Load profile (connection, marketplace)
     const { rows: [profile] } = await query(
-      `SELECT p.connection_id, p.profile_id AS amazon_profile_id, p.marketplace_id
+      `SELECT p.connection_id, p.profile_id AS amazon_profile_id, p.marketplace_id,
+              p.account_name, p.marketplace
        FROM amazon_profiles p
        WHERE p.id = $1 AND p.workspace_id = $2`,
       [profileId, req.workspaceId]
@@ -278,13 +280,121 @@ router.post("/discover", async (req, res, next) => {
       sources: sourcesUsed,
     });
 
-    res.json({
+    const responsePayload = {
       keywords:      finalKeywords,
       total:         finalKeywords.length,
       sources_used:  sourcesUsed,
       product_title: resolvedTitle,
       jungle_scout_available: jsConfigured(),
-    });
+    };
+
+    // ── Persist to workspace-shared search history (non-fatal) ───────────────
+    // Stores the inputs + a full snapshot of the results so a past search can be
+    // restored instantly without re-querying the paid sources. Pruned to 50/ws.
+    try {
+      const profileName = profile.account_name
+        ? `${profile.account_name}${profile.marketplace ? ` · ${profile.marketplace}` : ""}`
+        : (profile.marketplace || null);
+      const { rows: [hist] } = await query(
+        `INSERT INTO kwr_search_history
+           (workspace_id, created_by, profile_id, profile_name, locale, sources,
+            organic_top_n, asins, product_title, url_input, ad_group_id, total,
+            sources_used, result)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         RETURNING id`,
+        [
+          req.workspaceId,
+          req.user?.id || null,
+          profileId,
+          profileName,
+          locale || null,
+          JSON.stringify(sources || []),
+          Math.round(organicTopN) || null,
+          JSON.stringify(allAsins || []),
+          resolvedTitle || null,
+          req.body.urlInput || null,
+          adGroupId || null,
+          finalKeywords.length,
+          JSON.stringify(sourcesUsed),
+          JSON.stringify(responsePayload),
+        ]
+      );
+      responsePayload.history_id = hist.id;
+      // Prune: keep only the latest 50 searches per workspace
+      await query(
+        `DELETE FROM kwr_search_history
+         WHERE workspace_id = $1
+           AND id NOT IN (
+             SELECT id FROM kwr_search_history
+             WHERE workspace_id = $1
+             ORDER BY created_at DESC
+             LIMIT 50
+           )`,
+        [req.workspaceId]
+      );
+    } catch (e) {
+      logger.warn("Keyword research: failed to save history (non-fatal)", { error: e.message });
+    }
+
+    res.json(responsePayload);
+  } catch (err) { next(err); }
+});
+
+// ── GET /keyword-research/history ─────────────────────────────────────────────
+// Lightweight list (no result snapshot) of recent searches for the workspace.
+router.get("/history", async (req, res, next) => {
+  try {
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 30));
+    const { rows } = await query(
+      `SELECT h.id, h.profile_id, h.profile_name, h.locale, h.sources, h.organic_top_n,
+              h.asins, h.product_title, h.url_input, h.ad_group_id, h.total,
+              h.sources_used, h.created_at,
+              u.name AS created_by_name
+       FROM kwr_search_history h
+       LEFT JOIN users u ON u.id = h.created_by
+       WHERE h.workspace_id = $1
+       ORDER BY h.created_at DESC
+       LIMIT $2`,
+      [req.workspaceId, limit]
+    );
+    res.json({ history: rows });
+  } catch (err) { next(err); }
+});
+
+// ── GET /keyword-research/history/:id ─────────────────────────────────────────
+// Full row including the result snapshot — used to restore a past search.
+router.get("/history/:id", async (req, res, next) => {
+  try {
+    const { rows: [row] } = await query(
+      `SELECT id, profile_id, profile_name, locale, sources, organic_top_n,
+              asins, product_title, url_input, ad_group_id, total, sources_used,
+              result, created_at
+       FROM kwr_search_history
+       WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+    if (!row) return res.status(404).json({ error: "Search not found" });
+    res.json(row);
+  } catch (err) { next(err); }
+});
+
+// ── DELETE /keyword-research/history/:id ──────────────────────────────────────
+router.delete("/history/:id", async (req, res, next) => {
+  try {
+    await query(
+      `DELETE FROM kwr_search_history WHERE id = $1 AND workspace_id = $2`,
+      [req.params.id, req.workspaceId]
+    );
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── DELETE /keyword-research/history ──────────────────────────────────────────
+// Clear the entire workspace search history.
+router.delete("/history", async (req, res, next) => {
+  try {
+    await query(`DELETE FROM kwr_search_history WHERE workspace_id = $1`, [req.workspaceId]);
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 
@@ -428,6 +538,53 @@ router.post("/add-to-adgroup", async (req, res, next) => {
     });
 
     res.json({ success: true, added, skipped });
+  } catch (err) { next(err); }
+});
+
+// ── POST /keyword-research/export ─────────────────────────────────────────────
+// Generates a real .xlsx file from a generic { columns, rows } payload.
+// columns: string[] (header labels); rows: (string|number|null)[][]  (matching order)
+router.post("/export", async (req, res, next) => {
+  try {
+    const { columns = [], rows = [], sheetName = "Keywords", filename = "keywords" } = req.body;
+    if (!Array.isArray(columns) || !Array.isArray(rows)) {
+      return res.status(400).json({ error: "columns and rows arrays required" });
+    }
+
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "AdsFlow";
+    wb.created = new Date();
+    const ws = wb.addWorksheet(String(sheetName).slice(0, 31) || "Keywords");
+
+    // Header row
+    ws.addRow(columns);
+    const headerRow = ws.getRow(1);
+    headerRow.eachCell(c => {
+      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2D3748" } };
+      c.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 10, name: "Arial" };
+      c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    });
+    headerRow.height = 24;
+
+    // Data rows
+    for (const r of rows) ws.addRow(Array.isArray(r) ? r : []);
+
+    // Auto column widths (capped) + freeze header
+    ws.columns.forEach((col, i) => {
+      let max = String(columns[i] ?? "").length;
+      for (const r of rows) {
+        const v = r?.[i] == null ? "" : String(r[i]);
+        if (v.length > max) max = v.length;
+      }
+      col.width = Math.min(60, Math.max(10, max + 2));
+    });
+    ws.views = [{ state: "frozen", ySplit: 1 }];
+
+    const buffer = await wb.xlsx.writeBuffer();
+    const safeName = String(filename).replace(/[^\w.\-]+/g, "_").slice(0, 80) || "keywords";
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.xlsx"`);
+    res.send(Buffer.from(buffer));
   } catch (err) { next(err); }
 });
 

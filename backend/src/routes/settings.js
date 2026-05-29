@@ -58,13 +58,37 @@ router.patch("/workspace", requirePerm("write"), async (req, res, next) => {
 // ─── Team members ─────────────────────────────────────────────────────────────
 router.get("/members", async (req, res, next) => {
   try {
+    // Active members (in workspace_members) + pending invitees (invited but not yet
+    // accepted). Pending users have a user record but no workspace_members row until
+    // they accept, so without this they'd be invisible in the team list.
     const { rows } = await query(
-      `SELECT u.id, u.name, u.email, u.role as org_role, u.last_login_at, u.created_at,
-              wm.role as workspace_role, u.is_active
+      `SELECT u.id, u.name, u.email, u.role AS org_role, u.last_login_at, u.created_at,
+              wm.role AS workspace_role, u.is_active, 'active'::text AS status, NULL::timestamptz AS invited_at
        FROM workspace_members wm
        JOIN users u ON u.id = wm.user_id
        WHERE wm.workspace_id = $1
-       ORDER BY wm.role, u.name`,
+
+       UNION ALL
+
+       SELECT p.id, p.name, p.email, p.org_role, p.last_login_at, p.created_at,
+              p.workspace_role, p.is_active, 'pending'::text AS status, p.invited_at
+       FROM (
+         SELECT DISTINCT ON (u.id)
+                u.id, u.name, u.email, u.role AS org_role, u.last_login_at, u.created_at,
+                wi.role AS workspace_role, u.is_active, wi.created_at AS invited_at
+         FROM workspace_invitations wi
+         JOIN users u ON u.id = wi.user_id
+         WHERE wi.workspace_id = $1
+           AND wi.accepted_at IS NULL
+           AND wi.expires_at > NOW()
+           AND NOT EXISTS (
+             SELECT 1 FROM workspace_members wm
+             WHERE wm.workspace_id = wi.workspace_id AND wm.user_id = wi.user_id
+           )
+         ORDER BY u.id, wi.created_at DESC
+       ) p
+
+       ORDER BY status, workspace_role, name`,
       [req.workspaceId]
     );
     res.json(rows);
@@ -166,19 +190,34 @@ router.patch("/members/:userId/role", requirePerm("manage_roles"), async (req, r
       return res.status(400).json({ error: "Invalid role. Cannot assign owner role." });
     }
 
-    // Check target member exists and isn't owner
+    // Active member — update their workspace role directly
     const { rows: [member] } = await query(
       "SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2",
       [req.workspaceId, userId]
     );
-    if (!member) return res.status(404).json({ error: "Member not found" });
-    if (member.role === "owner") return res.status(403).json({ error: "Cannot change the owner's role" });
+    if (member) {
+      if (member.role === "owner") return res.status(403).json({ error: "Cannot change the owner's role" });
+      await query(
+        "UPDATE workspace_members SET role=$1 WHERE workspace_id=$2 AND user_id=$3",
+        [role, req.workspaceId, userId]
+      );
+      return res.json({ ok: true, role });
+    }
 
-    await query(
-      "UPDATE workspace_members SET role=$1 WHERE workspace_id=$2 AND user_id=$3",
-      [role, req.workspaceId, userId]
+    // Pending invitee — update the invitation role; it takes effect when they accept
+    const { rows: pending } = await query(
+      "SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND user_id=$2 AND accepted_at IS NULL",
+      [req.workspaceId, userId]
     );
-    res.json({ ok: true, role });
+    if (pending.length) {
+      await query(
+        "UPDATE workspace_invitations SET role=$1 WHERE workspace_id=$2 AND user_id=$3 AND accepted_at IS NULL",
+        [role, req.workspaceId, userId]
+      );
+      return res.json({ ok: true, role, pending: true });
+    }
+
+    return res.status(404).json({ error: "Member not found" });
   } catch (err) { next(err); }
 });
 
@@ -192,14 +231,32 @@ router.delete("/members/:userId", requirePerm("remove"), async (req, res, next) 
       "SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2",
       [req.workspaceId, userId]
     );
-    if (!member) return res.status(404).json({ error: "Member not found" });
-    if (member.role === "owner") return res.status(403).json({ error: "Cannot remove the workspace owner" });
 
-    await query(
-      "DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2",
+    if (member) {
+      if (member.role === "owner") return res.status(403).json({ error: "Cannot remove the workspace owner" });
+      await query("DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2", [req.workspaceId, userId]);
+      // Also clear any lingering pending invitation for this user
+      await query(
+        "DELETE FROM workspace_invitations WHERE workspace_id=$1 AND user_id=$2 AND accepted_at IS NULL",
+        [req.workspaceId, userId]
+      );
+      return res.json({ ok: true });
+    }
+
+    // Not an active member — maybe a pending invitee. Removing them cancels the invite.
+    const { rows: pending } = await query(
+      "SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND user_id=$2 AND accepted_at IS NULL",
       [req.workspaceId, userId]
     );
-    res.json({ ok: true });
+    if (pending.length) {
+      await query(
+        "DELETE FROM workspace_invitations WHERE workspace_id=$1 AND user_id=$2 AND accepted_at IS NULL",
+        [req.workspaceId, userId]
+      );
+      return res.json({ ok: true, cancelledInvite: true });
+    }
+
+    return res.status(404).json({ error: "Member not found" });
   } catch (err) { next(err); }
 });
 

@@ -2,6 +2,7 @@ const { CronJob } = require("cron");
 const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
+const { evaluateWorkspaceAlerts } = require("../services/alerts/evaluate");
 
 const SCHEDULE_INTERVALS = {
   hourly: 60 * 60 * 1000,               // 1 hour
@@ -241,7 +242,30 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob];
+  // ─── Alert evaluation: hourly at :15 ─────────────────────────────────────────
+  const alertCheckJob = new CronJob("15 * * * *", async () => {
+    try {
+      const { rows } = await query(
+        `SELECT DISTINCT ac.workspace_id, w.name AS workspace_name
+         FROM alert_configs ac JOIN workspaces w ON w.id = ac.workspace_id
+         WHERE ac.is_active = TRUE`
+      );
+      let triggered = 0, emailed = 0;
+      for (const { workspace_id, workspace_name } of rows) {
+        try {
+          const r = await evaluateWorkspaceAlerts(workspace_id, { workspaceName: workspace_name });
+          triggered += r.triggered; emailed += r.emailed;
+        } catch (e) {
+          logger.warn("Alert eval failed for workspace", { workspaceId: workspace_id, error: e.message });
+        }
+      }
+      if (triggered) logger.info("Cron: Alerts evaluated", { workspaces: rows.length, triggered, emailed });
+    } catch (err) {
+      logger.error("Cron alert check failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

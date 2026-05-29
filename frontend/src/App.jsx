@@ -4260,6 +4260,8 @@ const ProductsPage = ({ workspaceId }) => {
   const [tick, setTick] = useState(0);
   const [search, setSearch] = useState("");
   const [filterBrand, setFilterBrand] = useState("all");
+  const [filterAvail, setFilterAvail] = useState("all"); // all | available | unavailable
+  const [filterAds, setFilterAds]     = useState("all"); // all | advertised | not_advertised
   const [sortBy, setSortBy] = useState("bsr");
 
   const { data: products, loading, mutate } = useAsync(
@@ -4289,6 +4291,10 @@ const ProductsPage = ({ workspaceId }) => {
     if (filterBrand !== "all") {
       list = list.filter(p => p.brand === filterBrand);
     }
+    if (filterAvail === "available")   list = list.filter(p => p.is_available);
+    if (filterAvail === "unavailable") list = list.filter(p => !p.is_available);
+    if (filterAds === "advertised")     list = list.filter(p => p.is_advertised);
+    if (filterAds === "not_advertised") list = list.filter(p => !p.is_advertised);
     list = [...list].sort((a, b) => {
       if (sortBy === "bsr") {
         const ra = [...(a.classification_ranks||[]),...(a.display_group_ranks||[])];
@@ -4303,7 +4309,7 @@ const ProductsPage = ({ workspaceId }) => {
       return 0;
     });
     return list;
-  }, [products, search, filterBrand, sortBy]);
+  }, [products, search, filterBrand, filterAvail, filterAds, sortBy]);
 
   const handleAdd = async () => {
     if (!newAsin.trim()) return;
@@ -4635,6 +4641,28 @@ const ProductsPage = ({ workspaceId }) => {
               {brands.map(b => <option key={b} value={b}>{b}</option>)}
             </select>
           )}
+
+          <select
+            value={filterAvail}
+            onChange={e => setFilterAvail(e.target.value)}
+            title="Filter by listing availability"
+            style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: filterAvail === "all" ? "var(--tx)" : "var(--ac2)", cursor: "pointer" }}
+          >
+            <option value="all">All listings</option>
+            <option value="available">Available</option>
+            <option value="unavailable">Delisted</option>
+          </select>
+
+          <select
+            value={filterAds}
+            onChange={e => setFilterAds(e.target.value)}
+            title="Filter by advertising status"
+            style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: filterAds === "all" ? "var(--tx)" : "var(--ac2)", cursor: "pointer" }}
+          >
+            <option value="all">All ads</option>
+            <option value="advertised">Advertised</option>
+            <option value="not_advertised">Not advertised</option>
+          </select>
 
           <select
             value={sortBy}
@@ -12373,6 +12401,12 @@ const KeywordResearchPage = ({ workspaceId }) => {
   const [agSearch, setAgSearch]         = useState("");
   const resizingRef = useRef(null);
 
+  // ── Search history (workspace-shared) ──
+  const [history, setHistory]           = useState([]);
+  const [historyOpen, setHistoryOpen]   = useState(false);
+  const [restoringId, setRestoringId]   = useState(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+
   // Localised source label helper (inside component so it can use t())
   const srcLabel = (src) => {
     if (!src) return "—";
@@ -12500,17 +12534,94 @@ const KeywordResearchPage = ({ workspaceId }) => {
       if (asinList.length) body.asins = asinList;
       if (productTitle)    body.productTitle = productTitle;
       if (adGroupId)       body.adGroupId = adGroupId;
+      if (urlInput.trim()) body.urlInput = urlInput;
 
       const data = await apiFetch("/keyword-research/discover", {
         method: "POST",
         body: JSON.stringify(body),
       });
       setResults(data);
+      loadHistory();
     } catch (e) {
       setError(e.message || t("kwr.errDiscovery"));
     } finally {
       setLoading(false);
     }
+  };
+
+  // ── Search history ──────────────────────────────────────────────────────────
+  const loadHistory = async () => {
+    try {
+      const data = await apiFetch("/keyword-research/history");
+      setHistory(data?.history || []);
+    } catch { /* non-fatal */ }
+  };
+
+  useEffect(() => { loadHistory(); }, [workspaceId]);
+
+  const fmtHistoryTime = (iso) => {
+    if (!iso) return "";
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    const hrs  = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+    if (mins < 1)  return t("kwr.histJustNow");
+    if (mins < 60) return t("kwr.histMinAgo", { n: mins });
+    if (hrs  < 24) return t("kwr.histHrAgo", { n: hrs });
+    if (days < 7)  return t("kwr.histDayAgo", { n: days });
+    return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  };
+
+  const restoreHistory = async (id) => {
+    setRestoringId(id);
+    setError("");
+    try {
+      const row = await apiFetch(`/keyword-research/history/${id}`);
+      // Restore inputs
+      if (row.profile_id) setProfileId(row.profile_id);
+      setLocale(row.locale || "");
+      if (row.organic_top_n) setOrganicTopN(row.organic_top_n);
+      const srcArr = Array.isArray(row.sources) ? row.sources : [];
+      setSources({ amazon: srcArr.includes("amazon"), ai: srcArr.includes("ai"), jungle_scout: srcArr.includes("jungle_scout") });
+      const asinArr = Array.isArray(row.asins) ? row.asins : [];
+      setAsins(asinArr.join("\n"));
+      setProductTitle(row.product_title || "");
+      setUrlInput(row.url_input || "");
+      setUrlParsed(null); setUrlAsinCount(0);
+      // Restore results snapshot
+      setResults(row.result || null);
+      setSelected(new Set());
+      setMatchOverrides({}); setPlacementOverrides({}); setAddResult(null);
+      setFilterText(""); setFilterMatch(""); setFilterMinRel(0); setFilterSource("");
+      setSortBy("organic_rank_score"); setSortDir("desc"); setBulkMatch("");
+      setHistoryOpen(false);
+    } catch (e) {
+      setError(e.message || t("kwr.histRestoreErr"));
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  const deleteHistory = async (id, e) => {
+    e?.stopPropagation();
+    setHistory(h => h.filter(x => x.id !== id));
+    try { await apiFetch(`/keyword-research/history/${id}`, { method: "DELETE" }); }
+    catch { loadHistory(); }
+  };
+
+  const clearHistory = async () => {
+    if (!window.confirm(t("kwr.histClearConfirm"))) return;
+    setHistory([]);
+    setHistoryOpen(false);
+    try { await apiFetch("/keyword-research/history", { method: "DELETE" }); }
+    catch { loadHistory(); }
+  };
+
+  const historyLabel = (h) => {
+    if (h.product_title) return h.product_title;
+    const asinArr = Array.isArray(h.asins) ? h.asins : [];
+    if (asinArr.length) return asinArr.length === 1 ? asinArr[0] : `${asinArr[0]} +${asinArr.length - 1}`;
+    return t("kwr.histUntitled");
   };
 
   const toggleAll = (checked) => {
@@ -12630,28 +12741,69 @@ const KeywordResearchPage = ({ workspaceId }) => {
     return <span style={{ fontSize: 9, color: "var(--ac)" }}>{sortDir === "asc" ? "↑" : "↓"}</span>;
   };
 
-  const exportCSV = () => {
-    const rows = selected.size > 0
-      ? displayedKws.filter(({ origIdx }) => selected.has(origIdx))
-      : displayedKws;
+  // Build the FULL export dataset (all columns). Exports the selected rows if any
+  // are selected, otherwise every discovered keyword (not just the filtered view).
+  const buildExportData = () => {
+    if (!results?.keywords) return { columns: [], rows: [], objects: [] };
+    const indexed = results.keywords.map((kw, origIdx) => ({ kw, origIdx }));
+    const src = selected.size > 0 ? indexed.filter(({ origIdx }) => selected.has(origIdx)) : indexed;
     const getPriority = (rel) => rel >= 90 ? "Обязателен" : rel >= 80 ? "Важен" : rel != null ? "Доп." : "";
     const PLACEMENT_LABEL = { title: "Title", bullets: "Bullets", backend: "Backend", description: "Description" };
-    const header = ["#", "Ключевое слово", "Объём/мес (JS)", "Ease (JS)", "Релевантность", "Приоритет", "Размещение", "Статус", "Примечание"];
-    const lines = [header.join("\t"), ...rows.map(({ kw, origIdx }, i) => [
+    const columns = [
+      "#", "Ключевое слово", "Источник", "Тип", "Релевантность", "Приоритет",
+      "Органика %", "Орг. позиция", "Объём/мес", "Доля показов", "Ease", "Размещение",
+    ];
+    const rows = src.map(({ kw, origIdx }, i) => [
       i + 1,
-      `"${(kw.keyword_text || "").replace(/"/g, '""')}"`,
-      kw.monthly_search_volume ?? "н/д",
-      kw.ease_of_ranking ?? "н/д",
+      kw.keyword_text || "",
+      srcLabel(kw.source),
+      matchOverrides[origIdx] || kw.match_type || "broad",
       kw.relevance_score ?? "",
       getPriority(kw.relevance_score),
+      kw.organic_rank_score ?? "",
+      kw.organic_top_position ?? "",
+      kw.monthly_search_volume ?? "",
+      kw.impressions_share ?? "",
+      kw.ease_of_ranking ?? "",
       PLACEMENT_LABEL[getPlacement(kw, origIdx)] || "",
-      "",
-      "",
-    ].join("\t"))];
-    const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/tab-separated-values;charset=utf-8;" });
+    ]);
+    const objects = rows.map(r => Object.fromEntries(columns.map((c, idx) => [c, r[idx]])));
+    return { columns, rows, objects };
+  };
+
+  const downloadBlob = (blob, name) => {
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "keywords.tsv"; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = name; a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const exportAs = async (format) => {
+    setExportMenuOpen(false);
+    const { columns, rows, objects } = buildExportData();
+    if (!rows.length) return;
+    const base = "keywords-" + new Date().toISOString().slice(0, 10);
+    const csvCell = (v) => {
+      const s = v == null ? "" : String(v);
+      return /[",\n\r;]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    if (format === "csv") {
+      const lines = [columns.map(csvCell).join(","), ...rows.map(r => r.map(csvCell).join(","))];
+      downloadBlob(new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" }), base + ".csv");
+    } else if (format === "tsv") {
+      const tab = (v) => String(v ?? "").replace(/\t/g, " ");
+      const lines = [columns.map(tab).join("\t"), ...rows.map(r => r.map(tab).join("\t"))];
+      downloadBlob(new Blob(["﻿" + lines.join("\n")], { type: "text/tab-separated-values;charset=utf-8;" }), base + ".tsv");
+    } else if (format === "json") {
+      downloadBlob(new Blob([JSON.stringify(objects, null, 2)], { type: "application/json;charset=utf-8;" }), base + ".json");
+    } else if (format === "xlsx") {
+      try {
+        const blob = await apiFetch("/keyword-research/export", {
+          method: "POST",
+          body: JSON.stringify({ columns, rows, sheetName: "Keywords", filename: base }),
+        }, true);
+        downloadBlob(blob, base + ".xlsx");
+      } catch (e) { setError(e.message || t("kwr.exportErr")); }
+    }
   };
 
   const expandKeyword = (kwText) => {
@@ -12734,6 +12886,76 @@ const KeywordResearchPage = ({ workspaceId }) => {
         </div>
       </div>
 
+      {/* ── Search history (collapsible bar) ── */}
+      {history.length > 0 && (
+        <div style={{ marginBottom: 14, background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 10, overflow: "hidden" }}>
+          {/* Toggle row */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", cursor: "pointer", userSelect: "none" }}
+            onClick={() => setHistoryOpen(o => !o)}>
+            <History size={15} style={{ color: "var(--tx3)", flexShrink: 0 }} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--tx)" }}>{t("kwr.histTitle")}</span>
+            <span style={{ fontSize: 11, fontWeight: 600, padding: "1px 7px", borderRadius: 20,
+              background: "var(--s3)", color: "var(--tx2)" }}>{history.length}</span>
+            <div style={{ flex: 1 }} />
+            {historyOpen && (
+              <button onClick={(e) => { e.stopPropagation(); clearHistory(); }}
+                title={t("kwr.histClear")}
+                style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, padding: "3px 9px",
+                  borderRadius: 6, border: "1px solid var(--b2)", background: "transparent",
+                  color: "var(--tx3)", cursor: "pointer" }}>
+                <Trash2 size={11} /> {t("kwr.histClear")}
+              </button>
+            )}
+            {historyOpen ? <ChevronUp size={16} style={{ color: "var(--tx3)" }} /> : <ChevronDown size={16} style={{ color: "var(--tx3)" }} />}
+          </div>
+
+          {/* Expanded: horizontal scroll row of compact cards */}
+          {historyOpen && (
+            <div style={{ display: "flex", gap: 10, padding: "4px 14px 14px", overflowX: "auto" }}>
+              {history.map(h => (
+                <div key={h.id} onClick={() => restoreHistory(h.id)}
+                  title={t("kwr.histRestoreTip")}
+                  style={{ position: "relative", flexShrink: 0, width: 208, padding: "10px 12px",
+                    background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 8,
+                    cursor: "pointer", transition: "border-color .15s, transform .1s",
+                    opacity: restoringId === h.id ? 0.6 : 1 }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = "var(--ac)"; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--b2)"; }}>
+                  {/* Delete button */}
+                  <button onClick={(e) => deleteHistory(h.id, e)} title={t("kwr.histDelete")}
+                    style={{ position: "absolute", top: 6, right: 6, width: 18, height: 18, padding: 0,
+                      display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 4,
+                      border: "none", background: "transparent", color: "var(--tx3)", cursor: "pointer" }}>
+                    <X size={12} />
+                  </button>
+                  {/* Label */}
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--tx)", marginBottom: 6,
+                    paddingRight: 18, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {restoringId === h.id ? <><RefreshCw size={11} className="spin" /> {t("kwr.histRestoring")}</> : historyLabel(h)}
+                  </div>
+                  {/* Count + sources */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "var(--ac2)" }}>
+                      {h.total} <span style={{ fontWeight: 500, color: "var(--tx3)" }}>{t("kwr.histKwShort")}</span>
+                    </span>
+                    {(Array.isArray(h.sources_used) ? h.sources_used : []).slice(0, 3).map(s => (
+                      <span key={s} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 20,
+                        background: "var(--s3)", color: "var(--tx2)", fontWeight: 500 }}>{srcLabel(s)}</span>
+                    ))}
+                  </div>
+                  {/* Meta line */}
+                  <div style={{ fontSize: 10, color: "var(--tx3)", display: "flex", alignItems: "center", gap: 5,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <span>{fmtHistoryTime(h.created_at)}</span>
+                    {h.profile_name && <><span>·</span><span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{h.profile_name}</span></>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Input card ── */}
       <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, marginBottom: 20, overflow: "hidden" }}>
 
@@ -12752,7 +12974,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                   onChange={e => handleUrlChange(e.target.value)}
                   placeholder={"https://www.amazon.de/dp/B0XXXXXXX\nhttps://www.amazon.de/dp/B0YYYYYYY\n(вставьте ссылки конкурентов — по одной в строке)"}
                   rows={3}
-                  style={{ width: "100%", boxSizing: "border-box", resize: "none", fontSize: 13, lineHeight: 1.6,
+                  style={{ width: "100%", boxSizing: "border-box", resize: "vertical", fontSize: 13, lineHeight: 1.6,
                     background: urlAsinCount > 0 ? "rgba(34,197,94,.05)" : "var(--s2)",
                     border: `1.5px solid ${urlInput && !urlAsinCount ? "var(--red)" : urlAsinCount > 0 ? "var(--grn)" : "var(--b2)"}`,
                     borderRadius: 8, padding: "8px 36px 8px 34px", color: "var(--tx)",
@@ -12790,7 +13012,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 onChange={e => setAsins(e.target.value)}
                 placeholder={"B08XXXXXX\nB09XXXXXX"}
                 rows={3}
-                style={{ width: "100%", boxSizing: "border-box", resize: "none", fontSize: 12,
+                style={{ width: "100%", boxSizing: "border-box", resize: "vertical", fontSize: 12,
                   background: "var(--s2)", border: "1.5px solid var(--b2)", borderRadius: 8,
                   padding: "8px 12px", color: "var(--tx)", fontFamily: "var(--mono)",
                   lineHeight: 1.6, transition: "border-color .15s" }}
@@ -12808,7 +13030,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 onChange={e => setProductTitle(e.target.value)}
                 placeholder={t("kwr.titlePlaceholder")}
                 rows={3}
-                style={{ width: "100%", boxSizing: "border-box", resize: "none", fontSize: 13,
+                style={{ width: "100%", boxSizing: "border-box", resize: "vertical", fontSize: 13,
                   background: "var(--s2)", border: "1.5px solid var(--b2)", borderRadius: 8,
                   padding: "8px 12px", color: "var(--tx)", lineHeight: 1.6,
                   transition: "border-color .15s" }}
@@ -12939,11 +13161,41 @@ const KeywordResearchPage = ({ workspaceId }) => {
                 {srcLabel(s)}
               </span>
             ))}
-            <button onClick={exportCSV} title="Экспорт в CSV"
-              style={{ fontSize: 12, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--b2)",
-                background: "transparent", color: "var(--tx2)", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
-              ↓ CSV
-            </button>
+            <div style={{ position: "relative" }}>
+              <button onClick={() => setExportMenuOpen(o => !o)} title={t("kwr.exportTitle")}
+                style={{ fontSize: 12, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--b2)",
+                  background: exportMenuOpen ? "var(--s2)" : "transparent", color: "var(--tx2)", cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+                ↓ {t("kwr.exportBtn")} <ChevronDown size={12} />
+              </button>
+              {exportMenuOpen && (
+                <>
+                  <div onClick={() => setExportMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                  <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 41,
+                    background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 8,
+                    boxShadow: "0 8px 24px rgba(0,0,0,.18)", minWidth: 168, overflow: "hidden" }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase",
+                      color: "var(--tx3)", padding: "8px 12px 4px" }}>
+                      {selected.size > 0 ? t("kwr.exportSelected", { n: selected.size }) : t("kwr.exportAll", { n: results.keywords.length })}
+                    </div>
+                    {[
+                      { fmt: "csv",  label: "CSV",   hint: ".csv" },
+                      { fmt: "xlsx", label: "Excel", hint: ".xlsx" },
+                      { fmt: "tsv",  label: "TSV",   hint: ".tsv" },
+                      { fmt: "json", label: "JSON",  hint: ".json" },
+                    ].map(({ fmt, label, hint }) => (
+                      <button key={fmt} onClick={() => exportAs(fmt)}
+                        style={{ display: "flex", width: "100%", boxSizing: "border-box", alignItems: "center",
+                          justifyContent: "space-between", gap: 10, padding: "8px 12px", border: "none",
+                          background: "transparent", color: "var(--tx)", fontSize: 13, cursor: "pointer", textAlign: "left" }}
+                        onMouseEnter={e => e.currentTarget.style.background = "var(--s2)"}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                        <span>{label}</span><span style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
             <button onClick={() => toggleAll(selected.size < displayedKws.length)}
               style={{ fontSize: 12, padding: "5px 12px", borderRadius: 6, border: "1px solid var(--b2)",
                 background: "transparent", color: "var(--tx2)", cursor: "pointer" }}>
@@ -15137,7 +15389,7 @@ const StrategyModal = ({ strategy, availableRules, onClose, onSave, t }) => {
 };
 
 // ─── Alerts Page ──────────────────────────────────────────────────────────────
-const ALERT_METRICS   = ["acos", "roas", "spend", "impressions", "ctr", "cpc"];
+const ALERT_METRICS   = ["acos", "roas", "spend", "sales", "orders", "clicks", "impressions", "ctr", "cpc", "cvr", "bsr"];
 const ALERT_OPERATORS = [{ value: "gt", label: ">" }, { value: "gte", label: ">=" }, { value: "lt", label: "<" }, { value: "lte", label: "<=" }];
 
 const AlertsPage = ({ workspaceId }) => {
@@ -15146,7 +15398,7 @@ const AlertsPage = ({ workspaceId }) => {
   const [showModal, setShowModal] = useState(false);
   const [editConfig, setEditConfig] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24 });
+  const [form, setForm] = useState({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "" });
   const { colgroup: alertCfgColgroup, resizeHandle: alertCfgRH } = useResizableColumns(
     "alerts-configs", [160, 100, 90, 120, 90, 70, 100]
   );
@@ -15182,7 +15434,7 @@ const AlertsPage = ({ workspaceId }) => {
 
   function openCreate() {
     setEditConfig(null);
-    setForm({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24 });
+    setForm({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "" });
     setShowModal(true);
   }
 
@@ -15194,12 +15446,14 @@ const AlertsPage = ({ workspaceId }) => {
       name: config.name, metric: cond.metric || config.alert_type,
       operator: cond.operator || "gt", value: cond.value || 0,
       channels: ch || { in_app: true, email: false }, cooldown_hours: config.suppression_hours || 24,
+      window_days: cond.window_days || 7, asin: cond.asin || "",
     });
     setShowModal(true);
   }
 
   async function saveConfig() {
     if (!form.name) return alert(t("alerts.alertName"));
+    if (form.metric === "bsr" && !form.asin?.trim()) return alert(t("alerts.asinRequired"));
     setSaving(true);
     try {
       if (editConfig) {
@@ -15211,6 +15465,20 @@ const AlertsPage = ({ workspaceId }) => {
       setShowModal(false);
     } catch (e) { alert(t("common.error") + e.message); }
     setSaving(false);
+  }
+
+  const [checking, setChecking] = useState(false);
+  async function runCheck() {
+    setChecking(true);
+    try {
+      const r = await post("/alerts/check", {});
+      showAlertToast(t("alerts.checkResult", { triggered: r.triggered ?? 0, emailed: r.emailed ?? 0 }));
+      reloadInstances();
+      if ((r.triggered ?? 0) > 0) setTab("instances");
+    } catch (e) {
+      showAlertToast((t("common.error") || "Error: ") + e.message, "error");
+    }
+    setChecking(false);
   }
 
   async function deleteConfig(id) {
@@ -15270,6 +15538,11 @@ const AlertsPage = ({ workspaceId }) => {
         </div>
         {tab === "configs" && (
           <div style={{ display:"flex", gap:8 }}>
+            <button onClick={runCheck} disabled={checking} className="btn btn-ghost"
+              style={{ fontSize:12, padding:"7px 14px", display:"flex", alignItems:"center", gap:6 }}
+              title={t("alerts.checkNowHint")}>
+              {checking ? <RefreshCw size={14} className="spin" /> : <Bell size={14} strokeWidth={1.75} />} {t("alerts.checkNow")}
+            </button>
             <button onClick={toggleAlertTrash} className={`btn ${showTrash ? "btn-primary" : "btn-ghost"}`}
               style={{ fontSize:12, padding:"7px 14px", display:"flex", alignItems:"center", gap:6 }}>
               <Trash2 size={14} strokeWidth={1.75} /> {t("trash.label")}
@@ -15523,7 +15796,31 @@ const AlertsPage = ({ workspaceId }) => {
                 </select>
                 <input type="number" value={form.value} onChange={e => setForm(f => ({ ...f, value: parseFloat(e.target.value) }))} style={{ width: 80 }} />
               </div>
+              <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 5 }}>
+                {form.metric === "bsr" ? t("alerts.metricHintBsr")
+                  : ["spend","sales","orders","clicks","impressions"].includes(form.metric) ? t("alerts.metricHintSum")
+                  : t("alerts.metricHintRatio")}
+              </div>
             </div>
+
+            {form.metric === "bsr" ? (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.asinLabel")}</div>
+                <input value={form.asin || ""} onChange={e => setForm(f => ({ ...f, asin: e.target.value.toUpperCase().trim() }))}
+                  placeholder="B0XXXXXXXX" style={{ width: "100%", fontFamily: "var(--mono)" }} />
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 5 }}>{t("alerts.asinHint")}</div>
+              </div>
+            ) : (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.windowDays")}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="number" min={1} max={90} value={form.window_days}
+                    onChange={e => setForm(f => ({ ...f, window_days: Math.min(90, Math.max(1, parseInt(e.target.value) || 7)) }))}
+                    style={{ width: 80 }} />
+                  <span style={{ fontSize: 13, color: "var(--tx2)" }}>{t("alerts.daysSuffix")}</span>
+                </div>
+              </div>
+            )}
 
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.channels")}</div>
@@ -15537,6 +15834,17 @@ const AlertsPage = ({ workspaceId }) => {
                   {t("alerts.channelEmail")}
                 </label>
               </div>
+              {form.channels.email && (
+                <div style={{ marginTop: 10 }}>
+                  <input
+                    value={form.channels.email_to || ""}
+                    onChange={e => setForm(f => ({ ...f, channels: { ...f.channels, email_to: e.target.value } }))}
+                    placeholder={t("alerts.emailRecipientsPlaceholder")}
+                    style={{ width: "100%" }}
+                  />
+                  <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 5 }}>{t("alerts.emailRecipientsHint")}</div>
+                </div>
+              )}
             </div>
 
             <div style={{ marginBottom: 20 }}>
@@ -16710,7 +17018,14 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
                           </select>
                         ) : roleBadge(m.workspace_role)}
                       </td>
-                      <td style={{ fontSize: 11, color: "var(--tx3)" }}>{relTime(m.last_login_at) || "Never"}</td>
+                      <td style={{ fontSize: 11, color: "var(--tx3)" }}>
+                        {m.status === "pending" ? (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 600,
+                            padding: "2px 9px", borderRadius: 20, background: "rgba(245,158,11,.12)", color: "var(--amb)" }}>
+                            <Hourglass size={11} /> {t("settings.statusPending")}
+                          </span>
+                        ) : (relTime(m.last_login_at) || "Never")}
+                      </td>
                       <td>
                         {canRemove && m.workspace_role !== "owner" && m.id !== appUser?.id && (
                           <button className="btn btn-red" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => removeMember(m.id, m.name)}>
@@ -16805,7 +17120,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
       {/* ── Invite Modal ── */}
       {showInvite && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", boxSizing: "border-box" }}>
-          <div style={{ background: "#1a1d2e", borderRadius: 12, padding: 28, width: "100%", maxWidth: 480, margin: "0 auto" }}>
+          <div style={{ background: "var(--s1)", color: "var(--tx)", border: "1px solid var(--b2)", boxShadow: "0 8px 40px rgba(0,0,0,.3)", borderRadius: 12, padding: 28, width: "100%", maxWidth: 480, margin: "0 auto" }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, marginBottom: 20 }}>{t("settings.inviteMember")}</div>
             <div style={SL}>Email</div>
             <input value={inviteForm.email} onChange={e => setInviteForm(f => ({...f, email: e.target.value}))} style={{ width: "100%", marginBottom: inviteErr.email ? 4 : 14 }} placeholder="colleague@example.com" />
@@ -16832,7 +17147,7 @@ const SettingsPage = ({ workspaceId, user: appUser }) => {
       {/* ── Delete Workspace Modal ── */}
       {showDeleteWs && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", zIndex: 1000, overflowY: "auto", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "40px 20px", boxSizing: "border-box" }}>
-          <div style={{ background: "#1a1d2e", borderRadius: 12, padding: 28, width: "100%", maxWidth: 460, margin: "0 auto" }}>
+          <div style={{ background: "var(--s1)", color: "var(--tx)", border: "1px solid var(--b2)", boxShadow: "0 8px 40px rgba(0,0,0,.3)", borderRadius: 12, padding: 28, width: "100%", maxWidth: 460, margin: "0 auto" }}>
             <div style={{ fontFamily: "var(--disp)", fontSize: 16, fontWeight: 700, color: "var(--red)", marginBottom: 12 }}>Delete Workspace</div>
             <div style={{ fontSize: 13, color: "var(--tx2)", marginBottom: 16 }}>
               Type <strong style={{ color: "var(--tx)" }}>{wsData?.name}</strong> to confirm deletion:

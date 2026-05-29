@@ -332,7 +332,8 @@ describe("PATCH /settings/members/:userId/role", () => {
   });
 
   test("returns 404 when member not found", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [] }); // active member lookup → none
+    dbQuery.mockResolvedValueOnce({ rows: [] }); // pending invitation lookup → none
 
     const res = await request(app)
       .patch(`/settings/members/${USER2_ID}/role`)
@@ -340,6 +341,20 @@ describe("PATCH /settings/members/:userId/role", () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not found/i);
+  });
+
+  test("updates a pending invitee's role on the invitation", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });               // not an active member
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: "inv-1" }] }); // has a pending invitation
+    dbQuery.mockResolvedValueOnce({ rows: [] });               // UPDATE invitation role
+
+    const res = await request(app)
+      .patch(`/settings/members/${USER2_ID}/role`)
+      .send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe("admin");
+    expect(res.body.pending).toBe(true);
   });
 
   test("returns 403 when trying to change owner role", async () => {
@@ -386,12 +401,24 @@ describe("DELETE /settings/members/:userId", () => {
   });
 
   test("returns 404 when member not found", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [] }); // active member lookup → none
+    dbQuery.mockResolvedValueOnce({ rows: [] }); // pending invitation lookup → none
 
     const res = await request(app).delete(`/settings/members/${USER2_ID}`);
 
     expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not found/i);
+  });
+
+  test("cancels the invitation when removing a pending invitee", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });               // not an active member
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: "inv-1" }] }); // has a pending invitation
+    dbQuery.mockResolvedValueOnce({ rows: [] });               // DELETE invitations
+
+    const res = await request(app).delete(`/settings/members/${USER2_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.cancelledInvite).toBe(true);
   });
 
   test("returns 403 when trying to remove workspace owner", async () => {

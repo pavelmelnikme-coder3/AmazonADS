@@ -12,10 +12,30 @@ router.use(requireAuth, requireWorkspace);
 // GET /products — list all products for workspace with latest BSR + metrics
 router.get("/", async (req, res, next) => {
   try {
+    // ── Filters (enum-driven → safe to inline) ──
+    // availability: all | available (live listing) | unavailable (delisted / 404, no catalog data)
+    // advertising:  all | advertised (enabled ad in enabled campaign) | not_advertised
+    const availability = ["available", "unavailable"].includes(req.query.availability) ? req.query.availability : "all";
+    const advertising  = ["advertised", "not_advertised"].includes(req.query.advertising) ? req.query.advertising : "all";
+
+    const advExists = `EXISTS (
+      SELECT 1 FROM product_ads pa JOIN campaigns c ON c.id = pa.campaign_id
+      WHERE pa.workspace_id = p.workspace_id AND UPPER(pa.asin) = p.asin
+        AND pa.state = 'enabled' AND c.state = 'enabled'
+    )`;
+    let availFilter = "";
+    if (availability === "available")   availFilter = "AND p.title IS NOT NULL AND p.title <> ''";
+    if (availability === "unavailable") availFilter = "AND (p.title IS NULL OR p.title = '')";
+    let advFilter = "";
+    if (advertising === "advertised")     advFilter = `AND ${advExists}`;
+    if (advertising === "not_advertised") advFilter = `AND NOT ${advExists}`;
+
     const { rows } = await query(
       `SELECT
          p.id, p.asin, p.marketplace_id, p.title, p.brand, p.image_url, p.is_active,
          p.created_at,
+         ${advExists} AS is_advertised,
+         (p.title IS NOT NULL AND p.title <> '') AS is_available,
          s.best_rank,
          s.best_category,
          s.classification_ranks,
@@ -126,6 +146,8 @@ router.get("/", async (req, res, next) => {
            AND o.order_status NOT IN ('Cancelled', 'Pending')
        ) orders ON true
        WHERE p.workspace_id = $1 AND p.is_active = true
+         ${availFilter}
+         ${advFilter}
        ORDER BY s.best_rank ASC NULLS LAST, p.created_at DESC`,
       [req.workspaceId]
     );

@@ -252,23 +252,37 @@ Validation: 400 if `conditions` or `actions` arrays are missing/empty.
 ### GET /alerts/configs
 List alert configurations.
 
-### POST /alerts/configs
+### POST /alerts/configs *(metrics + channels + window expanded 2026-05-29)*
 ```json
 {
   "name": "High ACoS alert",
   "metric": "acos",
   "operator": "gt",
-  "threshold": 35,
-  "channels": ["inapp", "email"],
+  "value": 35,
+  "window_days": 7,
+  "channels": { "in_app": true, "email": true, "email_to": "a@x.com, b@y.com" },
   "cooldown_hours": 24
 }
 ```
-Metrics: `acos`, `spend`, `ctr`, `roas`, `impressions`, `clicks`  
-Operators: `gt`, `lt`, `gte`, `lte`
+BSR alert (per-product, latest snapshot — `asin` required, `window_days` ignored):
+```json
+{ "name": "BSR drop", "metric": "bsr", "operator": "gt", "value": 5000, "asin": "B0XXXXXXXX",
+  "channels": { "in_app": true } }
+```
+Performance metrics (account aggregate over `window_days`, default 7, max 90):
+`acos`, `roas`, `spend`, `sales`, `orders`, `clicks`, `impressions`, `ctr`, `cpc`, `cvr`.
+Product metric: `bsr` (requires `asin`).  
+Operators: `gt`, `lt`, `gte`, `lte`.  
+Channels: `in_app` (creates an alert instance), `email` (sends via Brevo SMTP — to `email_to` or, if empty, workspace owners & admins).
 
 ### PUT /alerts/configs/:id
 ### DELETE /alerts/configs/:id
 ### PATCH /alerts/configs/:id/toggle
+
+### POST /alerts/check *(2026-05-29)*
+Evaluate all **active** alert configs for the workspace immediately (manual run / "Check now").
+Returns `{ evaluated, triggered, emailed }`. Also runs hourly via cron (at :15). Respects each
+config's `suppression_hours` cooldown; on breach writes an instance and fires the configured channels.
 
 ### GET /alerts
 List triggered alert instances.

@@ -6,6 +6,53 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-05-29 — Stage 19: KWR history, Alerts engine, Products catalog, Team
+
+### Added — Keyword Research search history (workspace-shared)
+
+- **`kwr_search_history` table** (migration `032_kwr_search_history.sql`): stores each discovery run's inputs + a full snapshot of the results, workspace-shared, pruned to the latest 50 per workspace on insert.
+- **`POST /keyword-research/discover`** now auto-saves a history row (non-fatal) with the input ASINs/title/URL/profile/sources/locale/organicTopN + result snapshot.
+- New routes: **`GET /keyword-research/history`** (lightweight list), **`GET /keyword-research/history/:id`** (full snapshot for restore), **`DELETE /keyword-research/history/:id`**, **`DELETE /keyword-research/history`** (clear all).
+- **UI**: collapsible bar above the input card (collapsed = one row; expanded = horizontal compact cards). Clicking a card instantly restores the form + results from the snapshot — **no re-query** (saves paid Jungle Scout / Claude calls). 13 new `kwr.hist*` i18n keys (en/ru/de).
+
+### Added — Keyword Research multi-format export
+
+- Old "↓ CSV" button (actually wrote `.tsv`, 9 columns with 2 always blank, only the filtered view) replaced with a **format dropdown: CSV · Excel (.xlsx) · TSV · JSON**, **12 full columns** (incl. source, match type, organic rank, top position, search volume, impressions share, ease, placement), exporting **all** keywords (or the current selection) — not just the filtered view.
+- New **`POST /keyword-research/export`** builds a real `.xlsx` via `exceljs` from a generic `{ columns, rows }` payload (bold header, auto width, frozen header row).
+- All three product-input textareas are now **`resize: vertical`** (were fixed-height).
+
+### Added — AI keyword prompt guardrails
+
+- `services/ai/keywordResearch.js`: shared `KEYWORD_EXCLUSIONS` injected into **both** the generation and scoring prompts — never output competitor brands (Amazon policy), the seller's own brand, subjective/promo claims (best/cheapest/premium/…), ASIN codes, or misleading off-topic terms. The scoring prompt sets `keep:false` so such terms coming from Jungle Scout / Amazon are filtered out too.
+
+### Added — Products: full catalog + availability/advertising filters
+
+- Bulk-loaded all advertised ASINs into the Products watchlist and enriched title/BSR via SP-API. (Of the previously-untracked advertised ASINs, ~67 % returned catalog 404 — delisted listings accumulated from old campaigns.)
+- **`GET /products`** gains `availability` (`all|available|unavailable`) and `advertising` (`all|advertised|not_advertised`) query params, plus per-row `is_available` and `is_advertised` flags.
+- **UI**: two toolbar filters — "Listing availability" (Available / Delisted) and "Advertising" (Advertised / Not advertised). Count label shows `filtered / total`.
+
+### Added — Team: pending invitees + role editing
+
+- **`GET /settings/members`** now includes pending invitees (invited, not yet accepted) with a `status` field (`active` / `pending`) — previously new-user invitations were invisible until accepted.
+- A pending member's role can be changed **before** they accept (updates the invitation; applied on accept). **`DELETE /settings/members/:userId`** cancels a pending invitation. UI shows a "Pending" badge.
+
+### Added — Alerts: evaluation engine + email + more metrics + BSR
+
+- **The alerts feature had no evaluation engine** — the `alert-check` queue name existed but nothing evaluated thresholds, so **no alert ever fired**. Implemented `services/alerts/evaluate.js evaluateWorkspaceAlerts()`: evaluates active configs, respects the `suppression_hours` cooldown, writes `alert_instances`, and fires channels.
+- **Hourly cron** (`scheduler.js`, at :15) + **`POST /alerts/check`** for an on-demand/manual run (UI "Check now" button).
+- **Email channel** via `email.js sendAlertEmail` (Brevo SMTP). Recipients: `channels.email_to` (comma-separated) or, if empty, workspace owners & admins. Channels JSON: `{ in_app, email, email_to }`.
+- **Metrics expanded 6 → 11**: `acos, roas, spend, sales, orders, clicks, impressions, ctr, cpc, cvr` (account aggregate from `fact_metrics_daily`, campaign-level) + **`bsr`** (latest Best-Sellers Rank for a specific `asin` from `bsr_snapshots`).
+- **Configurable look-back window** (`conditions.window_days`, 1–90, default 7) for performance metrics; BSR uses the latest snapshot. conditions JSON: `{ metric, operator, value, window_days, asin }`.
+
+### Fixed
+
+- **Alerts ACOS edge case**: spend with zero sales (ACOS effectively infinite) was skipped (`!isFinite`) so an "ACOS > X" alert never fired in the worst case. Now mapped to a large finite value (9999) so it correctly triggers `>` thresholds.
+- **Invite modal & Delete-workspace modal** used a hardcoded dark background (`#1a1d2e`) → unreadable in light theme. Switched to theme variables (`var(--s1)`, border, shadow, `var(--tx)`).
+- Removed a stale active diagnostic rule `__verify_keyword_metrics__` (dry-run, clicks≥1 → pause) from production; all rules in the workspace are now real, active rules.
+- Test hygiene: fixed a stale `DELETE /alerts/configs/:id` test mock (out of date since the Stage 15 trash flow added a pre-delete SELECT).
+
+---
+
 ## [Unreleased] — 2026-05-11
 
 ### Added — Full test coverage: campaigns wizard, rules engine

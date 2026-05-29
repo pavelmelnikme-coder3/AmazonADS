@@ -698,3 +698,111 @@ describe("POST /keyword-research/add-to-adgroup", () => {
     expect(res.status).toBe(500);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Search history endpoints
+// ═════════════════════════════════════════════════════════════════════════════
+describe("GET /keyword-research/history", () => {
+  test("returns the workspace search history list", async () => {
+    const HIST_ROW = {
+      id: "hist-0001", profile_id: PROF_ID, profile_name: "Acme · DE",
+      locale: "de", sources: ["jungle_scout", "ai"], organic_top_n: 32,
+      asins: ["B01MFAUXDD"], product_title: "Thermo container", url_input: null,
+      ad_group_id: null, total: 162, sources_used: ["jungle_scout", "ai_generated"],
+      created_at: new Date().toISOString(), created_by_name: "Test User",
+    };
+    dbQuery.mockResolvedValueOnce({ rows: [HIST_ROW] });
+
+    const res = await request(buildApp()).get("/keyword-research/history");
+
+    expect(res.status).toBe(200);
+    expect(res.body.history).toHaveLength(1);
+    expect(res.body.history[0].total).toBe(162);
+    // Workspace-scoped query
+    expect(dbQuery).toHaveBeenCalledWith(expect.any(String), [WS_ID, 30]);
+  });
+
+  test("honours the limit query param (clamped to 50)", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    await request(buildApp()).get("/keyword-research/history?limit=999");
+    expect(dbQuery).toHaveBeenCalledWith(expect.any(String), [WS_ID, 50]);
+  });
+
+  test("propagates DB errors as 500", async () => {
+    dbQuery.mockRejectedValueOnce(new Error("DB failure"));
+    const res = await request(buildApp()).get("/keyword-research/history");
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("GET /keyword-research/history/:id", () => {
+  test("returns the full row including the result snapshot", async () => {
+    const ROW = {
+      id: "hist-0001", profile_id: PROF_ID, profile_name: "Acme · DE",
+      locale: "de", sources: ["jungle_scout"], organic_top_n: 32,
+      asins: ["B01MFAUXDD"], product_title: "Thermo", url_input: null,
+      ad_group_id: null, total: 1, sources_used: ["jungle_scout"],
+      result: { keywords: [{ keyword_text: "thermo" }], total: 1 },
+      created_at: new Date().toISOString(),
+    };
+    dbQuery.mockResolvedValueOnce({ rows: [ROW] });
+
+    const res = await request(buildApp()).get("/keyword-research/history/hist-0001");
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.keywords).toHaveLength(1);
+    expect(dbQuery).toHaveBeenCalledWith(expect.any(String), ["hist-0001", WS_ID]);
+  });
+
+  test("returns 404 when the search is not found in the workspace", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(buildApp()).get("/keyword-research/history/nope");
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("DELETE /keyword-research/history/:id", () => {
+  test("deletes a single search scoped to the workspace", async () => {
+    dbQuery.mockResolvedValueOnce({ rowCount: 1 });
+    const res = await request(buildApp()).delete("/keyword-research/history/hist-0001");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(dbQuery).toHaveBeenCalledWith(expect.any(String), ["hist-0001", WS_ID]);
+  });
+});
+
+describe("DELETE /keyword-research/history", () => {
+  test("clears the entire workspace history", async () => {
+    dbQuery.mockResolvedValueOnce({ rowCount: 5 });
+    const res = await request(buildApp()).delete("/keyword-research/history");
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(dbQuery).toHaveBeenCalledWith(expect.any(String), [WS_ID]);
+  });
+});
+
+describe("POST /keyword-research/export", () => {
+  test("returns an xlsx attachment for valid columns + rows", async () => {
+    const res = await request(buildApp())
+      .post("/keyword-research/export")
+      .responseType("blob")
+      .send({
+        columns: ["#", "Keyword", "Relevance"],
+        rows: [[1, "thermo box", 95], [2, "lunch box", 80]],
+        filename: "keywords-2026-05-29",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/spreadsheetml\.sheet/);
+    expect(res.headers["content-disposition"]).toMatch(/keywords-2026-05-29\.xlsx/);
+    // XLSX files are ZIP archives — first two bytes are "PK"
+    expect(Buffer.from(res.body).slice(0, 2).toString()).toBe("PK");
+  });
+
+  test("returns 400 when columns/rows are not arrays", async () => {
+    const res = await request(buildApp())
+      .post("/keyword-research/export")
+      .send({ columns: "nope", rows: {} });
+    expect(res.status).toBe(400);
+  });
+});

@@ -190,4 +190,61 @@ async function sendPasswordResetEmail({ to, resetUrl }) {
   }
 }
 
-module.exports = { sendInviteEmail, sendPasswordResetEmail };
+// ─── Alert notification email ─────────────────────────────────────────────────
+async function sendAlertEmail({ to, alertName, workspaceName, metricLabel, operatorLabel, threshold, actualText, windowDays, periodText, dashboardUrl }) {
+  const period = periodText || (windowDays ? `the last ${windowDays} days` : "the latest data");
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>AdsFlow Alert</title></head>
+<body style="margin:0;padding:0;background:#0f1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0f1117;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#1a1d27;border-radius:16px;border:1px solid #2a2d3e;overflow:hidden;">
+        <tr>
+          <td style="background:linear-gradient(135deg,#f59e0b,#ef4444);padding:32px;text-align:center;">
+            <div style="color:white;font-size:28px;font-weight:900;letter-spacing:-1px;">⚠ AdsFlow Alert</div>
+            <div style="color:rgba(255,255,255,0.85);font-size:13px;margin-top:6px;">${workspaceName || "Workspace"}</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 40px;">
+            <h1 style="color:#f1f5f9;font-size:20px;font-weight:700;margin:0 0 16px;">${alertName}</h1>
+            <div style="background:#1e2235;border:1px solid #2a2d3e;border-radius:10px;padding:18px 20px;margin-bottom:20px;">
+              <div style="color:#94a3b8;font-size:14px;line-height:1.7;">
+                <strong style="color:#f1f5f9;">${metricLabel}</strong> is now
+                <strong style="color:#fbbf24;">${actualText}</strong>,
+                crossing your threshold of <strong style="color:#e2e8f0;">${operatorLabel} ${threshold}</strong>
+                over ${period}.
+              </div>
+            </div>
+            ${dashboardUrl ? `<div style="text-align:center;margin:24px 0 4px;">
+              <a href="${dashboardUrl}" style="display:inline-block;background:linear-gradient(135deg,#3B82F6,#6366f1);color:white;text-decoration:none;padding:12px 32px;border-radius:10px;font-size:14px;font-weight:600;">Open dashboard →</a>
+            </div>` : ""}
+          </td>
+        </tr>
+        <tr>
+          <td style="border-top:1px solid #2a2d3e;padding:18px 40px;text-align:center;">
+            <p style="color:#475569;font-size:11px;margin:0;">AdsFlow — Amazon Ads Dashboard · You receive this because an alert is configured for this workspace.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  try {
+    await transporter.sendMail({
+      from: `"AdsFlow Alerts" <${process.env.BREVO_FROM_EMAIL}>`,
+      to: Array.isArray(to) ? to.join(", ") : to,
+      subject: `⚠ AdsFlow Alert: ${alertName}`,
+      html,
+    });
+    logger.info(`Alert email sent`, { to, alert: alertName });
+  } catch (err) {
+    logger.error(`Failed to send alert email`, { to, error: err.message });
+    throw err;
+  }
+}
+
+module.exports = { sendInviteEmail, sendPasswordResetEmail, sendAlertEmail };

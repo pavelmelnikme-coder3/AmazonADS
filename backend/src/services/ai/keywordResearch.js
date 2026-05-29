@@ -22,6 +22,16 @@ const LOCALE_NAMES = {
   ar: "Arabic", hi: "Hindi", ko: "Korean",
 };
 
+// Hard exclusion rules for organic-listing keywords. Shared by generation and
+// scoring prompts. These categories either violate Amazon policy (brand terms)
+// or hurt conversion/relevance, so they must never appear in the listing.
+const KEYWORD_EXCLUSIONS = `STRICTLY FORBIDDEN — these keywords must NEVER appear:
+- Competitor brand names — a direct violation of Amazon's policy that can get the listing suppressed or blocked.
+- The seller's OWN brand name — it is already indexed automatically, so it only wastes valuable keyword space.
+- Subjective / promotional claims: best, cheapest, amazing, premium, on sale, top, #1, guaranteed, luxury — and their equivalents in the target language.
+- ASIN codes (e.g. B0XXXXXXXX) or any product identifiers.
+- Misleading terms not related to the actual product — they hurt conversion and listing relevance.`;
+
 /**
  * Generate seed keywords for a product using Claude.
  * Especially useful for non-native language markets.
@@ -68,6 +78,9 @@ Generate exactly 40 keywords covering ALL of these categories:
 5. SYNONYM / ALTERNATIVE NAMES (different words for the same product type)
 6. LONG-TAIL combinations (specific phrases with lower competition but clear buyer intent)
 7. PROBLEM-SOLUTION queries ("Essen warm halten unterwegs", "thermobehälter ohne auslaufen"...)
+
+${KEYWORD_EXCLUSIONS}
+Do NOT generate any keyword that falls into the categories above.
 
 For each keyword assign placement:
 - "title" — if it would be a primary search a buyer uses to find exactly this product (highest volume)
@@ -138,7 +151,10 @@ For each keyword provide:
 - relevance_score: 0-100 (how likely a buyer searching this keyword wants exactly this product)
 - suggested_match_types: array from ["exact","phrase","broad"]
 - placement: where in the listing this keyword belongs: "title" (high-volume core terms), "bullets" (feature/use-case), "backend" (long-tail/synonyms), "description" (contextual phrases)
-- keep: false ONLY if completely irrelevant or wrong product category
+- keep: false if completely irrelevant or wrong product category, OR if it is a forbidden keyword (see below)
+
+${KEYWORD_EXCLUSIONS}
+Set keep:false for ANY keyword that falls into the forbidden categories above.
 
 Keywords:
 ${batch.map((k, idx) => `${idx + 1}. "${k.keyword_text}"`).join("\n")}

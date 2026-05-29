@@ -1,6 +1,7 @@
 const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
+const { evaluateWorkspaceAlerts } = require("../services/alerts/evaluate");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -35,11 +36,14 @@ router.get("/configs", async (req, res, next) => {
 // POST /alerts/configs
 router.post("/configs", async (req, res, next) => {
   try {
-    const { name, metric, operator, value, channels = { in_app: true }, cooldown_hours = 24 } = req.body;
+    const { name, metric, operator, value, channels = { in_app: true }, cooldown_hours = 24, window_days, asin } = req.body;
     if (!name || !metric || !operator || value === undefined) {
       return res.status(400).json({ error: "name, metric, operator, value required" });
     }
-    const conditions = { metric, operator, value };
+    if (metric === "bsr" && !asin) {
+      return res.status(400).json({ error: "asin required for BSR alerts" });
+    }
+    const conditions = { metric, operator, value, window_days: window_days || 7, asin: asin || null };
     const { rows: [config] } = await query(
       `INSERT INTO alert_configs (workspace_id, name, alert_type, conditions, channels, suppression_hours)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
@@ -52,11 +56,14 @@ router.post("/configs", async (req, res, next) => {
 // PUT /alerts/configs/:id
 router.put("/configs/:id", async (req, res, next) => {
   try {
-    const { name, metric, operator, value, channels, cooldown_hours } = req.body;
+    const { name, metric, operator, value, channels, cooldown_hours, window_days, asin } = req.body;
     if (!name || !metric || !operator || value === undefined) {
       return res.status(400).json({ error: "name, metric, operator, value required" });
     }
-    const conditions = { metric, operator, value };
+    if (metric === "bsr" && !asin) {
+      return res.status(400).json({ error: "asin required for BSR alerts" });
+    }
+    const conditions = { metric, operator, value, window_days: window_days || 7, asin: asin || null };
     const { rows: [config] } = await query(
       `UPDATE alert_configs
        SET name=$1, alert_type=$2, conditions=$3, channels=$4, suppression_hours=$5, updated_at=NOW()
@@ -129,6 +136,15 @@ router.get("/", async (req, res, next) => {
       data: rows,
       pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
+  } catch (err) { next(err); }
+});
+
+// POST /alerts/check — evaluate all active alerts for this workspace now (manual run / test)
+router.post("/check", async (req, res, next) => {
+  try {
+    const { rows: [ws] } = await query("SELECT name FROM workspaces WHERE id = $1", [req.workspaceId]);
+    const result = await evaluateWorkspaceAlerts(req.workspaceId, { workspaceName: ws?.name || null });
+    res.json(result);
   } catch (err) { next(err); }
 });
 
