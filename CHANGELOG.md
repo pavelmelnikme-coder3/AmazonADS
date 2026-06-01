@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-01 — Stage 20: Rule write-back correctness & audit visibility
+
+Audit of the last 3 days of rule execution surfaced silent divergence between the local DB and Amazon: rules logged actions as "applied" while several write-backs were actually being rejected by the Amazon Ads API and swallowed by non-fatal `.catch()` handlers.
+
+### Fixed
+
+- **Negative-keyword archive rejected by Amazon (400 INVALID_ARGUMENT).** `services/amazon/writeback.js → archiveNegativeKeyword` sent `state: "archived"`, but the Amazon Ads negative-keyword `state` field only accepts `ENABLED | PROPOSED | PAUSED`. This failed ~24 times over 3 days — the negative was removed locally but left **active** on Amazon (the reconciled search term stayed blocked). Now sends `state: "PAUSED"`, mirroring the already-correct negative-**target** path; the local row is still marked `archived` for our own bookkeeping.
+- **`audit_events.amazon_status` never populated for rule actions.** Every rule write-back went through `.catch(warn)` with no status recorded, so failures (including a budget `422`) were masked as "0 errors" in the journal. Added `updateAuditStatus` propagation via a new `trackWriteback(auditId, promise, msg)` helper in `routes/rules.js → executeRule`, wired into all negative add/archive and budget/set_budget write-backs. The journal now records `success` / `error` plus the Amazon error text per action. (Bid/state write-back branches are intentionally left uninstrumented — no current rule uses them; the helper is ready to extend.)
+- **Sponsored Brands campaign sync returned 404 daily.** `services/amazon/entities.js` listed SB campaigns via the removed `GET /sb/v4/campaigns` route. Switched to `POST /sb/v4/campaigns/list` with media type `application/vnd.sbcampaignresource.v4+json`, mirroring the SP `…/list` block. Remains non-fatal (returns `[]` on error), so a wrong contract is no worse than today.
+
+### Changed
+
+- **Rule run telemetry now persisted.** Both run paths (manual `POST /rules/:id/run` and the scheduled `executeAllDueRules`) now set `last_run_status`, increment `run_count`, and insert a row into `rule_executions` (best-effort) — previously these were never written, so `GET /rules/:id/runs` always returned an empty history and `run_count` was stuck at 0.
+
+### Notes
+
+- The single budget `422` (1 of 29 campaigns) is **not** a payload-format bug — the SP `dailyBudget` shape matches the UI path in `routes/campaigns.js`. It is a single-campaign rejection that is now diagnosable via the captured `amazon_status` / `amazon_error`.
+- Tests in the changed suites: **156 passed / 16 failed**. The 16 failures are pre-existing stale-mock assertions (exact `mock.calls` indices), unchanged by this work. Test-only fix: the `routes/audit` mock in `tests/rules.test.js` now also exports `updateAuditStatus`.
+
+---
+
 ## [Unreleased] — 2026-05-29 — Stage 19: KWR history, Alerts engine, Products catalog, Team
 
 ### Added — Keyword Research search history (workspace-shared)
