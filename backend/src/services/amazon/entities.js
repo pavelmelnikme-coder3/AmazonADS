@@ -202,11 +202,43 @@ async function fetchCampaigns(profile) {
       logger.info("SP campaigns fetch complete", { profileId: profile.profile_id, total: campaigns.length });
       return campaigns;
     })(),
-    // SB Campaigns (GET-based, v4)
-    getAll({ ...base, path: "/sb/v4/campaigns", params: { stateFilter: "enabled,paused,archived" }, group: "campaigns", responseKey: "campaigns", debug: true })
-      .then(r => r.map(c => ({ ...c, campaignType: "sponsoredBrands" })))
+    // SB Campaigns via POST /sb/v4/campaigns/list — the GET /sb/v4/campaigns route was
+    // removed by Amazon and returns 404 NOT_FOUND. v4 list uses POST with a vnd media type.
+    (async () => {
+      const accessToken = await getValidAccessToken(profile.connection_id);
+      const mediaType = "application/vnd.sbcampaignresource.v4+json";
+      const campaigns = [];
+      let nextToken = null;
+      let page = 0;
+      do {
+        const body = {
+          stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+          maxResults: 100,
+        };
+        if (nextToken) body.nextToken = nextToken;
+        const response = await axios.post(`${baseUrl}/sb/v4/campaigns/list`, body, {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+            "Amazon-Advertising-API-Scope": String(profile.profile_id),
+            "Content-Type": mediaType,
+            "Accept": mediaType,
+          },
+          timeout: 30000,
+        });
+        const data = response.data;
+        const batch = Array.isArray(data.campaigns) ? data.campaigns : [];
+        batch.forEach(c => { c.campaignType = "sponsoredBrands"; });
+        campaigns.push(...batch);
+        nextToken = data.nextToken || null;
+        page++;
+      } while (nextToken && page < 400);
+      logger.info("SB campaigns fetch complete", { profileId: profile.profile_id, total: campaigns.length });
+      return campaigns;
+    })()
       .catch(err => {
-        logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message, status: err.status, amazonResponse: err.amazonResponse ? JSON.stringify(err.amazonResponse).slice(0, 800) : undefined });
+        const amazonResponse = err.response?.data ? JSON.stringify(err.response.data).slice(0, 800) : (err.amazonResponse ? JSON.stringify(err.amazonResponse).slice(0, 800) : undefined);
+        logger.warn("SB campaigns failed", { profileId: profile.profile_id, error: err.message, status: err.response?.status || err.status, amazonResponse });
         return [];
       }),
     // SD Campaigns (GET-based)

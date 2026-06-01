@@ -14,7 +14,7 @@ const express = require("express");
 const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
-const { writeAudit } = require("./audit");
+const { writeAudit, updateAuditStatus } = require("./audit");
 const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget } = require("../services/amazon/writeback");
 const { put, post } = require("../services/amazon/adsClient");
 const logger  = require("../config/logger");
@@ -84,6 +84,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
   // Wrap writeAudit to always attach rule identity for traceability in the audit journal
   const writeRuleAudit = (opts) => writeAudit({ ...opts, metadata: { rule_id: rule.id, rule_name: rule.name } });
+
+  // Track the result of an Amazon write-back against its audit row so the journal reflects
+  // whether the change actually reached Amazon (amazon_status). Handles both raw put() promises
+  // (resolve = success, reject = error) and writeback helpers that resolve to { ok, error }.
+  // Always non-fatal — a failed write-back never throws out of executeRule (local DB stays updated).
+  const trackWriteback = (auditId, promise, warnMsg) => promise
+    .then(r => updateAuditStatus(auditId, r && r.ok === false ? "error" : "success", r && r.error))
+    .catch(e => { logger.warn(warnMsg, { error: e.message }); return updateAuditStatus(auditId, "error", e.message); });
 
   // Separate bid/budget threshold conditions (applied in SQL WHERE) from metric conditions (post-fetch filter).
   // daily_budget is only a valid SQL threshold on campaign scope; for other scopes it stays in metricConditions
@@ -825,7 +833,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               );
               insertedNtId = ntRows[0]?.id || null;
 
-              await writeRuleAudit({
+              const autoRouteAudit = await writeRuleAudit({
                 orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "search_term.add_negative_target_auto", entityType: "search_term",
                 entityId: entity.id, entityName: entity.keyword_text,
@@ -838,7 +846,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 // Reuse the existing v3 POST writer — it already uses the
                 // correct uppercase ASIN_SAME_AS, ENABLED state, and updates
                 // negative_targets.amazon_neg_target_id with the real Amazon ID.
-                pushNegativeAsin({
+                trackWriteback(autoRouteAudit, pushNegativeAsin({
                   localId: insertedNtId,
                   connectionId: entity.connection_id,
                   profileId: String(entity.amazon_profile_id),
@@ -848,8 +856,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   amazonAdGroupId: entity.amazon_ad_group_id || null,
                   asinValue: asinUpper,
                   level: "ad_group",
-                }).catch(e => logger.warn("Rule auto-route negative_target write-back failed",
-                  { error: e.message }));
+                }), "Rule auto-route negative_target write-back failed");
               }
             }
 
@@ -894,7 +901,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               );
               insertedId = insRows[0]?.id || null;
 
-              await writeRuleAudit({
+              const addNegKwAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "keyword.add_negative", entityType: "keyword",
                 entityId: entity.id, entityName: entity.keyword_text,
@@ -903,7 +910,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               });
 
               if (insertedId && entity.connection_id) {
-                pushNegativeKeyword({
+                trackWriteback(addNegKwAudit, pushNegativeKeyword({
                   localId: insertedId,
                   connectionId: entity.connection_id,
                   profileId: String(entity.amazon_profile_id),
@@ -914,7 +921,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   keywordText: entity.keyword_text,
                   matchType,
                   level: "ad_group",
-                }).catch(e => logger.warn("Rule add_negative_keyword write-back failed", { error: e.message }));
+                }), "Rule add_negative_keyword write-back failed");
               }
             }
             applied.push({
@@ -956,7 +963,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   rule.id, entity.entity_type]
               );
               insertedNtId = ntRows[0]?.id || null;
-              await writeRuleAudit({
+              const addNegTgtStAudit = await writeRuleAudit({
                 orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "search_term.add_negative_target", entityType: "search_term",
                 entityId: entity.id, entityName: entity.keyword_text,
@@ -964,13 +971,13 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 source: "rule",
               });
               if (insertedNtId && entity.connection_id) {
-                pushNegativeAsin({
+                trackWriteback(addNegTgtStAudit, pushNegativeAsin({
                   localId: insertedNtId, connectionId: entity.connection_id,
                   profileId: String(entity.amazon_profile_id), marketplaceId: entity.marketplace_id,
                   campaignType: entity.campaign_type, amazonCampaignId: entity.amazon_campaign_id,
                   amazonAdGroupId: entity.amazon_ad_group_id || null,
                   asinValue: asinUpper, level: "ad_group",
-                }).catch(e => logger.warn("Rule add_neg_target ST write-back failed", { error: e.message }));
+                }), "Rule add_neg_target ST write-back failed");
               }
             }
             applied.push({
@@ -1055,7 +1062,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 );
                 insertedNtId = ntRows[0]?.id || null;
 
-                await writeRuleAudit({
+                const addNegQtAudit = await writeRuleAudit({
                   orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                   action: "target.add_negative_asin_via_query", entityType: "target",
                   entityId: entity.id, entityName: `${exprType0} → ASIN_SAME_AS:${asinUpper}`,
@@ -1064,7 +1071,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 });
 
                 if (insertedNtId && entity.connection_id) {
-                  pushNegativeAsin({
+                  trackWriteback(addNegQtAudit, pushNegativeAsin({
                     localId: insertedNtId,
                     connectionId: entity.connection_id,
                     profileId: String(entity.amazon_profile_id),
@@ -1074,7 +1081,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                     amazonAdGroupId: entity.amazon_ad_group_id || null,
                     asinValue: asinUpper,
                     level: "ad_group",
-                  }).catch(e => logger.warn("Rule query-type neg_target write-back failed", { error: e.message }));
+                  }), "Rule query-type neg_target write-back failed");
                 }
               }
               applied.push({
@@ -1126,7 +1133,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             );
             insertedNtId = ntRows[0]?.id || null;
 
-            await writeRuleAudit({
+            const addNegTgtAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "target.add_negative", entityType: "target",
               entityId: entity.id, entityName: JSON.stringify(entity.expression),
@@ -1160,7 +1167,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   query("UPDATE negative_targets SET amazon_neg_target_id = $1 WHERE id = $2",
                     [String(realId), insertedNtId]).catch(() => {});
                 }
-              }).catch(e => logger.warn("Rule add_negative_target write-back failed", { error: e.message }));
+                return updateAuditStatus(addNegTgtAudit, "success");
+              }).catch(e => {
+                logger.warn("Rule add_negative_target write-back failed", { error: e.message });
+                return updateAuditStatus(addNegTgtAudit, "error", e.message);
+              });
             }
           }
           applied.push({
@@ -1350,7 +1361,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           const newBudget     = Math.round(Math.min(Math.max(1, currentBudget * (1 + pct)), maxBudget ?? Infinity) * 100) / 100;
           if (!dryRun) {
             await query("UPDATE campaigns SET daily_budget = $1, updated_at = NOW() WHERE id = $2", [newBudget, entity.id]);
-            await writeRuleAudit({
+            const adjustBudgetAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "campaign.adjust_budget_pct", entityType: "campaign",
               entityId: entity.id, entityName: entity.campaign_name,
@@ -1363,10 +1374,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const budgetPayload = (isSB || isSD)
                 ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
                 : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget };
-              put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
+              trackWriteback(adjustBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
                 data: { campaigns: [budgetPayload] }, group: "campaigns",
-              }).catch(e => logger.warn("Rule campaign budget write-back failed", { error: e.message }));
+              }), "Rule campaign budget write-back failed");
             }
           }
           applied.push({ entity_type: "campaign", entity_id: entity.id, keyword_text: entity.campaign_name,
@@ -1383,7 +1394,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           const newBudget     = Math.round(Math.min(Math.max(1, parseFloat(action.value || 10)), maxBudget ?? Infinity) * 100) / 100;
           if (!dryRun) {
             await query("UPDATE campaigns SET daily_budget = $1, updated_at = NOW() WHERE id = $2", [newBudget, entity.id]);
-            await writeRuleAudit({
+            const setBudgetAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "campaign.set_budget", entityType: "campaign",
               entityId: entity.id, entityName: entity.campaign_name,
@@ -1396,10 +1407,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const budgetPayload = (isSB || isSD)
                 ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
                 : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget };
-              put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
+              trackWriteback(setBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
                 data: { campaigns: [budgetPayload] }, group: "campaigns",
-              }).catch(e => logger.warn("Rule campaign set_budget write-back failed", { error: e.message }));
+              }), "Rule campaign set_budget write-back failed");
             }
           }
           applied.push({ entity_type: "campaign", entity_id: entity.id, keyword_text: entity.campaign_name,
@@ -1478,15 +1489,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             "UPDATE negative_keywords SET state='archived', amazon_neg_keyword_id=$1 WHERE id=$2",
             [newAmazonId, nk.id]
           );
-          const hasRealId = nk.amazon_neg_keyword_id && !nk.amazon_neg_keyword_id.startsWith("rule-");
-          if (hasRealId && nk.connection_id) {
-            archiveNegativeKeyword({
-              connectionId: nk.connection_id, profileId: String(nk.amazon_profile_id),
-              marketplaceId: nk.marketplace_id, campaignType: nk.campaign_type,
-              level: nk.level, amazonNegKeywordId: nk.amazon_neg_keyword_id,
-            }).catch(e => logger.warn("Reconcile archive neg_kw failed", { error: e.message }));
-          }
-          await writeRuleAudit({
+          const reconcileNegKwAudit = await writeRuleAudit({
             orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
             action: "keyword.remove_negative_reconcile", entityType: "keyword",
             entityId: nk.id, entityName: nk.keyword_text,
@@ -1494,6 +1497,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             afterData: { state: "archived", reason: "conditions_no_longer_met", metrics: m },
             source: "rule",
           });
+          const hasRealId = nk.amazon_neg_keyword_id && !nk.amazon_neg_keyword_id.startsWith("rule-");
+          if (hasRealId && nk.connection_id) {
+            trackWriteback(reconcileNegKwAudit, archiveNegativeKeyword({
+              connectionId: nk.connection_id, profileId: String(nk.amazon_profile_id),
+              marketplaceId: nk.marketplace_id, campaignType: nk.campaign_type,
+              level: nk.level, amazonNegKeywordId: nk.amazon_neg_keyword_id,
+            }), "Reconcile archive neg_kw failed");
+          }
         }
       }
     }
@@ -1556,15 +1567,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             "UPDATE negative_targets SET state='archived', amazon_neg_target_id=$1 WHERE id=$2",
             [newAmazonId, nt.id]
           );
-          const hasRealId = nt.amazon_neg_target_id && !nt.amazon_neg_target_id.startsWith("rule-") && !nt.amazon_neg_target_id.startsWith("archived-");
-          if (hasRealId && nt.connection_id) {
-            archiveNegativeTarget({
-              connectionId: nt.connection_id, profileId: String(nt.amazon_profile_id),
-              marketplaceId: nt.marketplace_id, campaignType: nt.campaign_type,
-              amazonNegTargetId: nt.amazon_neg_target_id,
-            }).catch(e => logger.warn("Reconcile archive neg_tgt failed", { error: e.message }));
-          }
-          await writeRuleAudit({
+          const reconcileNegTgtAudit = await writeRuleAudit({
             orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
             action: "target.remove_negative_reconcile", entityType: "target",
             entityId: nt.id, entityName: asinValue || JSON.stringify(exprArr),
@@ -1572,6 +1575,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             afterData: { state: "archived", reason: "conditions_no_longer_met", metrics: m },
             source: "rule",
           });
+          const hasRealId = nt.amazon_neg_target_id && !nt.amazon_neg_target_id.startsWith("rule-") && !nt.amazon_neg_target_id.startsWith("archived-");
+          if (hasRealId && nt.connection_id) {
+            trackWriteback(reconcileNegTgtAudit, archiveNegativeTarget({
+              connectionId: nt.connection_id, profileId: String(nt.amazon_profile_id),
+              marketplaceId: nt.marketplace_id, campaignType: nt.campaign_type,
+              amazonNegTargetId: nt.amazon_neg_target_id,
+            }), "Reconcile archive neg_tgt failed");
+          }
         }
       }
     }
@@ -1947,11 +1958,13 @@ router.post("/:id/run", async (req, res, next) => {
     await query(
       effectiveDryRun
         ? "UPDATE rules SET last_run_result = $1 WHERE id = $2"
-        : "UPDATE rules SET last_run_at = NOW(), last_run_result = $1, next_run_at = $3 WHERE id = $2",
+        : `UPDATE rules SET last_run_at = NOW(), last_run_result = $1, next_run_at = $3,
+             last_run_status = $4, run_count = COALESCE(run_count, 0) + 1 WHERE id = $2`,
       effectiveDryRun
         ? [JSON.stringify(result), req.params.id]
-        : [JSON.stringify(result), req.params.id, nextRunAt]
+        : [JSON.stringify(result), req.params.id, nextRunAt, runStatusFromResult(result)]
     );
+    if (!effectiveDryRun) await insertRuleExecution(req.params.id, req.workspaceId, result, false);
 
     logger.info("Rule executed", { ruleId: rule.id, ruleName: rule.name, ...result });
     res.json(result);
@@ -1986,6 +1999,35 @@ function computeNextRun(scheduleType, runHour) {
   return next;
 }
 
+// Derive a run-level status from the executeRule result summary.
+// "partial" when any action errored, otherwise "completed".
+function runStatusFromResult(result) {
+  return result?.errors?.length ? "partial" : "completed";
+}
+
+// Persist a row into rule_executions so /rules/:id/runs has real history.
+// Best-effort: a failed insert must never break rule execution.
+async function insertRuleExecution(ruleId, workspaceId, result, dryRun) {
+  try {
+    await query(
+      `INSERT INTO rule_executions
+         (rule_id, workspace_id, completed_at, dry_run, status,
+          entities_evaluated, entities_matched, actions_taken, actions_failed, summary)
+       VALUES ($1,$2,NOW(),$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        ruleId, workspaceId, !!dryRun, runStatusFromResult(result),
+        result?.total_evaluated || 0,
+        result?.matched_count || 0,
+        (result?.applied_count || 0) + (result?.removed_count || 0),
+        result?.errors?.length || 0,
+        JSON.stringify(result?.applied || []),
+      ]
+    );
+  } catch (e) {
+    logger.warn("Failed to insert rule_execution", { ruleId, error: e.message });
+  }
+}
+
 // Called by the RULE_EXECUTION worker — runs all keyword/target rules
 // that are due for this workspace and advances next_run_at.
 async function executeAllDueRules(workspaceId) {
@@ -2005,9 +2047,13 @@ async function executeAllDueRules(workspaceId) {
       await query(
         rule.dry_run
           ? "UPDATE rules SET last_run_result = $1, next_run_at = $2 WHERE id = $3"
-          : "UPDATE rules SET last_run_at = NOW(), last_run_result = $1, next_run_at = $2 WHERE id = $3",
-        [JSON.stringify(result), nextRunAt, rule.id]
+          : `UPDATE rules SET last_run_at = NOW(), last_run_result = $1, next_run_at = $2,
+               last_run_status = $4, run_count = COALESCE(run_count, 0) + 1 WHERE id = $3`,
+        rule.dry_run
+          ? [JSON.stringify(result), nextRunAt, rule.id]
+          : [JSON.stringify(result), nextRunAt, rule.id, runStatusFromResult(result)]
       );
+      await insertRuleExecution(rule.id, workspaceId, result, rule.dry_run);
       results.push({ ruleId: rule.id, ruleName: rule.name, ...result });
     } catch (e) {
       logger.error("executeAllDueRules: rule failed", { ruleId: rule.id, error: e.message });

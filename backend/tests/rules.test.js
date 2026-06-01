@@ -58,6 +58,7 @@ const SAMPLE_RULE = {
 jest.mock("../src/db/pool", () => ({ query: jest.fn() }));
 jest.mock("../src/routes/audit", () => ({
   writeAudit: jest.fn().mockResolvedValue(undefined),
+  updateAuditStatus: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("../src/services/amazon/writeback", () => ({
   pushNegativeKeyword: jest.fn().mockResolvedValue({}),
