@@ -6,6 +6,37 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-03 — Stage 21: Product-movers alert (BSR + total orders, multi-metric)
+
+A new alert type that scans **all products** and flags those whose metrics moved beyond a configurable threshold when comparing a rolling N-day window against the immediately preceding N-day window. Built for catching demand/rank declines that the existing single-threshold alerts miss. No DB migration — rides on the existing `alert_configs.alert_type` + JSONB `conditions`/`channels` and `alert_instances.data`.
+
+### Added — Product-movers alert type (`alert_type = "product_movers"`)
+
+- **Period-over-period comparison.** For each active product, compares the last `window_days` days against the preceding equal window. BSR uses the **median** `best_rank` (robust to the hourly jitter); order/ad metrics use period sums.
+- **Configurable multi-metric constructor.** `conditions = { window_days, match: "any"|"all", min_orders_prev, metrics: [{ metric, direction: "up"|"down", change_pct }] }`. Add any number of conditions; `match` combines them (OR / AND). A condition fires when the metric moved by ≥ `change_pct` % in the chosen direction.
+- **Metric catalog (14).** `bsr` (median rank); **`orders` / `units` / `sales` = total (organic + ads)** from SP-API `sp_order_items` ⋈ `sp_orders` (excludes `Canceled`); `ad_orders` / `ad_sales` (ad-attributed); `spend` / `clicks` / `impressions` / `acos` / `ctr` / `cpc` / `cvr` / `roas` from `advertised_product`. Derived ad ratios (acos/cvr/roas) use ad-side denominators.
+- **`min_orders_prev` noise floor** — order/total-derived metrics are only evaluated when the product had enough orders in the prior window (gated by total orders for total metrics, ad orders for ad metrics; BSR is never gated).
+- **Single digest per fire.** Writes one `alert_instances` row (`entity_type = "product_movers"`, full breached-product list in `data.products[]`) and sends **one email** listing every breached product with photo (`products.image_url`), Amazon `/dp/` link (marketplace→domain map, default `amazon.de`), per-metric `prev → cur (±%)`, and a shared "likely causes — check in this order" checklist (Inventory → Buy Box → Price → Reviews → Ads → Listing → Market). `email.js → sendProductMoversEmail`.
+- **Expandable triggered-alert rows.** In the Alerts → Triggered tab, a product-movers instance row expands in-place to show the same content as the email (product cards + causes checklist). `GET /alerts` already returned the `data` JSONB.
+- **Frontend.** Alert modal gains a type toggle (Threshold / Product movers) and a dynamic condition builder (metric select auto-picks the sensible direction, `+ Add metric`, per-row remove, ANY/ALL toggle shown with ≥2 conditions, `min_orders_prev`). ~30 new `alerts.*` i18n keys across en/ru/de.
+
+### Changed
+
+- **`orders` / `sales` now mean TOTAL, not ad-attributed.** The product-movers metrics use SP-API total orders (organic + ads). Most real declines are invisible to ad data alone (e.g. a product with 39 → 0 total orders had 0 ad-attributed orders). `ad_orders` / `ad_sales` remain available for ad-specific conditions. Legacy `{ bsr_change_pct, orders_change_pct, require_both }` configs are auto-converted (`require_both` → `match: "all"`) and continue to work.
+
+### Fixed
+
+- **`require_both` with a single enabled metric never fired.** When only one metric was set but "both conditions" was on, the AND could never be satisfied. `require_both` / `match: "all"` now only applies when ≥2 conditions are enabled (degrades to OR otherwise).
+- **Absurd % on ACOS-to-infinity.** A product that kept spending with zero ad sales hits the ACOS sentinel (∞), which produced display values like `+666396%`. The shown `pct` is now clamped to ±9999 % (breach detection still uses the raw value; real moves like BSR `+1300%` are untouched).
+
+### Notes
+
+- **Correctness verified** with a throwaway harness that independently recomputes every metric from raw SQL (explicit date-literal windows) and compares ASIN sets against the engine: **255 / 255 pass** across 14 metrics × 2 directions × 3 thresholds over window sizes `N ∈ {1, 7, 14}`, plus `match = all` (= set intersection), the noise-floor gate, and flag integrity. The live fired instance was independently confirmed 10/10.
+- Backend computation is split into a pure `computeMoverFlags(workspaceId, cond)` (no side effects, used by the evaluator and tests) and `evaluateProductMovers` (cooldown + instance + email).
+- Limitation: a metric going `0 → positive` can't yield a %, so it never fires (only proportional moves from a non-zero baseline are detected). Amazon spells the cancelled status `Canceled` (one "l").
+
+---
+
 ## [Unreleased] — 2026-06-01 — Stage 20: Rule write-back correctness & audit visibility
 
 Audit of the last 3 days of rule execution surfaced silent divergence between the local DB and Amazon: rules logged actions as "applied" while several write-backs were actually being rejected by the Amazon Ads API and swallowed by non-fatal `.catch()` handlers.

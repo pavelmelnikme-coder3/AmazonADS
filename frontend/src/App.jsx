@@ -15391,14 +15391,38 @@ const StrategyModal = ({ strategy, availableRules, onClose, onSave, t }) => {
 // ─── Alerts Page ──────────────────────────────────────────────────────────────
 const ALERT_METRICS   = ["acos", "roas", "spend", "sales", "orders", "clicks", "impressions", "ctr", "cpc", "cvr", "bsr"];
 const ALERT_OPERATORS = [{ value: "gt", label: ">" }, { value: "gte", label: ">=" }, { value: "lt", label: "<" }, { value: "lte", label: "<=" }];
+// Per-product metrics for the "product movers" alert. `dir` = default "worse" direction.
+// orders/units/sales = total (organic + ads, SP-API); ad_* = advertising only.
+const PM_METRICS = [
+  { v: "bsr", label: "BSR", dir: "up" },
+  { v: "orders", label: "ORDERS (total)", dir: "down" }, { v: "units", label: "UNITS (total)", dir: "down" },
+  { v: "sales", label: "SALES (total)", dir: "down" },
+  { v: "spend", label: "SPEND", dir: "up" }, { v: "clicks", label: "CLICKS", dir: "down" },
+  { v: "impressions", label: "IMPRESSIONS", dir: "down" }, { v: "acos", label: "ACOS", dir: "up" },
+  { v: "ctr", label: "CTR", dir: "down" }, { v: "cpc", label: "CPC", dir: "up" },
+  { v: "cvr", label: "CVR", dir: "down" }, { v: "roas", label: "ROAS", dir: "down" },
+  { v: "ad_orders", label: "AD ORDERS", dir: "down" }, { v: "ad_sales", label: "AD SALES", dir: "down" },
+];
+const pmMetricLabel = (v) => PM_METRICS.find((m) => m.v === v)?.label || (v || "").toUpperCase();
+// Format a product-movers metric value by its fmt tag (mirrors backend fmtMoverValue).
+const pmFmt = (fmt, v) => {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  if (fmt === "rank")  return "#" + Math.round(v).toLocaleString();
+  if (fmt === "int")   return Math.round(v).toLocaleString();
+  if (fmt === "money") return "€" + Number(v).toFixed(2);
+  if (fmt === "pct")   return Number(v) >= 9999 ? "∞" : Number(v).toFixed(1) + "%";
+  if (fmt === "x")     return Number(v).toFixed(2) + "×";
+  return String(v);
+};
 
 const AlertsPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [tab, setTab] = useState("configs");
   const [showModal, setShowModal] = useState(false);
+  const [expandedInst, setExpandedInst] = useState(null);
   const [editConfig, setEditConfig] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "" });
+  const [form, setForm] = useState({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
   const { colgroup: alertCfgColgroup, resizeHandle: alertCfgRH } = useResizableColumns(
     "alerts-configs", [160, 100, 90, 120, 90, 70, 100]
   );
@@ -15434,7 +15458,7 @@ const AlertsPage = ({ workspaceId }) => {
 
   function openCreate() {
     setEditConfig(null);
-    setForm({ name: "", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "" });
+    setForm({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
     setShowModal(true);
   }
 
@@ -15442,18 +15466,36 @@ const AlertsPage = ({ workspaceId }) => {
     setEditConfig(config);
     const cond = typeof config.conditions === "string" ? JSON.parse(config.conditions) : config.conditions;
     const ch   = typeof config.channels   === "string" ? JSON.parse(config.channels)   : config.channels;
+    const isPM = config.alert_type === "product_movers";
+    const legacyMetrics = [
+      ...(Number(cond.bsr_change_pct) > 0 ? [{ metric: "bsr", direction: "up", change_pct: cond.bsr_change_pct }] : []),
+      ...(Number(cond.orders_change_pct) > 0 ? [{ metric: "orders", direction: "down", change_pct: cond.orders_change_pct }] : []),
+    ];
+    const pmMetrics = Array.isArray(cond.metrics) && cond.metrics.length
+      ? cond.metrics.map(m => ({ metric: m.metric, direction: m.direction === "up" ? "up" : "down", change_pct: m.change_pct }))
+      : (legacyMetrics.length ? legacyMetrics : [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }]);
     setForm({
-      name: config.name, metric: cond.metric || config.alert_type,
+      name: config.name,
+      alert_type: isPM ? "product_movers" : "threshold",
+      metric: cond.metric || (isPM ? "acos" : config.alert_type),
       operator: cond.operator || "gt", value: cond.value || 0,
       channels: ch || { in_app: true, email: false }, cooldown_hours: config.suppression_hours || 24,
       window_days: cond.window_days || 7, asin: cond.asin || "",
+      min_orders_prev: cond.min_orders_prev ?? 3,
+      match: cond.match === "all" ? "all" : (cond.require_both ? "all" : "any"),
+      metrics: pmMetrics,
     });
     setShowModal(true);
   }
 
   async function saveConfig() {
     if (!form.name) return alert(t("alerts.alertName"));
-    if (form.metric === "bsr" && !form.asin?.trim()) return alert(t("alerts.asinRequired"));
+    if (form.alert_type === "product_movers") {
+      const valid = (form.metrics || []).filter(m => m.metric && Number(m.change_pct) > 0);
+      if (!valid.length) return alert(t("alerts.pmAtLeastOneMetric"));
+    } else if (form.metric === "bsr" && !form.asin?.trim()) {
+      return alert(t("alerts.asinRequired"));
+    }
     setSaving(true);
     try {
       if (editConfig) {
@@ -15642,8 +15684,22 @@ const AlertsPage = ({ workspaceId }) => {
                         return (
                           <tr key={config.id}>
                             <td style={{ fontWeight: 500 }}>{config.name}</td>
-                            <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{(cond.metric || config.alert_type || "").toUpperCase()}</span></td>
-                            <td className="num">{operLabel(cond.operator)} {cond.value}</td>
+                            <td>
+                              {config.alert_type === "product_movers"
+                                ? <span className="badge bg-amb" style={{ fontSize: 10 }}>{t("alerts.movers").toUpperCase()}</span>
+                                : <span className="badge bg-bl" style={{ fontSize: 10 }}>{(cond.metric || config.alert_type || "").toUpperCase()}</span>}
+                            </td>
+                            <td className="num" style={{ fontSize: 11 }}>
+                              {config.alert_type === "product_movers"
+                                ? (() => {
+                                    const ms = Array.isArray(cond.metrics) && cond.metrics.length ? cond.metrics
+                                      : [...(cond.bsr_change_pct > 0 ? [{ metric: "bsr", direction: "up", change_pct: cond.bsr_change_pct }] : []),
+                                         ...(cond.orders_change_pct > 0 ? [{ metric: "orders", direction: "down", change_pct: cond.orders_change_pct }] : [])];
+                                    const sep = (cond.match === "all" || cond.require_both) ? " & " : " · ";
+                                    return ms.map(m => `${pmMetricLabel(m.metric)}${m.direction === "up" ? "↑" : "↓"}${m.change_pct}%`).join(sep) || "—";
+                                  })()
+                                : `${operLabel(cond.operator)} ${cond.value}`}
+                            </td>
                             <td>
                               <div style={{ display: "flex", gap: 4 }}>
                                 {ch?.in_app && <span className="badge bg-pur" style={{ fontSize: 9 }}>in-app</span>}
@@ -15722,24 +15778,68 @@ const AlertsPage = ({ workspaceId }) => {
                       </tr>
                     </thead>
                     <tbody>
-                      {instances.map(inst => (
-                        <tr key={inst.id}>
-                          <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>{new Date(inst.created_at).toLocaleString()}</td>
-                          <td style={{ fontWeight: 500, fontSize: 12 }}>{inst.config_name || inst.title}</td>
-                          <td>
-                            <span className={`badge ${inst.severity === "critical" || inst.severity === "high" ? "bg-red" : inst.severity === "medium" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 10 }}>
-                              {inst.severity}
-                            </span>
-                          </td>
-                          <td style={{ fontSize: 11, color: "var(--tx2)" }}>{inst.entity_name || "—"}</td>
-                          <td><span className={`badge ${inst.status === "open" ? "bg-amb" : "bg-grn"}`} style={{ fontSize: 10 }}>{inst.status}</span></td>
-                          <td>
-                            {inst.status === "open" && (
-                              <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => acknowledge(inst.id)}>{t("alerts.acknowledge")}</button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
+                      {instances.map(inst => {
+                        const idata = (() => { try { return typeof inst.data === "string" ? JSON.parse(inst.data) : (inst.data || {}); } catch { return {}; } })();
+                        const products = Array.isArray(idata.products) ? idata.products : [];
+                        const expandable = products.length > 0;
+                        const isOpen = expandedInst === inst.id;
+                        return (
+                          <React.Fragment key={inst.id}>
+                          <tr onClick={() => expandable && setExpandedInst(isOpen ? null : inst.id)} style={{ cursor: expandable ? "pointer" : "default" }}>
+                            <td className="num" style={{ fontSize: 11, color: "var(--tx3)" }}>
+                              {expandable && <span style={{ display: "inline-block", width: 11, color: "var(--tx2)", transition: "transform .15s", transform: isOpen ? "rotate(90deg)" : "none" }}>▸</span>} {new Date(inst.created_at).toLocaleString()}
+                            </td>
+                            <td style={{ fontWeight: 500, fontSize: 12 }}>{inst.config_name || inst.title}</td>
+                            <td>
+                              <span className={`badge ${inst.severity === "critical" || inst.severity === "high" ? "bg-red" : inst.severity === "medium" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 10 }}>
+                                {inst.severity}
+                              </span>
+                            </td>
+                            <td style={{ fontSize: 11, color: "var(--tx2)" }}>{inst.entity_name || "—"}</td>
+                            <td><span className={`badge ${inst.status === "open" ? "bg-amb" : "bg-grn"}`} style={{ fontSize: 10 }}>{inst.status}</span></td>
+                            <td>
+                              {inst.status === "open" && (
+                                <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={(e) => { e.stopPropagation(); acknowledge(inst.id); }}>{t("alerts.acknowledge")}</button>
+                              )}
+                            </td>
+                          </tr>
+                          {isOpen && expandable && (
+                            <tr>
+                              <td colSpan={6} style={{ background: "var(--bg2)", padding: "14px 18px" }}>
+                                <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 10 }}>{inst.message}</div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                                  {products.map((p, i) => (
+                                    <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 0", borderBottom: i < products.length - 1 ? "1px solid var(--border)" : "none" }}>
+                                      {p.image_url
+                                        ? <img src={p.image_url} alt="" style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover", flexShrink: 0, border: "1px solid var(--border)" }} />
+                                        : <div style={{ width: 48, height: 48, borderRadius: 8, background: "var(--b2)", flexShrink: 0 }} />}
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.title || p.asin}</div>
+                                        <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "var(--tx3)", marginBottom: 5 }}>{p.asin}{p.best_category ? " · " + p.best_category : ""}</div>
+                                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                          {(p.metrics || []).map((m, j) => (
+                                            <span key={j} style={{ fontSize: 11, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 7px" }}>
+                                              <span style={{ color: "var(--tx2)" }}>{m.label}</span> {pmFmt(m.fmt, m.prev)} → {pmFmt(m.fmt, m.cur)} <strong style={{ color: "var(--red)" }}>({m.pct >= 0 ? "+" : ""}{m.pct}%)</strong>
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                      {p.url && <a href={p.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ fontSize: 11, color: "#3B82F6", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0, textDecoration: "none" }}>{t("alerts.pmOpenAmazon")} →</a>}
+                                    </div>
+                                  ))}
+                                </div>
+                                <div style={{ marginTop: 12, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px" }}>
+                                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>{t("alerts.pmCausesTitle")}</div>
+                                  <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: "var(--tx2)", lineHeight: 1.7 }}>
+                                    {[1, 2, 3, 4, 5, 6, 7].map(k => <li key={k}>{t("alerts.pmCause" + k)}</li>)}
+                                  </ol>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                          </React.Fragment>
+                        );
+                      })}
                     </tbody>
                   </table>
                 )
@@ -15786,6 +15886,77 @@ const AlertsPage = ({ workspaceId }) => {
             </div>
 
             <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.alertType")}</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["threshold", t("alerts.typeThreshold")], ["product_movers", t("alerts.typeProductMovers")]].map(([val, label]) => (
+                  <button key={val} type="button" onClick={() => setForm(f => ({ ...f, alert_type: val }))}
+                    className={`btn ${form.alert_type === val ? "btn-primary" : "btn-ghost"}`}
+                    style={{ flex: 1, fontSize: 12, padding: "7px 10px" }}>{label}</button>
+                ))}
+              </div>
+              {form.alert_type === "product_movers" && (
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 6 }}>{t("alerts.pmHint")}</div>
+              )}
+            </div>
+
+            {form.alert_type === "product_movers" ? (
+              <>
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.windowDays")}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input type="number" min={1} max={90} value={form.window_days}
+                      onChange={e => setForm(f => ({ ...f, window_days: Math.min(90, Math.max(1, parseInt(e.target.value) || 7)) }))}
+                      style={{ width: 80 }} />
+                    <span style={{ fontSize: 13, color: "var(--tx2)" }}>{t("alerts.daysSuffix")}</span>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 8, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.pmConditions")}</div>
+                  {(form.metrics || []).map((m, idx) => (
+                    <div key={idx} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                      <select value={m.metric} onChange={e => { const val = e.target.value; const dir = PM_METRICS.find(x => x.v === val)?.dir || "down"; setForm(f => ({ ...f, metrics: f.metrics.map((mm, i) => i === idx ? { ...mm, metric: val, direction: dir } : mm) })); }} style={{ flex: 1.3 }}>
+                        {PM_METRICS.map(pm => <option key={pm.v} value={pm.v}>{pm.label}</option>)}
+                      </select>
+                      <select value={m.direction} onChange={e => { const val = e.target.value; setForm(f => ({ ...f, metrics: f.metrics.map((mm, i) => i === idx ? { ...mm, direction: val } : mm) })); }} style={{ flex: 1.2 }}>
+                        <option value="up">{t("alerts.pmDirUp")}</option>
+                        <option value="down">{t("alerts.pmDirDown")}</option>
+                      </select>
+                      <input type="number" min={1} value={m.change_pct} onChange={e => { const val = Math.max(0, parseInt(e.target.value) || 0); setForm(f => ({ ...f, metrics: f.metrics.map((mm, i) => i === idx ? { ...mm, change_pct: val } : mm) })); }} style={{ width: 58 }} />
+                      <span style={{ fontSize: 13, color: "var(--tx2)" }}>%</span>
+                      <button type="button" onClick={() => setForm(f => ({ ...f, metrics: f.metrics.filter((_, i) => i !== idx) }))} className="btn btn-ghost" style={{ padding: "5px 7px" }} disabled={(form.metrics || []).length <= 1} title={t("alerts.pmRemove")}>
+                        <X size={13} strokeWidth={2} />
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => setForm(f => { const used = new Set(f.metrics.map(x => x.metric)); const next = PM_METRICS.find(pm => !used.has(pm.v)) || PM_METRICS[0]; return { ...f, metrics: [...f.metrics, { metric: next.v, direction: next.dir, change_pct: 30 }] }; })} className="btn btn-ghost" style={{ fontSize: 12, padding: "6px 12px", marginTop: 2 }}>
+                    {t("alerts.pmAddCondition")}
+                  </button>
+                  <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 8 }}>{t("alerts.pmCondHint")}</div>
+                </div>
+
+                {(form.metrics || []).length > 1 && (
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.pmMatch")}</div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {[["any", t("alerts.pmMatchAny")], ["all", t("alerts.pmMatchAll")]].map(([val, label]) => (
+                        <button key={val} type="button" onClick={() => setForm(f => ({ ...f, match: val }))} className={`btn ${form.match === val ? "btn-primary" : "btn-ghost"}`} style={{ flex: 1, fontSize: 12, padding: "7px 10px" }}>{label}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.pmMinOrders")}</div>
+                  <input type="number" min={0} value={form.min_orders_prev}
+                    onChange={e => setForm(f => ({ ...f, min_orders_prev: Math.max(0, parseInt(e.target.value) || 0) }))}
+                    style={{ width: 80 }} />
+                  <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 5 }}>{t("alerts.pmMinOrdersHint")}</div>
+                </div>
+              </>
+            ) : (
+            <>
+            <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.threshold")}</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <select value={form.metric} onChange={e => setForm(f => ({ ...f, metric: e.target.value }))} style={{ flex: 1 }}>
@@ -15820,6 +15991,8 @@ const AlertsPage = ({ workspaceId }) => {
                   <span style={{ fontSize: 13, color: "var(--tx2)" }}>{t("alerts.daysSuffix")}</span>
                 </div>
               </div>
+            )}
+            </>
             )}
 
             <div style={{ marginBottom: 14 }}>

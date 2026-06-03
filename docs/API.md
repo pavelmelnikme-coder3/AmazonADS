@@ -275,6 +275,28 @@ Product metric: `bsr` (requires `asin`).
 Operators: `gt`, `lt`, `gte`, `lte`.  
 Channels: `in_app` (creates an alert instance), `email` (sends via Brevo SMTP — to `email_to` or, if empty, workspace owners & admins).
 
+Product-movers alert *(per-product period-over-period, 2026-06-03)* — set `alert_type: "product_movers"`. Scans all active products and compares the last `window_days` vs the preceding equal window:
+```json
+{
+  "name": "Product decline",
+  "alert_type": "product_movers",
+  "window_days": 7,
+  "match": "any",
+  "min_orders_prev": 3,
+  "metrics": [
+    { "metric": "bsr",    "direction": "up",   "change_pct": 30 },
+    { "metric": "orders", "direction": "down", "change_pct": 30 }
+  ],
+  "channels": { "in_app": true, "email": true, "email_to": "a@x.com" },
+  "cooldown_hours": 24
+}
+```
+- `match`: `any` (OR) or `all` (AND, needs ≥2 conditions).
+- `direction`: `up` (metric rose by ≥ `change_pct` %) or `down` (fell by ≥). For BSR, `up` = rank worsened.
+- `metrics`: `bsr` (median rank); `orders`/`units`/`sales` = **total** (organic + ads, SP-API); `ad_orders`/`ad_sales` (ad-attributed); `spend`/`clicks`/`impressions`/`acos`/`ctr`/`cpc`/`cvr`/`roas` (ads).
+- `min_orders_prev`: noise floor — order/total metrics evaluated only if the product had ≥ N orders in the prior window (BSR is never gated).
+- Fires one instance (`entity_type: "product_movers"`, breached products in `data.products[]`) and one digest email listing every breached product (photo, Amazon link, per-metric `prev → cur (±%)`, causes checklist). Legacy `{ bsr_change_pct, orders_change_pct, require_both }` payloads are still accepted and converted.
+
 ### PUT /alerts/configs/:id
 ### DELETE /alerts/configs/:id
 ### PATCH /alerts/configs/:id/toggle

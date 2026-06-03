@@ -34,20 +34,56 @@ router.get("/configs", async (req, res, next) => {
 });
 
 // POST /alerts/configs
+// Build { alertType, conditions } from a request body, validating per alert type.
+// Returns { error } on validation failure.
+function buildAlertConfig(body) {
+  if (body.alert_type === "product_movers") {
+    const ALLOWED = ["bsr", "orders", "units", "sales", "spend", "clicks", "impressions", "acos", "ctr", "cpc", "cvr", "roas", "ad_orders", "ad_sales"];
+    let metrics = Array.isArray(body.metrics) ? body.metrics : null;
+    // Back-compat: accept the legacy two-field payload too.
+    if (!metrics) {
+      metrics = [];
+      if (Number(body.bsr_change_pct) > 0)    metrics.push({ metric: "bsr",    direction: "up",   change_pct: Number(body.bsr_change_pct) });
+      if (Number(body.orders_change_pct) > 0) metrics.push({ metric: "orders", direction: "down", change_pct: Number(body.orders_change_pct) });
+    }
+    metrics = (metrics || [])
+      .filter((m) => m && ALLOWED.includes(m.metric) && Number(m.change_pct) > 0)
+      .map((m) => ({ metric: m.metric, direction: m.direction === "up" ? "up" : "down", change_pct: Number(m.change_pct) }));
+    if (!metrics.length) {
+      return { error: "Add at least one metric condition" };
+    }
+    const conditions = {
+      window_days: Math.min(90, Math.max(1, parseInt(body.window_days) || 7)),
+      match: body.match === "all" ? "all" : "any",
+      min_orders_prev: Math.max(0, parseInt(body.min_orders_prev) || 0),
+      metrics,
+    };
+    return { alertType: "product_movers", conditions };
+  }
+  // Single-metric threshold alert (legacy default).
+  const { metric, operator, value, window_days, asin } = body;
+  if (!metric || !operator || value === undefined) {
+    return { error: "name, metric, operator, value required" };
+  }
+  if (metric === "bsr" && !asin) {
+    return { error: "asin required for BSR alerts" };
+  }
+  return {
+    alertType: metric,
+    conditions: { metric, operator, value, window_days: window_days || 7, asin: asin || null },
+  };
+}
+
 router.post("/configs", async (req, res, next) => {
   try {
-    const { name, metric, operator, value, channels = { in_app: true }, cooldown_hours = 24, window_days, asin } = req.body;
-    if (!name || !metric || !operator || value === undefined) {
-      return res.status(400).json({ error: "name, metric, operator, value required" });
-    }
-    if (metric === "bsr" && !asin) {
-      return res.status(400).json({ error: "asin required for BSR alerts" });
-    }
-    const conditions = { metric, operator, value, window_days: window_days || 7, asin: asin || null };
+    const { name, channels = { in_app: true }, cooldown_hours = 24 } = req.body;
+    if (!name) return res.status(400).json({ error: "name required" });
+    const built = buildAlertConfig(req.body);
+    if (built.error) return res.status(400).json({ error: built.error });
     const { rows: [config] } = await query(
       `INSERT INTO alert_configs (workspace_id, name, alert_type, conditions, channels, suppression_hours)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [req.workspaceId, name, metric, JSON.stringify(conditions), JSON.stringify(channels), cooldown_hours]
+      [req.workspaceId, name, built.alertType, JSON.stringify(built.conditions), JSON.stringify(channels), cooldown_hours]
     );
     res.status(201).json(config);
   } catch (err) { next(err); }
@@ -56,19 +92,15 @@ router.post("/configs", async (req, res, next) => {
 // PUT /alerts/configs/:id
 router.put("/configs/:id", async (req, res, next) => {
   try {
-    const { name, metric, operator, value, channels, cooldown_hours, window_days, asin } = req.body;
-    if (!name || !metric || !operator || value === undefined) {
-      return res.status(400).json({ error: "name, metric, operator, value required" });
-    }
-    if (metric === "bsr" && !asin) {
-      return res.status(400).json({ error: "asin required for BSR alerts" });
-    }
-    const conditions = { metric, operator, value, window_days: window_days || 7, asin: asin || null };
+    const { name, channels, cooldown_hours } = req.body;
+    if (!name) return res.status(400).json({ error: "name required" });
+    const built = buildAlertConfig(req.body);
+    if (built.error) return res.status(400).json({ error: built.error });
     const { rows: [config] } = await query(
       `UPDATE alert_configs
        SET name=$1, alert_type=$2, conditions=$3, channels=$4, suppression_hours=$5, updated_at=NOW()
        WHERE id=$6 AND workspace_id=$7 RETURNING *`,
-      [name, metric, JSON.stringify(conditions), JSON.stringify(channels || { in_app: true }), cooldown_hours || 24, req.params.id, req.workspaceId]
+      [name, built.alertType, JSON.stringify(built.conditions), JSON.stringify(channels || { in_app: true }), cooldown_hours || 24, req.params.id, req.workspaceId]
     );
     if (!config) return res.status(404).json({ error: "Alert config not found" });
     res.json(config);
