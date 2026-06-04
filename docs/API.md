@@ -283,6 +283,8 @@ Product-movers alert *(per-product period-over-period, 2026-06-03)* — set `ale
   "window_days": 7,
   "match": "any",
   "min_orders_prev": 3,
+  "product_cooldown_days": 7,
+  "escalation_pct": 25,
   "metrics": [
     { "metric": "bsr",    "direction": "up",   "change_pct": 30 },
     { "metric": "orders", "direction": "down", "change_pct": 30 }
@@ -295,7 +297,8 @@ Product-movers alert *(per-product period-over-period, 2026-06-03)* — set `ale
 - `direction`: `up` (metric rose by ≥ `change_pct` %) or `down` (fell by ≥). For BSR, `up` = rank worsened.
 - `metrics`: `bsr` (median rank); `orders`/`units`/`sales` = **total** (organic + ads, SP-API); `ad_orders`/`ad_sales` (ad-attributed); `spend`/`clicks`/`impressions`/`acos`/`ctr`/`cpc`/`cvr`/`roas` (ads).
 - `min_orders_prev`: noise floor — order/total metrics evaluated only if the product had ≥ N orders in the prior window (BSR is never gated).
-- Fires one instance (`entity_type: "product_movers"`, breached products in `data.products[]`) and one digest email listing every breached product (photo, Amazon link, per-metric `prev → cur (±%)`, causes checklist). Legacy `{ bsr_change_pct, orders_change_pct, require_both }` payloads are still accepted and converted.
+- `product_cooldown_days` *(default 7, `0` = off)*: per-ASIN dedup — a product already alerted within this many days is **suppressed** from new alerts to cut repeat noise. `escalation_pct` *(default 25)*: a suppressed product re-surfaces ("escalated") only if its worst single-metric move grew by ≥ this many points since the last alert; the cooldown auto-resets once it elapses.
+- Fires one instance (`entity_type: "product_movers"`, breached products in `data.products[]`, plus `fresh_count` / `escalated_count` / `suppressed_count`) and one digest email. Products are split into **New** and **Worsening** with a `+N suppressed` line; if every flagged product is suppressed, nothing fires. Legacy `{ bsr_change_pct, orders_change_pct, require_both }` payloads are still accepted and converted.
 
 ### PUT /alerts/configs/:id
 ### DELETE /alerts/configs/:id

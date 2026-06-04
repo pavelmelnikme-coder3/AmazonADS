@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-04 — Stage 22: Amazon reconnect recovery, SD write-back format, product-movers dedup
+
+An incident audit (rules failing to write to Amazon since 06-03) traced to the production DE advertiser profile losing Ads API access; recovering it required a re-auth, which surfaced several latent bugs. Plus a noise-reduction feature for the product-movers alert.
+
+### Fixed — Amazon connection & write-back
+
+- **Rule write-backs returned 401 from 06-03 — the DE profile lost Ads API access.** The stored token still refreshed fine (account-level), but its Amazon identity had lost access to *all* advertiser profiles (`/v2/profiles` → `200 []`), so every per-profile call 401'd and the read sync went stale after 06-02. Stage 20's `amazon_status` instrumentation is what made it visible. Recovered by re-authorizing with an account that has advertiser access and re-pointing the data-bearing profile row to the new connection (UUID preserved → all 1,158 campaigns / 33,865 keywords intact); the old connection was revoked.
+- **CORS blocked the tunnel-based OAuth re-auth.** `app.js` set the CORS `origin` to a single string (`FRONTEND_URL`). The LwA OAuth return URL is `http://localhost:3000` (Amazon only permits `http` on localhost), reached via SSH tunnel — but that origin was rejected, so login failed with "Load failed". `origin` is now an array (comma-split `FRONTEND_URL` + `http://localhost:3000`); the prod IP origin still works.
+- **`upsertProfiles` 500'd on reconnect (duplicate key).** `UPDATE … WHERE profile_id = $2` matched duplicate profile rows across old/revoked connections and re-pointed them all to one connection → `duplicate key (connection_id, profile_id)`, aborting the callback after the connection was already created. The UPDATE is now scoped to a single best row (attached / most-recent).
+- **Sponsored Display write-backs rejected (422 / 400).** SD campaign mutations (`PUT /sd/campaigns`) are v2-style: a **bare top-level array** with a **flat** `budget` + lowercase `budgetType: "daily"`, and a **lowercase** `state` — not the SP/SB `{ campaigns: [{ budget: { budget, budgetType: "DAILY" } }] }` / uppercase-state shape. Verified empirically against a live SD campaign: bare-array → `207 SUCCESS`, every wrapped/nested variant → `422`, bare-array + `"ENABLED"` → `400 "Unrecognized state"`, bare-array + `"enabled"` → `207`. Fixed the budget + pause/enable write-backs in `routes/rules.js` (rule engine), the UI `PATCH /campaigns/:id` in `routes/campaigns.js`, and the legacy `services/rules/engine.js` (used by strategies). SD **create** (POST) keeps the `{ campaigns: [...] }` wrapper — only PUT differs.
+
+### Added — Product-movers dedup (per-ASIN cooldown + escalation + New/Worsening split)
+
+Cuts repeat noise: the same products were re-firing the product-movers digest on every daily run (e.g. 7 of 9 products repeated across two consecutive days).
+
+- **Per-product cooldown** (`conditions.product_cooldown_days`, default 7, `0` = off) — an ASIN already alerted within the window is **suppressed** from new alerts.
+- **Escalation override** (`conditions.escalation_pct`, default 25) — a suppressed ASIN re-surfaces ("escalated") only if its worst single-metric move grew by ≥ that many points since the last alert. The cooldown is time-based and auto-resets on expiry.
+- **Quiet when nothing is new.** If every flagged product is suppressed, the alert fires nothing (no instance, no email). Otherwise the instance/email split products into **New** vs **Worsening** and append a `+N suppressed` line; `data` now also carries `fresh_count` / `escalated_count` / `suppressed_count`.
+- Pure, unit-tested helpers in `services/alerts/evaluate.js` — `moverWorstPct` / `partitionMovers` / `getRecentMoverHistory` (prior-alert history read from `alert_instances` — **no migration**). `buildAlertConfig` validates the two new fields; `email.js` + the Alerts → Triggered tab render the split. 6 new `alerts.*` i18n keys (en/ru/de).
+
+### Fixed — Product-movers dedup self-review
+
+- A throwing `product_movers` config no longer aborts evaluation of the other workspace alerts — `evaluateProductMovers` is wrapped in a non-fatal `try/catch`, matching the threshold-alert path.
+- The digest email no longer renders an empty "New · 0" section header when every notified product is escalated.
+
+### Notes
+
+- Tests: `backend/tests/productMovers.test.js` (15 cases) — cooldown off/on, no history, suppress, escalate at the inclusive boundary, `escalation_pct = 0`, auto-reset after expiry, case-insensitive ASIN match, mixed batch, history most-recent-per-ASIN + JSON-string tolerance, and error isolation. **66 / 66** alert suite green. Dedup verified on live prod: the config's 9 currently-flagged products are all repeats within 7 days and unworsened → **0 would fire** (it would otherwise have been a 3rd duplicate digest).
+- Known trade-offs (by design, not bugs): when every flagged product is suppressed the heavy `computeMoverFlags` scan re-runs hourly until something becomes new/worse (no `last_triggered_at` update on a no-fire); the cooldown is time-based, not recovery-based (a product that recovers and re-drops within the window is still suppressed).
+- Prototyped a **read-only** JTL-Wawi REST API connection (OnPrem app registration, scope `all.read`, JTL-Wawi 1.11.7). Wawi items already carry Amazon identifiers (`AmazonFnsku` / `Asins` / `AmazonPrice`) — a natural ASIN bridge and a future source of **total** (organic + ad) orders. No AdsFlow code changed; the connection is strictly read-only.
+
+---
+
 ## [Unreleased] — 2026-06-03 — Stage 21: Product-movers alert (BSR + total orders, multi-metric)
 
 A new alert type that scans **all products** and flags those whose metrics moved beyond a configurable threshold when comparing a rolling N-day window against the immediately preceding N-day window. Built for catching demand/rank declines that the existing single-threshold alerts miss. No DB migration — rides on the existing `alert_configs.alert_type` + JSONB `conditions`/`channels` and `alert_instances.data`.
