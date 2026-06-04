@@ -470,8 +470,12 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   for (const cfg of configs) {
     // Per-product BSR/orders movers — its own evaluation + digest email path.
     if (cfg.alert_type === "product_movers") {
-      const r = await evaluateProductMovers(workspaceId, cfg, workspaceName);
-      triggered += r.triggered; emailed += r.emailed;
+      try {
+        const r = await evaluateProductMovers(workspaceId, cfg, workspaceName);
+        triggered += r.triggered; emailed += r.emailed;
+      } catch (e) {
+        logger.warn("Product-movers evaluation failed (non-fatal)", { config: cfg.id, error: e.message });
+      }
       continue;
     }
 

@@ -299,7 +299,7 @@ async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays
   // Only add section headers when there are two groups; otherwise keep the plain single list.
   const rowsHtml = escalated.length
     ? sectionHeader("Still worsening", escalated.length, "#f87171") + escalated.map(renderRow).join("")
-      + sectionHeader("New", fresh.length, "#fbbf24") + fresh.map(renderRow).join("")
+      + (fresh.length ? sectionHeader("New", fresh.length, "#fbbf24") + fresh.map(renderRow).join("") : "")
     : products.map(renderRow).join("");
   const suppressedHtml = suppressedCount > 0
     ? `<div style="color:#64748b;font-size:11px;line-height:1.6;margin:14px 0 0;padding-top:12px;border-top:1px solid #232634;">+${suppressedCount} product${suppressedCount > 1 ? "s" : ""} still below threshold but unchanged since the last alert — hidden to reduce noise.</div>`

@@ -8,7 +8,8 @@ jest.mock("../src/config/logger", () => ({ info: jest.fn(), warn: jest.fn(), err
 jest.mock("../src/services/email", () => ({ sendProductMoversEmail: jest.fn().mockResolvedValue(undefined), sendAlertEmail: jest.fn() }));
 
 const { query: dbQuery } = require("../src/db/pool");
-const { moverWorstPct, partitionMovers, getRecentMoverHistory } = require("../src/services/alerts/evaluate");
+const { sendAlertEmail, sendProductMoversEmail } = require("../src/services/email");
+const { moverWorstPct, partitionMovers, getRecentMoverHistory, evaluateWorkspaceAlerts } = require("../src/services/alerts/evaluate");
 
 const DAY = 86400000;
 const prod = (asin, pct) => ({ asin, title: asin, metrics: Array.isArray(pct) ? pct.map((x) => ({ pct: x })) : [{ pct }] });
@@ -133,5 +134,36 @@ describe("getRecentMoverHistory", () => {
     });
     const map = await getRecentMoverHistory("cfg-1", 7);
     expect(map.get("B1").worstPct).toBe(80);
+  });
+});
+
+describe("evaluateWorkspaceAlerts — product_movers error isolation", () => {
+  const WS = "ws---0001-0000-0000-000000000001";
+  const pmCfg = {
+    id: "pm-1", workspace_id: WS, name: "Movers", alert_type: "product_movers",
+    conditions: { metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }], window_days: 7 },
+    channels: { in_app: true }, suppression_hours: 24, last_triggered_at: null,
+  };
+  const thCfg = {
+    id: "th-1", workspace_id: WS, name: "High ACOS", alert_type: "acos",
+    conditions: { metric: "acos", operator: "gt", value: 20 },
+    channels: { in_app: true, email: true, email_to: "boss@example.com" },
+    suppression_hours: 24, last_triggered_at: null,
+  };
+
+  test("a throwing product_movers config does not abort the other alerts", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [pmCfg, thCfg] })             // load configs
+      .mockRejectedValueOnce(new Error("boom: bsr query failed"))  // PM computeMoverFlags → throws
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 400, clicks: 50, impressions: 1000 }] }) // threshold agg (acos=25>20)
+      .mockResolvedValueOnce({ rows: [] })                         // INSERT threshold instance
+      .mockResolvedValueOnce({ rows: [] });                        // UPDATE last_triggered
+
+    const r = await evaluateWorkspaceAlerts(WS, { workspaceName: "WS" });
+
+    // PM failed silently; the threshold alert still fired + emailed.
+    expect(r).toEqual({ evaluated: 2, triggered: 1, emailed: 1 });
+    expect(sendAlertEmail).toHaveBeenCalledTimes(1);
+    expect(sendProductMoversEmail).not.toHaveBeenCalled();
   });
 });
