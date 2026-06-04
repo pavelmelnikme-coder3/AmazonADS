@@ -15422,7 +15422,7 @@ const AlertsPage = ({ workspaceId }) => {
   const [expandedInst, setExpandedInst] = useState(null);
   const [editConfig, setEditConfig] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
+  const [form, setForm] = useState({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, product_cooldown_days: 7, escalation_pct: 25, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
   const { colgroup: alertCfgColgroup, resizeHandle: alertCfgRH } = useResizableColumns(
     "alerts-configs", [160, 100, 90, 120, 90, 70, 100]
   );
@@ -15458,7 +15458,7 @@ const AlertsPage = ({ workspaceId }) => {
 
   function openCreate() {
     setEditConfig(null);
-    setForm({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
+    setForm({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, product_cooldown_days: 7, escalation_pct: 25, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
     setShowModal(true);
   }
 
@@ -15483,6 +15483,8 @@ const AlertsPage = ({ workspaceId }) => {
       window_days: cond.window_days || 7, asin: cond.asin || "",
       min_orders_prev: cond.min_orders_prev ?? 3,
       match: cond.match === "all" ? "all" : (cond.require_both ? "all" : "any"),
+      product_cooldown_days: cond.product_cooldown_days ?? 7,
+      escalation_pct: cond.escalation_pct ?? 25,
       metrics: pmMetrics,
     });
     setShowModal(true);
@@ -15807,6 +15809,19 @@ const AlertsPage = ({ workspaceId }) => {
                             <tr>
                               <td colSpan={6} style={{ background: "var(--bg2)", padding: "14px 18px" }}>
                                 <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 10 }}>{inst.message}</div>
+                                {(() => {
+                                  const esc = idata.escalated_count ?? products.filter(p => p.status === "escalated").length;
+                                  const fre = idata.fresh_count ?? (products.length - esc);
+                                  const sup = idata.suppressed_count || 0;
+                                  if (!esc && !sup) return null;
+                                  return (
+                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                                      {fre > 0 && <span style={{ fontSize: 10, fontWeight: 700, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", color: "var(--amb)" }}>{t("alerts.pmNew")} · {fre}</span>}
+                                      {esc > 0 && <span style={{ fontSize: 10, fontWeight: 700, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", color: "var(--red)" }}>{t("alerts.pmWorsening")} · {esc}</span>}
+                                      {sup > 0 && <span style={{ fontSize: 10, fontWeight: 700, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", color: "var(--tx3)" }}>{t("alerts.pmSuppressed")} · {sup}</span>}
+                                    </div>
+                                  );
+                                })()}
                                 <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
                                   {products.map((p, i) => (
                                     <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 0", borderBottom: i < products.length - 1 ? "1px solid var(--border)" : "none" }}>
@@ -15814,7 +15829,10 @@ const AlertsPage = ({ workspaceId }) => {
                                         ? <img src={p.image_url} alt="" style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover", flexShrink: 0, border: "1px solid var(--border)" }} />
                                         : <div style={{ width: 48, height: 48, borderRadius: 8, background: "var(--b2)", flexShrink: 0 }} />}
                                       <div style={{ flex: 1, minWidth: 0 }}>
-                                        <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.title || p.asin}</div>
+                                        <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                          {p.title || p.asin}
+                                          {p.status === "escalated" && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: "var(--red)", color: "#fff", borderRadius: 5, padding: "1px 6px", verticalAlign: "middle" }}>{t("alerts.pmWorsening")}{p.prev_worst_pct != null ? ` · ${p.prev_worst_pct}%` : ""}</span>}
+                                        </div>
                                         <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "var(--tx3)", marginBottom: 5 }}>{p.asin}{p.best_category ? " · " + p.best_category : ""}</div>
                                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                           {(p.metrics || []).map((m, j) => (
@@ -15953,6 +15971,22 @@ const AlertsPage = ({ workspaceId }) => {
                     style={{ width: 80 }} />
                   <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 5 }}>{t("alerts.pmMinOrdersHint")}</div>
                 </div>
+
+                <div style={{ display: "flex", gap: 18, marginBottom: 14 }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.pmCooldownDays")}</div>
+                    <input type="number" min={0} max={90} value={form.product_cooldown_days}
+                      onChange={e => setForm(f => ({ ...f, product_cooldown_days: Math.min(90, Math.max(0, parseInt(e.target.value) || 0)) }))}
+                      style={{ width: 80 }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.pmEscalationPct")}</div>
+                    <input type="number" min={0} value={form.escalation_pct}
+                      onChange={e => setForm(f => ({ ...f, escalation_pct: Math.max(0, parseInt(e.target.value) || 0) }))}
+                      style={{ width: 80 }} />
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: -6, marginBottom: 14 }}>{t("alerts.pmCooldownHint")}</div>
               </>
             ) : (
             <>

@@ -201,6 +201,59 @@ function normalizeMoverConditions(cond) {
   return { metrics, match };
 }
 
+// Severity scalar for a flagged product: magnitude of its worst single-metric move.
+function moverWorstPct(metricsArr) {
+  return Math.max(0, ...(metricsArr || []).map((m) => Math.abs(Number(m.pct) || 0)));
+}
+
+/**
+ * Split freshly-flagged products into fresh / escalated / suppressed using prior-alert
+ * history, to cut repeat noise. A product already alerted within `cooldownDays` is
+ * SUPPRESSED unless its worst move grew by ≥ `escalationPct` points since that alert
+ * (then it re-surfaces as "escalated"). When the cooldown has elapsed it is "new" again.
+ * Pure — no I/O. `historyMap`: UPPER(asin) → { lastAt:number(ms), worstPct:number }.
+ * @returns {{fresh:Array, escalated:Array, suppressed:Array}}
+ */
+function partitionMovers(flagged, historyMap, { cooldownDays = 0, escalationPct = 0, now = Date.now() } = {}) {
+  const fresh = [], escalated = [], suppressed = [];
+  const cooldownMs = Math.max(0, cooldownDays) * 86400000;
+  const hist = historyMap instanceof Map ? historyMap : new Map();
+  for (const p of (flagged || [])) {
+    const asin = String(p.asin || "").toUpperCase();
+    const h = cooldownMs > 0 ? hist.get(asin) : null;
+    const within = h && (now - h.lastAt) < cooldownMs;
+    if (!within) { fresh.push({ ...p, status: "new" }); continue; }
+    const curWorst = moverWorstPct(p.metrics);
+    const worsened = escalationPct > 0 && curWorst >= h.worstPct + escalationPct;
+    if (worsened) escalated.push({ ...p, status: "escalated", prev_worst_pct: Math.round(h.worstPct) });
+    else suppressed.push({ ...p, status: "suppressed" });
+  }
+  return { fresh, escalated, suppressed };
+}
+
+// Most-recent prior product-movers alert per ASIN for one config, within `sinceDays`.
+async function getRecentMoverHistory(configId, sinceDays) {
+  if (!configId || !(sinceDays > 0)) return new Map();
+  const { rows } = await query(
+    `SELECT created_at, data FROM alert_instances
+      WHERE config_id = $1 AND entity_type = 'product_movers'
+        AND created_at >= NOW() - make_interval(days => $2::int)
+      ORDER BY created_at DESC`,
+    [configId, Math.ceil(sinceDays)]
+  );
+  const map = new Map();
+  for (const r of rows) {
+    const at = new Date(r.created_at).getTime();
+    const data = typeof r.data === "string" ? JSON.parse(r.data) : (r.data || {});
+    for (const p of (data.products || [])) {
+      const asin = String(p.asin || "").toUpperCase();
+      if (!asin || map.has(asin)) continue; // rows newest-first → first seen = most recent
+      map.set(asin, { lastAt: at, worstPct: moverWorstPct(p.metrics) });
+    }
+  }
+  return map;
+}
+
 /**
  * Pure computation for the product-movers alert (no side effects — used by the live
  * evaluator and by tests). Scans ALL active products and flags those that breach the
@@ -344,14 +397,40 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
     if (ageMs < (cfg.suppression_hours || 24) * 3600 * 1000) return { triggered: 0, emailed: 0 };
   }
 
-  const { flagged, match, N, severity, title, message } = await computeMoverFlags(workspaceId, cond, cfg.name);
+  const { flagged, match, N } = await computeMoverFlags(workspaceId, cond, cfg.name);
   if (!flagged.length) return { triggered: 0, emailed: 0 };
+
+  // Per-product dedup (C): suppress products already alerted within the cooldown unless
+  // they worsened by ≥ escalation_pct points; split the rest into new / escalated (D).
+  const cooldownDays  = cond.product_cooldown_days != null ? Math.max(0, Number(cond.product_cooldown_days)) : 7;
+  const escalationPct = cond.escalation_pct       != null ? Math.max(0, Number(cond.escalation_pct))       : 25;
+  let notified = flagged.map((p) => ({ ...p, status: "new" }));
+  let suppressedCount = 0;
+  if (cooldownDays > 0) {
+    const history = await getRecentMoverHistory(cfg.id, cooldownDays);
+    const part = partitionMovers(flagged, history, { cooldownDays, escalationPct });
+    notified = [...part.fresh, ...part.escalated];
+    suppressedCount = part.suppressed.length;
+    if (!notified.length) return { triggered: 0, emailed: 0, suppressed: suppressedCount }; // all repeats → stay quiet
+  }
+
+  // Worst movers first; titles/severity reflect the NOTIFIED subset, not the raw flagged set.
+  notified.sort((a, b) => moverWorstPct(b.metrics) - moverWorstPct(a.metrics));
+  const freshCount = notified.filter((p) => p.status !== "escalated").length;
+  const escalatedCount = notified.length - freshCount;
+  const severity = notified.some((f) => f.metrics.some((m) => Math.abs(m.pct) >= 75)) ? "high" : "medium";
+  const title = `${notified.length} product${notified.length > 1 ? "s" : ""} moved beyond thresholds`;
+  const summary = notified.slice(0, 25)
+    .map((f) => `${f.asin}: ${f.metrics.map((m) => `${m.label} ${m.pct >= 0 ? "+" : ""}${m.pct}%`).join(", ")}`).join(" | ");
+  const message = `${cfg.name ? cfg.name + ": " : ""}${notified.length} product(s) breached over the last ${N} days vs the prior ${N} days${suppressedCount ? ` (+${suppressedCount} continuing, suppressed)` : ""}. ${summary}`;
 
   await query(
     `INSERT INTO alert_instances (config_id, workspace_id, severity, title, message, entity_type, entity_name, data)
      VALUES ($1,$2,$3,$4,$5,'product_movers',$6,$7)`,
-    [cfg.id, workspaceId, severity, title, message, `${flagged.length} products`,
-     JSON.stringify({ window_days: N, match, metrics, products: flagged })]
+    [cfg.id, workspaceId, severity, title, message, `${notified.length} products`,
+     JSON.stringify({ window_days: N, match, metrics, products: notified,
+       suppressed_count: suppressedCount, fresh_count: freshCount, escalated_count: escalatedCount,
+       cooldown_days: cooldownDays, escalation_pct: escalationPct })]
   );
   await query(`UPDATE alert_configs SET last_triggered_at = NOW() WHERE id = $1`, [cfg.id]);
 
@@ -363,7 +442,7 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
       try {
         await sendProductMoversEmail({
           to: recipients, alertName: cfg.name, workspaceName, windowDays: N,
-          products: flagged, dashboardUrl: process.env.FRONTEND_URL || null,
+          products: notified, suppressedCount, dashboardUrl: process.env.FRONTEND_URL || null,
         });
         emailed = 1;
       } catch (e) {
@@ -463,4 +542,4 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   return { evaluated: configs.length, triggered, emailed };
 }
 
-module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, moverMetricValue, normalizeMoverConditions, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, latestBsr, amazonProductUrl, PERF_METRICS };
+module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, latestBsr, amazonProductUrl, PERF_METRICS };

@@ -268,9 +268,9 @@ function fmtMoverValue(fmt, v) {
   }
 }
 
-async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays, products = [], dashboardUrl }) {
+async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays, products = [], suppressedCount = 0, dashboardUrl }) {
   const n = products.length;
-  const rowsHtml = products.map((p) => {
+  const renderRow = (p) => {
     const img = p.image_url
       ? `<img src="${esc(p.image_url)}" width="60" height="60" alt="" style="display:block;width:60px;height:60px;border-radius:8px;object-fit:cover;background:#0f1117;border:1px solid #2a2d3e;" />`
       : `<div style="width:60px;height:60px;border-radius:8px;background:#0f1117;border:1px solid #2a2d3e;color:#475569;font-size:9px;text-align:center;line-height:60px;">${esc(p.asin)}</div>`;
@@ -278,17 +278,32 @@ async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays
       const arrow = m.pct >= 0 ? `+${m.pct}%` : `${m.pct}%`;
       return `<span style="color:#94a3b8;">${esc(m.label)}</span> <span style="color:#e2e8f0;">${fmtMoverValue(m.fmt, m.prev)} → ${fmtMoverValue(m.fmt, m.cur)}</span> <strong style="color:#f87171;">(${arrow})</strong>`;
     }).join("<br/>");
+    const worseTag = p.status === "escalated"
+      ? `<span style="display:inline-block;margin-left:6px;background:#7f1d1d;color:#fecaca;font-size:9px;font-weight:700;padding:1px 6px;border-radius:6px;vertical-align:middle;">WORSENING${p.prev_worst_pct != null ? ` · was ${p.prev_worst_pct}%` : ""}</span>`
+      : "";
     return `
       <tr>
         <td style="padding:14px 0;border-bottom:1px solid #232634;vertical-align:top;width:60px;">${img}</td>
         <td style="padding:14px 0 14px 14px;border-bottom:1px solid #232634;vertical-align:top;">
-          <div style="color:#f1f5f9;font-size:13px;font-weight:600;line-height:1.4;margin-bottom:2px;">${esc((p.title || p.asin || "").slice(0, 90))}</div>
+          <div style="color:#f1f5f9;font-size:13px;font-weight:600;line-height:1.4;margin-bottom:2px;">${esc((p.title || p.asin || "").slice(0, 90))}${worseTag}</div>
           <div style="color:#64748b;font-size:11px;font-family:monospace;margin-bottom:8px;">${esc(p.asin)}${p.best_category ? " · " + esc(p.best_category) : ""}</div>
           <div style="font-size:12px;line-height:1.9;">${metricLines}</div>
           <a href="${esc(p.url)}" style="display:inline-block;margin-top:8px;color:#60a5fa;text-decoration:none;font-size:12px;font-weight:600;">Open on Amazon →</a>
         </td>
       </tr>`;
-  }).join("");
+  };
+  const sectionHeader = (label, count, color) =>
+    `<tr><td colspan="2" style="padding:18px 0 6px;"><span style="color:${color};font-size:12px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;">${label} · ${count}</span></td></tr>`;
+  const escalated = products.filter((p) => p.status === "escalated");
+  const fresh = products.filter((p) => p.status !== "escalated");
+  // Only add section headers when there are two groups; otherwise keep the plain single list.
+  const rowsHtml = escalated.length
+    ? sectionHeader("Still worsening", escalated.length, "#f87171") + escalated.map(renderRow).join("")
+      + sectionHeader("New", fresh.length, "#fbbf24") + fresh.map(renderRow).join("")
+    : products.map(renderRow).join("");
+  const suppressedHtml = suppressedCount > 0
+    ? `<div style="color:#64748b;font-size:11px;line-height:1.6;margin:14px 0 0;padding-top:12px;border-top:1px solid #232634;">+${suppressedCount} product${suppressedCount > 1 ? "s" : ""} still below threshold but unchanged since the last alert — hidden to reduce noise.</div>`
+    : "";
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -315,6 +330,7 @@ async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays
         <tr>
           <td style="padding:0 36px;">
             <table width="100%" cellpadding="0" cellspacing="0">${rowsHtml}</table>
+            ${suppressedHtml}
           </td>
         </tr>
         <tr>

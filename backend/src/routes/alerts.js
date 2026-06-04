@@ -56,6 +56,12 @@ function buildAlertConfig(body) {
       window_days: Math.min(90, Math.max(1, parseInt(body.window_days) || 7)),
       match: body.match === "all" ? "all" : "any",
       min_orders_prev: Math.max(0, parseInt(body.min_orders_prev) || 0),
+      // Per-product dedup: suppress an ASIN already alerted within `product_cooldown_days`
+      // (0 = off) unless its worst move grew by ≥ `escalation_pct` points since.
+      product_cooldown_days: Number.isFinite(parseInt(body.product_cooldown_days))
+        ? Math.min(90, Math.max(0, parseInt(body.product_cooldown_days))) : 7,
+      escalation_pct: Number.isFinite(Number(body.escalation_pct))
+        ? Math.max(0, Number(body.escalation_pct)) : 25,
       metrics,
     };
     return { alertType: "product_movers", conditions };
