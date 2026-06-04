@@ -53,8 +53,16 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 
+// Allow the configured frontend origin(s) plus localhost:3000 — the latter is the
+// LwA OAuth return URL (Amazon only permits http on localhost), reached via SSH tunnel
+// during (re)authorization. FRONTEND_URL may be a comma-separated list.
+const allowedOrigins = [
+  ...(process.env.FRONTEND_URL || "http://localhost:3000").split(",").map((s) => s.trim()),
+  "http://localhost:3000",
+].filter((v, i, a) => v && a.indexOf(v) === i);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  origin: allowedOrigins,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "x-workspace-id"],

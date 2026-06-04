@@ -95,6 +95,10 @@ async function upsertProfiles(connectionId, profiles) {
     // First try to update an existing profile with the same profile_id (any connection).
     // This handles re-connections: same Amazon profile, new connection → update connection_id
     // so the profile's campaigns/keywords data is preserved.
+    // Scope to a SINGLE best row: the same profile_id can exist under several (old/revoked)
+    // connections, and re-pointing all of them to one connection_id would violate the
+    // unique (connection_id, profile_id) constraint. Prefer the attached/most-recent row
+    // (the one carrying campaign/keyword data).
     const { rows: updated } = await query(
       `UPDATE amazon_profiles SET
          connection_id = $1,
@@ -106,7 +110,12 @@ async function upsertProfiles(connectionId, profiles) {
          account_name = $8,
          account_type = $9,
          updated_at = NOW()
-       WHERE profile_id = $2
+       WHERE id = (
+         SELECT id FROM amazon_profiles
+         WHERE profile_id = $2
+         ORDER BY (workspace_id IS NOT NULL) DESC, is_attached DESC, updated_at DESC
+         LIMIT 1
+       )
        RETURNING *`,
       values
     );
