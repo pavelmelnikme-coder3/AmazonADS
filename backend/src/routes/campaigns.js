@@ -184,8 +184,13 @@ router.patch("/:id", async (req, res, next) => {
     if (state) amazonPayload.state = state.toUpperCase();
     if (dailyBudget !== undefined) {
       const budget = parseFloat(dailyBudget);
-      if (isSB || isSD) {
-        // SB/SD use nested budget object with budgetType
+      if (isSD) {
+        // SD update (PUT) is v2-style: flat budget + lowercase budgetType, sent as a bare
+        // top-level array (see campaignsData below). Nesting/wrapping it → Amazon 422.
+        amazonPayload.budget = budget;
+        amazonPayload.budgetType = "daily";
+      } else if (isSB) {
+        // SB uses nested budget object with budgetType
         amazonPayload.budget = { budget, budgetType: "DAILY" };
       } else {
         amazonPayload.dailyBudget = budget;
@@ -209,6 +214,9 @@ router.patch("/:id", async (req, res, next) => {
       sponsoredDisplay:  "/sd/campaigns",
     }[campaign.campaign_type];
 
+    // SP/SB campaign mutations are wrapped in { campaigns: [...] }; SD (PUT) takes a bare array.
+    const campaignsData = isSD ? [amazonPayload] : { campaigns: [amazonPayload] };
+
     // Apply to Amazon — all three APIs use PUT for campaign mutations
     if (endpoint) {
       if (placements && !state && dailyBudget === undefined && !biddingStrategy) {
@@ -218,7 +226,7 @@ router.patch("/:id", async (req, res, next) => {
           profileId: String(campaign.amazon_profile_id),
           marketplace: campaign.marketplace_id,
           path: endpoint,
-          data: { campaigns: [amazonPayload] },
+          data: campaignsData,
           group: "campaigns",
         }).catch(e => logger.warn("Placement write-back failed (non-fatal)", { error: e.message }));
       } else {
@@ -227,7 +235,7 @@ router.patch("/:id", async (req, res, next) => {
           profileId: String(campaign.amazon_profile_id),
           marketplace: campaign.marketplace_id,
           path: endpoint,
-          data: { campaigns: [amazonPayload] },
+          data: campaignsData,
           group: "campaigns",
         });
       }

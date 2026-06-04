@@ -1371,12 +1371,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const isSB = entity.campaign_type === "sponsoredBrands";
               const isSD = entity.campaign_type === "sponsoredDisplay";
               const campPath = isSD ? "/sd/campaigns" : isSB ? "/sb/campaigns" : "/sp/campaigns";
-              const budgetPayload = (isSB || isSD)
-                ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
-                : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget };
+              // SD requires a bare top-level array with a flat budget + lowercase budgetType
+              // (v2-style); SB uses the nested budget object; SP uses dailyBudget.
+              // (Wrapping SD in {campaigns:[…]} or nesting its budget → Amazon 422.)
+              const budgetData = isSD
+                ? [{ campaignId: entity.amazon_campaign_id, budget: newBudget, budgetType: "daily" }]
+                : { campaigns: [ isSB
+                    ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
+                    : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget } ] };
               trackWriteback(adjustBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: { campaigns: [budgetPayload] }, group: "campaigns",
+                data: budgetData, group: "campaigns",
               }), "Rule campaign budget write-back failed");
             }
           }
@@ -1404,12 +1409,16 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const isSB = entity.campaign_type === "sponsoredBrands";
               const isSD = entity.campaign_type === "sponsoredDisplay";
               const campPath = isSD ? "/sd/campaigns" : isSB ? "/sb/campaigns" : "/sp/campaigns";
-              const budgetPayload = (isSB || isSD)
-                ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
-                : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget };
+              // SD requires a bare top-level array with a flat budget + lowercase budgetType
+              // (v2-style); SB uses the nested budget object; SP uses dailyBudget.
+              const budgetData = isSD
+                ? [{ campaignId: entity.amazon_campaign_id, budget: newBudget, budgetType: "daily" }]
+                : { campaigns: [ isSB
+                    ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
+                    : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget } ] };
               trackWriteback(setBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: { campaigns: [budgetPayload] }, group: "campaigns",
+                data: budgetData, group: "campaigns",
               }), "Rule campaign set_budget write-back failed");
             }
           }
