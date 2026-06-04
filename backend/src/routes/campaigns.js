@@ -181,7 +181,8 @@ router.patch("/:id", async (req, res, next) => {
     const isSB = campaign.campaign_type === "sponsoredBrands";
     const isSD = campaign.campaign_type === "sponsoredDisplay";
     const amazonPayload = { campaignId: campaign.amazon_campaign_id };
-    if (state) amazonPayload.state = state.toUpperCase();
+    // SP/SB expect uppercase state (ENABLED); SD (v2-style) expects lowercase (enabled).
+    if (state) amazonPayload.state = isSD ? state.toLowerCase() : state.toUpperCase();
     if (dailyBudget !== undefined) {
       const budget = parseFloat(dailyBudget);
       if (isSD) {

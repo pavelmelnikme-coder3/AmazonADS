@@ -1310,12 +1310,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
             });
             if (entity.amazon_campaign_id && entity.connection_id) {
-              const campPath = entity.campaign_type === "sponsoredDisplay" ? "/sd/campaigns"
+              const isSD = entity.campaign_type === "sponsoredDisplay";
+              const campPath = isSD ? "/sd/campaigns"
                              : entity.campaign_type === "sponsoredBrands"  ? "/sb/campaigns"
                              : "/sp/campaigns";
+              // SD (v2-style) takes a bare array with a lowercase state; SP/SB take the wrapped uppercase form.
+              const stateData = isSD
+                ? [{ campaignId: entity.amazon_campaign_id, state: "paused" }]
+                : { campaigns: [{ campaignId: entity.amazon_campaign_id, state: "PAUSED" }] };
               put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: { campaigns: [{ campaignId: entity.amazon_campaign_id, state: "PAUSED" }] }, group: "campaigns",
+                data: stateData, group: "campaigns",
               }).catch(e => logger.warn("Rule campaign pause write-back failed", { error: e.message }));
             }
           }
@@ -1337,12 +1342,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
             });
             if (entity.amazon_campaign_id && entity.connection_id) {
-              const campPath = entity.campaign_type === "sponsoredDisplay" ? "/sd/campaigns"
+              const isSD = entity.campaign_type === "sponsoredDisplay";
+              const campPath = isSD ? "/sd/campaigns"
                              : entity.campaign_type === "sponsoredBrands"  ? "/sb/campaigns"
                              : "/sp/campaigns";
+              // SD (v2-style) takes a bare array with a lowercase state; SP/SB take the wrapped uppercase form.
+              const stateData = isSD
+                ? [{ campaignId: entity.amazon_campaign_id, state: "enabled" }]
+                : { campaigns: [{ campaignId: entity.amazon_campaign_id, state: "ENABLED" }] };
               put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
-                data: { campaigns: [{ campaignId: entity.amazon_campaign_id, state: "ENABLED" }] }, group: "campaigns",
+                data: stateData, group: "campaigns",
               }).catch(e => logger.warn("Rule campaign enable write-back failed", { error: e.message }));
             }
           }

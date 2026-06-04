@@ -512,9 +512,15 @@ async function tryApiUpdate(entity, updateType, newValue) {
     if (!entity.connection_id || !entity.amazon_profile_id) return;
 
     if (updateType === "campaign_state" || updateType === "campaign_budget") {
+      // SD (PUT /sd/campaigns) is v2-style: bare top-level array, flat budget + lowercase
+      // budgetType, lowercase state. SP/SB use the wrapped {campaigns:[…]} form.
+      const isSD = entity.campaign_type === "sponsoredDisplay";
       const campaignUpdate = { campaignId: entity.amazon_campaign_id };
-      if (updateType === "campaign_state")  campaignUpdate.state       = newValue;
-      if (updateType === "campaign_budget") campaignUpdate.dailyBudget = newValue;
+      if (updateType === "campaign_state")  campaignUpdate.state = isSD ? String(newValue).toLowerCase() : newValue;
+      if (updateType === "campaign_budget") {
+        if (isSD) { campaignUpdate.budget = newValue; campaignUpdate.budgetType = "daily"; }
+        else      { campaignUpdate.dailyBudget = newValue; }
+      }
 
       const path =
         entity.campaign_type === "sponsoredProducts" ? "/sp/campaigns" :
@@ -526,7 +532,7 @@ async function tryApiUpdate(entity, updateType, newValue) {
         profileId:    entity.amazon_profile_id.toString(),
         marketplace:  entity.marketplace_id,
         path,
-        data:         { campaigns: [campaignUpdate] },
+        data:         isSD ? [campaignUpdate] : { campaigns: [campaignUpdate] },
         group:        "campaigns",
       });
     }
