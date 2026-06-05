@@ -29,6 +29,10 @@ export default {
     matched: "Matched to Amazon product", unmatched: "ASIN not in Amazon catalog", empty: "No items synced yet.",
     margin: "Margin", allChannel: "Orders / units", allChannelHint: "All-channel orders (Amazon + eBay + OTTO + shop …) from Wawi",
     matchedEmpty: "No ASIN-matched products yet (items still syncing).",
+    syncProgress: "Sync in progress", lastRun: "Last run",
+    step_warehouses: "Warehouses", step_salesChannels: "Channels", step_suppliers: "Suppliers",
+    step_stocks: "Stock", step_stockChanges: "Movements", step_orders: "Orders",
+    step_items: "Items", step_customers: "Customers",
   },
   common: {
     workspace: "WORKSPACE",

@@ -29,6 +29,10 @@ export default {
     matched: "Amazon-Produkt zugeordnet", unmatched: "ASIN nicht im Amazon-Katalog", empty: "Noch keine Artikel synchronisiert.",
     margin: "Marge", allChannel: "Bestellungen / Stk", allChannelHint: "Bestellungen aller Kanäle (Amazon + eBay + OTTO + Shop …) aus Wawi",
     matchedEmpty: "Noch keine ASIN-zugeordneten Produkte (Artikel synchronisieren noch).",
+    syncProgress: "Synchronisierung läuft", lastRun: "Letzter Lauf",
+    step_warehouses: "Lager", step_salesChannels: "Kanäle", step_suppliers: "Lieferanten",
+    step_stocks: "Bestand", step_stockChanges: "Bewegungen", step_orders: "Bestellungen",
+    step_items: "Artikel", step_customers: "Kunden",
   },
   common: {
     workspace: "ARBEITSBEREICH",

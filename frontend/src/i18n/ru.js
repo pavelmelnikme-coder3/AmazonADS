@@ -29,6 +29,10 @@ export default {
     matched: "Сопоставлен с товаром Amazon", unmatched: "ASIN нет в каталоге Amazon", empty: "Товары ещё не синхронизированы.",
     margin: "Маржа", allChannel: "Заказы / шт", allChannelHint: "Заказы по всем каналам (Amazon + eBay + OTTO + шоп …) из Wawi",
     matchedEmpty: "Пока нет товаров, сопоставленных по ASIN (товары ещё синхронизируются).",
+    syncProgress: "Идёт синхронизация", lastRun: "Последний прогон",
+    step_warehouses: "Склады", step_salesChannels: "Каналы", step_suppliers: "Поставщики",
+    step_stocks: "Остатки", step_stockChanges: "Движения", step_orders: "Заказы",
+    step_items: "Товары", step_customers: "Клиенты",
   },
   common: {
     workspace: "WORKSPACE",

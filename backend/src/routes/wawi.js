@@ -6,7 +6,7 @@ const express = require("express");
 const router = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
-const { queueWawiSync } = require("../jobs/workers");
+const { queueWawiSync, getQueue, QUEUES } = require("../jobs/workers");
 const { getConnection, wawiInfo } = require("../services/wawi/client");
 const logger = require("../config/logger");
 
@@ -20,13 +20,19 @@ router.get("/status", async (req, res, next) => {
       `SELECT id, base_url, app_id, api_version, wawi_version, status, last_sync_at, error_count, last_error, created_at
          FROM wawi_connections WHERE workspace_id=$1 ORDER BY created_at DESC LIMIT 1`, [ws]);
     const connection = conns[0] || null;
+    const light = req.query.light === "true"; // poll mode: skip the live Wawi round-trip
 
     let reachable = null, liveVersion = null;
-    if (connection) {
+    if (connection && !light) {
       const c = await getConnection(ws);
       if (c) { try { const info = await wawiInfo(c); reachable = true; liveVersion = info?.Version || null; } catch { reachable = false; } }
     }
-    const { rows: syncState } = await query(`SELECT entity, cursor_value, last_run_at, last_status, rows_synced, last_error FROM wawi_sync_state WHERE workspace_id=$1 ORDER BY entity`, [ws]);
+
+    // Is a sync running right now? (active jobs on the wawi-sync queue)
+    let syncing = false;
+    try { const counts = await getQueue(QUEUES.WAWI_SYNC).getJobCounts("active", "waiting", "delayed"); syncing = (counts.active || 0) + (counts.waiting || 0) + (counts.delayed || 0) > 0; } catch { /* noop */ }
+
+    const { rows: syncState } = await query(`SELECT entity, cursor_value, last_run_at, last_status, rows_synced, total, last_error FROM wawi_sync_state WHERE workspace_id=$1 ORDER BY entity`, [ws]);
     const { rows: counts } = await query(
       `SELECT
          (SELECT count(*) FROM wawi_items            WHERE workspace_id=$1) AS items,
@@ -38,7 +44,7 @@ router.get("/status", async (req, res, next) => {
          (SELECT count(*) FROM wawi_customers        WHERE workspace_id=$1) AS customers,
          (SELECT count(*) FROM wawi_warehouses       WHERE workspace_id=$1) AS warehouses`, [ws]);
 
-    res.json({ connection, reachable, liveVersion, syncState, counts: counts[0] || {} });
+    res.json({ connection, reachable, liveVersion, syncing, syncState, counts: counts[0] || {} });
   } catch (err) { next(err); }
 });
 

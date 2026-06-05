@@ -83,9 +83,10 @@ async function wawiGetAll(conn, path, params = {}, onPage, { pageSize = DEFAULT_
 async function wawiGetPagesParallel(conn, path, params = {}, onPage, { pageSize = DEFAULT_PAGE_SIZE, timeout = 30000, concurrency = 4 } = {}) {
   const first = await wawiGet(conn, path, { ...params, pageNumber: 1, pageSize }, { timeout });
   if (Array.isArray(first)) { if (first.length) await onPage(first, { pageNumber: 1 }); return first.length; }
+  const grand = first?.TotalItems ?? null;
   const items1 = Array.isArray(first?.Items) ? first.Items : [];
   let total = items1.length;
-  if (items1.length) await onPage(items1, { pageNumber: 1 });
+  if (items1.length) await onPage(items1, { pageNumber: 1, total: grand });
   const totalPages = first?.TotalPages || 1;
   for (let p = 2; p <= totalPages; p += concurrency) {
     const batch = [];
@@ -95,7 +96,7 @@ async function wawiGetPagesParallel(conn, path, params = {}, onPage, { pageSize 
     for (const r of results) {
       if (r.err) { logger.warn("wawi page failed", { path, page: r.pn, error: r.err.message }); continue; }
       const its = Array.isArray(r.d?.Items) ? r.d.Items : [];
-      if (its.length) { await onPage(its, { pageNumber: r.pn }); total += its.length; }
+      if (its.length) { await onPage(its, { pageNumber: r.pn, total: grand }); total += its.length; }
     }
   }
   return total;

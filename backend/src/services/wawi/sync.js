@@ -45,6 +45,20 @@ async function bulkUpsert(table, columns, conflictCols, updateCols, rows, batch 
   return n;
 }
 
+const SYNC_STEPS = ["warehouses", "salesChannels", "suppliers", "stocks", "stockChanges", "orders", "items", "customers"];
+
+// Live progress writer (status / rows / total) — does NOT touch the delta cursor_value.
+async function markStep(ws, entity, status, rows = 0, total = null) {
+  await query(
+    `INSERT INTO wawi_sync_state (workspace_id, entity, last_run_at, last_status, rows_synced, total, last_error)
+     VALUES ($1,$2,NOW(),$3,$4,$5,NULL)
+     ON CONFLICT (workspace_id, entity) DO UPDATE SET
+       last_run_at=NOW(), last_status=$3, rows_synced=$4,
+       total=COALESCE($5, wawi_sync_state.total), last_error=NULL`,
+    [ws, entity, status, rows, total]
+  ).catch(() => {});
+}
+
 async function getCursor(workspaceId, entity) {
   const { rows } = await query(`SELECT cursor_value FROM wawi_sync_state WHERE workspace_id=$1 AND entity=$2`, [workspaceId, entity]);
   return rows[0]?.cursor_value || null;
@@ -114,7 +128,7 @@ async function syncItems(conn, { full = false } = {}) {
 
   // Item objects are heavy (Wawi serialises ~0.6 s/item) — small pages, long timeout,
   // and bounded parallelism so a 20k-item catalog loads in ~1 h instead of ~4 h.
-  await wawiGetPagesParallel(conn, "/items", params, async (items) => {
+  await wawiGetPagesParallel(conn, "/items", params, async (items, info) => {
     const mapped = items.map((it) => mapItem(ws, it));
     await bulkUpsert("wawi_items", ITEM_COLS, ["workspace_id","wawi_id"], UPD.filter(c => c !== "synced_at"), mapped);
     // ASIN bridge for this page
@@ -126,6 +140,7 @@ async function syncItems(conn, { full = false } = {}) {
     if (pairs.length) await bulkUpsert("wawi_item_asins", ["workspace_id","asin","wawi_item_id"], ["workspace_id","asin","wawi_item_id"], [], pairs);
     for (const it of items) { const c = ts(it.Changed); if (c && (!maxChanged || c > maxChanged)) maxChanged = c; }
     total += items.length;
+    await markStep(ws, "items", "running", total, info?.total ?? null);
   }, { pageSize: 50, timeout: 90000, concurrency: 4 });
 
   // Resolve product_id for any unmatched ASIN bridge rows (read-only join to products).
@@ -173,7 +188,7 @@ async function syncStockChanges(conn, { sinceDays = 30 } = {}) {
     })).filter(r => r.wawi_item_id != null && r.change_date != null);
     if (rows.length) total += await bulkUpsert("wawi_stock_changes", COLS, ["workspace_id","wawi_item_id","change_date","quantity","change_type"], [], rows);
   });
-  await setCursor(ws, "stock_changes", null, "ok", total);
+  await setCursor(ws, "stockChanges", null, "ok", total);
   return total;
 }
 
@@ -186,7 +201,7 @@ async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180, 
   const O_COLS = ["workspace_id","wawi_id","number","external_number","company_id","customer_id","sales_channel_id","order_date","departure_country","payment_status","is_cancelled","is_external_invoice","raw_data"];
   const synced = []; // { id, date } — to bound line-item fetching to a recent window
 
-  await wawiGetAll(conn, "/salesOrders", { createdSince }, async (items) => {
+  await wawiGetAll(conn, "/salesOrders", { createdSince }, async (items, info) => {
     const rows = items.map((o) => {
       const d = ts(o.SalesOrderDate || o.CreationDate);
       if (d && (!maxDate || d > maxDate)) maxDate = d;
@@ -200,6 +215,7 @@ async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180, 
       };
     });
     total += await bulkUpsert("wawi_sales_orders", O_COLS, ["workspace_id","wawi_id"], O_COLS.filter(c => c !== "workspace_id" && c !== "wawi_id"), rows);
+    await markStep(ws, "orders", "running", total, info?.total ?? null);
   });
   await setCursor(ws, "orders", maxDate, "ok", total);
 
@@ -272,12 +288,16 @@ async function syncAll(workspaceId, { full = false } = {}) {
     ["items", () => syncItems(conn, { full })],
     ["customers", () => syncCustomers(conn, { full })],  // largest + least-urgent → last
   ];
+  // Reset all steps to 'pending' so the progress bar reflects THIS run from the start.
+  for (const s of SYNC_STEPS) await markStep(workspaceId, s, "pending", 0, null).catch(() => {});
+
   for (const [name, fn] of steps) {
+    await markStep(workspaceId, name, "running").catch(() => {});
     try {
       out[name] = await fn();
-      // Mark the step ok (cursor_value preserved via COALESCE) — clears any stale error
-      // and gives steps without their own cursor (warehouses/channels/suppliers) a state.
-      await setCursor(workspaceId, name, null, "ok", typeof out[name] === "number" ? out[name] : 0).catch(() => {});
+      // ok (cursor_value preserved via COALESCE) — clears any stale error and gives steps
+      // without their own cursor (warehouses/channels/suppliers) a state.
+      await markStep(workspaceId, name, "ok", typeof out[name] === "number" ? out[name] : 0).catch(() => {});
     } catch (e) {
       out[name] = `error: ${e.message}`;
       logger.warn(`Wawi sync step failed: ${name}`, { error: e.message });

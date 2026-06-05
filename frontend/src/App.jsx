@@ -15430,7 +15430,8 @@ const WawiPage = ({ workspaceId }) => {
   const money = (v) => (v == null ? "—" : "€" + Number(v).toFixed(2));
   const int = (v) => (v == null ? "0" : Math.round(Number(v)).toLocaleString());
 
-  const loadStatus = async () => { try { setStatus(await get("/wawi/status")); } catch (e) { /* noop */ } };
+  const loadStatus = async (light) => { try { setStatus(await get("/wawi/status" + (light ? "?light=true" : ""))); } catch (e) { /* noop */ } };
+  const WAWI_STEPS = ["warehouses", "salesChannels", "suppliers", "stocks", "stockChanges", "orders", "items", "customers"];
   const loadItems = async () => {
     setLoading(true);
     try {
@@ -15449,6 +15450,15 @@ const WawiPage = ({ workspaceId }) => {
 
   useEffect(() => { loadStatus(); }, []);
   useEffect(() => { tab === "catalog" ? loadItems() : loadMatched(); /* eslint-disable-next-line */ }, [tab, matchedOnly]);
+  // Poll lightly while a sync is running; when it finishes, refresh the visible data.
+  const wasSyncing = useRef(false);
+  useEffect(() => {
+    const syncing = !!status?.syncing;
+    if (syncing) { const id = setInterval(() => loadStatus(true), 3000); return () => clearInterval(id); }
+    if (wasSyncing.current) { tab === "catalog" ? loadItems() : loadMatched(); }
+    wasSyncing.current = syncing;
+    /* eslint-disable-next-line */
+  }, [status?.syncing]);
 
   const runSync = async (full) => {
     setSyncing(true);
@@ -15502,18 +15512,38 @@ const WawiPage = ({ workspaceId }) => {
             <Stat label={t("wawi.cWarehouses")} value={int(c.warehouses)} />
           </div>
 
-          {/* Per-entity sync state */}
-          {!!(status?.syncState || []).length && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 18 }}>
-              {status.syncState.map((s) => (
-                <span key={s.entity} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)" }}>
-                  <span style={{ color: "var(--tx2)" }}>{s.entity}</span>{" "}
-                  <strong style={{ color: s.last_status === "ok" ? "var(--grn)" : s.last_status === "error" ? "var(--red)" : "var(--tx3)" }}>{int(s.rows_synced)}</strong>
-                  {s.last_status === "error" ? " ⚠" : ""}
-                </span>
-              ))}
-            </div>
-          )}
+          {/* Sync progress bar + per-step state */}
+          {(() => {
+            const byE = Object.fromEntries((status?.syncState || []).map((s) => [s.entity, s]));
+            const frac = (s) => !s ? 0 : s.last_status === "ok" ? 1 : s.last_status === "running" ? (s.total ? Math.min(0.99, (s.rows_synced || 0) / s.total) : 0.5) : 0;
+            const done = WAWI_STEPS.reduce((a, e) => a + frac(byE[e]), 0);
+            const pct = Math.round((done / WAWI_STEPS.length) * 100);
+            if (!status?.syncing && !WAWI_STEPS.some((e) => byE[e])) return null;
+            return (
+              <div style={{ marginBottom: 18, padding: "12px 14px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700 }}>{status?.syncing ? `${t("wawi.syncProgress")} ⏳` : t("wawi.lastRun")}</span>
+                  <span style={{ fontSize: 12, color: "var(--tx2)" }}>{pct}%</span>
+                </div>
+                <div style={{ height: 8, background: "var(--border)", borderRadius: 6, overflow: "hidden", marginBottom: 10 }}>
+                  <div style={{ width: pct + "%", height: "100%", background: status?.syncing ? "var(--ac2)" : "var(--grn)", transition: "width .4s" }} />
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {WAWI_STEPS.map((e) => {
+                    const s = byE[e]; const st = s?.last_status;
+                    const icon = st === "ok" ? "✓" : st === "running" ? "⏳" : st === "error" ? "⚠" : "○";
+                    const col = st === "ok" ? "var(--grn)" : st === "running" ? "var(--ac2)" : st === "error" ? "var(--red)" : "var(--tx3)";
+                    const cnt = s ? (s.total ? `${int(s.rows_synced)}/${int(s.total)}` : (s.rows_synced ? int(s.rows_synced) : "")) : "";
+                    return (
+                      <span key={e} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg2)" }} title={s?.last_error || ""}>
+                        <span style={{ color: col }}>{icon}</span> {t("wawi.step_" + e)} {cnt ? <span style={{ color: "var(--tx3)" }}>{cnt}</span> : null}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Tabs */}
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
