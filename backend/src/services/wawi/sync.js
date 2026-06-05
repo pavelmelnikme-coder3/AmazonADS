@@ -178,19 +178,19 @@ async function syncStockChanges(conn, { sinceDays = 30 } = {}) {
 }
 
 // ─── Sales orders (all channels) + line items ─────────────────────────────────
-async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180 } = {}) {
+async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180, lineItemDays = 60, lineConcurrency = 6 } = {}) {
   const ws = conn.workspace_id;
   const cursor = full ? null : await getCursor(ws, "orders");
   const createdSince = cursor || new Date(Date.now() - initialLookbackDays * 86400000).toISOString();
   let total = 0, maxDate = cursor, lineTotal = 0;
   const O_COLS = ["workspace_id","wawi_id","number","external_number","company_id","customer_id","sales_channel_id","order_date","departure_country","payment_status","is_cancelled","is_external_invoice","raw_data"];
-  const newOrderIds = [];
+  const synced = []; // { id, date } — to bound line-item fetching to a recent window
 
   await wawiGetAll(conn, "/salesOrders", { createdSince }, async (items) => {
     const rows = items.map((o) => {
       const d = ts(o.SalesOrderDate || o.CreationDate);
       if (d && (!maxDate || d > maxDate)) maxDate = d;
-      newOrderIds.push(o.Id);
+      synced.push({ id: o.Id, date: d });
       return {
         workspace_id: ws, wawi_id: o.Id, number: o.Number || null, external_number: o.ExternalNumber || null,
         company_id: o.CompanyId ?? null, customer_id: o.CustomerId ?? null, sales_channel_id: o.SalesChannelId ?? null,
@@ -201,12 +201,17 @@ async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180 }
     });
     total += await bulkUpsert("wawi_sales_orders", O_COLS, ["workspace_id","wawi_id"], O_COLS.filter(c => c !== "workspace_id" && c !== "wawi_id"), rows);
   });
+  await setCursor(ws, "orders", maxDate, "ok", total);
 
-  // Line items for the orders synced this run (per-order endpoint; non-fatal each).
+  // Line items are per-order (N+1) and the catalog can have tens of thousands of orders —
+  // fetch them ONLY for the recent window the dashboards use (lineItemDays), with bounded
+  // parallelism. Older orders keep header-only (channel + date still available).
+  const cutoff = new Date(Date.now() - lineItemDays * 86400000).toISOString();
+  const recent = synced.filter((o) => o.date && o.date >= cutoff).map((o) => o.id);
   const LI_COLS = ["workspace_id","order_wawi_id","line_id","wawi_item_id","sku","name","quantity","unit_price_net","raw_data"];
-  for (const oid of newOrderIds) {
+  const fetchOne = async (oid) => {
     try {
-      const li = await wawiGet(conn, `/salesOrders/${oid}/lineitems`);
+      const li = await wawiGet(conn, `/salesOrders/${oid}/lineitems`, {}, { timeout: 20000 });
       const arr = Array.isArray(li) ? li : (li?.Items || []);
       const rows = arr.map((l, idx) => ({
         workspace_id: ws, order_wawi_id: oid, line_id: l.Id ?? l.LineItemId ?? idx + 1,
@@ -215,9 +220,12 @@ async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180 }
       }));
       if (rows.length) lineTotal += await bulkUpsert("wawi_sales_order_items", LI_COLS, ["workspace_id","order_wawi_id","line_id"], LI_COLS.filter(c => !["workspace_id","order_wawi_id","line_id"].includes(c)), rows);
     } catch (e) { logger.warn("Wawi line-items fetch failed (non-fatal)", { order: oid, error: e.message }); }
+  };
+  for (let i = 0; i < recent.length; i += lineConcurrency) {
+    await Promise.all(recent.slice(i, i + lineConcurrency).map(fetchOne));
   }
-  await setCursor(ws, "orders", maxDate, "ok", total);
-  logger.info("Wawi orders synced", { orders: total, lineItems: lineTotal });
+  await setCursor(ws, "order_items", null, "ok", lineTotal);
+  logger.info("Wawi orders synced", { orders: total, recentWithLines: recent.length, lineItems: lineTotal });
   return total;
 }
 
