@@ -17,6 +17,13 @@ const J = (v) => (v == null ? null : JSON.stringify(v));
 
 /** Batched INSERT … ON CONFLICT DO UPDATE for a list of plain objects. */
 async function bulkUpsert(table, columns, conflictCols, updateCols, rows, batch = 500) {
+  // De-duplicate by the conflict key within this call — a single INSERT … ON CONFLICT
+  // can't affect the same target row twice, and Wawi pages can repeat an Id.
+  if (conflictCols.length && rows.length) {
+    const seen = new Map();
+    for (const r of rows) seen.set(conflictCols.map((c) => r[c]).join(""), r);
+    rows = [...seen.values()];
+  }
   let n = 0;
   for (let i = 0; i < rows.length; i += batch) {
     const slice = rows.slice(i, i + batch);
@@ -157,11 +164,13 @@ async function syncStockChanges(conn, { sinceDays = 30 } = {}) {
   let total = 0;
   const COLS = ["workspace_id","wawi_item_id","warehouse_id","change_date","quantity","change_type","comment","raw_data"];
   await wawiGetAll(conn, "/stocks/changes", { startDate }, async (items) => {
+    // Real /stocks/changes fields: ItemId, WarehouseId, Quantity, ChangedDate, Comment, Username.
+    // change_type kept as "" (no type field exists) so the dedup unique key has no NULLs.
     const rows = items.map((c) => ({
-      workspace_id: ws, wawi_item_id: c.ItemId ?? c.ArticleId, warehouse_id: c.WarehouseId ?? null,
-      change_date: ts(c.Date || c.ChangeDate || c.CreatedAt), quantity: num(c.Quantity ?? c.Change),
-      change_type: c.Type || c.ChangeType || c.Reason || null, comment: c.Comment || null, raw_data: J(c),
-    })).filter(r => r.wawi_item_id != null);
+      workspace_id: ws, wawi_item_id: c.ItemId ?? null, warehouse_id: c.WarehouseId ?? null,
+      change_date: ts(c.ChangedDate || c.Date), quantity: num(c.Quantity),
+      change_type: "", comment: c.Comment || null, raw_data: J(c),
+    })).filter(r => r.wawi_item_id != null && r.change_date != null);
     if (rows.length) total += await bulkUpsert("wawi_stock_changes", COLS, ["workspace_id","wawi_item_id","change_date","quantity","change_type"], [], rows);
   });
   await setCursor(ws, "stock_changes", null, "ok", total);
@@ -201,8 +210,8 @@ async function syncSalesOrders(conn, { full = false, initialLookbackDays = 180 }
       const arr = Array.isArray(li) ? li : (li?.Items || []);
       const rows = arr.map((l, idx) => ({
         workspace_id: ws, order_wawi_id: oid, line_id: l.Id ?? l.LineItemId ?? idx + 1,
-        wawi_item_id: l.ItemId ?? l.ArticleId ?? null, sku: l.SKU || null, name: l.Name || null,
-        quantity: num(l.Quantity), unit_price_net: num(l.UnitPriceNet ?? l.PriceNet ?? l.SellPriceNet), raw_data: J(l),
+        wawi_item_id: l.ItemId ?? null, sku: l.SKU || null, name: l.Name || null,
+        quantity: num(l.Quantity), unit_price_net: num(l.SalesPriceNet), raw_data: J(l),
       }));
       if (rows.length) lineTotal += await bulkUpsert("wawi_sales_order_items", LI_COLS, ["workspace_id","order_wawi_id","line_id"], LI_COLS.filter(c => !["workspace_id","order_wawi_id","line_id"].includes(c)), rows);
     } catch (e) { logger.warn("Wawi line-items fetch failed (non-fatal)", { order: oid, error: e.message }); }
@@ -251,13 +260,21 @@ async function syncAll(workspaceId, { full = false } = {}) {
     ["suppliers", () => syncSuppliers(conn)],
     ["stocks", () => syncStocks(conn)],
     ["stockChanges", () => syncStockChanges(conn, {})],
-    ["customers", () => syncCustomers(conn, { full })],
     ["orders", () => syncSalesOrders(conn, { full })],
     ["items", () => syncItems(conn, { full })],
+    ["customers", () => syncCustomers(conn, { full })],  // largest + least-urgent → last
   ];
   for (const [name, fn] of steps) {
-    try { out[name] = await fn(); }
-    catch (e) { out[name] = `error: ${e.message}`; logger.warn(`Wawi sync step failed: ${name}`, { error: e.message }); await setCursor(workspaceId, name, null, "error", 0, e.message).catch(() => {}); }
+    try {
+      out[name] = await fn();
+      // Mark the step ok (cursor_value preserved via COALESCE) — clears any stale error
+      // and gives steps without their own cursor (warehouses/channels/suppliers) a state.
+      await setCursor(workspaceId, name, null, "ok", typeof out[name] === "number" ? out[name] : 0).catch(() => {});
+    } catch (e) {
+      out[name] = `error: ${e.message}`;
+      logger.warn(`Wawi sync step failed: ${name}`, { error: e.message });
+      await setCursor(workspaceId, name, null, "error", 0, e.message).catch(() => {});
+    }
   }
   await query(`UPDATE wawi_connections SET last_sync_at = NOW(), updated_at = NOW() WHERE workspace_id = $1 AND status='active'`, [workspaceId]);
   logger.info("Wawi syncAll complete", { workspaceId, out });
