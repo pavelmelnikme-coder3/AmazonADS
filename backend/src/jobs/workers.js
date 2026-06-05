@@ -35,6 +35,7 @@ const QUEUES = {
   SP_SYNC:          "sp-sync",
   RANK_CHECK:       "rank-check",
   PRODUCT_META:     "product-meta-sync",
+  WAWI_SYNC:        "wawi-sync",
 };
 
 const defaultJobOptions = {
@@ -107,6 +108,11 @@ async function queueRankCheck(workspaceId) {
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const jobId = `rank_${workspaceId}_${day}`;
   return queue.add("check", { workspaceId }, { jobId });
+}
+
+async function queueWawiSync(workspaceId, opts = {}) {
+  const queue = getQueue(QUEUES.WAWI_SYNC);
+  return queue.add("wawi-sync", { workspaceId, ...opts }, { priority: 5 });
 }
 
 async function queueProductMetaSync(workspaceId) {
@@ -573,7 +579,23 @@ async function startWorkers() {
     logger.error("Product meta worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker];
+  const { syncAll: wawiSyncAll } = require("../services/wawi/sync");
+  const wawiSyncWorker = new Worker(
+    QUEUES.WAWI_SYNC,
+    async (job) => {
+      const { workspaceId, full = false } = job.data;
+      logger.info("Wawi sync started", { workspaceId, full });
+      const result = await wawiSyncAll(workspaceId, { full });
+      logger.info("Wawi sync done", { workspaceId, result });
+      return result;
+    },
+    { connection: createRedisConnection(), concurrency: 1 }
+  );
+  wawiSyncWorker.on("failed", (job, err) => {
+    logger.error("Wawi sync worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker, wawiSyncWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 
   // Mark stale processing/requested DB records as failed (left over from previous restarts)
@@ -606,6 +628,7 @@ module.exports = {
   queueSpSync,
   queueRankCheck,
   queueProductMetaSync,
+  queueWawiSync,
   startWorkers,
   stopWorkers,
   QUEUES,

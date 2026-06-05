@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync, queueWawiSync } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 const { evaluateWorkspaceAlerts } = require("../services/alerts/evaluate");
@@ -265,7 +265,22 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob];
+  // ─── JTL-Wawi incremental sync: every 3 hours (read-only ERP ingest) ─────────
+  const wawiSyncJob = new CronJob("20 */3 * * *", async () => {
+    try {
+      const { rows } = await query(
+        `SELECT DISTINCT workspace_id FROM wawi_connections WHERE status = 'active' AND api_key_enc IS NOT NULL`
+      );
+      for (const { workspace_id } of rows) {
+        await queueWawiSync(workspace_id, { full: false });
+      }
+      if (rows.length) logger.info("Cron: Wawi sync queued", { workspaces: rows.length });
+    } catch (err) {
+      logger.error("Cron Wawi sync failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 
