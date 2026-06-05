@@ -112,7 +112,12 @@ async function queueRankCheck(workspaceId) {
 
 async function queueWawiSync(workspaceId, opts = {}) {
   const queue = getQueue(QUEUES.WAWI_SYNC);
-  return queue.add("wawi-sync", { workspaceId, ...opts }, { priority: 5 });
+  // Singleton per workspace: a Wawi full sync is long-running; the cron and a manual
+  // trigger must coalesce into ONE job (BullMQ deduplication API — not a static jobId,
+  // which silently drops jobs after completion). attempts:1 — never auto-retry a partial
+  // sync into a competing second run; the next scheduled run picks up where cursors left off.
+  return queue.add("wawi-sync", { workspaceId, ...opts },
+    { priority: 5, attempts: 1, deduplication: { id: `wawi-sync-${workspaceId}` } });
 }
 
 async function queueProductMetaSync(workspaceId) {
