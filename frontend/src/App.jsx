@@ -5,7 +5,7 @@ import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
 import {
   Activity, Megaphone, Tag, Package, Newspaper,
-  Layers, Workflow, Bell, Sparkles, History, Cable, Cog,
+  Layers, Workflow, Bell, Sparkles, History, Cable, Cog, Warehouse,
   Repeat, Edit2, Trash2, Play, Eye,
   Pause, Power, Percent, Target,
   Ban, Undo2, Download, Filter, ArrowUpDown,
@@ -575,6 +575,7 @@ const NAV = [
   { id: "alerts",     icon: Bell          },
   { id: "ai",        icon: Sparkles       },
   { id: "audit",     icon: History        },
+  { id: "wawi",      icon: Warehouse      },
   { id: "connect",   icon: Cable          },
   { id: "settings",  icon: Cog            },
 ];
@@ -15415,6 +15416,197 @@ const pmFmt = (fmt, v) => {
   return String(v);
 };
 
+const WawiPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [status, setStatus] = useState(null);
+  const [tab, setTab] = useState("catalog");
+  const [items, setItems] = useState([]);
+  const [matched, setMatched] = useState([]);
+  const [q, setQ] = useState("");
+  const [matchedOnly, setMatchedOnly] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const money = (v) => (v == null ? "—" : "€" + Number(v).toFixed(2));
+  const int = (v) => (v == null ? "0" : Math.round(Number(v)).toLocaleString());
+
+  const loadStatus = async () => { try { setStatus(await get("/wawi/status")); } catch (e) { /* noop */ } };
+  const loadItems = async () => {
+    setLoading(true);
+    try {
+      const qs = new URLSearchParams({ limit: "150" });
+      if (q.trim()) qs.set("q", q.trim());
+      if (matchedOnly) qs.set("matched", "true");
+      const r = await get(`/wawi/items?${qs.toString()}`);
+      setItems(r.items || []);
+    } catch (e) { /* noop */ } finally { setLoading(false); }
+  };
+  const loadMatched = async () => {
+    setLoading(true);
+    try { const r = await get("/wawi/matched?days=30"); setMatched(r.matched || []); }
+    catch (e) { /* noop */ } finally { setLoading(false); }
+  };
+
+  useEffect(() => { loadStatus(); }, []);
+  useEffect(() => { tab === "catalog" ? loadItems() : loadMatched(); /* eslint-disable-next-line */ }, [tab, matchedOnly]);
+
+  const runSync = async (full) => {
+    setSyncing(true);
+    try { await post("/wawi/sync", { full: !!full }); }
+    catch (e) { alert((t("common.error") || "Error: ") + e.message); }
+    setSyncing(false);
+    setTimeout(loadStatus, 2000);
+  };
+
+  const c = status?.counts || {};
+  const conn = status?.connection;
+  const Stat = ({ label, value, accent }) => (
+    <div style={{ padding: "10px 14px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, minWidth: 96 }}>
+      <div style={{ fontSize: 18, fontWeight: 800, color: accent || "var(--tx)" }}>{value}</div>
+      <div style={{ fontSize: 10, color: "var(--tx3)", textTransform: "uppercase", letterSpacing: ".05em" }}>{label}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ padding: "8px 4px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12, marginBottom: 6 }}>
+        <div>
+          <h1 style={{ margin: 0 }}>{t("wawi.title")}</h1>
+          <div style={{ fontSize: 13, color: "var(--tx2)" }}>{t("wawi.subtitle")}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-ghost" onClick={() => runSync(false)} disabled={syncing || !conn}>{syncing ? t("wawi.syncing") : t("wawi.syncNow")}</button>
+          <button className="btn btn-ghost" onClick={() => runSync(true)} disabled={syncing || !conn} title={t("wawi.fullSyncHint")}>{t("wawi.fullSync")}</button>
+        </div>
+      </div>
+
+      {!conn ? (
+        <div style={{ padding: 24, color: "var(--tx2)" }}>{t("wawi.noConnection")}</div>
+      ) : (
+        <>
+          {/* Connection + counts */}
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", margin: "10px 0 14px" }}>
+            <span className={`badge ${status?.reachable ? "bg-grn" : "bg-red"}`} style={{ fontSize: 11 }}>
+              {status?.reachable ? t("wawi.reachable") : t("wawi.notReachable")}{status?.liveVersion ? ` · v${status.liveVersion}` : ""}
+            </span>
+            <span style={{ fontSize: 12, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{conn.base_url}</span>
+            <span style={{ fontSize: 12, color: "var(--tx3)" }}>{t("wawi.lastSync")}: {conn.last_sync_at ? new Date(conn.last_sync_at).toLocaleString() : t("wawi.never")}</span>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+            <Stat label={t("wawi.cItems")}     value={int(c.items)} />
+            <Stat label={t("wawi.cMatched")}   value={int(c.matched_asins)} accent="var(--grn)" />
+            <Stat label={t("wawi.cStock")}     value={int(c.stock_rows)} />
+            <Stat label={t("wawi.cOrders")}    value={int(c.orders)} />
+            <Stat label={t("wawi.cOrderItems")} value={int(c.order_items)} />
+            <Stat label={t("wawi.cCustomers")} value={int(c.customers)} />
+            <Stat label={t("wawi.cWarehouses")} value={int(c.warehouses)} />
+          </div>
+
+          {/* Per-entity sync state */}
+          {!!(status?.syncState || []).length && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 18 }}>
+              {status.syncState.map((s) => (
+                <span key={s.entity} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)" }}>
+                  <span style={{ color: "var(--tx2)" }}>{s.entity}</span>{" "}
+                  <strong style={{ color: s.last_status === "ok" ? "var(--grn)" : s.last_status === "error" ? "var(--red)" : "var(--tx3)" }}>{int(s.rows_synced)}</strong>
+                  {s.last_status === "error" ? " ⚠" : ""}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Tabs */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            {[["catalog", t("wawi.tabCatalog")], ["matched", t("wawi.tabMatched")]].map(([id, label]) => (
+              <button key={id} className={`btn ${tab === id ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab(id)}>{label}</button>
+            ))}
+          </div>
+
+          {tab === "catalog" ? (
+            <>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+                <input placeholder={t("wawi.searchPh")} value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && loadItems()} style={{ width: 240 }} />
+                <button className="btn btn-ghost" onClick={loadItems}>{t("common.search") || "Search"}</button>
+                <label style={{ fontSize: 12, color: "var(--tx2)", display: "flex", alignItems: "center", gap: 6 }}>
+                  <input type="checkbox" checked={matchedOnly} onChange={(e) => setMatchedOnly(e.target.checked)} /> {t("wawi.matchedOnly")}
+                </label>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead><tr style={{ textAlign: "left", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
+                    <th style={{ padding: "6px 8px" }}>{t("wawi.sku")}</th><th style={{ padding: "6px 8px" }}>{t("wawi.name")}</th>
+                    <th style={{ padding: "6px 8px" }}>{t("wawi.gtin")}</th><th style={{ padding: "6px 8px" }}>ASIN</th>
+                    <th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.cost")}</th><th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.salePrice")}</th>
+                    <th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.stock")}</th>
+                  </tr></thead>
+                  <tbody>
+                    {loading ? <tr><td colSpan={7} style={{ padding: 20, color: "var(--tx3)" }}>{t("common.loading") || "…"}</td></tr>
+                    : !items.length ? <tr><td colSpan={7} style={{ padding: 20, color: "var(--tx3)" }}>{t("wawi.empty")}</td></tr>
+                    : items.map((it) => {
+                      const links = it.asin_links || [];
+                      const matchedAsin = links.some((l) => l.product_id);
+                      return (
+                        <tr key={it.wawi_id} style={{ borderTop: "1px solid var(--border)" }}>
+                          <td style={{ padding: "7px 8px", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{it.sku || "—"}</td>
+                          <td style={{ padding: "7px 8px", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.name || "—"}</td>
+                          <td style={{ padding: "7px 8px", fontFamily: "var(--mono)", color: "var(--tx3)", fontSize: 11 }}>{it.gtin || "—"}</td>
+                          <td style={{ padding: "7px 8px" }}>
+                            {links.length ? links.slice(0, 3).map((l) => (
+                              <span key={l.asin} className={`badge ${l.product_id ? "bg-grn" : "bg-bl"}`} style={{ fontSize: 9, marginRight: 3, fontFamily: "var(--mono)" }} title={l.product_id ? t("wawi.matched") : t("wawi.unmatched")}>{l.asin}</span>
+                            )) : <span style={{ color: "var(--tx3)" }}>—</span>}
+                          </td>
+                          <td style={{ padding: "7px 8px", textAlign: "right", color: "var(--tx2)" }}>{money(it.purchase_price_net)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right" }}>{money(it.sales_price_net)}</td>
+                          <td style={{ padding: "7px 8px", textAlign: "right" }}>{int(it.stock_available)}<span style={{ color: "var(--tx3)" }}> / {int(it.stock_total)}</span></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead><tr style={{ textAlign: "left", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>ASIN</th><th style={{ padding: "6px 8px" }}>{t("wawi.name")}</th>
+                  <th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.cost")}</th><th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.salePrice")}</th>
+                  <th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.margin")}</th>
+                  <th style={{ padding: "6px 8px", textAlign: "right" }}>{t("wawi.stock")}</th>
+                  <th style={{ padding: "6px 8px", textAlign: "right" }} title={t("wawi.allChannelHint")}>{t("wawi.allChannel")} (30d)</th>
+                </tr></thead>
+                <tbody>
+                  {loading ? <tr><td colSpan={8} style={{ padding: 20, color: "var(--tx3)" }}>{t("common.loading") || "…"}</td></tr>
+                  : !matched.length ? <tr><td colSpan={8} style={{ padding: 20, color: "var(--tx3)" }}>{t("wawi.matchedEmpty")}</td></tr>
+                  : matched.map((m) => {
+                    const sale = Number(m.sales_price_net), cost = Number(m.cost);
+                    const margin = (m.sales_price_net != null && m.cost != null) ? sale - cost : null;
+                    const marginPct = (margin != null && sale > 0) ? (margin / sale) * 100 : null;
+                    return (
+                      <tr key={m.asin + m.wawi_id} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "6px 8px", width: 40 }}>{m.image_url ? <img src={m.image_url} alt="" style={{ width: 32, height: 32, borderRadius: 5, objectFit: "cover" }} /> : null}</td>
+                        <td style={{ padding: "7px 8px", fontFamily: "var(--mono)", fontSize: 11 }}>{m.asin}</td>
+                        <td style={{ padding: "7px 8px", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.title || m.sku}</td>
+                        <td style={{ padding: "7px 8px", textAlign: "right", color: "var(--tx2)" }}>{money(m.cost)}</td>
+                        <td style={{ padding: "7px 8px", textAlign: "right" }}>{money(m.sales_price_net)}</td>
+                        <td style={{ padding: "7px 8px", textAlign: "right", color: margin == null ? "var(--tx3)" : margin >= 0 ? "var(--grn)" : "var(--red)" }}>
+                          {margin == null ? "—" : money(margin)}{marginPct != null ? <span style={{ color: "var(--tx3)", fontSize: 11 }}> ({marginPct.toFixed(0)}%)</span> : null}
+                        </td>
+                        <td style={{ padding: "7px 8px", textAlign: "right" }}>{int(m.wawi_stock_available)}<span style={{ color: "var(--tx3)" }}> / {int(m.wawi_stock_total)}</span></td>
+                        <td style={{ padding: "7px 8px", textAlign: "right", fontWeight: 600 }}>{int(m.wawi_orders_all_channel)}<span style={{ color: "var(--tx3)", fontWeight: 400 }}> · {int(m.wawi_units_all_channel)}u</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
 const AlertsPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [tab, setTab] = useState("configs");
@@ -17525,6 +17717,7 @@ export default function App() {
     rules: <RulesPage workspaceId={wid} />,
     strategies: <StrategiesPage workspaceId={wid} />,
     alerts: <AlertsPage workspaceId={wid} />,
+    wawi: <WawiPage workspaceId={wid} />,
     ai: <AIPage workspaceId={wid} />,
     audit: <AuditPage workspaceId={wid} />,
     connect: <ConnectPage workspaceId={wid} onConnected={() => { setActive("overview"); setSyncTrigger(t => t + 1); }} onSyncStarted={() => setSyncTrigger(t => t + 1)} />,
