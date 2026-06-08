@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-08 — Rule write-back idempotency, product-movers real causes, Products listing trends, dashboard currency
+
+A day of correctness fixes and two feature areas: data-derived alert causes, and a listing-grouped Products page with daily trend charts.
+
+### Fixed — Rule write-back (verified live on Amazon)
+
+- **Duplicate negatives no longer log as errors.** Re-adding a negative keyword/target that already exists on Amazon returned a `duplicateValueError` (400) and was recorded as a failed write-back, re-failing every daily run. `pushNegativeAsin` / `pushNegativeKeyword` now detect the duplicate and return `{ ok: true, duplicate: true }` (adding an existing negative is idempotent — the desired end-state already holds). Verified live: a real POST for an existing negative → `{ok:true, duplicate:true}`.
+- **`pause_keyword` / `enable_keyword` write-backs are now audit-tracked.** They fired via a bare `.catch()` that only logged, leaving `audit_events.amazon_status = NULL` (a masked-failure class). Now wired through `trackWriteback` so the audit row reflects the real Amazon result.
+- **Partial keyword-update rejections surface.** `pushKeywordUpdates` returned `{ok:true}` even when Amazon rejected keywords in the `keywords.error` array; the first rejection now propagates so the audit shows the error.
+
+### Added — Product-movers: real, data-derived causes
+
+The alert's static "likely causes" checklist is now preceded by **detected** causes per product (chips in the email and the Triggered-tab row):
+
+- **Out of stock / low stock** — Wawi ERP stock (`wawi_stocks` via `wawi_item_asins`) + FBA `sp_inventory`; both sources shown explicitly (`ERP: x · FBA: y`), flagged only on a known source (never invents OOS from a single missing source).
+- **Price up** — order-derived avg selling price, current window vs prior.
+- **Ad spend down** — ad spend (`fact_metrics_daily`), current vs prior window.
+- Thresholds are **configurable per alert** (`conditions.cause_price_pct` / `cause_ad_pct` / `cause_low_stock`). `detectMoverCauses` in `services/alerts/evaluate.js` (+5 unit tests); rendered in `email.js` and the Alerts UI; existing fired instances backfilled.
+
+### Added — Products: listing grouping + daily trend charts
+
+- **Group by Amazon parent ASIN** (variation family). New `products.parent_asin` column (migration `036`), populated from SP-API Catalog `relationships`; the UI groups `parent_asin || asin` into listing cards with aggregate KPIs, expandable to child ASINs.
+- **Stacked, synchronized trend charts** per listing and per ASIN: BSR, Orders, Price, Ad spend, **ACOS, TACOS, ROAS** — one shared crosshair across all charts, an "expand/collapse all charts" toggle, and **compare-to-previous-period** overlay (faded dashed line). `GET /products/timeseries` (lazy-loaded, ≤60 ASINs, `compare=1`).
+- **Sort by orders for the selected period** — `GET /products/period-orders`; surfaces the top revenue-driving listings.
+- **Fixed per-ASIN ad spend.** Header `PPC`/`Profit` summed a campaign-level spend that was repeated on every ASIN in the campaign (e.g. €327.20 × 9 ≈ €3007 across one listing's variations). Now uses `advertised_product`-level spend (e.g. €3.12 / €1.52 / … ≈ €6.34 true) in both the grouped and flat views, fixing the listing PPC/Profit and enabling correct ACOS/TACOS.
+
+### Fixed — Dashboard data accuracy (Overview + Campaigns)
+
+- **Currency was hardcoded `$` but the data is EUR** (amazon.de). `GET /metrics/summary` now returns `currency` (the marketplace currency of the profiles with spend in the period) and `currencyMixed` (true when >1 currency contributed — totals then sum across currencies, surfaced as a "⚠ Mixed currencies" badge). The frontend renders the real symbol via `curSym()`; Campaigns uses per-row `currency_code`. (This workspace has attached USD + EUR profiles — the USD one has no data, so current totals are pure EUR.)
+- **"Orders" mixed total and ad scope.** The card showed ad orders (`orders_14d`) next to total sales. It now shows **total orders** (`totalOrders` from `sp_orders`) to match "Total sales", relabeling to "Ad orders" when only ad data is available.
+
+### Notes
+
+- Tests: `detectMoverCauses` +5 (alertEvaluate suite 30/30). Full suite 843 pass / 27 fail — the 27 are pre-existing stale-mock failures (ai/strategies/campaigns/rules), identical on clean HEAD; **zero new failures**.
+- Verified on prod: timeseries correctness harness (11 ASINs × 14d + compare) — formulas, aggregation, NaN/∞ all clean; `period-orders` matches raw; summary ACOS/ROAS consistent at 7d & 30d; duplicate-negative idempotency confirmed against live Amazon.
+
+---
+
 ## [Unreleased] — 2026-06-04 — Stage 22: Amazon reconnect recovery, SD write-back format, product-movers dedup
 
 An incident audit (rules failing to write to Amazon since 06-03) traced to the production DE advertiser profile losing Ads API access; recovering it required a re-auth, which surfaced several latent bugs. Plus a noise-reduction feature for the product-movers alert.

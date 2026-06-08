@@ -100,12 +100,14 @@ router.get("/summary", async (req, res, next) => {
     // "TACoS for Apr 20-24 (5d/7d)" rather than blindly trust 3.6%.
     let tacos = null;
     let totalRevenue = null;
+    let totalOrders = null;
     let tacosSource = null; // 'sp_api' | null
     let tacosPeriod = null; // { start, end, days, requestedDays }
     try {
       const { rows: [spInfo] } = await query(
         `SELECT
            SUM(order_total_amount)         AS total_revenue,
+           COUNT(*)                        AS total_orders,
            MIN(purchase_date)::date        AS first_rev_date,
            MAX(purchase_date)::date        AS last_rev_date,
            COUNT(DISTINCT purchase_date::date) AS coverage_days
@@ -114,6 +116,7 @@ router.get("/summary", async (req, res, next) => {
          AND order_status NOT IN ('Canceled', 'Unfulfillable')`,
         [req.workspaceId, start, end]
       );
+      if (spInfo?.total_orders != null) totalOrders = parseInt(spInfo.total_orders);
       if (spInfo?.total_revenue && spInfo.last_rev_date) {
         totalRevenue = parseFloat(spInfo.total_revenue);
         const alignedEnd = spInfo.last_rev_date.toISOString().split("T")[0];
@@ -139,6 +142,24 @@ router.get("/summary", async (req, res, next) => {
       return ((curr - prevVal) / prevVal * 100).toFixed(1);
     };
 
+    // Currency: the workspace can hold profiles in different currencies (e.g. EUR + USD).
+    // Report the currency of the profiles that actually have ad spend in the period (the
+    // one with the most spend wins) so totals aren't mislabelled. `mixed` flags the rare
+    // case where >1 currency contributed (totals would then be summing across currencies).
+    let currency = "EUR", currencyMixed = false;
+    try {
+      const { rows: curRows } = await query(
+        `SELECT ap.currency_code AS code, SUM(f.cost) AS spend
+           FROM fact_metrics_daily f
+           JOIN campaigns c ON c.id = f.entity_id
+           JOIN amazon_profiles ap ON ap.id = c.profile_id
+          WHERE f.workspace_id = $1 AND f.date BETWEEN $2 AND $3 AND f.entity_type = 'campaign'
+          GROUP BY ap.currency_code HAVING SUM(f.cost) > 0 ORDER BY SUM(f.cost) DESC`,
+        [req.workspaceId, start, end]
+      );
+      if (curRows.length) { currency = curRows[0].code || "EUR"; currencyMixed = curRows.length > 1; }
+    } catch {}
+
     res.json({
       period: { start, end },
       totals: {
@@ -155,6 +176,9 @@ router.get("/summary", async (req, res, next) => {
         tacosSource,
         tacosPeriod,
         totalRevenue: totalRevenue ? totalRevenue.toFixed(2) : null,
+        totalOrders,
+        currency,
+        currencyMixed,
       },
       deltas: {
         spend: calcDelta(totals?.spend, prev?.spend),

@@ -78,7 +78,7 @@ async function getCatalogItem(asin, marketplaceId, refreshToken) {
   const region = MARKETPLACE_REGION[marketplaceId] || "EU";
   const data = await _spRequest(region, `/catalog/2022-04-01/items/${asin}`, {
     marketplaceIds: marketplaceId,
-    includedData: "salesRanks,summaries,images",
+    includedData: "salesRanks,summaries,images,relationships",
   }, token);
 
   const salesRanks  = (data.salesRanks || []).find(r => r.marketplaceId === marketplaceId) || {};
@@ -86,8 +86,14 @@ async function getCatalogItem(asin, marketplaceId, refreshToken) {
   const imageList   = (data.images     || []).find(i => i.marketplaceId === marketplaceId) || {};
   const mainImage   = (imageList.images || []).find(img => img.variant === "MAIN");
 
+  // Variation parent: a child ASIN's relationships carry parentAsins; a parent/standalone has none.
+  const relForMkt = (data.relationships || []).find(r => r.marketplaceId === marketplaceId) || {};
+  const variation = (relForMkt.relationships || []).find(rel => Array.isArray(rel.parentAsins) && rel.parentAsins.length);
+  const parentAsin = variation ? variation.parentAsins[0] : null;
+
   return {
     asin,
+    parentAsin,
     title:               summaryList.itemName || null,
     brand:               summaryList.brand    || null,
     imageUrl:            mainImage?.link      || null,

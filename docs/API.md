@@ -334,7 +334,10 @@ Query: ?startDate=2026-04-20&endDate=2026-04-26
     "tacos": "2.16",
     "tacosSource": "sp_api",
     "tacosPeriod": { "start": "2026-04-20", "end": "2026-04-26", "days": 7, "requestedDays": 7 },
-    "totalRevenue": "82103.61"
+    "totalRevenue": "82103.61",
+    "totalOrders": 1526,
+    "currency": "EUR",
+    "currencyMixed": false
   },
   "deltas":  { "spend": "-12.0", "sales": "-9.5", "acos": "...", "roas": "..." },
   "trend":   [
@@ -348,6 +351,8 @@ Query: ?startDate=2026-04-20&endDate=2026-04-26
 - `tacos` is `null` and `tacosSource` is `null` when `sp_orders` is empty (SP-API not connected or sync incomplete) — UI shows "—".
 - `tacosPeriod` reports the *aligned* range (start..MAX(purchase_date)) so spend and revenue cover the same days. When `days < requestedDays` the UI surfaces a coverage chip.
 - `trend[*].tacos` and `trend[*].total_revenue` are per-day; days without revenue have `tacos: null` and the sparkline draws a gap.
+- `sales`/`orders` are ad-attributed (`sales_14d`/`orders_14d`); `totalRevenue`/`totalOrders` are *total* (organic + ads) from `sp_orders`. The UI shows the total when available and relabels to "Ad sales/orders" otherwise.
+- `currency` is the marketplace currency of the profiles that have spend in the period (dominant wins). `currencyMixed` is `true` when >1 currency contributed — totals then sum across currencies and the UI shows a "⚠ Mixed currencies" badge. *(2026-06-08)*
 
 ### GET /metrics/top-campaigns
 ```
@@ -356,13 +361,33 @@ Query: ?limit=10&orderBy=spend
 
 ---
 
-## Products *(2026-04-27 — export added)*
+## Products *(2026-04-27 — export added; 2026-06-08 — listing grouping + trends)*
 
 ### GET /products
-List active products with the latest BSR snapshot per ASIN.
+List active products with the latest BSR snapshot per ASIN. Each row also carries
+`parent_asin` (Amazon variation-family parent, from SP-API Catalog `relationships`;
+the UI groups by `parent_asin || asin`) and true per-ASIN ad metrics `ad_spend_7d` /
+`ad_sales_7d` (from `fact_metrics_daily entity_type='advertised_product'` — `ppc_7d`
+and `profit_7d` now use this, replacing the old campaign-level spend that double-counted
+across a listing's variations).
 
 ### POST /products
 Add a new ASIN to track (queues a meta + BSR fetch job).
+
+### GET /products/timeseries?asins=A,B,C&start=&end=&compare=1
+Daily aligned series for the listing/ASIN charts. Returns per-ASIN series (`by_asin`)
+and a listing `aggregate` (BSR = min across children, money/counts summed, price averaged,
+ACOS/TACOS/ROAS from summed components). Each point: `{date, bsr, price, orders, units,
+revenue, ad_spend, ad_sales, acos, tacos, roas}` — `acos = spend/adSales`, `tacos =
+spend/totalRevenue`, `roas = adSales/spend` (null when the denominator is 0). With
+`compare=1` the queried range is widened to also return the immediately-preceding
+equal-length window as `prev` (`{start, end, by_asin, aggregate}`), aligned by index.
+Max 60 ASINs; default range = last 30 days. Lazy-loaded on expand.
+
+### GET /products/period-orders?start=&end=
+Total orders/units/revenue per ASIN over a date range (default last 30d), from
+`sp_orders` (status ≠ Canceled). Powers "sort by orders for the period". Returns
+`{start, end, by_asin: { ASIN: { orders, units, revenue } }}`.
 
 ### GET /products/:id/history?days=30
 BSR snapshots for one product over the last N days.

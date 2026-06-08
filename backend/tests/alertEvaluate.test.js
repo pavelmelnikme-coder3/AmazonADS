@@ -8,7 +8,7 @@ jest.mock("../src/services/email", () => ({ sendAlertEmail: jest.fn().mockResolv
 
 const { query: dbQuery } = require("../src/db/pool");
 const { sendAlertEmail } = require("../src/services/email");
-const { computeMetric, compare, formatValue, evaluateWorkspaceAlerts } = require("../src/services/alerts/evaluate");
+const { computeMetric, compare, formatValue, evaluateWorkspaceAlerts, detectMoverCauses } = require("../src/services/alerts/evaluate");
 
 const WS_ID = "ws---0001-0000-0000-000000000001";
 
@@ -126,5 +126,70 @@ describe("evaluateWorkspaceAlerts", () => {
 
     const r = await evaluateWorkspaceAlerts(WS_ID);
     expect(r.triggered).toBe(0);
+  });
+});
+
+describe("detectMoverCauses", () => {
+  // The fn runs 4 queries in order: wawi stock, fba inventory, order price, ad spend.
+  const mockQueries = ({ wawi = [], fba = [], price = [], ad = [] }) => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: wawi })
+      .mockResolvedValueOnce({ rows: fba })
+      .mockResolvedValueOnce({ rows: price })
+      .mockResolvedValueOnce({ rows: ad });
+  };
+
+  it("flags out-of-stock (high) from ERP stock = 0, FBA n/a", async () => {
+    mockQueries({ wawi: [{ asin: "B0AAA00001", stock: "0" }] });
+    const products = [{ asin: "B0AAA00001" }];
+    await detectMoverCauses(WS_ID, products, 7);
+    expect(products[0].causes).toEqual([
+      { type: "stock_out", severity: "high", detail: "ERP: 0 · FBA: n/a" },
+    ]);
+  });
+
+  it("surfaces both stock sources and flags low stock by the smaller known value", async () => {
+    mockQueries({
+      wawi: [{ asin: "B0AAA00002", stock: "4" }],
+      fba: [{ asin: "B0AAA00002", sellable: "2", nn: "1" }],
+    });
+    const products = [{ asin: "B0AAA00002" }];
+    await detectMoverCauses(WS_ID, products, 7, { lowStock: 10 });
+    expect(products[0].causes).toContainEqual(
+      { type: "stock_low", severity: "medium", detail: "ERP: 4 · FBA: 2", value: 2 },
+    );
+  });
+
+  it("honours config-driven thresholds (price rise below threshold → no cause)", async () => {
+    // 10% price rise; default pricePct=5 flags it, pricePct=15 does not.
+    const price = [{ asin: "B0AAA00003", price_cur: "11.00", price_prev: "10.00" }];
+    mockQueries({ price });
+    const a = [{ asin: "B0AAA00003" }];
+    await detectMoverCauses(WS_ID, a, 7, { pricePct: 5 });
+    expect(a[0].causes).toContainEqual(
+      { type: "price_up", severity: "medium", pct: 10, detail: "€10.00 → €11.00" },
+    );
+
+    mockQueries({ price });
+    const b = [{ asin: "B0AAA00003" }];
+    await detectMoverCauses(WS_ID, b, 7, { pricePct: 15 });
+    expect(b[0].causes).toEqual([]);
+  });
+
+  it("flags ad pullback when spend drops past the threshold", async () => {
+    mockQueries({ ad: [{ asin: "B0AAA00004", cost_cur: "0", cost_prev: "0.28" }] });
+    const products = [{ asin: "B0AAA00004" }];
+    await detectMoverCauses(WS_ID, products, 7, { adPct: 50 });
+    expect(products[0].causes).toContainEqual(
+      { type: "ad_cut", severity: "medium", pct: -100, detail: "€0.28 → €0.00" },
+    );
+  });
+
+  it("does not invent a cause from a single missing source or a no-op move", async () => {
+    // No wawi/fba rows → stock unknown; price flat → no price_up.
+    mockQueries({ price: [{ asin: "B0AAA00005", price_cur: "10.00", price_prev: "10.00" }] });
+    const products = [{ asin: "B0AAA00005" }];
+    await detectMoverCauses(WS_ID, products, 7, { pricePct: 0 });
+    expect(products[0].causes).toEqual([]);
   });
 });

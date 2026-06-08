@@ -204,6 +204,11 @@ const AI_PARAM_DISPLAY = {
   daily_budget:       'Новый бюджет/день',
   state:              'Новый статус',
 };
+// Currency symbol by ISO code — used to render money in the actual marketplace
+// currency (the workspace can hold EUR/USD/GBP… profiles) instead of a hardcoded $.
+const CUR_SYM = { EUR: "€", USD: "$", GBP: "£", SEK: "kr", PLN: "zł", TRY: "₺", JPY: "¥", CAD: "C$", AUD: "A$", MXN: "MX$", AED: "AED", INR: "₹", BRL: "R$" };
+const curSym = (code) => CUR_SYM[code] || code || "€";
+
 const renderAiParams = (params) => {
   if (!params) return null;
   const obj = (typeof params === 'string')
@@ -4198,6 +4203,137 @@ const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
   );
 };
 
+// ─── Listing trend charts ───────────────────────────────────────────────────
+// One metric as an area+line SVG with a shared crosshair. `data`: [{date, value}].
+// `invert` flips Y so a lower value sits at the top (used for BSR, where #1 is best).
+// `prev` (optional) is the previous period's values aligned by index → drawn as a
+// faded dashed overlay for period-over-period comparison.
+// hoverIdx/onHover are lifted to the parent so every stacked chart shares one cursor.
+function TrendChart({ title, color, data, prev, fmt, invert = false, hoverIdx, onHover, height = 52 }) {
+  const W = 720, H = height, PAD = 6;
+  const N = data.length;
+  const curVals = data.map(d => d.value).filter(v => v != null && !Number.isNaN(v));
+  const prevVals = (prev || []).filter(v => v != null && !Number.isNaN(v));
+  const all = curVals.concat(prevVals);
+  const hasData = all.length > 0;
+  const min = hasData ? Math.min(...all) : 0;
+  const max = hasData ? Math.max(...all) : 1;
+  const spread = (max - min) || 1;
+  const xOf = i => PAD + (i / (N - 1 || 1)) * (W - PAD * 2);
+  const yOf = v => {
+    const norm = (v - min) / spread;            // 0 (min) … 1 (max)
+    const topFrac = invert ? norm : (1 - norm); // best value → top
+    return PAD + topFrac * (H - PAD * 2);
+  };
+  const segmentsOf = vals => {
+    const segs = []; let cur = [];
+    vals.forEach((v, i) => {
+      if (v != null && !Number.isNaN(v)) cur.push(`${xOf(i)},${yOf(v)}`);
+      else if (cur.length) { segs.push(cur); cur = []; }
+    });
+    if (cur.length) segs.push(cur);
+    return segs;
+  };
+  const segs = segmentsOf(data.map(d => d.value));
+  const prevSegs = prev ? segmentsOf(prev) : [];
+  const longest = segs.reduce((a, b) => (b.length > a.length ? b : a), []);
+  const areaPts = longest.length >= 2
+    ? `${longest[0].split(",")[0]},${H} ${longest.join(" ")} ${longest[longest.length-1].split(",")[0]},${H}`
+    : null;
+  const onMove = e => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    onHover(Math.round(pct * (N - 1)));
+  };
+  const hovV = hoverIdx != null && hoverIdx >= 0 && hoverIdx < N ? data[hoverIdx]?.value : null;
+  const hovP = prev && hoverIdx != null && hoverIdx >= 0 && hoverIdx < N ? prev[hoverIdx] : null;
+  const gid = `tg-${title.replace(/\W/g, "")}-${color.replace("#", "")}`;
+  return (
+    <div style={{ display: "flex", alignItems: "stretch", gap: 10 }}>
+      <div style={{ width: 80, flexShrink: 0, paddingTop: 2 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: "var(--tx2)", textTransform: "uppercase", letterSpacing: ".04em" }}>{title}</div>
+        <div style={{ fontSize: 12, fontWeight: 700, color, fontFamily: "var(--mono)", minHeight: 15 }}>
+          {hovV != null ? fmt(hovV) : (hasData ? fmt(invert ? min : max) : "—")}
+        </div>
+        {prev && <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", minHeight: 13 }}>{hovP != null ? fmt(hovP) : ""}</div>}
+      </div>
+      <div style={{ position: "relative", flex: 1, minWidth: 0 }} onMouseMove={onMove} onMouseLeave={() => onHover(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: H, display: "block", overflow: "visible", cursor: "crosshair" }}>
+          <defs>
+            <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.28" />
+              <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+            </linearGradient>
+          </defs>
+          {areaPts && <polygon points={areaPts} fill={`url(#${gid})`} />}
+          {prevSegs.map((s, si) => s.length >= 2 && (
+            <polyline key={"p" + si} points={s.join(" ")} fill="none" stroke={color} strokeWidth="1.5"
+              strokeDasharray="4 3" opacity="0.4" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          ))}
+          {segs.map((s, si) => s.length >= 2 && (
+            <polyline key={si} points={s.join(" ")} fill="none" stroke={color} strokeWidth="2"
+              strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          ))}
+          {segs.map((s) => s.length === 1 && (
+            <circle key={"d" + s[0]} cx={s[0].split(",")[0]} cy={s[0].split(",")[1]} r="2.5" fill={color} />
+          ))}
+          {hovV != null && (
+            <>
+              <line x1={xOf(hoverIdx)} y1={PAD} x2={xOf(hoverIdx)} y2={H - PAD} stroke="var(--tx3)" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+              <circle cx={xOf(hoverIdx)} cy={yOf(hovV)} r="3.5" fill={color} stroke="var(--bg)" strokeWidth="1.5" />
+              {hovP != null && <circle cx={xOf(hoverIdx)} cy={yOf(hovP)} r="3" fill="none" stroke={color} strokeWidth="1.5" opacity="0.5" />}
+            </>
+          )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// Stack of the product trend charts with a single shared crosshair + a hovered-date
+// header. `series`: [{date, bsr, price, orders, ad_spend, acos, tacos, roas}].
+// `prevSeries` (optional) is the previous period's aligned series for comparison.
+function ListingTrendStack({ series, prevSeries, tr }) {
+  const [hoverIdx, setHoverIdx] = React.useState(null);
+  if (!series || !series.length) return <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.trendNoData")}</div>;
+  const money = v => "€" + Number(v).toFixed(2);
+  const int = v => Math.round(v).toLocaleString();
+  const pct = v => Number(v).toFixed(1) + "%";
+  const x = v => Number(v).toFixed(2) + "×";
+  const metrics = [
+    { key: "bsr",      title: tr("products.trendBsr"),    color: "#3B82F6", invert: true,  fmt: v => "#" + int(v) },
+    { key: "orders",   title: tr("products.trendOrders"), color: "#ec4899", invert: false, fmt: int },
+    { key: "price",    title: tr("products.trendPrice"),  color: "#10b981", invert: false, fmt: money },
+    { key: "ad_spend", title: tr("products.trendSpend"),  color: "#f59e0b", invert: false, fmt: money },
+    { key: "acos",     title: "ACOS",                     color: "#ef4444", invert: false, fmt: pct },
+    { key: "tacos",    title: "TACOS",                    color: "#f97316", invert: false, fmt: pct },
+    { key: "roas",     title: "ROAS",                     color: "#14b8a6", invert: false, fmt: x },
+  ];
+  const hovDate = hoverIdx != null && series[hoverIdx] ? series[hoverIdx].date : null;
+  const hovPrevDate = prevSeries && hoverIdx != null && prevSeries[hoverIdx] ? prevSeries[hoverIdx].date : null;
+  const fmtD = d => new Date(d + "T00:00:00Z").toLocaleDateString("de", { day: "2-digit", month: "short" });
+  return (
+    <div style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", height: 16, marginBottom: 2 }}>
+        {prevSeries
+          ? <span style={{ fontSize: 10, color: "var(--tx3)" }}><span style={{ display: "inline-block", width: 14, borderTop: "2px dashed currentColor", verticalAlign: "middle", opacity: .5, marginRight: 4 }} />{tr("products.prevPeriod")}{hovPrevDate ? ` · ${fmtD(hovPrevDate)}` : ""}</span>
+          : <span />}
+        <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx2)" }}>
+          {hovDate ? fmtD(hovDate) : `${fmtD(series[0].date)} – ${fmtD(series[series.length - 1].date)}`}
+        </span>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {metrics.map(m => (
+          <TrendChart key={m.key} title={m.title} color={m.color} invert={m.invert} fmt={m.fmt}
+            data={series.map(s => ({ date: s.date, value: s[m.key] }))}
+            prev={prevSeries ? prevSeries.map(s => s[m.key]) : null}
+            hoverIdx={hoverIdx} onHover={setHoverIdx} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const ProductsPage = ({ workspaceId }) => {
   const { t: tr } = useI18n();
   const [newAsin, setNewAsin] = useState("");
@@ -4227,6 +4363,8 @@ const ProductsPage = ({ workspaceId }) => {
     setHistEnd(end);
     setHistory({});
     expandedIds.forEach(id => fetchHistory(id, start, end));
+    // Trend charts are range-bound too — drop the cache so open ones refetch.
+    setTsData({});
   };
   // Hover sparkline state — { pid, idx } where idx is the BSR badge index
   // for that product. Lazy-fetches /:id/history on first hover so the chart
@@ -4264,11 +4402,35 @@ const ProductsPage = ({ workspaceId }) => {
   const [filterAvail, setFilterAvail] = useState("all"); // all | available | unavailable
   const [filterAds, setFilterAds]     = useState("all"); // all | advertised | not_advertised
   const [sortBy, setSortBy] = useState("bsr");
+  // Listing grouping (parent ASIN → variation family) + lazy trend charts.
+  const [groupByListing, setGroupByListing] = useState(true);
+  const [expandedListings, setExpandedListings] = useState(() => new Set());      // listing rows showing their child ASINs
+  const [listingChartsOpen, setListingChartsOpen] = useState(() => new Set());    // listing IDs showing the aggregate charts
+  const [childChartsOpen, setChildChartsOpen] = useState(() => new Set());        // child ASINs showing per-ASIN charts
+  const [tsData, setTsData] = useState({});       // listingId → { aggregate, by_asin, prev }
+  const [tsLoading, setTsLoading] = useState(() => new Set());
+  const [periodOrders, setPeriodOrders] = useState(null); // UPPER(asin) → { orders, units, revenue } over the selected range
+  const [compareMode, setCompareMode] = useState(false);  // overlay previous period on the trend charts
 
   const { data: products, loading, mutate } = useAsync(
     () => workspaceId ? get("/products") : Promise.resolve([]),
     [workspaceId, tick]
   );
+
+  // Fetch the daily time-series for a whole listing in one call (feeds both the
+  // aggregate stack and every child ASIN stack). Uses the toolbar BSR date range.
+  const fetchTimeseries = (listingId, asins) => {
+    if (tsData[listingId] || tsLoading.has(listingId)) return;
+    setTsLoading(s => new Set(s).add(listingId));
+    const qs = new URLSearchParams({ asins: asins.join(",") });
+    if (histStart) qs.set("start", histStart);
+    if (histEnd)   qs.set("end", histEnd);
+    if (compareMode) qs.set("compare", "1");
+    get(`/products/timeseries?${qs}`)
+      .then(d => setTsData(m => ({ ...m, [listingId]: d })))
+      .catch(() => {})
+      .finally(() => setTsLoading(s => { const n = new Set(s); n.delete(listingId); return n; }));
+  };
 
   const reload = () => setTick(t => t + 1);
 
@@ -4304,13 +4466,82 @@ const ProductsPage = ({ workspaceId }) => {
         const br = rb.length ? Math.min(...rb.map(r => r.rank)) : Infinity;
         return ar - br;
       }
+      if (sortBy === "orders") {
+        const oa = (periodOrders?.[a.asin]?.orders) || 0;
+        const ob = (periodOrders?.[b.asin]?.orders) || 0;
+        return ob - oa; // most orders first
+      }
       if (sortBy === "asin") return a.asin.localeCompare(b.asin);
       if (sortBy === "updated") return new Date(b.bsr_updated_at || 0) - new Date(a.bsr_updated_at || 0);
       if (sortBy === "title") return (a.title || "").localeCompare(b.title || "");
       return 0;
     });
     return list;
-  }, [products, search, filterBrand, filterAvail, filterAds, sortBy]);
+  }, [products, search, filterBrand, filterAvail, filterAds, sortBy, periodOrders]);
+
+  // Group filtered products into listings by parent ASIN (variation family);
+  // products without a parent are their own single-ASIN listing.
+  const listings = useMemo(() => {
+    const map = new Map();
+    for (const p of filteredProducts) {
+      const lid = p.parent_asin || p.asin;
+      if (!map.has(lid)) map.set(lid, []);
+      map.get(lid).push(p);
+    }
+    const num = v => Number(v) || 0;
+    const out = [...map.entries()].map(([lid, ch]) => {
+      const rep = ch.find(c => c.asin === lid) || ch[0]; // parent's own row if tracked, else first child
+      const ranks = ch.map(c => c.best_rank).filter(r => r != null && r > 0);
+      const prices = ch.map(c => num(c.sell_price)).filter(v => v > 0);
+      const adSpend7 = ch.reduce((s, c) => s + num(c.ad_spend_7d), 0);
+      const adSales7 = ch.reduce((s, c) => s + num(c.ad_sales_7d), 0);
+      const revenue7 = ch.reduce((s, c) => s + num(c.revenue_7d), 0);
+      return {
+        listing_id: lid,
+        rep, children: ch, asins: ch.map(c => c.asin),
+        asin_count: ch.length,
+        title: rep.title, image_url: rep.image_url, brand: rep.brand, marketplace_id: rep.marketplace_id,
+        best_rank: ranks.length ? Math.min(...ranks) : null,
+        ad_spend_7d: adSpend7,
+        orders_7d: ch.reduce((s, c) => s + num(c.qty_7d), 0),
+        acos_7d: adSales7 > 0 ? (adSpend7 / adSales7) * 100 : null,
+        tacos_7d: revenue7 > 0 ? (adSpend7 / revenue7) * 100 : null,
+        price_min: prices.length ? Math.min(...prices) : null,
+        price_max: prices.length ? Math.max(...prices) : null,
+        period_orders: ch.reduce((s, c) => s + ((periodOrders?.[c.asin]?.orders) || 0), 0),
+        period_revenue: ch.reduce((s, c) => s + ((periodOrders?.[c.asin]?.revenue) || 0), 0),
+      };
+    });
+    if (sortBy === "orders") out.sort((a, b) => b.period_orders - a.period_orders || (a.best_rank ?? Infinity) - (b.best_rank ?? Infinity));
+    else out.sort((a, b) => (a.best_rank ?? Infinity) - (b.best_rank ?? Infinity));
+    return out;
+  }, [filteredProducts, sortBy, periodOrders]);
+
+  // Ensure every open chart (aggregate or per-child) has its series loaded; also
+  // re-runs after a date-range change (which clears tsData) to refetch them.
+  useEffect(() => {
+    if (!groupByListing) return;
+    const need = new Set([...listingChartsOpen]);
+    for (const asin of childChartsOpen) {
+      const L = listings.find(x => x.asins.includes(asin));
+      if (L) need.add(L.listing_id);
+    }
+    for (const lid of need) {
+      const L = listings.find(x => x.listing_id === lid);
+      if (L) fetchTimeseries(lid, L.asins);
+    }
+  }, [listingChartsOpen, childChartsOpen, histStart, histEnd, groupByListing, listings, compareMode]); // eslint-disable-line
+
+  // Load per-ASIN order totals over the selected range when sorting by orders.
+  useEffect(() => {
+    if (sortBy !== "orders" || !workspaceId) return;
+    const qs = new URLSearchParams();
+    if (histStart) qs.set("start", histStart);
+    if (histEnd)   qs.set("end", histEnd);
+    get(`/products/period-orders${qs.toString() ? "?" + qs : ""}`)
+      .then(d => setPeriodOrders(d.by_asin || {}))
+      .catch(() => setPeriodOrders({}));
+  }, [sortBy, histStart, histEnd, workspaceId]);
 
   const handleAdd = async () => {
     if (!newAsin.trim()) return;
@@ -4667,13 +4898,23 @@ const ProductsPage = ({ workspaceId }) => {
 
           <select
             value={sortBy}
-            onChange={e => setSortBy(e.target.value)}
+            onChange={e => {
+              const v = e.target.value;
+              setSortBy(v);
+              // "Orders" needs a period — default to the last 30 days if none is set.
+              if (v === "orders" && !histStart && !histEnd) {
+                const end = new Date().toISOString().slice(0, 10);
+                const start = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+                handleHistRange(start, end);
+              }
+            }}
             style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", cursor: "pointer" }}
           >
-            <option value="bsr">Sort: BSR rank</option>
-            <option value="title">Sort: Title</option>
-            <option value="asin">Sort: ASIN</option>
-            <option value="updated">Sort: Last updated</option>
+            <option value="bsr">{tr("products.sortBsr")}</option>
+            <option value="orders">{tr("products.sortOrders")}</option>
+            <option value="title">{tr("products.sortTitle")}</option>
+            <option value="asin">{tr("products.sortAsin")}</option>
+            <option value="updated">{tr("products.sortUpdated")}</option>
           </select>
 
           {/* BSR history date range filter */}
@@ -4697,7 +4938,47 @@ const ProductsPage = ({ workspaceId }) => {
             )}
           </div>
 
-          {(() => {
+          <button
+            onClick={() => setGroupByListing(v => !v)}
+            className="btn btn-ghost"
+            title={tr("products.groupByListingHint")}
+            style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6,
+              background: groupByListing ? "rgba(99,102,241,.14)" : "transparent",
+              borderColor: groupByListing ? "rgba(99,102,241,.4)" : undefined,
+              color: groupByListing ? "var(--ac2)" : undefined }}>
+            <Layers size={13} strokeWidth={1.75} /> {tr("products.groupByListing")}
+          </button>
+
+          {groupByListing && (
+            <>
+              <button
+                onClick={() => { setCompareMode(v => !v); setTsData({}); }}
+                className="btn btn-ghost"
+                title={tr("products.compareHint")}
+                style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6,
+                  background: compareMode ? "rgba(99,102,241,.14)" : "transparent",
+                  borderColor: compareMode ? "rgba(99,102,241,.4)" : undefined,
+                  color: compareMode ? "var(--ac2)" : undefined }}>
+                <History size={13} strokeWidth={1.75} /> {tr("products.compare")}
+              </button>
+              {(() => {
+                const allOpen = listings.length > 0 && listings.every(L => listingChartsOpen.has(L.listing_id));
+                return (
+                  <button
+                    onClick={() => setListingChartsOpen(allOpen ? new Set() : new Set(listings.map(L => L.listing_id)))}
+                    disabled={!listings.length}
+                    className="btn btn-ghost"
+                    title={allOpen ? tr("products.collapseAllChartsHint") : tr("products.expandAllChartsHint")}
+                    style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+                    {allOpen ? <ChevronUp size={13} strokeWidth={1.75} /> : <ChevronDown size={13} strokeWidth={1.75} />}
+                    {allOpen ? tr("products.collapseAllCharts") : tr("products.expandAllCharts")}
+                  </button>
+                );
+              })()}
+            </>
+          )}
+
+          {!groupByListing && (() => {
             const anyOpen = (filteredProducts || []).some(p => expandedIds.has(p.id));
             return (
               <button
@@ -4770,6 +5051,127 @@ const ProductsPage = ({ workspaceId }) => {
             Clear filters
           </button>
         </div>
+      ) : groupByListing ? (
+        (() => {
+          const money = v => "€" + Number(v || 0).toFixed(2);
+          const pctOrDash = v => v == null ? "—" : Number(v).toFixed(1) + "%";
+          const toggleSet = (setter, key) => setter(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+          const Kpi = ({ label, value, color }) => (
+            <span style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline" }}>
+              <span style={{ color: "var(--tx3)" }}>{label}</span>
+              <span style={{ fontWeight: 700, color: color || "var(--tx)", fontFamily: "var(--mono)" }}>{value}</span>
+            </span>
+          );
+          const ChartToggle = ({ open, onClick }) => (
+            <button onClick={onClick} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5 }}>
+              <LineChartIcon size={12} strokeWidth={1.75} /> {open ? tr("products.hideCharts") : tr("products.showCharts")}
+            </button>
+          );
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {listings.map(L => {
+                const grouped = L.asin_count > 1;
+                const open = expandedListings.has(L.listing_id);
+                const chartsOpen = listingChartsOpen.has(L.listing_id);
+                const ts = tsData[L.listing_id];
+                const loadingTs = tsLoading.has(L.listing_id);
+                return (
+                  <div key={L.listing_id} className="card" style={{ padding: "14px 18px" }}>
+                    {/* Listing header */}
+                    <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+                      {L.image_url
+                        ? <img src={L.image_url} alt={L.listing_id} style={{ width: 52, height: 52, objectFit: "contain", borderRadius: 6, background: "var(--s2)", flexShrink: 0 }} />
+                        : <div style={{ width: 52, height: 52, borderRadius: 6, background: "var(--s2)", flexShrink: 0 }} />}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", gap: 9, alignItems: "center", flexWrap: "wrap", marginBottom: 3 }}>
+                          {grouped
+                            ? <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--tx)" }}>{L.listing_id}</span>
+                            : <a href={amazonProductUrl(L.listing_id, L.marketplace_id)} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--ac2)", textDecoration: "none", borderBottom: "1px dotted var(--ac2)" }}>{L.listing_id}</a>}
+                          {L.brand && <span className="badge bg-bl" style={{ fontSize: 10 }}>{L.brand}</span>}
+                          {grouped
+                            ? <span className="badge" style={{ fontSize: 10, fontWeight: 700, background: "rgba(99,102,241,.16)", color: "var(--ac2)", border: "1px solid rgba(99,102,241,.35)" }}>{tr("products.variations", { n: L.asin_count })}</span>
+                            : <span className="badge bg-bl" style={{ fontSize: 9 }}>{tr("products.single")}</span>}
+                        </div>
+                        {L.title && <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{L.title}</div>}
+                        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+                          {periodOrders && (
+                            <span style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline", padding: "1px 8px", borderRadius: 5, background: sortBy === "orders" ? "rgba(236,72,153,.14)" : "transparent", border: sortBy === "orders" ? "1px solid rgba(236,72,153,.35)" : "none" }}>
+                              <span style={{ color: "var(--tx3)" }}>{tr("products.ordersPeriod")}</span>
+                              <span style={{ fontWeight: 700, color: "#ec4899", fontFamily: "var(--mono)" }}>{Math.round(L.period_orders).toLocaleString()}</span>
+                              <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)" }}>· €{Number(L.period_revenue).toFixed(0)}</span>
+                            </span>
+                          )}
+                          <Kpi label={tr("products.trendBsr")} value={L.best_rank != null ? "#" + L.best_rank.toLocaleString() : "—"} color="var(--ac2)" />
+                          <Kpi label={tr("products.trendOrders") + " 7д"} value={Math.round(L.orders_7d).toLocaleString()} />
+                          <Kpi label="PPC 7д" value={money(L.ad_spend_7d)} color="var(--amb)" />
+                          <Kpi label="ACOS 7д" value={pctOrDash(L.acos_7d)} color="#ef4444" />
+                          <Kpi label="TACOS 7д" value={pctOrDash(L.tacos_7d)} color="#f97316" />
+                          <Kpi label={tr("products.trendPrice")} value={L.price_min == null ? "—" : (L.price_min === L.price_max ? money(L.price_min) : `${money(L.price_min)}–${money(L.price_max)}`)} color="var(--grn)" />
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
+                        <ChartToggle open={chartsOpen} onClick={() => { toggleSet(setListingChartsOpen, L.listing_id); if (!ts) fetchTimeseries(L.listing_id, L.asins); }} />
+                        {grouped && (
+                          <button onClick={() => toggleSet(setExpandedListings, L.listing_id)} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                            {open ? <ChevronUp size={12} strokeWidth={1.75} /> : <ChevronDown size={12} strokeWidth={1.75} />} {tr("products.variations", { n: L.asin_count })}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Aggregate charts */}
+                    {chartsOpen && (
+                      <div style={{ marginTop: 12 }}>
+                        {loadingTs && !ts
+                          ? <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.loading")}</div>
+                          : <ListingTrendStack series={ts?.aggregate} prevSeries={ts?.prev?.aggregate} tr={tr} />}
+                      </div>
+                    )}
+
+                    {/* Child ASINs */}
+                    {grouped && open && (
+                      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 6 }}>
+                        {L.children.map(c => {
+                          const cOpen = childChartsOpen.has(c.asin);
+                          const cSeries = ts?.by_asin?.[c.asin];
+                          const cPrev = ts?.prev?.by_asin?.[c.asin];
+                          return (
+                            <div key={c.id} style={{ background: "var(--s2)", borderRadius: 8, padding: "9px 12px" }}>
+                              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                                {c.image_url
+                                  ? <img src={c.image_url} alt={c.asin} style={{ width: 34, height: 34, objectFit: "contain", borderRadius: 5, background: "var(--bg)", flexShrink: 0 }} />
+                                  : <div style={{ width: 34, height: 34, borderRadius: 5, background: "var(--bg)", flexShrink: 0 }} />}
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                    <a href={amazonProductUrl(c.asin, c.marketplace_id)} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 600, color: "var(--ac2)", textDecoration: "none" }}>{c.asin}</a>
+                                    <Kpi label={tr("products.trendBsr")} value={c.best_rank != null ? "#" + Number(c.best_rank).toLocaleString() : "—"} />
+                                    <Kpi label={tr("products.trendOrders") + " 7д"} value={Math.round(Number(c.qty_7d) || 0).toLocaleString()} />
+                                    <Kpi label="PPC 7д" value={money(c.ad_spend_7d)} color="var(--amb)" />
+                                    <Kpi label="ACOS 7д" value={pctOrDash(Number(c.ad_sales_7d) > 0 ? (Number(c.ad_spend_7d) / Number(c.ad_sales_7d)) * 100 : null)} color="#ef4444" />
+                                    {c.sell_price && <Kpi label={tr("products.trendPrice")} value={money(c.sell_price)} color="var(--grn)" />}
+                                  </div>
+                                  {c.title && <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</div>}
+                                </div>
+                                <ChartToggle open={cOpen} onClick={() => { toggleSet(setChildChartsOpen, c.asin); if (!ts) fetchTimeseries(L.listing_id, L.asins); }} />
+                              </div>
+                              {cOpen && (
+                                <div style={{ marginTop: 9 }}>
+                                  {loadingTs && !ts
+                                    ? <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.loading")}</div>
+                                    : <ListingTrendStack series={cSeries} prevSeries={cPrev} tr={tr} />}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {filteredProducts.map(p => {
@@ -5631,29 +6033,34 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     cpc:         trend.map(r => parseFloat(r.cpc || 0)),
   };
 
-  const fmt$ = v => `$${parseFloat(v || 0).toLocaleString("en", { maximumFractionDigits: 0 })}`;
+  const CUR = curSym(totals.currency);
+  const fmt$ = v => `${CUR}${parseFloat(v || 0).toLocaleString("en", { maximumFractionDigits: 0 })}`;
   const fmtN = v => parseInt(v || 0).toLocaleString();
 
   // Per-metric tooltip formatters used inside the inline sparkline.
   const sparkFmt = {
-    spend:       v => `$${parseFloat(v||0).toLocaleString("en",{maximumFractionDigits:0})}`,
-    sales:       v => `$${parseFloat(v||0).toLocaleString("en",{maximumFractionDigits:0})}`,
+    spend:       v => `${CUR}${parseFloat(v||0).toLocaleString("en",{maximumFractionDigits:0})}`,
+    sales:       v => `${CUR}${parseFloat(v||0).toLocaleString("en",{maximumFractionDigits:0})}`,
     acos:        v => `${parseFloat(v||0).toFixed(1)}%`,
     roas:        v => `${parseFloat(v||0).toFixed(2)}×`,
     clicks:      v => parseInt(v||0).toLocaleString(),
     impressions: v => parseInt(v||0).toLocaleString(),
     orders:      v => parseInt(v||0).toLocaleString(),
     ctr:         v => `${parseFloat(v||0).toFixed(2)}%`,
-    cpc:         v => `$${parseFloat(v||0).toFixed(2)}`,
+    cpc:         v => `${CUR}${parseFloat(v||0).toFixed(2)}`,
   };
 
   // Show real total revenue from SP-API when available; otherwise fall back to
   // ad-attributed sales (sales_14d) and relabel so the user knows the
-  // difference (organic ≠ ads).
+  // difference (organic ≠ ads). Orders mirror sales: total orders alongside
+  // total revenue, ad-attributed orders alongside ad sales.
   const hasTotalRevenue = totals.totalRevenue != null && parseFloat(totals.totalRevenue) > 0;
   const salesValue = hasTotalRevenue ? totals.totalRevenue : totals.sales;
   const salesLabel = hasTotalRevenue ? t("overview.kpiSales") : t("overview.kpiAdSales");
   const salesTooltip = hasTotalRevenue ? t("overview.kpiSalesTotalTooltip") : t("overview.kpiSalesAdTooltip");
+  const hasTotalOrders = hasTotalRevenue && totals.totalOrders != null;
+  const ordersValue = hasTotalOrders ? totals.totalOrders : totals.orders;
+  const ordersLabel = hasTotalOrders ? t("overview.kpiOrders") : t("overview.kpiAdOrders");
 
   const kpiMap = {
     kpi_spend:       { label: t("overview.kpiSpend"),       value: hasData ? fmt$(totals.spend)       : "—", delta: deltas.spend, color: "#60A5FA", spark: sparkData.spend, sparkFormat: sparkFmt.spend },
@@ -5668,9 +6075,9 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     kpi_roas:        { label: "ROAS",                        value: hasData ? `${parseFloat(totals.roas).toFixed(2)}×` : "—", delta: deltas.roas,  color: "#A78BFA", spark: sparkData.roas, sparkFormat: sparkFmt.roas },
     kpi_clicks:      { label: t("overview.kpiClicks"),      value: hasData ? fmtN(totals.clicks)      : "—", delta: null, color: "#14B8A6", spark: sparkData.clicks, sparkFormat: sparkFmt.clicks },
     kpi_impressions: { label: t("overview.kpiImpressions"), value: hasData ? `${(parseInt(totals.impressions || 0)/1000).toFixed(0)}K` : "—", delta: null, color: "#F472B6", spark: sparkData.impressions, sparkFormat: sparkFmt.impressions },
-    kpi_orders:      { label: t("overview.kpiOrders"),      value: hasData ? fmtN(totals.orders)      : "—", delta: null, color: "#34D399", spark: sparkData.orders, sparkFormat: sparkFmt.orders },
+    kpi_orders:      { label: ordersLabel,                  value: hasData ? fmtN(ordersValue)        : "—", delta: null, color: "#34D399", spark: sparkData.orders, sparkFormat: sparkFmt.orders },
     kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: sparkData.ctr, sparkFormat: sparkFmt.ctr },
-    kpi_cpc:         { label: "CPC",                         value: hasData ? `$${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc, sparkFormat: sparkFmt.cpc },
+    kpi_cpc:         { label: "CPC",                         value: hasData ? `${CUR}${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc, sparkFormat: sparkFmt.cpc },
   };
 
   const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || (ct || "").slice(0, 3).toUpperCase();
@@ -5767,7 +6174,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
                   const max = Math.max(...trend.map(x => parseFloat(x.spend)));
                   const h = max > 0 ? Math.max((parseFloat(r.spend) / max) * 56, 3) : 3;
                   return (
-                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }} title={`$${parseFloat(r.spend).toFixed(0)}`}>
+                    <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }} title={`${CUR}${parseFloat(r.spend).toFixed(0)}`}>
                       <div style={{ width: "100%", height: h, background: "linear-gradient(to top, #3B82F6, #60A5FA88)", borderRadius: "3px 3px 0 0" }} />
                       <span style={{ fontSize: 9, color: "var(--tx3)", fontFamily: "var(--mono)" }}>
                         {new Date(r.date).toLocaleDateString("en", { weekday: "short" }).slice(0, 2)}
@@ -5824,8 +6231,8 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
                     <tr key={c.id}>
                       <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</td>
                       <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{typeLabel(c.campaign_type)}</span></td>
-                      <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend).toFixed(0)}</td>
-                      <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>{CUR}{parseFloat(c.spend).toFixed(0)}</td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `${CUR}${parseFloat(c.sales).toFixed(0)}` : "—"}</td>
                       <td className="num" style={{ textAlign: "right", color: acosColor(parseFloat(c.acos)) }}>
                         {parseFloat(c.acos) > 0 ? `${parseFloat(c.acos).toFixed(1)}%` : "—"}
                       </td>
@@ -5965,6 +6372,11 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
               ? t("overview.profilesSynced", { count: activeProfiles.length })
               : <span style={{ color: "var(--amb)" }}>{t("overview.noProfilesWarning")}<span style={{ color: "var(--ac2)", cursor: "pointer" }}>{t("overview.connectAmazon")}</span></span>
             }
+            {totals.currencyMixed && (
+              <span title={t("overview.currencyMixedHint")} style={{ marginLeft: 10, fontSize: 11, fontWeight: 700, color: "#b45309", background: "rgba(245,158,11,.16)", border: "1px solid rgba(245,158,11,.4)", borderRadius: 6, padding: "1px 8px" }}>
+                ⚠ {t("overview.currencyMixed")}
+              </span>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -7283,14 +7695,15 @@ const CampaignsPage = ({ workspaceId }) => {
                               : pct >= 85  ? 'var(--amb)'
                               : pct >= 50  ? 'var(--grn)'
                               : 'var(--tx3)';
+                            const cs = curSym(c.currency_code);
                             const tipText = pct !== null
-                              ? `Avg daily spend: $${(c.spend / (campFilters.metricsDays || 30)).toFixed(2)} / $${parseFloat(c.daily_budget).toFixed(0)} budget (${pct}% utilized)`
+                              ? `Avg daily spend: ${cs}${(c.spend / (campFilters.metricsDays || 30)).toFixed(2)} / ${cs}${parseFloat(c.daily_budget).toFixed(0)} budget (${pct}% utilized)`
                               : 'No budget set';
                             return (
                               <Tip text={tipText} width={210}>
                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                                    {c.daily_budget ? `$${parseFloat(c.daily_budget).toFixed(0)}` : '—'}
+                                    {c.daily_budget ? `${cs}${parseFloat(c.daily_budget).toFixed(0)}` : '—'}
                                   </span>
                                   {pct !== null && (
                                     <div style={{ width: 60, height: 3, borderRadius: 2, background: 'var(--b2)', marginTop: 3, overflow: 'hidden' }}>
@@ -7303,8 +7716,8 @@ const CampaignsPage = ({ workspaceId }) => {
                           })()}
                         </td>}
                         {campCV("clicks") && <td className="num" style={{ textAlign: "right", color: c.clicks > 0 ? "var(--tx)" : "var(--tx3)", fontVariantNumeric: "tabular-nums" }}>{c.clicks > 0 ? Number(c.clicks).toLocaleString() : "—"}</td>}
-                        {campCV("spend") && <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(c.spend || 0).toFixed(0)}</td>}
-                        {campCV("sales") && <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `$${parseFloat(c.sales).toFixed(0)}` : "—"}</td>}
+                        {campCV("spend") && <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>{curSym(c.currency_code)}{parseFloat(c.spend || 0).toFixed(0)}</td>}
+                        {campCV("sales") && <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{c.sales > 0 ? `${curSym(c.currency_code)}${parseFloat(c.sales).toFixed(0)}` : "—"}</td>}
                         {campCV("acos") && <td className="num" style={{ textAlign: "right", color: acosColor(c.acos) }}>
                           {c.acos > 0 ? `${parseFloat(c.acos).toFixed(1)}%` : "—"}
                         </td>}
@@ -15644,7 +16057,7 @@ const AlertsPage = ({ workspaceId }) => {
   const [expandedInst, setExpandedInst] = useState(null);
   const [editConfig, setEditConfig] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, product_cooldown_days: 7, escalation_pct: 25, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
+  const [form, setForm] = useState({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, product_cooldown_days: 7, escalation_pct: 25, cause_price_pct: 5, cause_ad_pct: 50, cause_low_stock: 10, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
   const { colgroup: alertCfgColgroup, resizeHandle: alertCfgRH } = useResizableColumns(
     "alerts-configs", [160, 100, 90, 120, 90, 70, 100]
   );
@@ -15680,7 +16093,7 @@ const AlertsPage = ({ workspaceId }) => {
 
   function openCreate() {
     setEditConfig(null);
-    setForm({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, product_cooldown_days: 7, escalation_pct: 25, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
+    setForm({ name: "", alert_type: "threshold", metric: "acos", operator: "gt", value: 30, channels: { in_app: true, email: false }, cooldown_hours: 24, window_days: 7, asin: "", min_orders_prev: 3, product_cooldown_days: 7, escalation_pct: 25, cause_price_pct: 5, cause_ad_pct: 50, cause_low_stock: 10, match: "any", metrics: [{ metric: "bsr", direction: "up", change_pct: 30 }, { metric: "orders", direction: "down", change_pct: 30 }] });
     setShowModal(true);
   }
 
@@ -15707,6 +16120,9 @@ const AlertsPage = ({ workspaceId }) => {
       match: cond.match === "all" ? "all" : (cond.require_both ? "all" : "any"),
       product_cooldown_days: cond.product_cooldown_days ?? 7,
       escalation_pct: cond.escalation_pct ?? 25,
+      cause_price_pct: cond.cause_price_pct ?? 5,
+      cause_ad_pct: cond.cause_ad_pct ?? 50,
+      cause_low_stock: cond.cause_low_stock ?? 10,
       metrics: pmMetrics,
     });
     setShowModal(true);
@@ -16056,6 +16472,20 @@ const AlertsPage = ({ workspaceId }) => {
                                           {p.status === "escalated" && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, background: "var(--red)", color: "#fff", borderRadius: 5, padding: "1px 6px", verticalAlign: "middle" }}>{t("alerts.pmWorsening")}{p.prev_worst_pct != null ? ` · ${p.prev_worst_pct}%` : ""}</span>}
                                         </div>
                                         <div style={{ fontSize: 10, fontFamily: "var(--mono)", color: "var(--tx3)", marginBottom: 5 }}>{p.asin}{p.best_category ? " · " + p.best_category : ""}</div>
+                                        {(p.causes || []).length > 0 && (
+                                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+                                            {p.causes.map((c, k) => {
+                                              const high = c.severity === "high";
+                                              const lbl = t("alerts.pmCause_" + c.type) + (c.pct != null ? ` ${c.pct > 0 ? "+" : ""}${c.pct}%` : c.value != null ? ` (${c.value})` : "");
+                                              return (
+                                                <span key={k} title={c.detail || ""} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 9px", color: "#fff", background: high ? "#dc2626" : "#d97706", border: `1px solid ${high ? "#b91c1c" : "#b45309"}`, boxShadow: high ? "0 1px 3px rgba(220,38,38,.4)" : "0 1px 3px rgba(217,119,6,.35)" }}>
+                                                  {high && <span style={{ fontSize: 10, lineHeight: 1 }}>●</span>}
+                                                  {lbl}{c.detail ? <span style={{ fontWeight: 600, opacity: .92 }}> · {c.detail}</span> : null}
+                                                </span>
+                                              );
+                                            })}
+                                          </div>
+                                        )}
                                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                           {(p.metrics || []).map((m, j) => (
                                             <span key={j} style={{ fontSize: 11, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 7px" }}>
@@ -16209,6 +16639,31 @@ const AlertsPage = ({ workspaceId }) => {
                   </div>
                 </div>
                 <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: -6, marginBottom: 14 }}>{t("alerts.pmCooldownHint")}</div>
+
+                <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, marginBottom: 6 }}>
+                  <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 8, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.pmCauseThresholds")}</div>
+                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: "var(--tx2)", marginBottom: 5 }}>{t("alerts.pmCausePriceLabel")}</div>
+                      <input type="number" min={0} value={form.cause_price_pct}
+                        onChange={e => setForm(f => ({ ...f, cause_price_pct: Math.max(0, parseFloat(e.target.value) || 0) }))}
+                        style={{ width: 80 }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11, color: "var(--tx2)", marginBottom: 5 }}>{t("alerts.pmCauseAdLabel")}</div>
+                      <input type="number" min={0} value={form.cause_ad_pct}
+                        onChange={e => setForm(f => ({ ...f, cause_ad_pct: Math.max(0, parseFloat(e.target.value) || 0) }))}
+                        style={{ width: 80 }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 11, color: "var(--tx2)", marginBottom: 5 }}>{t("alerts.pmCauseStockLabel")}</div>
+                      <input type="number" min={0} value={form.cause_low_stock}
+                        onChange={e => setForm(f => ({ ...f, cause_low_stock: Math.max(0, parseInt(e.target.value) || 0) }))}
+                        style={{ width: 80 }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 8 }}>{t("alerts.pmCauseThresholdsHint")}</div>
+                </div>
               </>
             ) : (
             <>

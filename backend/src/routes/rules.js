@@ -547,21 +547,21 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (entity.state === "paused") { recordSkip(entity, action, "already_paused"); continue; }
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'paused', updated_at = NOW() WHERE id = $1", [entity.id]);
-            await writeRuleAudit({
+            const pauseKwAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.pause_keyword", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { state: entity.state }, afterData: { state: "paused" }, source: "rule",
             });
             if (entity.amazon_keyword_id && entity.connection_id) {
-              pushKeywordUpdates([{
+              trackWriteback(pauseKwAudit, pushKeywordUpdates([{
                 amazonKeywordId: entity.amazon_keyword_id,
                 campaignType: entity.campaign_type,
                 connectionId: entity.connection_id,
                 profileId: String(entity.amazon_profile_id),
                 marketplaceId: entity.marketplace_id,
                 state: "paused",
-              }]).catch(e => logger.warn("Rule keyword pause write-back failed", { error: e.message }));
+              }]), "Rule keyword pause write-back failed");
             }
           }
           applied.push({
@@ -577,21 +577,21 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (entity.state === "enabled") { recordSkip(entity, action, "already_enabled"); continue; }
           if (!dryRun) {
             await query("UPDATE keywords SET state = 'enabled', updated_at = NOW() WHERE id = $1", [entity.id]);
-            await writeRuleAudit({
+            const enableKwAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
               action: "keyword.enable_keyword", entityType: "keyword",
               entityId: entity.id, entityName: entity.keyword_text,
               beforeData: { state: entity.state }, afterData: { state: "enabled" }, source: "rule",
             });
             if (entity.amazon_keyword_id && entity.connection_id) {
-              pushKeywordUpdates([{
+              trackWriteback(enableKwAudit, pushKeywordUpdates([{
                 amazonKeywordId: entity.amazon_keyword_id,
                 campaignType: entity.campaign_type,
                 connectionId: entity.connection_id,
                 profileId: String(entity.amazon_profile_id),
                 marketplaceId: entity.marketplace_id,
                 state: "enabled",
-              }]).catch(e => logger.warn("Rule keyword enable write-back failed", { error: e.message }));
+              }]), "Rule keyword enable write-back failed");
             }
           }
           applied.push({

@@ -33,7 +33,7 @@ router.get("/", async (req, res, next) => {
     const { rows } = await query(
       `SELECT
          p.id, p.asin, p.marketplace_id, p.title, p.brand, p.image_url, p.is_active,
-         p.created_at,
+         p.created_at, p.parent_asin,
          ${advExists} AS is_advertised,
          (p.title IS NOT NULL AND p.title <> '') AS is_available,
          s.best_rank,
@@ -51,24 +51,28 @@ router.get("/", async (req, res, next) => {
          COALESCE(stock.fbm_qty, 0) AS fbm_qty,
          -- sell price (buy-box preferred)
          pricing.sell_price,
-         -- PPC spend
-         COALESCE(ppc.ppc_yesterday, 0) AS ppc_yesterday,
-         COALESCE(ppc.ppc_7d, 0)        AS ppc_7d,
+         -- PPC spend — true per-ASIN ad spend (advertised_product level). Replaces the
+         -- old campaign-level attribution that repeated a campaign's full spend on every
+         -- ASIN in it (double-counted across a listing's variations).
+         COALESCE(adp.ad_spend_yesterday, 0) AS ppc_yesterday,
+         COALESCE(adp.ad_spend_7d, 0)        AS ppc_7d,
+         COALESCE(adp.ad_spend_7d, 0) AS ad_spend_7d,
+         COALESCE(adp.ad_sales_7d, 0) AS ad_sales_7d,
          -- orders / revenue
          COALESCE(orders.revenue_yesterday, 0) AS revenue_yesterday,
          COALESCE(orders.revenue_7d, 0)        AS revenue_7d,
          COALESCE(orders.qty_yesterday, 0)     AS qty_yesterday,
          COALESCE(orders.qty_7d, 0)            AS qty_7d,
-         -- net profit (revenue after Amazon fee minus COGS minus PPC)
+         -- net profit (revenue after Amazon fee minus COGS minus per-ASIN ad spend)
          ROUND((
            COALESCE(orders.revenue_yesterday, 0) * (1 + COALESCE(sm.amazon_fee_pct, -0.15))
            - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_yesterday, 0)
-           - COALESCE(ppc.ppc_yesterday, 0)
+           - COALESCE(adp.ad_spend_yesterday, 0)
          )::numeric, 2) AS profit_yesterday,
          ROUND((
            COALESCE(orders.revenue_7d, 0) * (1 + COALESCE(sm.amazon_fee_pct, -0.15))
            - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_7d, 0)
-           - COALESCE(ppc.ppc_7d, 0)
+           - COALESCE(adp.ad_spend_7d, 0)
          )::numeric, 2) AS profit_7d
        FROM products p
        LEFT JOIN LATERAL (
@@ -109,22 +113,20 @@ router.get("/", async (req, res, next) => {
          ORDER BY captured_at DESC
          LIMIT 1
        ) pricing ON true
-       -- PPC spend via product_ads → fact_metrics_daily (campaign level, DISTINCT to avoid
-       -- multiplying spend when same ASIN appears in multiple ad groups of the same campaign)
+       -- Per-ASIN ad spend & ad-attributed sales (advertised_product level) — correct
+       -- per-ASIN attribution (the old campaign-level join repeated a campaign's full
+       -- spend on every ASIN, double-counting across a listing's variations).
        LEFT JOIN LATERAL (
          SELECT
-           COALESCE(SUM(CASE WHEN fmd.date = CURRENT_DATE - 1
-                             THEN fmd.cost ELSE 0 END), 0) AS ppc_yesterday,
-           COALESCE(SUM(CASE WHEN fmd.date >= CURRENT_DATE - 7 AND fmd.date <= CURRENT_DATE - 1
-                             THEN fmd.cost ELSE 0 END), 0) AS ppc_7d
-         FROM (SELECT DISTINCT campaign_id FROM product_ads
-               WHERE workspace_id = p.workspace_id AND asin = p.asin) pa_dist
-         JOIN fact_metrics_daily fmd
-           ON fmd.entity_id = pa_dist.campaign_id
-          AND fmd.workspace_id = p.workspace_id
-          AND fmd.entity_type = 'campaign'
-         WHERE fmd.date >= CURRENT_DATE - 7
-       ) ppc ON true
+           COALESCE(SUM(CASE WHEN m.date = CURRENT_DATE - 1 THEN m.cost ELSE 0 END), 0) AS ad_spend_yesterday,
+           COALESCE(SUM(CASE WHEN m.date >= CURRENT_DATE - 7 AND m.date <= CURRENT_DATE - 1 THEN m.cost     ELSE 0 END), 0) AS ad_spend_7d,
+           COALESCE(SUM(CASE WHEN m.date >= CURRENT_DATE - 7 AND m.date <= CURRENT_DATE - 1 THEN m.sales_1d ELSE 0 END), 0) AS ad_sales_7d
+         FROM fact_metrics_daily m
+         WHERE m.workspace_id = p.workspace_id
+           AND m.entity_type = 'advertised_product'
+           AND UPPER(m.amazon_id) = p.asin
+           AND m.date >= CURRENT_DATE - 7
+       ) adp ON true
        -- Orders revenue from SP Orders API
        LEFT JOIN LATERAL (
          SELECT
@@ -285,6 +287,137 @@ router.get("/:id/history", async (req, res, next) => {
       params
     );
     res.json(rows);
+  } catch (err) { next(err); }
+});
+
+// GET /products/timeseries?asins=A,B,C&start=YYYY-MM-DD&end=YYYY-MM-DD&compare=1
+// Daily aligned series for the listing/ASIN charts: BSR, price, orders, ad spend,
+// ACOS, TACOS, ROAS. Per-ASIN series + a listing aggregate. With compare=1 it also
+// returns the immediately-preceding equal-length window (`prev`), aligned by index.
+// Lazy-loaded on expand (never for the whole page) so 500+ products stay performant.
+router.get("/timeseries", async (req, res, next) => {
+  try {
+    const asins = String(req.query.asins || "").split(",")
+      .map((a) => a.trim().toUpperCase()).filter((a) => /^[A-Z0-9]{10}$/.test(a)).slice(0, 60);
+    if (!asins.length) return res.json({ start: null, end: null, by_asin: {}, aggregate: [], prev: null });
+
+    const end   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start) ? req.query.start
+      : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+    const compare = req.query.compare === "1" || req.query.compare === "true";
+    const ws = req.workspaceId;
+
+    const DAY = 86400000;
+    const spine = (from, to) => {
+      const out = [];
+      for (let d = new Date(from + "T00:00:00Z"); d <= new Date(to + "T00:00:00Z"); d = new Date(d.getTime() + DAY)) out.push(d.toISOString().slice(0, 10));
+      return out;
+    };
+    const curDates = spine(start, end);
+    const windowLen = curDates.length;
+    const prevStart = new Date(new Date(start + "T00:00:00Z").getTime() - windowLen * DAY).toISOString().slice(0, 10);
+    const prevEnd   = new Date(new Date(start + "T00:00:00Z").getTime() - DAY).toISOString().slice(0, 10);
+    const prevDates = compare ? spine(prevStart, prevEnd) : [];
+    const qStart = compare ? prevStart : start;   // widen the queried range to cover both windows
+
+    const [bsr, ad, price, ord] = await Promise.all([
+      query(`SELECT UPPER(p.asin) AS asin, bs.captured_at::date::text AS d, MIN(bs.best_rank) AS bsr
+               FROM products p JOIN bsr_snapshots bs ON bs.product_id = p.id
+              WHERE p.workspace_id=$1 AND UPPER(p.asin)=ANY($2::text[]) AND bs.best_rank IS NOT NULL
+                AND bs.captured_at::date BETWEEN $3 AND $4
+              GROUP BY 1,2`, [ws, asins, qStart, end]),
+      query(`SELECT UPPER(amazon_id) AS asin, date::text AS d,
+                COALESCE(SUM(cost),0) AS ad_spend, COALESCE(SUM(sales_1d),0) AS ad_sales
+               FROM fact_metrics_daily
+              WHERE workspace_id=$1 AND entity_type='advertised_product' AND UPPER(amazon_id)=ANY($2::text[])
+                AND date BETWEEN $3 AND $4
+              GROUP BY 1,2`, [ws, asins, qStart, end]),
+      query(`SELECT UPPER(asin) AS asin, captured_at::date::text AS d,
+                (array_agg(COALESCE(buy_box_price_amount, listing_price_amount) ORDER BY captured_at DESC)
+                   FILTER (WHERE COALESCE(buy_box_price_amount, listing_price_amount) IS NOT NULL))[1] AS price
+               FROM sp_pricing
+              WHERE workspace_id=$1 AND UPPER(asin)=ANY($2::text[]) AND captured_at::date BETWEEN $3 AND $4
+              GROUP BY 1,2`, [ws, asins, qStart, end]),
+      query(`SELECT UPPER(oi.asin) AS asin, o.purchase_date::date::text AS d,
+                COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(oi.quantity_ordered),0) AS units,
+                COALESCE(SUM(oi.item_price_amount),0) AS revenue
+               FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
+              WHERE oi.workspace_id=$1 AND UPPER(oi.asin)=ANY($2::text[]) AND o.order_status <> 'Canceled'
+                AND o.purchase_date::date BETWEEN $3 AND $4
+              GROUP BY 1,2`, [ws, asins, qStart, end]),
+    ]);
+
+    const key = (asin, d) => `${asin}|${d}`;
+    const bsrM = new Map(bsr.rows.map((r) => [key(r.asin, r.d), Number(r.bsr)]));
+    const adM = new Map(ad.rows.map((r) => [key(r.asin, r.d), r]));
+    const priceM = new Map(price.rows.map((r) => [key(r.asin, r.d), r.price != null ? Number(r.price) : null]));
+    const ordM = new Map(ord.rows.map((r) => [key(r.asin, r.d), r]));
+    const r2 = (v) => Math.round(v * 100) / 100;
+    const r1 = (v) => Math.round(v * 10) / 10;
+    // ACOS = spend/adSales; TACOS = spend/totalRevenue; ROAS = adSales/spend.
+    const mkPoint = (date, { bsr, cost, adSales, price, orders, units, revenue }) => ({
+      date, bsr, price: price != null ? r2(price) : null, orders, units,
+      ad_spend: r2(cost), ad_sales: r2(adSales), revenue: r2(revenue),
+      acos:  adSales > 0 ? r1((cost / adSales) * 100) : null,
+      tacos: revenue > 0 ? r1((cost / revenue) * 100) : null,
+      roas:  cost > 0    ? r2(adSales / cost)         : null,
+    });
+    const buildSeries = (asin, dateList) => dateList.map((d) => {
+      const a = adM.get(key(asin, d)); const o = ordM.get(key(asin, d));
+      return mkPoint(d, {
+        bsr: bsrM.has(key(asin, d)) ? bsrM.get(key(asin, d)) : null,
+        cost: a ? Number(a.ad_spend) : 0, adSales: a ? Number(a.ad_sales) : 0,
+        price: priceM.has(key(asin, d)) ? priceM.get(key(asin, d)) : null,
+        orders: o ? Number(o.orders) : 0, units: o ? Number(o.units) : 0, revenue: o ? Number(o.revenue) : 0,
+      });
+    });
+    const aggregateOf = (seriesByAsin, len) => Array.from({ length: len }, (_, i) => {
+      let bsr = null, cost = 0, adSales = 0, revenue = 0, orders = 0, units = 0, pSum = 0, pN = 0, date = null;
+      for (const asin of asins) {
+        const pt = seriesByAsin[asin][i]; if (!pt) continue; date = pt.date;
+        if (pt.bsr != null) bsr = bsr == null ? pt.bsr : Math.min(bsr, pt.bsr);
+        if (pt.price != null) { pSum += pt.price; pN++; }
+        cost += pt.ad_spend; adSales += pt.ad_sales; revenue += pt.revenue; orders += pt.orders; units += pt.units;
+      }
+      return mkPoint(date, { bsr, cost, adSales, price: pN ? pSum / pN : null, orders, units, revenue });
+    });
+
+    const by_asin = {}; const prev_by_asin = {};
+    for (const asin of asins) {
+      by_asin[asin] = buildSeries(asin, curDates);
+      if (compare) prev_by_asin[asin] = buildSeries(asin, prevDates);
+    }
+    const aggregate = aggregateOf(by_asin, curDates.length);
+    const prev = compare
+      ? { start: prevStart, end: prevEnd, by_asin: prev_by_asin, aggregate: aggregateOf(prev_by_asin, prevDates.length) }
+      : null;
+
+    res.json({ start, end, by_asin, aggregate, prev });
+  } catch (err) { next(err); }
+});
+
+// GET /products/period-orders?start=&end= — total orders/units/revenue per ASIN over a
+// date range (default last 30d). Lightweight: powers "sort by orders for the period" so
+// the user can surface the top revenue-driving listings without loading every chart.
+router.get("/period-orders", async (req, res, next) => {
+  try {
+    const end   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start) ? req.query.start
+      : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+    const { rows } = await query(
+      `SELECT UPPER(oi.asin) AS asin,
+         COUNT(DISTINCT o.id) AS orders,
+         COALESCE(SUM(oi.quantity_ordered),0) AS units,
+         COALESCE(SUM(oi.item_price_amount),0) AS revenue
+       FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
+       WHERE oi.workspace_id=$1 AND o.order_status <> 'Canceled'
+         AND o.purchase_date::date BETWEEN $2 AND $3 AND oi.asin IS NOT NULL
+       GROUP BY UPPER(oi.asin)`,
+      [req.workspaceId, start, end]
+    );
+    const by_asin = {};
+    for (const r of rows) by_asin[r.asin] = { orders: Number(r.orders), units: Number(r.units), revenue: Math.round(Number(r.revenue) * 100) / 100 };
+    res.json({ start, end, by_asin });
   } catch (err) { next(err); }
 });
 

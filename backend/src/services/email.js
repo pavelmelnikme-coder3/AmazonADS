@@ -270,6 +270,23 @@ function fmtMoverValue(fmt, v) {
 
 async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays, products = [], suppressedCount = 0, dashboardUrl }) {
   const n = products.length;
+  const causeLabel = (c) => {
+    switch (c.type) {
+      case "stock_out": return "Out of stock";
+      case "stock_low": return `Low stock${c.value != null ? ` (${c.value} left)` : ""}`;
+      case "price_up":  return `Price up +${c.pct}%`;
+      case "ad_cut":    return `Ad spend down ${c.pct}%`;
+      default:          return c.type;
+    }
+  };
+  const renderCauses = (p) => {
+    const chips = (p.causes || []).map((c) => {
+      const bg  = c.severity === "high" ? "#7f1d1d" : "#78350f";
+      const txt = c.severity === "high" ? "#fecaca" : "#fde68a";
+      return `<span style="display:inline-block;background:${bg};color:${txt};font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px;margin:0 4px 4px 0;">${esc(causeLabel(c))}${c.detail ? ` <span style="opacity:.85;font-weight:500;">${esc(c.detail)}</span>` : ""}</span>`;
+    }).join("");
+    return chips ? `<div style="margin:0 0 8px;">${chips}</div>` : "";
+  };
   const renderRow = (p) => {
     const img = p.image_url
       ? `<img src="${esc(p.image_url)}" width="60" height="60" alt="" style="display:block;width:60px;height:60px;border-radius:8px;object-fit:cover;background:#0f1117;border:1px solid #2a2d3e;" />`
@@ -287,6 +304,7 @@ async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays
         <td style="padding:14px 0 14px 14px;border-bottom:1px solid #232634;vertical-align:top;">
           <div style="color:#f1f5f9;font-size:13px;font-weight:600;line-height:1.4;margin-bottom:2px;">${esc((p.title || p.asin || "").slice(0, 90))}${worseTag}</div>
           <div style="color:#64748b;font-size:11px;font-family:monospace;margin-bottom:8px;">${esc(p.asin)}${p.best_category ? " · " + esc(p.best_category) : ""}</div>
+          ${renderCauses(p)}
           <div style="font-size:12px;line-height:1.9;">${metricLines}</div>
           <a href="${esc(p.url)}" style="display:inline-block;margin-top:8px;color:#60a5fa;text-decoration:none;font-size:12px;font-weight:600;">Open on Amazon →</a>
         </td>
@@ -336,7 +354,7 @@ async function sendProductMoversEmail({ to, alertName, workspaceName, windowDays
         <tr>
           <td style="padding:22px 36px 8px;">
             <div style="background:#1e2235;border:1px solid #2a2d3e;border-radius:10px;padding:16px 20px;">
-              <div style="color:#f1f5f9;font-size:13px;font-weight:700;margin-bottom:10px;">Likely causes — check in this order</div>
+              <div style="color:#f1f5f9;font-size:13px;font-weight:700;margin-bottom:10px;">Other things to check${products.some((p) => (p.causes || []).length) ? " (beyond the detected causes above)" : ""}</div>
               <ol style="color:#94a3b8;font-size:12px;line-height:1.75;margin:0;padding-left:18px;">
                 <li><strong style="color:#cbd5e1;">Inventory</strong> — out of stock / low stock is the #1 cause of a sudden BSR drop.</li>
                 <li><strong style="color:#cbd5e1;">Buy Box</strong> — lost to another seller (price, fulfillment, or account health).</li>

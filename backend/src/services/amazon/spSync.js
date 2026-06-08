@@ -42,8 +42,9 @@ async function syncBsr(workspaceId, marketplaceId, refreshToken) {
         const data = await getCatalogItem(product.asin, marketplaceId, refreshToken);
         fetched++;
         await pool.query(
-          `UPDATE products SET title=$1, brand=$2, image_url=$3, updated_at=NOW() WHERE id=$4`,
-          [data.title, data.brand, data.imageUrl, product.id]
+          `UPDATE products SET title=$1, brand=$2, image_url=$3,
+             parent_asin=COALESCE($4, parent_asin), updated_at=NOW() WHERE id=$5`,
+          [data.title, data.brand, data.imageUrl, data.parentAsin, product.id]
         );
         const bestRank = _bestRank(data.classificationRanks, data.displayGroupRanks);
         await pool.query(

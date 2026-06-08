@@ -62,6 +62,13 @@ function buildAlertConfig(body) {
         ? Math.min(90, Math.max(0, parseInt(body.product_cooldown_days))) : 7,
       escalation_pct: Number.isFinite(Number(body.escalation_pct))
         ? Math.max(0, Number(body.escalation_pct)) : 25,
+      // Thresholds for the data-derived "likely causes" surfaced on each flagged product.
+      cause_price_pct: Number.isFinite(Number(body.cause_price_pct))
+        ? Math.max(0, Number(body.cause_price_pct)) : 5,   // price rose ≥ this % → "price up"
+      cause_ad_pct: Number.isFinite(Number(body.cause_ad_pct))
+        ? Math.max(0, Number(body.cause_ad_pct)) : 50,     // ad spend fell ≥ this % → "ad cut"
+      cause_low_stock: Number.isFinite(parseInt(body.cause_low_stock))
+        ? Math.max(0, parseInt(body.cause_low_stock)) : 10, // stock ≤ this (but >0) → "low stock"
       metrics,
     };
     return { alertType: "product_movers", conditions };

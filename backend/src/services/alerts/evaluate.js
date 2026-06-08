@@ -382,6 +382,126 @@ async function computeMoverFlags(workspaceId, cond, cfgName = "") {
 }
 
 /**
+ * Enrich flagged movers with REAL, data-derived likely causes (instead of only the
+ * static checklist). Mutates each product, setting `p.causes = [{type, severity, detail, pct?, value?}]`.
+ * Detectable from synced data:
+ *   • stock_out / stock_low — Wawi ERP stock (`wawi_stocks` via `wawi_item_asins`) +
+ *     FBA sellable (`sp_inventory`). FBA stock lives at Amazon, ERP stock in Wawi — so
+ *     both sources are surfaced explicitly (ERP: x · FBA: y) and we never invent an
+ *     out-of-stock from a single missing source.
+ *   • price_up — order-derived avg selling price, current N-day window vs prior.
+ *   • ad_cut  — ad spend (`fact_metrics_daily`), current window vs prior.
+ * Buy-Box / reviews / listing-suppression / market are NOT synced → left to the static checklist.
+ * Best-effort: each query is independently guarded; a failure just yields fewer causes.
+ */
+async function detectMoverCauses(workspaceId, products, N, opts = {}) {
+  if (!products || !products.length) return;
+  const asins = [...new Set(products.map((p) => String(p.asin || "").toUpperCase()).filter(Boolean))];
+  if (!asins.length) return;
+
+  // Tunable thresholds (config-driven; sane defaults).
+  const pricePct = Number.isFinite(Number(opts.pricePct)) ? Math.max(0, Number(opts.pricePct)) : 5;   // price rise %
+  const adPct    = Number.isFinite(Number(opts.adPct))    ? Math.max(0, Number(opts.adPct))    : 50;  // ad-spend drop %
+  const lowStock = Number.isFinite(Number(opts.lowStock)) ? Math.max(0, Number(opts.lowStock)) : 10;  // low-stock units
+
+  const wawiStock = new Map(); // asin → erp qty (null = ASIN not mapped in Wawi)
+  const fbaStock  = new Map(); // asin → sellable (null = no SP inventory data)
+  const priceWin  = new Map(); // asin → { cur, prev }
+  const adWin     = new Map(); // asin → { cur, prev }
+
+  try {
+    const { rows } = await query(
+      `SELECT UPPER(ia.asin) AS asin, COALESCE(SUM(ws.quantity_total), 0) AS stock
+         FROM wawi_item_asins ia
+         LEFT JOIN wawi_stocks ws
+           ON ws.workspace_id = ia.workspace_id AND ws.wawi_item_id = ia.wawi_item_id
+        WHERE ia.workspace_id = $1 AND UPPER(ia.asin) = ANY($2::text[])
+        GROUP BY UPPER(ia.asin)`,
+      [workspaceId, asins]
+    );
+    for (const r of rows) wawiStock.set(r.asin, Number(r.stock));
+  } catch (e) { logger.warn("detectMoverCauses: wawi stock query failed", { error: e.message }); }
+
+  try {
+    const { rows } = await query(
+      `SELECT UPPER(asin) AS asin, SUM(quantity_sellable) AS sellable, COUNT(quantity_sellable) AS nn
+         FROM sp_inventory
+        WHERE workspace_id = $1 AND UPPER(asin) = ANY($2::text[])
+        GROUP BY UPPER(asin)`,
+      [workspaceId, asins]
+    );
+    for (const r of rows) fbaStock.set(r.asin, Number(r.nn) > 0 ? Number(r.sellable) : null);
+  } catch (e) { logger.warn("detectMoverCauses: fba stock query failed", { error: e.message }); }
+
+  try {
+    const curF  = `FILTER (WHERE o.purchase_date::date >= CURRENT_DATE - $3::int AND o.purchase_date::date <= CURRENT_DATE - 1)`;
+    const prevF = `FILTER (WHERE o.purchase_date::date >= CURRENT_DATE - $4::int AND o.purchase_date::date <= CURRENT_DATE - $3::int - 1)`;
+    const { rows } = await query(
+      `SELECT UPPER(oi.asin) AS asin,
+         SUM(oi.item_price_amount) ${curF}  / NULLIF(SUM(oi.quantity_ordered) ${curF}, 0)  AS price_cur,
+         SUM(oi.item_price_amount) ${prevF} / NULLIF(SUM(oi.quantity_ordered) ${prevF}, 0) AS price_prev
+       FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
+       WHERE oi.workspace_id = $1 AND o.order_status <> 'Canceled'
+         AND UPPER(oi.asin) = ANY($2::text[])
+         AND o.purchase_date::date >= CURRENT_DATE - $4::int AND o.purchase_date::date <= CURRENT_DATE - 1
+       GROUP BY UPPER(oi.asin)`,
+      [workspaceId, asins, N, 2 * N]
+    );
+    for (const r of rows) priceWin.set(r.asin, { cur: r.price_cur != null ? Number(r.price_cur) : null, prev: r.price_prev != null ? Number(r.price_prev) : null });
+  } catch (e) { logger.warn("detectMoverCauses: price query failed", { error: e.message }); }
+
+  try {
+    const curF  = `FILTER (WHERE f.date >= CURRENT_DATE - $3::int AND f.date <= CURRENT_DATE - 1)`;
+    const prevF = `FILTER (WHERE f.date >= CURRENT_DATE - $4::int AND f.date <= CURRENT_DATE - $3::int - 1)`;
+    const { rows } = await query(
+      `SELECT UPPER(f.amazon_id) AS asin,
+         COALESCE(SUM(f.cost) ${curF}, 0)  AS cost_cur,
+         COALESCE(SUM(f.cost) ${prevF}, 0) AS cost_prev
+       FROM fact_metrics_daily f
+       WHERE f.workspace_id = $1 AND f.entity_type = 'advertised_product'
+         AND UPPER(f.amazon_id) = ANY($2::text[])
+         AND f.date >= CURRENT_DATE - $4::int AND f.date <= CURRENT_DATE - 1
+       GROUP BY UPPER(f.amazon_id)`,
+      [workspaceId, asins, N, 2 * N]
+    );
+    for (const r of rows) adWin.set(r.asin, { cur: Number(r.cost_cur), prev: Number(r.cost_prev) });
+  } catch (e) { logger.warn("detectMoverCauses: ad spend query failed", { error: e.message }); }
+
+  for (const p of products) {
+    const asin = String(p.asin || "").toUpperCase();
+    const causes = [];
+
+    // Stock — surface both sources explicitly; flag only on a source that is actually known.
+    const erp = wawiStock.has(asin) ? wawiStock.get(asin) : null;
+    const fba = fbaStock.has(asin) ? fbaStock.get(asin) : null;
+    const known = [erp, fba].filter((v) => v != null);
+    if (known.length) {
+      const detail = `ERP: ${erp != null ? erp : "n/a"} · FBA: ${fba != null ? fba : "n/a"}`;
+      const minKnown = Math.min(...known);
+      if (minKnown <= 0)              causes.push({ type: "stock_out", severity: "high",   detail });
+      else if (minKnown <= lowStock)  causes.push({ type: "stock_low", severity: "medium", detail, value: minKnown });
+    }
+
+    // Price hike — only when it rose ≥ pricePct% window-over-window.
+    const pr = priceWin.get(asin);
+    if (pr && pr.prev > 0 && pr.cur != null) {
+      const chg = ((pr.cur - pr.prev) / pr.prev) * 100;
+      if (chg > 0 && chg >= pricePct) causes.push({ type: "price_up", severity: "medium", pct: Math.round(chg), detail: `€${pr.prev.toFixed(2)} → €${pr.cur.toFixed(2)}` });
+    }
+
+    // Ad pullback — spend down ≥ adPct% window-over-window.
+    const ad = adWin.get(asin);
+    if (ad && ad.prev > 0) {
+      const chg = ((ad.cur - ad.prev) / ad.prev) * 100;
+      if (chg < 0 && chg <= -adPct) causes.push({ type: "ad_cut", severity: "medium", pct: Math.round(chg), detail: `€${ad.prev.toFixed(2)} → €${ad.cur.toFixed(2)}` });
+    }
+
+    causes.sort((a, b) => (b.severity === "high" ? 1 : 0) - (a.severity === "high" ? 1 : 0));
+    p.causes = causes;
+  }
+}
+
+/**
  * Live product-movers evaluator: cooldown gate → compute → single in-app instance +
  * single digest email listing every breached product.
  * @returns {Promise<{triggered:number, emailed:number}>}
@@ -413,6 +533,13 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
     suppressedCount = part.suppressed.length;
     if (!notified.length) return { triggered: 0, emailed: 0, suppressed: suppressedCount }; // all repeats → stay quiet
   }
+
+  // Enrich with real, data-derived causes (stock / price / ads) — best-effort.
+  try {
+    await detectMoverCauses(workspaceId, notified, N, {
+      pricePct: cond.cause_price_pct, adPct: cond.cause_ad_pct, lowStock: cond.cause_low_stock,
+    });
+  } catch (e) { logger.warn("detectMoverCauses failed (non-fatal)", { config: cfg.id, error: e.message }); }
 
   // Worst movers first; titles/severity reflect the NOTIFIED subset, not the raw flagged set.
   notified.sort((a, b) => moverWorstPct(b.metrics) - moverWorstPct(a.metrics));
@@ -546,4 +673,4 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   return { evaluated: configs.length, triggered, emailed };
 }
 
-module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, latestBsr, amazonProductUrl, PERF_METRICS };
+module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, latestBsr, amazonProductUrl, PERF_METRICS };

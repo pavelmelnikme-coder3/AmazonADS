@@ -14,6 +14,20 @@ const logger = require("../../config/logger");
 const BATCH_SIZE = 500;
 
 /**
+ * Detect Amazon "already exists" rejections (duplicateValueError / DUPLICATE_VALUE).
+ * Adding a negative that already exists is idempotent — the desired end-state
+ * (the negative is present on Amazon) is already satisfied, so we treat it as
+ * success rather than an error. Without this, a previously-created negative whose
+ * local id was lost (e.g. a write-back that failed during an outage and is retried)
+ * would re-fail every run and pollute the audit log with phantom errors.
+ */
+function isDuplicateError(msg) {
+  if (!msg) return false;
+  const s = String(msg);
+  return /duplicateValueError|DUPLICATE_VALUE|already exists/i.test(s);
+}
+
+/**
  * Push keyword bid/state updates to Amazon.
  *
  * @param {Array<{amazonKeywordId, campaignType, connectionId, profileId, marketplaceId, bid?, state?}>} updates
@@ -50,6 +64,7 @@ async function pushKeywordUpdates(updates) {
         const errors = result?.keywords?.error ?? result?.error ?? [];
         if (errors.length) {
           logger.warn("SP keyword write-back partial errors", { profileId, errors });
+          anyError = errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
         }
         logger.info("SP keyword write-back ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
@@ -82,6 +97,7 @@ async function pushKeywordUpdates(updates) {
         const errors = result?.keywords?.error ?? result?.error ?? [];
         if (errors.length) {
           logger.warn("SB keyword write-back partial errors", { profileId, errors });
+          anyError = errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
         }
         logger.info("SB keyword write-back ok", { profileId, count: batch.length, rejected: errors.length });
       } catch (e) {
@@ -172,9 +188,22 @@ async function pushNegativeKeyword({
       );
     }
 
+    if (!realId) {
+      const errors = result?.[dataKey]?.error || [];
+      const errMsg = errors[0]?.description || errors[0]?.message || (errors.length ? JSON.stringify(errors[0]) : null);
+      if (isDuplicateError(errMsg)) {
+        logger.info("Negative keyword already exists on Amazon (idempotent)", { profileId, path, keywordText });
+        return { ok: true, duplicate: true };
+      }
+    }
+
     logger.info("Negative keyword write-back ok", { profileId, path, realId });
     return { ok: true };
   } catch (e) {
+    if (isDuplicateError(e.message)) {
+      logger.info("Negative keyword already exists on Amazon (idempotent)", { profileId, keywordText });
+      return { ok: true, duplicate: true };
+    }
     logger.warn("Negative keyword write-back failed (non-fatal)", { profileId, error: e.message });
     return { ok: false, error: e.message };
   }
@@ -269,6 +298,10 @@ async function pushNegativeAsin({
       const errors = result?.negativeTargetingClauses?.error || [];
       if (errors.length > 0) {
         const errMsg = errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
+        if (isDuplicateError(errMsg)) {
+          logger.info("Negative ASIN already exists on Amazon (idempotent)", { profileId, path, asinValue });
+          return { ok: true, duplicate: true };
+        }
         logger.warn("Negative ASIN rejected by Amazon", { profileId, path, amazonError: errMsg });
         return { ok: false, error: errMsg };
       }
@@ -286,6 +319,10 @@ async function pushNegativeAsin({
     logger.info("Negative ASIN write-back ok", { profileId, path, realId });
     return { ok: true };
   } catch (e) {
+    if (isDuplicateError(e.message)) {
+      logger.info("Negative ASIN already exists on Amazon (idempotent)", { profileId, asinValue });
+      return { ok: true, duplicate: true };
+    }
     logger.warn("Negative ASIN write-back failed (non-fatal)", { profileId, error: e.message });
     return { ok: false, error: e.message };
   }
