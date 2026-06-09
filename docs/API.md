@@ -371,6 +371,12 @@ the UI groups by `parent_asin || asin`) and true per-ASIN ad metrics `ad_spend_7
 and `profit_7d` now use this, replacing the old campaign-level spend that double-counted
 across a listing's variations).
 
+> Attribution: `ad_sales_7d` is the spend/sales over the last 7 **days** but uses the
+> **14-day attribution window** (`sales_14d`) — the app-wide standard (campaigns, rules,
+> analytics all use `sales_14d`), so per-product ACOS/ROAS match the other pages. The
+> `_7d` suffix denotes the date range, not the attribution window. Per-product ad metrics
+> are **SP-only** (Sponsored Brands/Display have no product-level report in the API).
+
 ### POST /products
 Add a new ASIN to track (queues a meta + BSR fetch job).
 

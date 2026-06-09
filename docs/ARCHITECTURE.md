@@ -242,3 +242,37 @@ POST /keyword-research/add-to-adgroup
 - Root cause: `useSavedFilters` initializes from `localStorage` on first render; a `useEffect` that wrote to `localStorage` ran *after* the hook had already captured the stale value.
 - Fix: `useMemo([], ...)` block (intentionally run once, before hook init) migrates the pending search from `sessionStorage` to `localStorage` synchronously, so `useSavedFilters` sees the correct value on its very first call.
 - No `useEffect` cleanup needed — the memo is idempotent under React StrictMode (second call finds `sessionStorage` already empty).
+
+## 2026-06-09 changes (reporting-ingest integrity, attribution unification, throttle resilience)
+
+### `fact_metrics_daily` upsert — refresh every attribution window
+- `services/amazon/reporting.js` `ingestReportData` `ON CONFLICT` previously updated only
+  `sales_14d`/`orders_14d` (+cost/clicks/impressions). Since the 60-day backfill re-touches recent dates
+  on every run, the un-refreshed `sales_1d/7d/30d` and `orders_1d/7d/30d` froze at their first-insert
+  value and drifted out of sync (symptom: matured rows with `sales_1d > sales_14d`).
+- Amazon **restates** conversions at 1/7/28 days after the click, so a re-ingest must overwrite *all*
+  windows. The upsert now refreshes `sales_1d/7d/14d/30d`, `orders_1d/7d/14d/30d`, `units_sold` and
+  `campaign_type`.
+
+### `campaign_type` sourced from the report request (not the row)
+- Amazon report **rows** carry no campaign-type field. The old `row.campaignType || "SP"` therefore tagged
+  **every** row `SP`, mislabeling SB/SD spend. `ingestReportData` now takes a `campaignType` parameter
+  (passed from `runReportingPipeline`, which knows the report's product) and writes it directly.
+- One-time history heal: `UPDATE fact_metrics_daily … FROM campaigns` mapped campaign-level rows by
+  `amazon_campaign_id` to the real short code (`SPONSOREDPRODUCTS→SP`, `…BRANDS→SB`, `…DISPLAY→SD`).
+
+### Attribution window unified to 14d on the Products page
+- The Products list (`routes/products.js`: `ad_sales_7d` lateral, `/timeseries`, export `ads` CTE) used
+  `sales_1d` in the UI but `sales_14d` in the export — and the rest of the app already standardizes on
+  `sales_14d`. All three now use `sales_14d`/`orders_14d`, so per-product ACOS/ROAS match
+  campaigns/keywords/rules/analytics. (`sales_14d` is also the only window the old upsert kept fresh, so
+  switching to it gives correct values immediately; a 30-day re-backfill heals the residual rows the old
+  upsert had zeroed.)
+- The alert engine (`services/alerts/evaluate.js`) deliberately stays on `sales_1d`/`orders_1d`:
+  product-movers compares a window vs the preceding one and 1-day attribution matures within a day,
+  avoiding false "drop" alerts from an immature recent 14-day window.
+
+### Report-creation throttle resilience
+- `createReportRequest` now retries 429s up to 5× with exponential backoff (15→30→60→120 s) that honors
+  the `Retry-After` header, plus jitter — Amazon's Sponsored Brands report-creation has a short burst
+  limit that the old fixed 3×/15s+30s retry could not outlast.

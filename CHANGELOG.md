@@ -6,6 +6,61 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-09 — Ad-attribution data integrity, report-throttle resilience, Products UX
+
+A data-reliability day: audited every product statistic against its source, found and fixed the
+root causes of unreliable ACOS/ROAS, hardened report ingestion against Amazon throttling, and
+extended the Products page UX.
+
+### Fixed — Ad-attribution data integrity (ACOS / ROAS / ad-sales)
+
+Audit verdict: BSR, total orders/revenue and price were reliable and fresh; **ad-performance
+metrics were not**. Three root causes, all fixed:
+
+- **Partial upsert rotted the attribution columns.** `ingestReportData` (`reporting.js`) `ON CONFLICT`
+  refreshed only `sales_14d`/`orders_14d` (+cost/clicks/impressions); `sales_1d/7d/30d` and
+  `orders_1d/7d/30d` were frozen at first insert. Because the 60-day backfill re-touches recent dates
+  every run, those windows drifted (proof: matured rows with `sales_1d > sales_14d`, impossible within a
+  single Amazon snapshot). Amazon **restates** conversions at 1/7/28 days, so re-ingest must refresh
+  every window — the upsert now updates **all** sales/orders windows (and `campaign_type`).
+- **Inconsistent attribution window.** The Products UI KPIs and timeseries computed ACOS/ROAS from
+  `sales_1d` (1-day) while the export used `sales_14d`, and the rest of the app
+  (campaigns/keywords/targets/ad-groups/rules/analytics/AI) uses `sales_14d`. Products now uses
+  **`sales_14d` everywhere** (the app-wide standard), so per-product ACOS/ROAS match the other pages.
+  Live effect: ACOS dropped to matured values (e.g. 7.7%→4.9%) and products whose `sales_1d` was 0 —
+  which previously showed a **blank ACOS and gappy chart lines** — now show their real ACOS.
+- **`campaign_type` was always `SP`.** `ingestReportData` read `row.campaignType`, a field Amazon never
+  sends in report rows, so every row defaulted to `SP` — SB/SD spend was ingested but mislabeled. It now
+  comes from the report-request parameter. History healed via SQL for campaign-level rows (632 rows →
+  150 SB, 482 SD) and via a 30-day re-backfill for the remaining entity levels.
+
+Note: per-product ad metrics remain **SP-only** by design — Sponsored Brands/Display have no
+product-level report in the standard API (SB/SD per-product attribution is tracked as a separate task).
+The alert engine (`evaluate.js`) intentionally keeps 1-day attribution: it compares a window against the
+preceding one, and 1-day matures fast, avoiding false "drops".
+
+### Fixed — Report ingestion resilience (429 throttling)
+
+- **SB report creation no longer drops a day on a throttle.** `createReportRequest` retried 429s only 3×
+  with a fixed 15s→30s backoff and ignored Amazon's `Retry-After`. It now retries up to 5× with
+  exponential backoff (15→30→60→120s) **honoring `Retry-After`**, plus jitter — covering Amazon's short
+  SB-creation burst limit that previously orphaned that day's report (self-healed later by backfill, but
+  now avoided).
+
+### Added — Products page UX
+
+- **Per-listing "Expand all".** The global "expand all charts" toolbar button (which opened charts on
+  *every* listing) is replaced by a per-listing **Expand all / Collapse all** that opens just that
+  listing — its aggregate charts **plus every child ASIN and each ASIN's charts** — in one click.
+- **Fixed date-range presets.** A "Range" dropdown (7 / 14 / 30 / 60 / 90 days) next to the date inputs;
+  reflects the active preset or "custom".
+- **Averages + period comparison left of the charts.** Each trend metric now shows its **period average**
+  (instead of the min/max extreme); in Compare mode it also shows the **previous period's average with a
+  ▲/▼ delta**, colored by whether the change is good for that metric (BSR/ACOS/TACOS down = good,
+  orders/ROAS up = good). Hover still shows the per-day current/previous values.
+
+---
+
 ## [Unreleased] — 2026-06-08 — Rule write-back idempotency, product-movers real causes, Products listing trends, dashboard currency
 
 A day of correctness fixes and two feature areas: data-derived alert causes, and a listing-grouped Products page with daily trend charts.

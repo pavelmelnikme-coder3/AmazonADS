@@ -4209,13 +4209,21 @@ const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
 // `prev` (optional) is the previous period's values aligned by index → drawn as a
 // faded dashed overlay for period-over-period comparison.
 // hoverIdx/onHover are lifted to the parent so every stacked chart shares one cursor.
-function TrendChart({ title, color, data, prev, fmt, invert = false, hoverIdx, onHover, height = 52 }) {
+function TrendChart({ title, color, data, prev, fmt, invert = false, good = null, hoverIdx, onHover, height = 52 }) {
   const W = 720, H = height, PAD = 6;
   const N = data.length;
   const curVals = data.map(d => d.value).filter(v => v != null && !Number.isNaN(v));
   const prevVals = (prev || []).filter(v => v != null && !Number.isNaN(v));
   const all = curVals.concat(prevVals);
   const hasData = all.length > 0;
+  // Period averages shown to the left of the chart; delta compares the current
+  // average vs the previous period's average (when compare mode is on).
+  const mean = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+  const curAvg = mean(curVals);
+  const prevAvg = mean(prevVals);
+  const delta = (curAvg != null && prevAvg != null && prevAvg !== 0) ? ((curAvg - prevAvg) / Math.abs(prevAvg)) * 100 : null;
+  const deltaColor = (delta == null || good == null || Math.abs(delta) < 0.05) ? "var(--tx3)"
+    : ((delta > 0) === (good === "up")) ? "#10b981" : "#ef4444";
   const min = hasData ? Math.min(...all) : 0;
   const max = hasData ? Math.max(...all) : 1;
   const spread = (max - min) || 1;
@@ -4253,9 +4261,20 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, hoverIdx, o
       <div style={{ width: 80, flexShrink: 0, paddingTop: 2 }}>
         <div style={{ fontSize: 10, fontWeight: 700, color: "var(--tx2)", textTransform: "uppercase", letterSpacing: ".04em" }}>{title}</div>
         <div style={{ fontSize: 12, fontWeight: 700, color, fontFamily: "var(--mono)", minHeight: 15 }}>
-          {hovV != null ? fmt(hovV) : (hasData ? fmt(invert ? min : max) : "—")}
+          {hovV != null ? fmt(hovV) : (curAvg != null ? fmt(curAvg) : "—")}
         </div>
-        {prev && <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", minHeight: 13 }}>{hovP != null ? fmt(hovP) : ""}</div>}
+        {prev && (
+          <div style={{ fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)", minHeight: 13, display: "flex", gap: 4, alignItems: "baseline", flexWrap: "wrap" }}>
+            {hovP != null
+              ? fmt(hovP)
+              : prevAvg != null
+                ? <>
+                    <span>{fmt(prevAvg)}</span>
+                    {delta != null && <span style={{ color: deltaColor, fontWeight: 700 }}>{delta > 0 ? "▲" : delta < 0 ? "▼" : ""}{Math.abs(delta).toFixed(0)}%</span>}
+                  </>
+                : ""}
+          </div>
+        )}
       </div>
       <div style={{ position: "relative", flex: 1, minWidth: 0 }} onMouseMove={onMove} onMouseLeave={() => onHover(null)}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ width: "100%", height: H, display: "block", overflow: "visible", cursor: "crosshair" }}>
@@ -4301,13 +4320,13 @@ function ListingTrendStack({ series, prevSeries, tr }) {
   const pct = v => Number(v).toFixed(1) + "%";
   const x = v => Number(v).toFixed(2) + "×";
   const metrics = [
-    { key: "bsr",      title: tr("products.trendBsr"),    color: "#3B82F6", invert: true,  fmt: v => "#" + int(v) },
-    { key: "orders",   title: tr("products.trendOrders"), color: "#ec4899", invert: false, fmt: int },
-    { key: "price",    title: tr("products.trendPrice"),  color: "#10b981", invert: false, fmt: money },
-    { key: "ad_spend", title: tr("products.trendSpend"),  color: "#f59e0b", invert: false, fmt: money },
-    { key: "acos",     title: "ACOS",                     color: "#ef4444", invert: false, fmt: pct },
-    { key: "tacos",    title: "TACOS",                    color: "#f97316", invert: false, fmt: pct },
-    { key: "roas",     title: "ROAS",                     color: "#14b8a6", invert: false, fmt: x },
+    { key: "bsr",      title: tr("products.trendBsr"),    color: "#3B82F6", invert: true,  good: "down", fmt: v => "#" + int(v) },
+    { key: "orders",   title: tr("products.trendOrders"), color: "#ec4899", invert: false, good: "up",   fmt: int },
+    { key: "price",    title: tr("products.trendPrice"),  color: "#10b981", invert: false, good: null,   fmt: money },
+    { key: "ad_spend", title: tr("products.trendSpend"),  color: "#f59e0b", invert: false, good: null,   fmt: money },
+    { key: "acos",     title: "ACOS",                     color: "#ef4444", invert: false, good: "down", fmt: pct },
+    { key: "tacos",    title: "TACOS",                    color: "#f97316", invert: false, good: "down", fmt: pct },
+    { key: "roas",     title: "ROAS",                     color: "#14b8a6", invert: false, good: "up",   fmt: x },
   ];
   const hovDate = hoverIdx != null && series[hoverIdx] ? series[hoverIdx].date : null;
   const hovPrevDate = prevSeries && hoverIdx != null && prevSeries[hoverIdx] ? prevSeries[hoverIdx].date : null;
@@ -4324,7 +4343,7 @@ function ListingTrendStack({ series, prevSeries, tr }) {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {metrics.map(m => (
-          <TrendChart key={m.key} title={m.title} color={m.color} invert={m.invert} fmt={m.fmt}
+          <TrendChart key={m.key} title={m.title} color={m.color} invert={m.invert} good={m.good} fmt={m.fmt}
             data={series.map(s => ({ date: s.date, value: s[m.key] }))}
             prev={prevSeries ? prevSeries.map(s => s[m.key]) : null}
             hoverIdx={hoverIdx} onHover={setHoverIdx} />
@@ -4917,6 +4936,37 @@ const ProductsPage = ({ workspaceId }) => {
             <option value="updated">{tr("products.sortUpdated")}</option>
           </select>
 
+          {/* Fixed date-range presets */}
+          {(() => {
+            const today = new Date().toISOString().slice(0, 10);
+            const active = (() => {
+              if (histEnd !== today || !histStart) return "";
+              const days = Math.round((new Date(histEnd + "T00:00:00Z") - new Date(histStart + "T00:00:00Z")) / 86400000) + 1;
+              return [7, 14, 30, 60, 90].includes(days) ? String(days) : "";
+            })();
+            return (
+              <select
+                value={active}
+                onChange={e => {
+                  const n = parseInt(e.target.value, 10);
+                  if (!n) return;
+                  const end = new Date().toISOString().slice(0, 10);
+                  const start = new Date(Date.now() - (n - 1) * 86400000).toISOString().slice(0, 10);
+                  handleHistRange(start, end);
+                }}
+                title={tr("products.datePreset")}
+                style={{ padding: "5px 8px", borderRadius: 6, fontSize: 11, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", cursor: "pointer" }}
+              >
+                <option value="">{tr("products.datePreset")}</option>
+                <option value="7">{tr("products.range7d")}</option>
+                <option value="14">{tr("products.range14d")}</option>
+                <option value="30">{tr("products.range30d")}</option>
+                <option value="60">{tr("products.range60d")}</option>
+                <option value="90">{tr("products.range90d")}</option>
+              </select>
+            );
+          })()}
+
           {/* BSR history date range filter */}
           <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <span style={{ fontSize: 11, color: "var(--tx3)", whiteSpace: "nowrap" }}>BSR:</span>
@@ -4961,20 +5011,6 @@ const ProductsPage = ({ workspaceId }) => {
                   color: compareMode ? "var(--ac2)" : undefined }}>
                 <History size={13} strokeWidth={1.75} /> {tr("products.compare")}
               </button>
-              {(() => {
-                const allOpen = listings.length > 0 && listings.every(L => listingChartsOpen.has(L.listing_id));
-                return (
-                  <button
-                    onClick={() => setListingChartsOpen(allOpen ? new Set() : new Set(listings.map(L => L.listing_id)))}
-                    disabled={!listings.length}
-                    className="btn btn-ghost"
-                    title={allOpen ? tr("products.collapseAllChartsHint") : tr("products.expandAllChartsHint")}
-                    style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6 }}>
-                    {allOpen ? <ChevronUp size={13} strokeWidth={1.75} /> : <ChevronDown size={13} strokeWidth={1.75} />}
-                    {allOpen ? tr("products.collapseAllCharts") : tr("products.expandAllCharts")}
-                  </button>
-                );
-              })()}
             </>
           )}
 
@@ -5056,6 +5092,21 @@ const ProductsPage = ({ workspaceId }) => {
           const money = v => "€" + Number(v || 0).toFixed(2);
           const pctOrDash = v => v == null ? "—" : Number(v).toFixed(1) + "%";
           const toggleSet = (setter, key) => setter(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+          // Expand/collapse an entire listing at once: its aggregate charts, all child
+          // ASIN rows, AND every child ASIN's per-ASIN charts.
+          const expandWholeListing = (L, openAll) => {
+            const childAsins = (L.children || []).map(c => c.asin);
+            if (openAll) {
+              setListingChartsOpen(s => new Set(s).add(L.listing_id));
+              setExpandedListings(s => new Set(s).add(L.listing_id));
+              setChildChartsOpen(s => { const n = new Set(s); childAsins.forEach(a => n.add(a)); return n; });
+              if (!tsData[L.listing_id]) fetchTimeseries(L.listing_id, L.asins);
+            } else {
+              setListingChartsOpen(s => { const n = new Set(s); n.delete(L.listing_id); return n; });
+              setExpandedListings(s => { const n = new Set(s); n.delete(L.listing_id); return n; });
+              setChildChartsOpen(s => { const n = new Set(s); childAsins.forEach(a => n.delete(a)); return n; });
+            }
+          };
           const Kpi = ({ label, value, color }) => (
             <span style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline" }}>
               <span style={{ color: "var(--tx3)" }}>{label}</span>
@@ -5075,6 +5126,8 @@ const ProductsPage = ({ workspaceId }) => {
                 const chartsOpen = listingChartsOpen.has(L.listing_id);
                 const ts = tsData[L.listing_id];
                 const loadingTs = tsLoading.has(L.listing_id);
+                const childAsins = (L.children || []).map(c => c.asin);
+                const fullyOpen = chartsOpen && open && childAsins.length > 0 && childAsins.every(a => childChartsOpen.has(a));
                 return (
                   <div key={L.listing_id} className="card" style={{ padding: "14px 18px" }}>
                     {/* Listing header */}
@@ -5110,6 +5163,17 @@ const ProductsPage = ({ workspaceId }) => {
                         </div>
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
+                        {grouped && (
+                          <button
+                            onClick={() => expandWholeListing(L, !fullyOpen)}
+                            className="btn btn-ghost"
+                            title={fullyOpen ? tr("products.collapseAllChartsHint") : tr("products.expandAllChartsHint")}
+                            style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5,
+                              background: fullyOpen ? "rgba(99,102,241,.14)" : undefined, borderColor: fullyOpen ? "rgba(99,102,241,.4)" : undefined, color: fullyOpen ? "var(--ac2)" : undefined }}>
+                            {fullyOpen ? <ChevronUp size={12} strokeWidth={1.75} /> : <ChevronDown size={12} strokeWidth={1.75} />}
+                            {fullyOpen ? tr("products.collapseAllCharts") : tr("products.expandAllCharts")}
+                          </button>
+                        )}
                         <ChartToggle open={chartsOpen} onClick={() => { toggleSet(setListingChartsOpen, L.listing_id); if (!ts) fetchTimeseries(L.listing_id, L.asins); }} />
                         {grouped && (
                           <button onClick={() => toggleSet(setExpandedListings, L.listing_id)} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5 }}>

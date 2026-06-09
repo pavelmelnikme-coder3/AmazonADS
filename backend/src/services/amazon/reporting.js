@@ -167,8 +167,11 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
     "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
   };
 
-  // Retry up to 3 times on 429 throttling with exponential backoff
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // Retry on 429 throttling. Amazon's SB report-creation limit is a short burst
+  // window that can persist >45s, so we honor the Retry-After header when present
+  // and otherwise back off exponentially (15→30→60→120s, capped) with jitter.
+  const MAX_REPORT_ATTEMPTS = 5;
+  for (let attempt = 1; attempt <= MAX_REPORT_ATTEMPTS; attempt++) {
     let response;
     try {
       response = await axios.post(`${baseUrl}/reporting/reports`, body, { headers, timeout: 15000 });
@@ -188,10 +191,15 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
         }
       }
 
-      // 429: throttled — wait and retry
-      if (status === 429 && attempt < 3) {
-        const delay = attempt * 15000; // 15s, 30s
-        logger.warn("Amazon report API throttled, retrying", { attempt, delayMs: delay, campaignType, reportLevel });
+      // 429: throttled — wait and retry, preferring Amazon's Retry-After header
+      if (status === 429 && attempt < MAX_REPORT_ATTEMPTS) {
+        const retryAfterSec = parseInt(err.response?.headers?.["retry-after"] || "0", 10);
+        const backoff = Math.min(15000 * Math.pow(2, attempt - 1), 120000); // 15,30,60,120
+        const delay = Math.max(retryAfterSec * 1000, backoff) + Math.floor(Math.random() * 1000);
+        logger.warn("Amazon report API throttled, retrying", {
+          attempt, maxAttempts: MAX_REPORT_ATTEMPTS, delayMs: delay,
+          retryAfterSec: retryAfterSec || null, campaignType, reportLevel,
+        });
         await sleep(delay);
         continue;
       }
@@ -291,7 +299,7 @@ async function resolveEntityId(amazonId, entityType, workspaceId) {
 /**
  * Parse downloaded report rows and upsert into the fact table.
  */
-async function ingestReportData({ reportRequestId, workspaceId, profileDbId, reportLevel, rows }) {
+async function ingestReportData({ reportRequestId, workspaceId, profileDbId, reportLevel, rows, campaignType = "SP" }) {
   let processed = 0;
 
   for (const row of rows) {
@@ -310,9 +318,13 @@ async function ingestReportData({ reportRequestId, workspaceId, profileDbId, rep
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
          ON CONFLICT (profile_id, amazon_id, entity_type, date)
          DO UPDATE SET
-           impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks,
-           cost = EXCLUDED.cost, sales_14d = EXCLUDED.sales_14d,
-           orders_14d = EXCLUDED.orders_14d, units_sold = EXCLUDED.units_sold,
+           campaign_type = EXCLUDED.campaign_type,
+           impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, cost = EXCLUDED.cost,
+           sales_1d = EXCLUDED.sales_1d, sales_7d = EXCLUDED.sales_7d,
+           sales_14d = EXCLUDED.sales_14d, sales_30d = EXCLUDED.sales_30d,
+           orders_1d = EXCLUDED.orders_1d, orders_7d = EXCLUDED.orders_7d,
+           orders_14d = EXCLUDED.orders_14d, orders_30d = EXCLUDED.orders_30d,
+           units_sold = EXCLUDED.units_sold,
            report_id = EXCLUDED.report_id,
            entity_id = COALESCE(EXCLUDED.entity_id, fact_metrics_daily.entity_id)`,
         [
@@ -322,7 +334,9 @@ async function ingestReportData({ reportRequestId, workspaceId, profileDbId, rep
           reportLevel,
           entityUuid,
           amazonEntityId,
-          row.campaignType || "SP",
+          // Amazon report rows do NOT carry a campaign-type field — it must come from
+          // the report request (campaignType), not row.campaignType (always undefined → 'SP').
+          campaignType,
           row.impressions || 0,
           row.clicks || 0,
           row.cost || 0,
@@ -509,7 +523,7 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
         if (reportLevel === "searchTerm") {
           processed = await ingestSearchTermData({ workspaceId, profileDbId, rows, startDate, endDate });
         } else {
-          processed = await ingestReportData({ reportRequestId: requestId, workspaceId, profileDbId, reportLevel, rows });
+          processed = await ingestReportData({ reportRequestId: requestId, workspaceId, profileDbId, reportLevel, rows, campaignType });
           // SB keyword report (sbSearchTerm) also populates search_term_metrics
           if (reportLevel === "keyword") {
             await ingestSearchTermData({ workspaceId, profileDbId, rows, startDate, endDate }).catch(e =>

@@ -120,7 +120,8 @@ router.get("/", async (req, res, next) => {
          SELECT
            COALESCE(SUM(CASE WHEN m.date = CURRENT_DATE - 1 THEN m.cost ELSE 0 END), 0) AS ad_spend_yesterday,
            COALESCE(SUM(CASE WHEN m.date >= CURRENT_DATE - 7 AND m.date <= CURRENT_DATE - 1 THEN m.cost     ELSE 0 END), 0) AS ad_spend_7d,
-           COALESCE(SUM(CASE WHEN m.date >= CURRENT_DATE - 7 AND m.date <= CURRENT_DATE - 1 THEN m.sales_1d ELSE 0 END), 0) AS ad_sales_7d
+           -- 14-day attribution — the app-wide standard (campaigns/rules/analytics all use sales_14d)
+           COALESCE(SUM(CASE WHEN m.date >= CURRENT_DATE - 7 AND m.date <= CURRENT_DATE - 1 THEN m.sales_14d ELSE 0 END), 0) AS ad_sales_7d
          FROM fact_metrics_daily m
          WHERE m.workspace_id = p.workspace_id
            AND m.entity_type = 'advertised_product'
@@ -327,7 +328,7 @@ router.get("/timeseries", async (req, res, next) => {
                 AND bs.captured_at::date BETWEEN $3 AND $4
               GROUP BY 1,2`, [ws, asins, qStart, end]),
       query(`SELECT UPPER(amazon_id) AS asin, date::text AS d,
-                COALESCE(SUM(cost),0) AS ad_spend, COALESCE(SUM(sales_1d),0) AS ad_sales
+                COALESCE(SUM(cost),0) AS ad_spend, COALESCE(SUM(sales_14d),0) AS ad_sales
                FROM fact_metrics_daily
               WHERE workspace_id=$1 AND entity_type='advertised_product' AND UPPER(amazon_id)=ANY($2::text[])
                 AND date BETWEEN $3 AND $4
@@ -540,7 +541,7 @@ router.post("/export", async (req, res, next) => {
        ads AS (
          SELECT m.amazon_id AS asin,
                 SUM(m.cost)         AS ad_spend,
-                SUM(m.sales_14d)    AS ad_sales,
+                SUM(m.sales_14d)    AS ad_sales,   -- 14d attribution — app-wide standard, consistent with the UI
                 SUM(m.orders_14d)   AS ad_orders,
                 SUM(m.clicks)       AS ad_clicks
          FROM fact_metrics_daily m
