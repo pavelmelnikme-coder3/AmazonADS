@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-19 — Product-movers data integrity (FBA stock + phantom price spikes)
+
+Routine "how did the alerts fire" review surfaced two bad signals on the **product-movers** alert,
+both the same class of bug: incomplete/garbage source data leaking into the alert's detected causes.
+Verified against raw rows on prod before and after each fix.
+
+### Fixed — FBA stock always showed `n/a`
+
+The "out of stock" badge surfaces FBA sellable stock from `sp_inventory.quantity_sellable`. Amazon
+returned the data correctly (confirmed in `raw_data`), but `spSync.js`'s inventory mapper mangled it
+on write:
+
+- **`0 || null` dropped real zeros.** `quantity_sellable = inv.fulfillableQuantity || null` turned a
+  genuine `0` (out of stock) into `NULL`, which the alert renders as `n/a`. So exactly the
+  out-of-stock products — the ones the alert exists to catch — lost their FBA signal. Only **15 of
+  305** rows had a non-null sellable value.
+- **Wrong field paths.** `quantity_total`, `inbound_working/shipped/receiving` and
+  `researching_quantity` read nested `obj?.quantity`, but the FBA Inventory API returns these as
+  plain numbers (`item.totalQuantity`, `inv.inboundWorkingQuantity`, …) → those columns were `NULL`
+  for **all** 305 rows.
+
+Fix: a `num()` helper that coalesces only on `null`/`undefined` (preserving a real `0`), plus
+corrected field paths against the actual API shape. The 305 existing rows were healed in place from
+`raw_data` (coverage 15 → 305; 290 ASINs genuinely `0`). The alert now shows `FBA: 0` for
+out-of-stock items instead of hiding it as `n/a`.
+
+### Fixed — phantom "price rose +200%" causes
+
+The price-rise cause computes avg unit price as `SUM(item_price_amount) / SUM(quantity_ordered)` over
+a window. **Pending orders carry a `quantity_ordered` but a `NULL` `item_price_amount`** (Amazon hasn't
+confirmed the price yet). Left in the denominator, they deflate the average: e.g. one shipped €20.99
+unit plus two unpriced pending units → `20.99 / 3 ≈ €7.00`, a phantom drop — which then looked like a
++200% spike the following window. Reported live on `B0G1C9BDKC` (steady €20.99, flagged €7.00 → €20.99).
+
+Fix: both price-window `FILTER`s in `evaluate.js` now require `item_price_amount IS NOT NULL`, so only
+priced units count toward the average. Verified on prod: `B0G1C9BDKC` prev/cur €7.00/€13.99 → €20.99/€20.99
+(0% change, no false cause); phantom `price_up` signals across active products dropped 7 → 4.
+
+---
+
 ## [Unreleased] — 2026-06-09 — Ad-attribution data integrity, report-throttle resilience, Products UX
 
 A data-reliability day: audited every product statistic against its source, found and fixed the

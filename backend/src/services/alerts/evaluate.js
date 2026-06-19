@@ -434,8 +434,11 @@ async function detectMoverCauses(workspaceId, products, N, opts = {}) {
   } catch (e) { logger.warn("detectMoverCauses: fba stock query failed", { error: e.message }); }
 
   try {
-    const curF  = `FILTER (WHERE o.purchase_date::date >= CURRENT_DATE - $3::int AND o.purchase_date::date <= CURRENT_DATE - 1)`;
-    const prevF = `FILTER (WHERE o.purchase_date::date >= CURRENT_DATE - $4::int AND o.purchase_date::date <= CURRENT_DATE - $3::int - 1)`;
+    // Only priced lines count toward avg unit price. Pending orders carry a quantity but a
+    // NULL item_price_amount; left in, they inflate the denominator and deflate the average
+    // (e.g. one €20.99 unit + two unpriced pending units → 20.99/3 ≈ €7.00, a phantom drop).
+    const curF  = `FILTER (WHERE oi.item_price_amount IS NOT NULL AND o.purchase_date::date >= CURRENT_DATE - $3::int AND o.purchase_date::date <= CURRENT_DATE - 1)`;
+    const prevF = `FILTER (WHERE oi.item_price_amount IS NOT NULL AND o.purchase_date::date >= CURRENT_DATE - $4::int AND o.purchase_date::date <= CURRENT_DATE - $3::int - 1)`;
     const { rows } = await query(
       `SELECT UPPER(oi.asin) AS asin,
          SUM(oi.item_price_amount) ${curF}  / NULLIF(SUM(oi.quantity_ordered) ${curF}, 0)  AS price_cur,

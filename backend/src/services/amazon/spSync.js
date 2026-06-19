@@ -86,6 +86,9 @@ async function syncInventory(workspaceId, marketplaceId, refreshToken) {
   try {
     const items = await getInventory(marketplaceId, refreshToken);
     fetched = items.length;
+    // FBA Inventory API returns quantities as plain numbers (0 is meaningful = out of stock),
+    // so coalesce only on null/undefined — never with `|| null`, which would drop a real 0.
+    const num = (v) => (v == null ? null : Number(v));
     for (const item of items) {
       const inv = item.inventoryDetails || {};
       const rs  = inv.researchingQuantity || {};
@@ -106,15 +109,15 @@ async function syncInventory(workspaceId, marketplaceId, refreshToken) {
           workspaceId, item.asin, marketplaceId,
           item.sellerSku || "", item.condition || null,
           item.fulfillmentChannelCode || "",
-          inv.totalQuantity?.quantity || null,
-          inv.fulfillableQuantity || null,
-          (inv.reservedQuantity?.totalReservedQuantity) || null,
-          inv.pendingCustomsQuantity || null,
-          inv.inboundWorkingQuantity?.quantity || null,
-          inv.inboundShippedQuantity?.quantity || null,
-          inv.inboundReceivingQuantity?.quantity || null,
-          (rs.totalResearchingQuantity?.quantity) || null,
-          inv.unfulfillableQuantity?.totalUnfulfillableQuantity || null,
+          num(item.totalQuantity),
+          num(inv.fulfillableQuantity),
+          num(inv.reservedQuantity?.totalReservedQuantity),
+          num(inv.pendingCustomsQuantity),
+          num(inv.inboundWorkingQuantity),
+          num(inv.inboundShippedQuantity),
+          num(inv.inboundReceivingQuantity),
+          num(rs.totalResearchingQuantity),
+          num(inv.unfulfillableQuantity?.totalUnfulfillableQuantity),
           JSON.stringify(item),
         ]
       );
