@@ -159,9 +159,13 @@ router.post("/discover", async (req, res, next) => {
     }
 
     // ── 5. Claude AI — score and filter the full pool ────────────────────────
+    // Only when the AI source is enabled — otherwise we'd make (billable) Claude
+    // calls even though the user did not select AI. Keywords already carry a
+    // relevance signal from their own source (Amazon recs = 80, JS = relevancy),
+    // so skipping this leaves them fully scored.
     let finalKeywords = [...kwMap.values()];
 
-    if (resolvedTitle && finalKeywords.length > 0) {
+    if (sources.includes("ai") && resolvedTitle && finalKeywords.length > 0) {
       // Only send keywords that don't already have a good relevance score
       const toScore = finalKeywords.filter(
         k => k.relevance_score === undefined || k.relevance_score === null
@@ -172,11 +176,19 @@ router.post("/discover", async (req, res, next) => {
           productTitle: resolvedTitle,
           locale,
         });
-        const scoredMap = new Map(scored.map(k => [k.keyword_text.toLowerCase(), k]));
+        const scoredMap  = new Map(scored.map(k => [k.keyword_text.toLowerCase(), k]));
+        const submitted  = new Set(toScore.map(k => k.keyword_text.toLowerCase()));
         finalKeywords = finalKeywords.map(k => {
           const s = scoredMap.get(k.keyword_text.toLowerCase());
           return s ? { ...k, relevance_score: s.relevance_score, suggested_match_types: s.suggested_match_types } : k;
-        }).filter(k => (k.relevance_score ?? 50) >= 50);
+        }).filter(k => {
+          const key = k.keyword_text.toLowerCase();
+          // A keyword we submitted to AI scoring but that came back absent was
+          // dropped by the model (keep:false — forbidden/irrelevant). Remove it,
+          // rather than letting it survive on its null→50 default score.
+          if (submitted.has(key) && !scoredMap.has(key)) return false;
+          return (k.relevance_score ?? 50) >= 50;
+        });
       }
     }
 

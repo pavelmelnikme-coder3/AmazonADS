@@ -126,6 +126,10 @@ const {
   isConfigured: jsConfigured,
 } = require("../src/services/junglescout/client");
 const { pushNewKeywords } = require("../src/services/amazon/writeback");
+const {
+  generateSeedKeywords,
+  scoreAndFilterKeywords,
+} = require("../src/services/ai/keywordResearch");
 
 const kwResearchRouter = require("../src/routes/keywordResearch");
 
@@ -291,6 +295,75 @@ describe("POST /keyword-research/discover", () => {
     expect(res.body.sources_used).toContain("jungle_scout");
     expect(res.body.keywords.some(k => k.keyword_text === "lion mane supplement")).toBe(true);
     expect(res.body.jungle_scout_available).toBe(true);
+  });
+
+  test("does NOT call AI scoring when 'ai' source is not selected", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [PROFILE_ROW] })
+      .mockResolvedValueOnce({ rows: [{ title: "Camping Gas Stove" }] }); // title present → would otherwise score
+
+    jsConfigured.mockReturnValue(true);
+    getAmazonKeywordRecommendations.mockResolvedValueOnce([]);
+    getKeywordsByAsin.mockResolvedValueOnce([JS_KW]); // a keyword that could be scored
+
+    const res = await request(buildApp())
+      .post("/keyword-research/discover")
+      .send({ profileId: PROF_ID, asins: ["B01MFAUXDD"], sources: ["amazon", "jungle_scout"] });
+
+    expect(res.status).toBe(200);
+    // No billable Claude calls when AI source is off
+    expect(scoreAndFilterKeywords).not.toHaveBeenCalled();
+    expect(generateSeedKeywords).not.toHaveBeenCalled();
+    // JS keyword still returned with its own relevance preserved
+    const kw = res.body.keywords.find(k => k.keyword_text === "lion mane supplement");
+    expect(kw.relevance_score).toBe(75);
+  });
+
+  test("calls AI scoring when 'ai' source is selected and a title is known", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [PROFILE_ROW] })
+      .mockResolvedValueOnce({ rows: [{ title: "Camping Gas Stove" }] });
+
+    jsConfigured.mockReturnValue(true);
+    getAmazonKeywordRecommendations.mockResolvedValueOnce([]);
+    // JS keyword WITHOUT a relevance score → eligible for AI scoring
+    getKeywordsByAsin.mockResolvedValueOnce([{ ...JS_KW, relevance_score: null }]);
+
+    const res = await request(buildApp())
+      .post("/keyword-research/discover")
+      .send({ profileId: PROF_ID, asins: ["B01MFAUXDD"], sources: ["amazon", "jungle_scout", "ai"] });
+
+    expect(res.status).toBe(200);
+    expect(scoreAndFilterKeywords).toHaveBeenCalled();
+  });
+
+  test("removes keywords the AI dropped (keep:false) when scoring runs", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [PROFILE_ROW] })
+      .mockResolvedValueOnce({ rows: [{ title: "Camping Gas Stove" }] });
+
+    jsConfigured.mockReturnValue(true);
+    // sources omit "amazon", so don't queue a getAmazonKeywordRecommendations
+    // `once` (it would never be consumed and would shift the FIFO mock queue for
+    // later tests). beforeEach already sets a persistent mockResolvedValue([]).
+    // Two unscored JS keywords go to AI; the forbidden one is dropped by the model
+    getKeywordsByAsin.mockResolvedValueOnce([
+      { ...JS_KW, keyword_text: "gas stove",        relevance_score: null },
+      { ...JS_KW, keyword_text: "competitor brand", relevance_score: null },
+    ]);
+    // Mock AI returning only the kept keyword (keep:false ⇒ absent from result)
+    scoreAndFilterKeywords.mockResolvedValueOnce([
+      { keyword_text: "gas stove", relevance_score: 88, suggested_match_types: ["exact"] },
+    ]);
+
+    const res = await request(buildApp())
+      .post("/keyword-research/discover")
+      .send({ profileId: PROF_ID, asins: ["B01MFAUXDD"], sources: ["jungle_scout", "ai"] });
+
+    expect(res.status).toBe(200);
+    const texts = res.body.keywords.map(k => k.keyword_text);
+    expect(texts).toContain("gas stove");
+    expect(texts).not.toContain("competitor brand"); // dropped, not surviving on null→50
   });
 
   test("loads ad group context when adGroupId is provided", async () => {

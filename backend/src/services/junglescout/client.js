@@ -58,8 +58,12 @@ function parseKeywords(data, source = "jungle_scout") {
         || attrs.monthly_search_volume_broad
         || attrs.approximate_30_day_search_volume
         || null,
-      relevancy_score: attrs.relevancy_score || null,
-      ease_of_ranking: attrs.ease_of_ranking_score || null,
+      // JS exposes its own 0–100 relevance under `relevancy_score`. The rest of
+      // the app (merge/sort/filter, frontend "Релев." column, export) reads
+      // `relevance_score`, so map it here — otherwise JS relevance is discarded
+      // and the column shows "—" for every JS keyword.
+      relevance_score: attrs.relevancy_score ?? null,
+      ease_of_ranking: attrs.ease_of_ranking_score ?? null,
       source,
     };
   }).filter(Boolean);

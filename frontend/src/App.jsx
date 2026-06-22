@@ -4251,7 +4251,7 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, good = null
   const onMove = e => {
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    onHover(Math.round(pct * (N - 1)));
+    onHover(Math.round(pct * (N - 1)), e.clientX, e.clientY);
   };
   const hovV = hoverIdx != null && hoverIdx >= 0 && hoverIdx < N ? data[hoverIdx]?.value : null;
   const hovP = prev && hoverIdx != null && hoverIdx >= 0 && hoverIdx < N ? prev[hoverIdx] : null;
@@ -4296,14 +4296,38 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, good = null
           {segs.map((s) => s.length === 1 && (
             <circle key={"d" + s[0]} cx={s[0].split(",")[0]} cy={s[0].split(",")[1]} r="2.5" fill={color} />
           ))}
-          {hovV != null && (
+          {hoverIdx != null && hoverIdx >= 0 && hoverIdx < N && (
             <>
+              {/* Crosshair line is drawn on every row (even where this metric has a
+                  gap) so the shared cursor lines up across the whole stack —
+                  mirrors Grafana's shared-crosshair behaviour. Dots only render
+                  where a value actually exists. */}
               <line x1={xOf(hoverIdx)} y1={PAD} x2={xOf(hoverIdx)} y2={H - PAD} stroke="var(--tx3)" strokeWidth="1" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-              <circle cx={xOf(hoverIdx)} cy={yOf(hovV)} r="3.5" fill={color} stroke="var(--bg)" strokeWidth="1.5" />
+              {hovV != null && <circle cx={xOf(hoverIdx)} cy={yOf(hovV)} r="3.5" fill={color} stroke="var(--bg)" strokeWidth="1.5" />}
               {hovP != null && <circle cx={xOf(hoverIdx)} cy={yOf(hovP)} r="3" fill="none" stroke={color} strokeWidth="1.5" opacity="0.5" />}
             </>
           )}
         </svg>
+        {/* Per-point value label pinned at the hovered dot. Rendered as HTML
+            (not SVG <text>) because the SVG uses preserveAspectRatio="none",
+            which would stretch any in-SVG text. Positioned by % so it tracks
+            the dot; flips to the left of the dot past the 70% mark so it never
+            runs off the right edge. */}
+        {hovV != null && hoverIdx != null && hoverIdx >= 0 && hoverIdx < N && (() => {
+          const xPct = (xOf(hoverIdx) / W) * 100;
+          const flip = xPct > 70;
+          return (
+            <div style={{
+              position: "absolute", left: `${xPct}%`, top: `${(yOf(hovV) / H) * 100}%`,
+              transform: `translate(${flip ? "calc(-100% - 9px)" : "9px"}, -50%)`,
+              pointerEvents: "none", fontSize: 10, fontWeight: 700, fontFamily: "var(--mono)",
+              color: "#fff", background: color, padding: "1px 5px", borderRadius: 4,
+              whiteSpace: "nowrap", boxShadow: "0 1px 4px rgba(0,0,0,.25)",
+            }}>
+              {fmt(hovV)}
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -4314,6 +4338,15 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, good = null
 // `prevSeries` (optional) is the previous period's aligned series for comparison.
 function ListingTrendStack({ series, prevSeries, tr }) {
   const [hoverIdx, setHoverIdx] = React.useState(null);
+  // Pixel position of the cursor (viewport coords) for the shared floating
+  // tooltip. Lifted from whichever row the pointer is over so one tooltip can
+  // follow the cursor across the whole stack (Grafana "all series" pattern).
+  const [cursor, setCursor] = React.useState(null);
+  const handleHover = React.useCallback((idx, clientX, clientY) => {
+    setHoverIdx(idx);
+    if (idx == null) setCursor(null);
+    else if (clientX != null) setCursor({ x: clientX, y: clientY });
+  }, []);
   if (!series || !series.length) return <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.trendNoData")}</div>;
   const money = v => "€" + Number(v).toFixed(2);
   const int = v => Math.round(v).toLocaleString();
@@ -4346,9 +4379,51 @@ function ListingTrendStack({ series, prevSeries, tr }) {
           <TrendChart key={m.key} title={m.title} color={m.color} invert={m.invert} good={m.good} fmt={m.fmt}
             data={series.map(s => ({ date: s.date, value: s[m.key] }))}
             prev={prevSeries ? prevSeries.map(s => s[m.key]) : null}
-            hoverIdx={hoverIdx} onHover={setHoverIdx} />
+            hoverIdx={hoverIdx} onHover={handleHover} />
         ))}
       </div>
+      {/* Shared floating tooltip — lists every metric's value for the hovered day
+          right at the cursor, instead of forcing the eye back to the left gutter.
+          Fixed-positioned + edge-flipped so it never spills off-screen; pointer
+          events disabled so it never steals the hover. */}
+      {hoverIdx != null && cursor && series[hoverIdx] && (() => {
+        const TT_W = 196;
+        const flipX = cursor.x + 18 + TT_W > window.innerWidth;
+        const left = flipX ? cursor.x - 18 - TT_W : cursor.x + 18;
+        const top = Math.max(8, Math.min(cursor.y + 14, window.innerHeight - 200));
+        const row = series[hoverIdx];
+        const prevRow = prevSeries ? prevSeries[hoverIdx] : null;
+        return (
+          <div style={{
+            position: "fixed", left, top, width: TT_W, zIndex: 9999, pointerEvents: "none",
+            background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8,
+            boxShadow: "0 6px 24px rgba(0,0,0,.18)", padding: "8px 10px", fontSize: 11,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--mono)", color: "var(--tx2)", marginBottom: 6, display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span>{fmtD(row.date)}</span>
+              {prevRow && <span style={{ color: "var(--tx3)", fontWeight: 500 }}>{tr("products.prevPeriod")}: {fmtD(prevRow.date)}</span>}
+            </div>
+            {metrics.map(m => {
+              const v = row[m.key];
+              const pv = prevRow ? prevRow[m.key] : null;
+              return (
+                <div key={m.key} style={{ display: "flex", alignItems: "center", gap: 6, lineHeight: "17px" }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: m.color, flexShrink: 0 }} />
+                  <span style={{ color: "var(--tx2)", flex: 1, minWidth: 0 }}>{m.title}</span>
+                  <span style={{ fontFamily: "var(--mono)", fontWeight: 700, color: m.color }}>
+                    {v != null && !Number.isNaN(v) ? m.fmt(v) : "—"}
+                  </span>
+                  {prevRow && (
+                    <span style={{ fontFamily: "var(--mono)", color: "var(--tx3)", width: 52, textAlign: "right", flexShrink: 0 }}>
+                      {pv != null && !Number.isNaN(pv) ? m.fmt(pv) : "—"}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -13207,7 +13282,7 @@ const KeywordResearchPage = ({ workspaceId }) => {
       });
     }
     return list;
-  }, [results, filterText, filterMatch, filterMinRel, sortBy, sortDir]);
+  }, [results, filterText, filterMatch, filterMinRel, filterSource, sortBy, sortDir]);
 
   const handleSort = (col) => {
     if (sortBy === col) setSortDir(d => d === "asc" ? "desc" : "asc");
