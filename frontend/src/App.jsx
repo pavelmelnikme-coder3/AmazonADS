@@ -15943,7 +15943,13 @@ const StrategyModal = ({ strategy, availableRules, onClose, onSave, t }) => {
 
 // ─── Alerts Page ──────────────────────────────────────────────────────────────
 const ALERT_METRICS   = ["acos", "roas", "spend", "sales", "orders", "clicks", "impressions", "ctr", "cpc", "cvr", "bsr"];
-const ALERT_OPERATORS = [{ value: "gt", label: ">" }, { value: "gte", label: ">=" }, { value: "lt", label: "<" }, { value: "lte", label: "<=" }];
+const ALERT_OPERATORS = [
+  { value: "gt", label: ">" }, { value: "gte", label: "≥" },
+  { value: "lt", label: "<" }, { value: "lte", label: "≤" },
+  { value: "drop_pct", label: "↓ %" }, { value: "rise_pct", label: "↑ %" },
+];
+// Window-over-window percentage-change operators (not valid for point-in-time BSR).
+const ALERT_CHANGE_OPS = new Set(["drop_pct", "rise_pct"]);
 // Per-product metrics for the "product movers" alert. `dir` = default "worse" direction.
 // orders/units/sales = total (organic + ads, SP-API); ad_* = advertising only.
 const PM_METRICS = [
@@ -16477,7 +16483,7 @@ const AlertsPage = ({ workspaceId }) => {
                                     const sep = (cond.match === "all" || cond.require_both) ? " & " : " · ";
                                     return ms.map(m => `${pmMetricLabel(m.metric)}${m.direction === "up" ? "↑" : "↓"}${m.change_pct}%`).join(sep) || "—";
                                   })()
-                                : `${operLabel(cond.operator)} ${cond.value}`}
+                                : `${operLabel(cond.operator)} ${cond.value}${ALERT_CHANGE_OPS.has(cond.operator) ? `% / ${cond.window_days || 7}d` : ""}`}
                             </td>
                             <td>
                               <div style={{ display: "flex", gap: 4 }}>
@@ -16808,17 +16814,24 @@ const AlertsPage = ({ workspaceId }) => {
             <>
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 10, color: "var(--tx3)", marginBottom: 6, fontFamily: "var(--mono)", textTransform: "uppercase", letterSpacing: ".06em" }}>{t("alerts.threshold")}</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <select value={form.metric} onChange={e => setForm(f => ({ ...f, metric: e.target.value }))} style={{ flex: 1 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <select value={form.metric} onChange={e => setForm(f => ({
+                  ...f, metric: e.target.value,
+                  // BSR has no window-over-window change → fall back to an absolute operator
+                  operator: e.target.value === "bsr" && ALERT_CHANGE_OPS.has(f.operator) ? "gt" : f.operator,
+                }))} style={{ flex: 1 }}>
                   {ALERT_METRICS.map(m => <option key={m} value={m}>{m.toUpperCase()}</option>)}
                 </select>
-                <select value={form.operator} onChange={e => setForm(f => ({ ...f, operator: e.target.value }))} style={{ width: 60 }}>
-                  {ALERT_OPERATORS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                <select value={form.operator} onChange={e => setForm(f => ({ ...f, operator: e.target.value }))} style={{ width: 72 }}>
+                  {ALERT_OPERATORS.filter(o => form.metric !== "bsr" || !ALERT_CHANGE_OPS.has(o.value))
+                    .map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
-                <input type="number" value={form.value} onChange={e => setForm(f => ({ ...f, value: parseFloat(e.target.value) }))} style={{ width: 80 }} />
+                <input type="number" value={form.value} onChange={e => setForm(f => ({ ...f, value: parseFloat(e.target.value) }))} style={{ width: 70 }} />
+                {ALERT_CHANGE_OPS.has(form.operator) && <span style={{ fontSize: 13, color: "var(--tx2)" }}>%</span>}
               </div>
               <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 5 }}>
-                {form.metric === "bsr" ? t("alerts.metricHintBsr")
+                {ALERT_CHANGE_OPS.has(form.operator) ? t("alerts.metricHintChange")
+                  : form.metric === "bsr" ? t("alerts.metricHintBsr")
                   : ["spend","sales","orders","clicks","impressions"].includes(form.metric) ? t("alerts.metricHintSum")
                   : t("alerts.metricHintRatio")}
               </div>

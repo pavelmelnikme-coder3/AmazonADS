@@ -81,6 +81,13 @@ function buildAlertConfig(body) {
   if (metric === "bsr" && !asin) {
     return { error: "asin required for BSR alerts" };
   }
+  // Percentage-change operators compare the current window to the prior window — perf
+  // metrics only, and the threshold must be a positive percentage.
+  const CHANGE_OPS = ["drop_pct", "rise_pct"];
+  if (CHANGE_OPS.includes(operator)) {
+    if (metric === "bsr") return { error: "Percentage-change alerts are not available for BSR" };
+    if (!(Number(value) > 0)) return { error: "Percentage value must be greater than 0" };
+  }
   return {
     alertType: metric,
     conditions: { metric, operator, value, window_days: window_days || 7, asin: asin || null },

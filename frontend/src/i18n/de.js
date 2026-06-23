@@ -795,6 +795,7 @@ export default {
     asinHint: "Der BSR-Alert verfolgt den aktuellen Best-Sellers-Rank dieses Produkts.",
     asinRequired: "ASIN für den BSR-Alert eingeben",
     metricHintBsr: "Löst beim aktuellen BSR des Produkts aus (z. B. > 5000 = Rang gefallen).",
+    metricHintChange: "Vergleicht das aktuelle Zeitfenster mit dem vorherigen gleicher Länge. Der Wert ist die %-Änderungsschwelle (z. B. ROAS ↓ 30% über 7 Tage).",
     metricHintSum: "Summiert über den Betrachtungszeitraum (Konto-Gesamt).",
     metricHintRatio: "Kontoweit über den Betrachtungszeitraum berechnet.",
     cooldown: "Cooldown-Stunden",

@@ -189,6 +189,31 @@ describe("POST /alerts/configs", () => {
     const params = dbQuery.mock.calls[0][1];
     expect(params).toContain(48);
   });
+
+  it("creates a ROAS drop_pct change alert and stores the operator + window", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [SAMPLE_CONFIG] });
+    const res = await request(app).post("/alerts/configs")
+      .send({ name: "ROAS drop", metric: "roas", operator: "drop_pct", value: 30, window_days: 7 });
+    expect(res.status).toBe(201);
+    // conditions JSON is the 4th INSERT param
+    const conditions = JSON.parse(dbQuery.mock.calls[0][1][3]);
+    expect(conditions).toMatchObject({ metric: "roas", operator: "drop_pct", value: 30, window_days: 7 });
+    expect(dbQuery.mock.calls[0][1]).toContain("roas"); // alert_type = metric
+  });
+
+  it("rejects a change operator on BSR (no window-over-window)", async () => {
+    const res = await request(app).post("/alerts/configs")
+      .send({ name: "bad", metric: "bsr", operator: "drop_pct", value: 30, asin: "B0XXXXXXXX" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/BSR/i);
+  });
+
+  it("rejects a change operator with a non-positive percentage", async () => {
+    const res = await request(app).post("/alerts/configs")
+      .send({ name: "bad", metric: "roas", operator: "drop_pct", value: 0 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/greater than 0/i);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

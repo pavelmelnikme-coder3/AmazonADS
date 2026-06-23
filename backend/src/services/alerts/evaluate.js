@@ -19,8 +19,13 @@ const METRIC_LABELS = {
   clicks: "Clicks", impressions: "Impressions", ctr: "CTR", cpc: "CPC", cvr: "CVR",
   bsr: "BSR",
 };
-const OPERATOR_LABELS = { gt: ">", gte: "≥", lt: "<", lte: "≤", eq: "=" };
+const OPERATOR_LABELS = { gt: ">", gte: "≥", lt: "<", lte: "≤", eq: "=", drop_pct: "↓%", rise_pct: "↑%" };
 const PERF_METRICS = ["acos", "roas", "spend", "sales", "orders", "clicks", "impressions", "ctr", "cpc", "cvr"];
+// Percentage-change operators: compare the current window to the preceding window of
+// the same length and fire on a drop/rise of ≥ threshold %. Perf metrics only (BSR
+// uses a point-in-time snapshot, not a window aggregate, so a window-over-window % is
+// not meaningful for it).
+const CHANGE_OPERATORS = new Set(["drop_pct", "rise_pct"]);
 
 const ACOS_NO_SALES = 9999; // spend with zero sales → effectively infinite ACOS, finite for comparison/formatting
 
@@ -88,8 +93,9 @@ async function resolveRecipients(workspaceId, emailTo) {
   return rows.map((r) => r.email);
 }
 
-// Account-level aggregate over the last `windowDays` days (campaign rows → no double count).
-async function aggregateMetrics(workspaceId, windowDays) {
+// Account-level aggregate over the day range [CURRENT_DATE - fromOffset, CURRENT_DATE - toOffset]
+// (campaign rows → no double count). Inclusive on both ends.
+async function aggregateMetricsRange(workspaceId, fromOffset, toOffset) {
   const { rows: [agg] } = await query(
     `SELECT COALESCE(SUM(cost),0)        AS cost,
             COALESCE(SUM(sales_1d),0)    AS sales,
@@ -98,10 +104,15 @@ async function aggregateMetrics(workspaceId, windowDays) {
             COALESCE(SUM(impressions),0) AS impressions
      FROM fact_metrics_daily
      WHERE workspace_id = $1 AND entity_type = 'campaign'
-       AND date >= CURRENT_DATE - $2::int AND date <= CURRENT_DATE - 1`,
-    [workspaceId, windowDays]
+       AND date >= CURRENT_DATE - $2::int AND date <= CURRENT_DATE - $3::int`,
+    [workspaceId, fromOffset, toOffset]
   );
   return agg;
+}
+
+// Last `windowDays` days (current window): [today-windowDays, yesterday].
+function aggregateMetrics(workspaceId, windowDays) {
+  return aggregateMetricsRange(workspaceId, windowDays, 1);
 }
 
 async function latestBsr(workspaceId, asin) {
@@ -614,43 +625,85 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
     const operator = cond.operator;
     const threshold = Number(cond.value);
     const windowDays = Math.min(90, Math.max(1, parseInt(cond.window_days) || 7));
+    const metricLabel = METRIC_LABELS[metric] || (metric ? metric.toUpperCase() : "");
+    const isChange = CHANGE_OPERATORS.has(operator);
 
-    let actual = null;
-    let scopeLabel = "";
-    if (metric === "bsr") {
-      const asin = String(cond.asin || "").trim().toUpperCase();
-      if (!asin) continue;
-      actual = await latestBsr(workspaceId, asin);
-      scopeLabel = ` for ${asin}`;
-    } else if (PERF_METRICS.includes(metric)) {
+    // Per-alert display + payload, built differently for absolute vs change operators.
+    let title, message, severity, dataObj, emailParams;
+
+    if (isChange) {
+      // Window-over-window percentage change — perf metrics only.
+      if (!PERF_METRICS.includes(metric)) continue;
+      const prevKey = `prev:${windowDays}`;
       if (!aggCache.has(windowDays)) aggCache.set(windowDays, await aggregateMetrics(workspaceId, windowDays));
-      actual = computeMetric(metric, aggCache.get(windowDays));
+      if (!aggCache.has(prevKey)) aggCache.set(prevKey, await aggregateMetricsRange(workspaceId, 2 * windowDays, windowDays + 1));
+      const cur = computeMetric(metric, aggCache.get(windowDays));
+      const prev = computeMetric(metric, aggCache.get(prevKey));
+      // Need a positive prior value to express a meaningful % change.
+      if (cur == null || prev == null || Number.isNaN(cur) || Number.isNaN(prev) || !(prev > 0)) continue;
+      const pct = ((cur - prev) / prev) * 100;
+      const breach = operator === "drop_pct" ? pct <= -threshold : pct >= threshold;
+      if (!breach) continue;
+      // Cooldown
+      if (cfg.last_triggered_at) {
+        const ageMs = Date.now() - new Date(cfg.last_triggered_at).getTime();
+        if (ageMs < (cfg.suppression_hours || 24) * 3600 * 1000) continue;
+      }
+      const dirWord = operator === "drop_pct" ? "dropped" : "rose";
+      const pctAbs = Math.abs(Math.round(pct));
+      const prevText = formatValue(metric, prev);
+      const curText = formatValue(metric, cur);
+      title = `${metricLabel} ${dirWord} ${pctAbs}% (${windowDays}d)`;
+      message = `${cfg.name}: ${metricLabel} ${dirWord} ${pctAbs}% over the last ${windowDays} days (${prevText} → ${curText}) vs the prior ${windowDays} days. Threshold: ${dirWord} ≥ ${threshold}%.`;
+      severity = pctAbs >= 50 ? "high" : "medium";
+      dataObj = { metric, operator, threshold, change_pct: Math.round(pct), prev, cur, windowDays };
+      emailParams = {
+        metricLabel: `${metricLabel} change`, operatorLabel: `${dirWord} ≥`, threshold: `${threshold}%`,
+        actualText: `${pct < 0 ? "−" : "+"}${pctAbs}% (${prevText} → ${curText})`,
+        windowDays, periodText: `the last ${windowDays} days vs the prior ${windowDays} days`,
+      };
     } else {
-      continue; // unknown metric
+      // Absolute threshold.
+      let actual = null;
+      let scopeLabel = "";
+      if (metric === "bsr") {
+        const asin = String(cond.asin || "").trim().toUpperCase();
+        if (!asin) continue;
+        actual = await latestBsr(workspaceId, asin);
+        scopeLabel = ` for ${asin}`;
+      } else if (PERF_METRICS.includes(metric)) {
+        if (!aggCache.has(windowDays)) aggCache.set(windowDays, await aggregateMetrics(workspaceId, windowDays));
+        actual = computeMetric(metric, aggCache.get(windowDays));
+      } else {
+        continue; // unknown metric
+      }
+
+      if (actual == null || Number.isNaN(actual)) continue;
+      if (!compare(actual, operator, threshold)) continue;
+
+      // Cooldown
+      if (cfg.last_triggered_at) {
+        const ageMs = Date.now() - new Date(cfg.last_triggered_at).getTime();
+        if (ageMs < (cfg.suppression_hours || 24) * 3600 * 1000) continue;
+      }
+
+      const opLabel = OPERATOR_LABELS[operator] || operator;
+      const actualText = formatValue(metric, actual);
+      const period = metric === "bsr" ? "latest snapshot" : `the last ${windowDays} days`;
+      title = `${metricLabel}${scopeLabel} ${opLabel} ${cond.value}`;
+      message = `${cfg.name}: ${metricLabel}${scopeLabel} is ${actualText} (threshold ${opLabel} ${cond.value}) over ${period}.`;
+      severity = ["acos", "bsr"].includes(metric) ? "high" : "medium";
+      dataObj = { metric, operator, threshold, actual, windowDays, asin: cond.asin || null };
+      emailParams = {
+        metricLabel: `${metricLabel}${scopeLabel}`, operatorLabel: opLabel,
+        threshold: cond.value, actualText, windowDays: metric === "bsr" ? null : windowDays, periodText: period,
+      };
     }
-
-    if (actual == null || Number.isNaN(actual)) continue;
-    if (!compare(actual, operator, threshold)) continue;
-
-    // Cooldown
-    if (cfg.last_triggered_at) {
-      const ageMs = Date.now() - new Date(cfg.last_triggered_at).getTime();
-      if (ageMs < (cfg.suppression_hours || 24) * 3600 * 1000) continue;
-    }
-
-    const metricLabel = METRIC_LABELS[metric] || metric.toUpperCase();
-    const opLabel = OPERATOR_LABELS[operator] || operator;
-    const actualText = formatValue(metric, actual);
-    const period = metric === "bsr" ? "latest snapshot" : `the last ${windowDays} days`;
-    const title = `${metricLabel}${scopeLabel} ${opLabel} ${cond.value}`;
-    const message = `${cfg.name}: ${metricLabel}${scopeLabel} is ${actualText} (threshold ${opLabel} ${cond.value}) over ${period}.`;
-    const severity = ["acos", "bsr"].includes(metric) ? "high" : "medium";
 
     await query(
       `INSERT INTO alert_instances (config_id, workspace_id, severity, title, message, data)
        VALUES ($1,$2,$3,$4,$5,$6)`,
-      [cfg.id, workspaceId, severity, title, message,
-       JSON.stringify({ metric, operator, threshold, actual, windowDays, asin: cond.asin || null })]
+      [cfg.id, workspaceId, severity, title, message, JSON.stringify(dataObj)]
     );
     await query(`UPDATE alert_configs SET last_triggered_at = NOW() WHERE id = $1`, [cfg.id]);
     triggered++;
@@ -662,9 +715,7 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
         try {
           await sendAlertEmail({
             to: recipients, alertName: cfg.name, workspaceName,
-            metricLabel: `${metricLabel}${scopeLabel}`, operatorLabel: opLabel,
-            threshold: cond.value, actualText, windowDays: metric === "bsr" ? null : windowDays,
-            periodText: period, dashboardUrl: process.env.FRONTEND_URL || null,
+            ...emailParams, dashboardUrl: process.env.FRONTEND_URL || null,
           });
           emailed++;
         } catch (e) {
@@ -676,4 +727,4 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   return { evaluated: configs.length, triggered, emailed };
 }
 
-module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, latestBsr, amazonProductUrl, PERF_METRICS };
+module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, aggregateMetricsRange, latestBsr, amazonProductUrl, PERF_METRICS, CHANGE_OPERATORS };

@@ -127,6 +127,78 @@ describe("evaluateWorkspaceAlerts", () => {
     const r = await evaluateWorkspaceAlerts(WS_ID);
     expect(r.triggered).toBe(0);
   });
+
+  // ── Percentage-change operators (window vs prior window) ────────────────────
+  const roasDropConfig = {
+    id: "cfg-roas", workspace_id: WS_ID, name: "ROAS drop",
+    conditions: { metric: "roas", operator: "drop_pct", value: 30, window_days: 7 },
+    channels: { in_app: true, email: true, email_to: "boss@example.com" },
+    suppression_hours: 24, last_triggered_at: null,
+  };
+
+  test("drop_pct fires when ROAS falls more than threshold % vs prior window", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [roasDropConfig] })                          // configs
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 300, clicks: 50, impressions: 1000 }] }) // current: roas 3.0
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 500, clicks: 50, impressions: 1000 }] }) // prior:   roas 5.0 → -40%
+      .mockResolvedValueOnce({ rows: [] })                                        // INSERT instance
+      .mockResolvedValueOnce({ rows: [] });                                       // UPDATE last_triggered
+
+    const r = await evaluateWorkspaceAlerts(WS_ID, { workspaceName: "WS" });
+    expect(r.triggered).toBe(1);
+    expect(sendAlertEmail).toHaveBeenCalledWith(expect.objectContaining({
+      metricLabel: "ROAS change", operatorLabel: "dropped ≥", threshold: "30%",
+    }));
+    // payload carries the % change and both window values
+    const insertCall = dbQuery.mock.calls.find(c => String(c[0]).includes("INSERT INTO alert_instances"));
+    const data = JSON.parse(insertCall[1][5]);
+    expect(data).toMatchObject({ metric: "roas", operator: "drop_pct", change_pct: -40 });
+    expect(data.prev).toBeCloseTo(5); expect(data.cur).toBeCloseTo(3);
+  });
+
+  test("drop_pct does NOT fire when the drop is below threshold", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [roasDropConfig] })
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 450 }] }) // cur roas 4.5
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 500 }] }); // prior roas 5.0 → -10%
+    const r = await evaluateWorkspaceAlerts(WS_ID);
+    expect(r.triggered).toBe(0);
+  });
+
+  test("drop_pct does NOT fire on a rise (ROAS improved)", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [roasDropConfig] })
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 600 }] }) // cur roas 6.0
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 400 }] }); // prior roas 4.0 → +50%
+    const r = await evaluateWorkspaceAlerts(WS_ID);
+    expect(r.triggered).toBe(0);
+  });
+
+  test("change operator skipped when prior window has no baseline (prev = 0)", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [roasDropConfig] })
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 300 }] }) // cur roas 3.0
+      .mockResolvedValueOnce({ rows: [{ cost: 0, sales: 0 }] });    // prior roas 0 → can't compute %
+    const r = await evaluateWorkspaceAlerts(WS_ID);
+    expect(r.triggered).toBe(0);
+  });
+
+  test("rise_pct fires when ACOS rises more than threshold %", async () => {
+    const acosRise = {
+      id: "cfg-acos", workspace_id: WS_ID, name: "ACOS spike",
+      conditions: { metric: "acos", operator: "rise_pct", value: 25, window_days: 7 },
+      channels: { in_app: true }, suppression_hours: 24, last_triggered_at: null,
+    };
+    dbQuery
+      .mockResolvedValueOnce({ rows: [acosRise] })
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 250 }] }) // cur acos 40%
+      .mockResolvedValueOnce({ rows: [{ cost: 100, sales: 500 }] }) // prior acos 20% → +100%
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const r = await evaluateWorkspaceAlerts(WS_ID);
+    expect(r.triggered).toBe(1);
+    expect(sendAlertEmail).not.toHaveBeenCalled(); // in-app only
+  });
 });
 
 describe("detectMoverCauses", () => {

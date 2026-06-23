@@ -796,6 +796,7 @@ export default {
     asinHint: "BSR alert tracks this product's latest Best-Sellers Rank.",
     asinRequired: "Enter an ASIN for the BSR alert",
     metricHintBsr: "Triggers on the product's latest BSR (e.g. > 5000 = ranking dropped).",
+    metricHintChange: "Compares the current window to the prior window of the same length. The value is the % change threshold (e.g. ROAS ↓ 30% over 7 days).",
     metricHintSum: "Summed over the look-back period (account total).",
     metricHintRatio: "Computed account-wide over the look-back period.",
     cooldown: "Cooldown hours",
