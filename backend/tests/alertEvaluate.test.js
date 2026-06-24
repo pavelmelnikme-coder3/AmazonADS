@@ -211,7 +211,7 @@ describe("evaluateWorkspaceAlerts", () => {
       .mockResolvedValueOnce({ rows: [spendCfg] })                                  // load configs
       .mockResolvedValueOnce({ rows: [{ cost: 361.17, sales: 0, clicks: 0, impressions: 0 }] }) // agg (spend 361 > 300)
       .mockResolvedValueOnce({ rows: [                                              // topSpendCampaigns
-        { name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: "84.51", prev_spend: "50.99" },
+        { name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: "84.51", prev_spend: "50.99", sales: "1723.25", orders: "42", clicks: "376" },
       ] })
       .mockResolvedValueOnce({ rows: [] })                                          // INSERT instance
       .mockResolvedValueOnce({ rows: [] });                                         // UPDATE last_triggered
@@ -229,14 +229,19 @@ describe("evaluateWorkspaceAlerts", () => {
 });
 
 describe("topSpendCampaigns", () => {
-  test("maps rows → spend/delta/delta_pct, handles zero prior (delta_pct null)", async () => {
+  test("maps rows → spend/delta + health (roas/acos/sales/orders); zero prior → delta_pct null", async () => {
     dbQuery.mockResolvedValueOnce({ rows: [
-      { name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: "84.51", prev_spend: "50.99" },
-      { name: "New camp",        campaign_type: null,               spend: "10.00", prev_spend: "0" },
+      { name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: "84.51", prev_spend: "50.99", sales: "1723.25", orders: "42", clicks: "376" },
+      { name: "New camp",        campaign_type: null,               spend: "10.00", prev_spend: "0",     sales: "0",       orders: "0",  clicks: "5" },
     ] });
     const out = await topSpendCampaigns(WS_ID, 1, 6);
-    expect(out[0]).toEqual({ name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: 84.51, prev_spend: 50.99, delta: 33.52, delta_pct: 66 });
-    expect(out[1]).toEqual({ name: "New camp", campaign_type: null, spend: 10, prev_spend: 0, delta: 10, delta_pct: null });
+    expect(out[0]).toMatchObject({
+      name: "AM - SP - Magic", campaign_type: "sponsoredProducts",
+      spend: 84.51, prev_spend: 50.99, delta: 33.52, delta_pct: 66,
+      sales: 1723.25, orders: 42, roas: 20.39, acos: 4.9,
+    });
+    // healthy ramp: ROAS ≈ 20×
+    expect(out[1]).toMatchObject({ name: "New camp", spend: 10, delta: 10, delta_pct: null, sales: 0, orders: 0, roas: 0, acos: null });
   });
 });
 

@@ -856,6 +856,9 @@ export default {
     spendColCampaign: "Kampagne",
     spendColSpend: "Ausgaben",
     spendColDelta: "Δ ggü. vorher",
+    spendColSales: "Umsatz",
+    spendColOrders: "Bestellungen",
+    spendColRoas: "ROAS",
   },
   reports: {
     title: "Berichte",

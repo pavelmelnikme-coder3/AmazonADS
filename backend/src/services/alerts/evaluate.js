@@ -634,28 +634,38 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
  * Ordered by current spend desc (where the budget is going); delta shows what ramped.
  */
 async function topSpendCampaigns(workspaceId, windowDays, limit = 6) {
+  const CUR  = `FILTER (WHERE f.date >= CURRENT_DATE - $2::int AND f.date <= CURRENT_DATE - 1)`;
+  const PREV = `FILTER (WHERE f.date >= CURRENT_DATE - 2*$2::int AND f.date <= CURRENT_DATE - $2::int - 1)`;
   const { rows } = await query(
     `SELECT COALESCE(c.name, f.entity_id::text) AS name, c.campaign_type,
-            COALESCE(SUM(f.cost) FILTER (WHERE f.date >= CURRENT_DATE - $2::int AND f.date <= CURRENT_DATE - 1), 0) AS spend,
-            COALESCE(SUM(f.cost) FILTER (WHERE f.date >= CURRENT_DATE - 2*$2::int AND f.date <= CURRENT_DATE - $2::int - 1), 0) AS prev_spend
+            COALESCE(SUM(f.cost)      ${CUR}, 0) AS spend,
+            COALESCE(SUM(f.cost)      ${PREV},0) AS prev_spend,
+            COALESCE(SUM(f.sales_1d)  ${CUR}, 0) AS sales,
+            COALESCE(SUM(f.orders_1d) ${CUR}, 0) AS orders,
+            COALESCE(SUM(f.clicks)    ${CUR}, 0) AS clicks
        FROM fact_metrics_daily f
        LEFT JOIN campaigns c ON c.id = f.entity_id AND c.workspace_id = f.workspace_id
       WHERE f.workspace_id = $1 AND f.entity_type = 'campaign'
         AND f.date >= CURRENT_DATE - 2*$2::int AND f.date <= CURRENT_DATE - 1
       GROUP BY 1, 2
-      HAVING COALESCE(SUM(f.cost) FILTER (WHERE f.date >= CURRENT_DATE - $2::int AND f.date <= CURRENT_DATE - 1), 0) > 0
+      HAVING COALESCE(SUM(f.cost) ${CUR}, 0) > 0
       ORDER BY spend DESC
       LIMIT $3`,
     [workspaceId, windowDays, limit]
   );
+  const r2 = (v) => Math.round(v * 100) / 100;
   return rows.map((r) => {
     const spend = Number(r.spend), prev = Number(r.prev_spend);
+    const sales = Number(r.sales), orders = Number(r.orders), clicks = Number(r.clicks);
     return {
       name: r.name, campaign_type: r.campaign_type || null,
-      spend: Math.round(spend * 100) / 100,
-      prev_spend: Math.round(prev * 100) / 100,
-      delta: Math.round((spend - prev) * 100) / 100,
+      spend: r2(spend), prev_spend: r2(prev),
+      delta: r2(spend - prev),
       delta_pct: prev > 0 ? Math.round(((spend - prev) / prev) * 100) : null,
+      // Health snapshot over the current window.
+      sales: r2(sales), orders,
+      roas: spend > 0 ? r2(sales / spend) : null,            // sales per €1 ad spend
+      acos: sales > 0 ? Math.round((spend / sales) * 1000) / 10 : (spend > 0 ? null : null), // %
     };
   });
 }

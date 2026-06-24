@@ -16601,12 +16601,16 @@ const AlertsPage = ({ workspaceId }) => {
                                         <tr style={{ color: "var(--tx3)", fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>
                                           <th style={{ textAlign: "left", padding: "4px 0", fontWeight: 600 }}>{t("alerts.spendColCampaign")}</th>
                                           <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 600 }}>{t("alerts.spendColSpend")}</th>
-                                          <th style={{ textAlign: "right", padding: "4px 0", fontWeight: 600 }}>{t("alerts.spendColDelta")}</th>
+                                          <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 600 }}>{t("alerts.spendColDelta")}</th>
+                                          <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 600 }}>{t("alerts.spendColSales")}</th>
+                                          <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 600 }}>{t("alerts.spendColOrders")}</th>
+                                          <th style={{ textAlign: "right", padding: "4px 0", fontWeight: 600 }}>{t("alerts.spendColRoas")}</th>
                                         </tr>
                                       </thead>
                                       <tbody>
                                         {topCampaigns.map((c, i) => {
                                           const up = (c.delta || 0) > 0;
+                                          const roasColor = c.roas == null ? "var(--tx3)" : c.roas >= 3 ? "var(--grn)" : c.roas >= 1.5 ? "var(--amb)" : "var(--red)";
                                           return (
                                             <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
                                               <td style={{ padding: "5px 0", color: "var(--tx)" }}>
@@ -16614,9 +16618,12 @@ const AlertsPage = ({ workspaceId }) => {
                                                 {c.name}
                                               </td>
                                               <td style={{ padding: "5px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx)" }}>€{Number(c.spend).toFixed(2)}</td>
-                                              <td style={{ padding: "5px 0", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600, color: up ? "var(--red)" : "var(--tx3)" }}>
+                                              <td style={{ padding: "5px 8px", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600, color: up ? "var(--red)" : "var(--tx3)" }}>
                                                 {up ? "+" : ""}€{Number(c.delta).toFixed(2)}{c.delta_pct != null ? ` (${up ? "+" : ""}${c.delta_pct}%)` : ""}
                                               </td>
+                                              <td style={{ padding: "5px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{c.sales != null ? "€" + Number(c.sales).toFixed(2) : "—"}</td>
+                                              <td style={{ padding: "5px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{c.orders ?? "—"}</td>
+                                              <td style={{ padding: "5px 0", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 700, color: roasColor }}>{c.roas != null ? Number(c.roas).toFixed(2) + "×" : "—"}</td>
                                             </tr>
                                           );
                                         })}

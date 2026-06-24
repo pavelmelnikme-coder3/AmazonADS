@@ -851,6 +851,9 @@ export default {
     spendColCampaign: "Кампания",
     spendColSpend: "Расход",
     spendColDelta: "Δ к пред.",
+    spendColSales: "Продажи",
+    spendColOrders: "Заказы",
+    spendColRoas: "ROAS",
   },
   reports: {
     title: "Отчёты",
