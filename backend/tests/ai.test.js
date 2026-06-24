@@ -262,13 +262,15 @@ describe("GET /ai/recommendations", () => {
   });
 
   test("enriches entity_name for campaign actions that lack it", async () => {
+    // Route enriches only when entity_id is a valid hex UUID (safety guard), so use one.
+    const CAMP_UUID = "aaaaaaaa-0001-4000-8000-000000000001";
     const recWithoutName = {
       ...SAVED_REC,
       actions: JSON.stringify([
         {
           action_type: "adjust_bid",
           entity_type: "campaign",
-          entity_id: CAMP_ID,
+          entity_id: CAMP_UUID,
           // entity_name intentionally omitted
           params: { bid_adjustment_pct: -10 },
         },
@@ -284,13 +286,14 @@ describe("GET /ai/recommendations", () => {
   });
 
   test("enriches entity_name for keyword actions that lack it", async () => {
+    const KW_UUID = "bbbbbbbb-0001-4000-8000-000000000001";
     const recWithoutName = {
       ...SAVED_REC,
       actions: JSON.stringify([
         {
           action_type: "adjust_bid",
           entity_type: "keyword",
-          entity_id: KW_ID,
+          entity_id: KW_UUID,
           params: { bid: 0.45 },
         },
       ]),

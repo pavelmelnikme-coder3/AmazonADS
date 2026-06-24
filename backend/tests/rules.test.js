@@ -129,8 +129,10 @@ function makeKeyword(overrides = {}) {
 function makeTarget(overrides = {}) {
   return {
     id: "tgt-001", amazon_target_id: "AZ_TGT_001",
-    expression: [{ type: "asinSameAs", value: "B0TESTPRODUCT" }],
-    expression_type: "asinSameAs",
+    // Amazon Ads v3 uses SCREAMING_SNAKE expression types (ASIN_SAME_AS); only these
+    // are negatable. (The old v2 camelCase asinSameAs is no longer what sync stores.)
+    expression: [{ type: "ASIN_SAME_AS", value: "B0TESTPRODUCT" }],
+    expression_type: "ASIN_SAME_AS",
     state: "enabled", bid: "0.80",
     campaign_id: CAMP_ID, ad_group_id: AG_ID,
     campaign_name: "Campaign A", campaign_type: "sponsoredProducts",
@@ -221,6 +223,13 @@ function mockSearchTermRun(rule, stRows, extraMocks = []) {
     .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_targets
     .mockResolvedValueOnce({ rows: [] });          // UPDATE
 }
+
+// Drain the dbQuery mockResolvedValueOnce queue after every test. jest.clearAllMocks()
+// (used in each describe's beforeEach) clears call history but NOT queued once-values,
+// so a test that queues more responses than the route consumes would leak leftovers
+// into the next test — shifting query indices and the rule read at call 0. Resetting
+// here keeps each test's fixed-index assertions (e.g. calls[3]) reliable.
+afterEach(() => { dbQuery.mockReset(); });
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  evaluate() — tested via dry-run rule execution
@@ -498,12 +507,19 @@ describe("DELETE /rules/:id", () => {
   let app;
   beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
 
-  it("deletes rule and returns ok:true", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
+  it("soft-deletes rule to trash and returns ok:true", async () => {
+    // Route: SELECT rule → INSERT trash snapshot → DELETE FROM rules
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ id: RULE_ID, name: "Rule", workspace_id: WS_ID }] }) // SELECT
+      .mockResolvedValueOnce({ rows: [] })            // INSERT trash
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // DELETE
 
     const res = await request(app).delete(`/rules/${RULE_ID}`);
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+    const sqls = dbQuery.mock.calls.map((c) => c[0]);
+    expect(sqls.some((s) => /INSERT INTO trash/.test(s))).toBe(true);
+    expect(sqls.some((s) => /DELETE FROM rules/.test(s))).toBe(true);
   });
 });
 

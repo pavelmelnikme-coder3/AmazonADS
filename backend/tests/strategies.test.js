@@ -290,19 +290,23 @@ describe("DELETE /strategies/:id", () => {
   let app;
   beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
 
-  it("deletes strategy and returns ok:true", async () => {
-    dbQuery.mockResolvedValueOnce({ rowCount: 1 });
+  it("soft-deletes strategy to trash and returns ok:true", async () => {
+    // Route: SELECT strategy → INSERT trash snapshot → DELETE FROM strategies
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ id: STRAT_ID, name: "Strat", workspace_id: WS_ID }] }) // SELECT
+      .mockResolvedValueOnce({ rows: [] })     // INSERT trash
+      .mockResolvedValueOnce({ rowCount: 1 }); // DELETE
 
     const res = await request(app).delete(`/strategies/${STRAT_ID}`);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
-    const [sql, params] = dbQuery.mock.calls[0];
-    expect(sql).toMatch(/DELETE FROM strategies/);
-    expect(params).toEqual([STRAT_ID, WS_ID]);
+    const sqls = dbQuery.mock.calls.map((c) => c[0]);
+    expect(sqls.some((s) => /INSERT INTO trash/.test(s))).toBe(true);
+    expect(sqls.some((s) => /DELETE FROM strategies/.test(s))).toBe(true);
   });
 
   it("returns 404 when strategy not found", async () => {
-    dbQuery.mockResolvedValueOnce({ rowCount: 0 });
+    dbQuery.mockResolvedValueOnce({ rows: [] }); // SELECT → no strategy
 
     const res = await request(app).delete(`/strategies/${STRAT_ID}`);
     expect(res.status).toBe(404);

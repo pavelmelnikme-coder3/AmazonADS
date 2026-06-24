@@ -636,6 +636,13 @@ describe("PATCH /campaigns/:id", () => {
     dbQuery.mockResolvedValueOnce({ rows: [campRow] }); // SELECT only
   }
 
+  // First campaign payload, regardless of wrapper shape: SP/SB wrap in { campaigns: [...] },
+  // SD (v2 PUT) sends a bare array.
+  const putPayload = () => {
+    const d = apiPut.mock.calls[0][0].data;
+    return Array.isArray(d) ? d[0] : d.campaigns[0];
+  };
+
   it("updates state — calls Amazon PUT and updates DB", async () => {
     mockPatch();
     const res = await request(app)
@@ -650,7 +657,7 @@ describe("PATCH /campaigns/:id", () => {
   it("sends uppercase state to Amazon API", async () => {
     mockPatch();
     await request(app).patch(`/campaigns/${CAMP_ID}`).send({ state: "paused" });
-    const payload = apiPut.mock.calls[0][0].data[0];
+    const payload = putPayload();
     expect(payload.state).toBe("PAUSED");
   });
 
@@ -659,7 +666,7 @@ describe("PATCH /campaigns/:id", () => {
     const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ dailyBudget: 75 });
     expect(res.status).toBe(200);
     expect(res.body.after.dailyBudget).toBe(75);
-    const payload = apiPut.mock.calls[0][0].data[0];
+    const payload = putPayload();
     expect(payload.dailyBudget).toBe(75);
     expect(payload.budget).toBeUndefined();
   });
@@ -668,17 +675,19 @@ describe("PATCH /campaigns/:id", () => {
     mockPatch({ ...CAMPAIGN_DB_ROW, campaign_type: "sponsoredBrands" });
     const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ dailyBudget: 60 });
     expect(res.status).toBe(200);
-    const payload = apiPut.mock.calls[0][0].data[0];
+    const payload = putPayload();
     expect(payload.budget).toEqual({ budget: 60, budgetType: "DAILY" });
     expect(payload.dailyBudget).toBeUndefined();
   });
 
-  it("SD campaign — budget uses nested budget object", async () => {
+  it("SD campaign — budget is flat v2-style (budget + lowercase budgetType)", async () => {
     mockPatch({ ...CAMPAIGN_DB_ROW, campaign_type: "sponsoredDisplay" });
     const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ dailyBudget: 40 });
     expect(res.status).toBe(200);
-    const payload = apiPut.mock.calls[0][0].data[0];
-    expect(payload.budget).toEqual({ budget: 40, budgetType: "DAILY" });
+    const payload = putPayload();
+    // SD (v2 PUT): flat budget number + lowercase budgetType, NOT a nested object
+    expect(payload.budget).toBe(40);
+    expect(payload.budgetType).toBe("daily");
   });
 
   it("SB campaign — uses /sb/campaigns endpoint", async () => {
@@ -696,7 +705,7 @@ describe("PATCH /campaigns/:id", () => {
   it("updates biddingStrategy in Amazon payload", async () => {
     mockPatchNoUpdate(); // biddingStrategy alone does not trigger DB UPDATE
     await request(app).patch(`/campaigns/${CAMP_ID}`).send({ biddingStrategy: "autoForSales" });
-    const payload = apiPut.mock.calls[0][0].data[0];
+    const payload = putPayload();
     expect(payload.bidding).toEqual({ strategy: "autoForSales" });
   });
 
@@ -715,7 +724,7 @@ describe("PATCH /campaigns/:id", () => {
       biddingStrategy: "legacyForSales",
       placements: [{ predicate: "placementTop", percentage: 30 }],
     });
-    const payload = apiPut.mock.calls[0][0].data[0];
+    const payload = putPayload();
     expect(payload.bidding.strategy).toBe("legacyForSales");
     expect(payload.bidding.adjustments[0].predicate).toBe("placementTop");
     expect(payload.bidding.adjustments[0].percentage).toBe(30);
@@ -726,7 +735,7 @@ describe("PATCH /campaigns/:id", () => {
     await request(app).patch(`/campaigns/${CAMP_ID}`).send({
       placements: [{ predicate: "placementTop", percentage: 9999 }],
     });
-    const payload = apiPut.mock.calls[0][0].data[0];
+    const payload = putPayload();
     expect(payload.bidding.adjustments[0].percentage).toBe(900);
   });
 
