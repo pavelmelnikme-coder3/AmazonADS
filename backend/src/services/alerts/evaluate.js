@@ -628,6 +628,39 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
 }
 
 /**
+ * Top campaigns by ad spend over the current window, with the change vs the prior
+ * equal-length window. Surfaced on spend ("overspend") alerts so the driver of the
+ * spend is visible right in the notification (the alert itself is account-level).
+ * Ordered by current spend desc (where the budget is going); delta shows what ramped.
+ */
+async function topSpendCampaigns(workspaceId, windowDays, limit = 6) {
+  const { rows } = await query(
+    `SELECT COALESCE(c.name, f.entity_id::text) AS name, c.campaign_type,
+            COALESCE(SUM(f.cost) FILTER (WHERE f.date >= CURRENT_DATE - $2::int AND f.date <= CURRENT_DATE - 1), 0) AS spend,
+            COALESCE(SUM(f.cost) FILTER (WHERE f.date >= CURRENT_DATE - 2*$2::int AND f.date <= CURRENT_DATE - $2::int - 1), 0) AS prev_spend
+       FROM fact_metrics_daily f
+       LEFT JOIN campaigns c ON c.id = f.entity_id AND c.workspace_id = f.workspace_id
+      WHERE f.workspace_id = $1 AND f.entity_type = 'campaign'
+        AND f.date >= CURRENT_DATE - 2*$2::int AND f.date <= CURRENT_DATE - 1
+      GROUP BY 1, 2
+      HAVING COALESCE(SUM(f.cost) FILTER (WHERE f.date >= CURRENT_DATE - $2::int AND f.date <= CURRENT_DATE - 1), 0) > 0
+      ORDER BY spend DESC
+      LIMIT $3`,
+    [workspaceId, windowDays, limit]
+  );
+  return rows.map((r) => {
+    const spend = Number(r.spend), prev = Number(r.prev_spend);
+    return {
+      name: r.name, campaign_type: r.campaign_type || null,
+      spend: Math.round(spend * 100) / 100,
+      prev_spend: Math.round(prev * 100) / 100,
+      delta: Math.round((spend - prev) * 100) / 100,
+      delta_pct: prev > 0 ? Math.round(((spend - prev) / prev) * 100) : null,
+    };
+  });
+}
+
+/**
  * Evaluate all active alerts for a workspace.
  * @returns {Promise<{evaluated:number, triggered:number, emailed:number}>}
  */
@@ -733,6 +766,15 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
       };
     }
 
+    // Spend ("overspend") alerts: attach the per-campaign breakdown so the driver of
+    // the spend is visible in the instance + email (the threshold itself is account-wide).
+    if (metric === "spend") {
+      try {
+        const top = await topSpendCampaigns(workspaceId, windowDays, 6);
+        if (top.length) { dataObj.top_campaigns = top; emailParams.topCampaigns = top; }
+      } catch (e) { logger.warn("topSpendCampaigns failed (non-fatal)", { config: cfg.id, error: e.message }); }
+    }
+
     await query(
       `INSERT INTO alert_instances (config_id, workspace_id, severity, title, message, data)
        VALUES ($1,$2,$3,$4,$5,$6)`,
@@ -760,4 +802,4 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   return { evaluated: configs.length, triggered, emailed };
 }
 
-module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, aggregateMetricsRange, latestBsr, amazonProductUrl, PERF_METRICS, CHANGE_OPERATORS };
+module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, aggregateMetricsRange, topSpendCampaigns, latestBsr, amazonProductUrl, PERF_METRICS, CHANGE_OPERATORS };

@@ -16566,7 +16566,8 @@ const AlertsPage = ({ workspaceId }) => {
                       {instances.map(inst => {
                         const idata = (() => { try { return typeof inst.data === "string" ? JSON.parse(inst.data) : (inst.data || {}); } catch { return {}; } })();
                         const products = Array.isArray(idata.products) ? idata.products : [];
-                        const expandable = products.length > 0;
+                        const topCampaigns = Array.isArray(idata.top_campaigns) ? idata.top_campaigns : [];
+                        const expandable = products.length > 0 || topCampaigns.length > 0;
                         const isOpen = expandedInst === inst.id;
                         return (
                           <React.Fragment key={inst.id}>
@@ -16592,7 +16593,38 @@ const AlertsPage = ({ workspaceId }) => {
                             <tr>
                               <td colSpan={6} style={{ background: "var(--bg2)", padding: "14px 18px" }}>
                                 <div style={{ fontSize: 11, color: "var(--tx3)", marginBottom: 10 }}>{inst.message}</div>
-                                {(() => {
+                                {topCampaigns.length > 0 && (
+                                  <div style={{ marginBottom: products.length ? 14 : 0 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>{t("alerts.spendTopCampaigns")}</div>
+                                    <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                                      <thead>
+                                        <tr style={{ color: "var(--tx3)", fontSize: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>
+                                          <th style={{ textAlign: "left", padding: "4px 0", fontWeight: 600 }}>{t("alerts.spendColCampaign")}</th>
+                                          <th style={{ textAlign: "right", padding: "4px 8px", fontWeight: 600 }}>{t("alerts.spendColSpend")}</th>
+                                          <th style={{ textAlign: "right", padding: "4px 0", fontWeight: 600 }}>{t("alerts.spendColDelta")}</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {topCampaigns.map((c, i) => {
+                                          const up = (c.delta || 0) > 0;
+                                          return (
+                                            <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
+                                              <td style={{ padding: "5px 0", color: "var(--tx)" }}>
+                                                {c.campaign_type && <span className="badge bg-bl" style={{ fontSize: 8, marginRight: 5 }}>{c.campaign_type === "sponsoredProducts" ? "SP" : c.campaign_type === "sponsoredBrands" ? "SB" : c.campaign_type === "sponsoredDisplay" ? "SD" : c.campaign_type}</span>}
+                                                {c.name}
+                                              </td>
+                                              <td style={{ padding: "5px 8px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx)" }}>€{Number(c.spend).toFixed(2)}</td>
+                                              <td style={{ padding: "5px 0", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600, color: up ? "var(--red)" : "var(--tx3)" }}>
+                                                {up ? "+" : ""}€{Number(c.delta).toFixed(2)}{c.delta_pct != null ? ` (${up ? "+" : ""}${c.delta_pct}%)` : ""}
+                                              </td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                                {products.length > 0 && (() => {
                                   const esc = idata.escalated_count ?? products.filter(p => p.status === "escalated").length;
                                   const fre = idata.fresh_count ?? (products.length - esc);
                                   const sup = idata.suppressed_count || 0;
@@ -16605,7 +16637,7 @@ const AlertsPage = ({ workspaceId }) => {
                                     </div>
                                   );
                                 })()}
-                                <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+                                {products.length > 0 && <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
                                   {products.map((p, i) => (
                                     <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: "10px 0", borderBottom: i < products.length - 1 ? "1px solid var(--border)" : "none" }}>
                                       {p.image_url
@@ -16642,13 +16674,13 @@ const AlertsPage = ({ workspaceId }) => {
                                       {p.url && <a href={p.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ fontSize: 11, color: "#3B82F6", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0, textDecoration: "none" }}>{t("alerts.pmOpenAmazon")} →</a>}
                                     </div>
                                   ))}
-                                </div>
-                                <div style={{ marginTop: 12, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px" }}>
+                                </div>}
+                                {products.length > 0 && <div style={{ marginTop: 12, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px" }}>
                                   <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>{t("alerts.pmCausesTitle")}</div>
                                   <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11, color: "var(--tx2)", lineHeight: 1.7 }}>
                                     {[1, 2, 3, 4, 5, 6, 7].map(k => <li key={k}>{t("alerts.pmCause" + k)}</li>)}
                                   </ol>
-                                </div>
+                                </div>}
                               </td>
                             </tr>
                           )}

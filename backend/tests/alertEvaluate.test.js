@@ -8,7 +8,7 @@ jest.mock("../src/services/email", () => ({ sendAlertEmail: jest.fn().mockResolv
 
 const { query: dbQuery } = require("../src/db/pool");
 const { sendAlertEmail } = require("../src/services/email");
-const { computeMetric, compare, formatValue, evaluateWorkspaceAlerts, detectMoverCauses } = require("../src/services/alerts/evaluate");
+const { computeMetric, compare, formatValue, evaluateWorkspaceAlerts, detectMoverCauses, topSpendCampaigns } = require("../src/services/alerts/evaluate");
 
 const WS_ID = "ws---0001-0000-0000-000000000001";
 
@@ -198,6 +198,45 @@ describe("evaluateWorkspaceAlerts", () => {
     const r = await evaluateWorkspaceAlerts(WS_ID);
     expect(r.triggered).toBe(1);
     expect(sendAlertEmail).not.toHaveBeenCalled(); // in-app only
+  });
+
+  test("spend alert attaches the top-campaigns breakdown to instance + email", async () => {
+    const spendCfg = {
+      id: "cfg-spend", workspace_id: WS_ID, name: "Перерасход",
+      conditions: { metric: "spend", operator: "gt", value: 300, window_days: 1 },
+      channels: { in_app: true, email: true, email_to: "boss@example.com" },
+      suppression_hours: 24, last_triggered_at: null,
+    };
+    dbQuery
+      .mockResolvedValueOnce({ rows: [spendCfg] })                                  // load configs
+      .mockResolvedValueOnce({ rows: [{ cost: 361.17, sales: 0, clicks: 0, impressions: 0 }] }) // agg (spend 361 > 300)
+      .mockResolvedValueOnce({ rows: [                                              // topSpendCampaigns
+        { name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: "84.51", prev_spend: "50.99" },
+      ] })
+      .mockResolvedValueOnce({ rows: [] })                                          // INSERT instance
+      .mockResolvedValueOnce({ rows: [] });                                         // UPDATE last_triggered
+
+    const r = await evaluateWorkspaceAlerts(WS_ID, { workspaceName: "WS" });
+    expect(r.triggered).toBe(1);
+    const insertCall = dbQuery.mock.calls.find((c) => String(c[0]).includes("INSERT INTO alert_instances"));
+    const data = JSON.parse(insertCall[1][5]);
+    expect(data.top_campaigns).toHaveLength(1);
+    expect(data.top_campaigns[0]).toMatchObject({ name: "AM - SP - Magic", spend: 84.51, delta: 33.52 });
+    expect(sendAlertEmail).toHaveBeenCalledWith(expect.objectContaining({
+      topCampaigns: expect.arrayContaining([expect.objectContaining({ name: "AM - SP - Magic" })]),
+    }));
+  });
+});
+
+describe("topSpendCampaigns", () => {
+  test("maps rows → spend/delta/delta_pct, handles zero prior (delta_pct null)", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [
+      { name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: "84.51", prev_spend: "50.99" },
+      { name: "New camp",        campaign_type: null,               spend: "10.00", prev_spend: "0" },
+    ] });
+    const out = await topSpendCampaigns(WS_ID, 1, 6);
+    expect(out[0]).toEqual({ name: "AM - SP - Magic", campaign_type: "sponsoredProducts", spend: 84.51, prev_spend: 50.99, delta: 33.52, delta_pct: 66 });
+    expect(out[1]).toEqual({ name: "New camp", campaign_type: null, spend: 10, prev_spend: 0, delta: 10, delta_pct: null });
   });
 });
 

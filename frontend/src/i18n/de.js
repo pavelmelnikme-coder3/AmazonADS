@@ -852,6 +852,10 @@ export default {
     pmCause5: "Werbung — reduziertes Budget / pausierte Kampagnen senken die Velocity.",
     pmCause6: "Listing — unterdrückt oder geänderte Bilder / Titel / Keywords.",
     pmCause7: "Markt — Wettbewerber-Anstieg oder Saisonalität. Wenn die Bestellungen stabil blieben, ist evtl. keine Aktion nötig.",
+    spendTopCampaigns: "Top-Kampagnen nach Ausgaben",
+    spendColCampaign: "Kampagne",
+    spendColSpend: "Ausgaben",
+    spendColDelta: "Δ ggü. vorher",
   },
   reports: {
     title: "Berichte",

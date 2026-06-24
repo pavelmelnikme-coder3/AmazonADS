@@ -853,6 +853,10 @@ export default {
     pmCause5: "Ads — reduced budget / paused campaigns cut sales velocity.",
     pmCause6: "Listing — suppressed listing or changed images / title / keywords.",
     pmCause7: "Market — competitor surge or seasonality. If total orders held, BSR alone may need no action.",
+    spendTopCampaigns: "Top campaigns by spend",
+    spendColCampaign: "Campaign",
+    spendColSpend: "Spend",
+    spendColDelta: "Δ vs prior",
   },
   reports: {
     title: "Reports",

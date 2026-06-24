@@ -191,8 +191,29 @@ async function sendPasswordResetEmail({ to, resetUrl }) {
 }
 
 // ─── Alert notification email ─────────────────────────────────────────────────
-async function sendAlertEmail({ to, alertName, workspaceName, metricLabel, operatorLabel, threshold, actualText, windowDays, periodText, dashboardUrl }) {
+async function sendAlertEmail({ to, alertName, workspaceName, metricLabel, operatorLabel, threshold, actualText, windowDays, periodText, dashboardUrl, topCampaigns }) {
   const period = periodText || (windowDays ? `the last ${windowDays} days` : "the latest data");
+
+  // Optional per-campaign breakdown (spend/"overspend" alerts) — shows where the spend
+  // went and which campaign ramped (Δ vs the prior equal-length window).
+  const campaignsHtml = Array.isArray(topCampaigns) && topCampaigns.length
+    ? `<div style="background:#1e2235;border:1px solid #2a2d3e;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+         <div style="color:#f1f5f9;font-size:13px;font-weight:700;margin-bottom:10px;">Top campaigns by spend (Δ vs prior ${windowDays || 1} day${(windowDays || 1) > 1 ? "s" : ""})</div>
+         <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">
+           ${topCampaigns.map((c) => {
+             const up = (c.delta || 0) > 0;
+             const deltaTxt = `${up ? "+" : ""}€${Number(c.delta).toFixed(2)}${c.delta_pct != null ? ` (${up ? "+" : ""}${c.delta_pct}%)` : ""}`;
+             const deltaColor = up ? "#f87171" : "#64748b";
+             return `<tr>
+               <td style="padding:5px 0;border-bottom:1px solid #232634;color:#cbd5e1;">${esc((c.name || "").slice(0, 48))}</td>
+               <td style="padding:5px 0;border-bottom:1px solid #232634;text-align:right;color:#e2e8f0;white-space:nowrap;">€${Number(c.spend).toFixed(2)}</td>
+               <td style="padding:5px 0 5px 12px;border-bottom:1px solid #232634;text-align:right;color:${deltaColor};white-space:nowrap;">${deltaTxt}</td>
+             </tr>`;
+           }).join("")}
+         </table>
+       </div>`
+    : "";
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>AdsFlow Alert</title></head>
@@ -217,6 +238,7 @@ async function sendAlertEmail({ to, alertName, workspaceName, metricLabel, opera
                 over ${period}.
               </div>
             </div>
+            ${campaignsHtml}
             ${dashboardUrl ? `<div style="text-align:center;margin:24px 0 4px;">
               <a href="${dashboardUrl}" style="display:inline-block;background:linear-gradient(135deg,#3B82F6,#6366f1);color:white;text-decoration:none;padding:12px 32px;border-radius:10px;font-size:14px;font-weight:600;">Open dashboard →</a>
             </div>` : ""}
