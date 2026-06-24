@@ -636,13 +636,17 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
 async function topSpendCampaigns(workspaceId, windowDays, limit = 6) {
   const CUR  = `FILTER (WHERE f.date >= CURRENT_DATE - $2::int AND f.date <= CURRENT_DATE - 1)`;
   const PREV = `FILTER (WHERE f.date >= CURRENT_DATE - 2*$2::int AND f.date <= CURRENT_DATE - $2::int - 1)`;
+  // Sales/orders use the 14-day attribution columns (sales_14d/orders_14d), matching
+  // Amazon's campaign-manager default. This matters for Sponsored Brands, which report
+  // conversions only on the 14d window (sales_1d stays 0); Sponsored Products fill all
+  // windows identically, so SP figures are unchanged.
   const { rows } = await query(
     `SELECT COALESCE(c.name, f.entity_id::text) AS name, c.campaign_type,
-            COALESCE(SUM(f.cost)      ${CUR}, 0) AS spend,
-            COALESCE(SUM(f.cost)      ${PREV},0) AS prev_spend,
-            COALESCE(SUM(f.sales_1d)  ${CUR}, 0) AS sales,
-            COALESCE(SUM(f.orders_1d) ${CUR}, 0) AS orders,
-            COALESCE(SUM(f.clicks)    ${CUR}, 0) AS clicks
+            COALESCE(SUM(f.cost)       ${CUR}, 0) AS spend,
+            COALESCE(SUM(f.cost)       ${PREV},0) AS prev_spend,
+            COALESCE(SUM(f.sales_14d)  ${CUR}, 0) AS sales,
+            COALESCE(SUM(f.orders_14d) ${CUR}, 0) AS orders,
+            COALESCE(SUM(f.clicks)     ${CUR}, 0) AS clicks
        FROM fact_metrics_daily f
        LEFT JOIN campaigns c ON c.id = f.entity_id AND c.workspace_id = f.workspace_id
       WHERE f.workspace_id = $1 AND f.entity_type = 'campaign'
