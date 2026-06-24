@@ -415,14 +415,20 @@ async function detectMoverCauses(workspaceId, products, N, opts = {}) {
   const adPct    = Number.isFinite(Number(opts.adPct))    ? Math.max(0, Number(opts.adPct))    : 50;  // ad-spend drop %
   const lowStock = Number.isFinite(Number(opts.lowStock)) ? Math.max(0, Number(opts.lowStock)) : 10;  // low-stock units
 
-  const wawiStock = new Map(); // asin → erp qty (null = ASIN not mapped in Wawi)
+  const wawiStock = new Map(); // asin → erp qty (null = unknown: not mapped OR no stock row)
   const fbaStock  = new Map(); // asin → sellable (null = no SP inventory data)
   const priceWin  = new Map(); // asin → { cur, prev }
   const adWin     = new Map(); // asin → { cur, prev }
 
   try {
+    // wawi_stocks only ever holds positive-quantity rows (the Wawi /stocks feed omits
+    // zero-stock locations, and the sync upserts without writing zeros). So a mapped item
+    // with NO stock row means "absent from the positive-stock feed" — NOT a confirmed zero.
+    // COUNT the joined rows to tell a real reported quantity apart from missing data; when
+    // there are no rows ERP stays unknown (null) rather than a synthesised 0.
     const { rows } = await query(
-      `SELECT UPPER(ia.asin) AS asin, COALESCE(SUM(ws.quantity_total), 0) AS stock
+      `SELECT UPPER(ia.asin) AS asin, SUM(ws.quantity_total) AS stock,
+              COUNT(ws.wawi_item_id) AS nrows
          FROM wawi_item_asins ia
          LEFT JOIN wawi_stocks ws
            ON ws.workspace_id = ia.workspace_id AND ws.wawi_item_id = ia.wawi_item_id
@@ -430,7 +436,7 @@ async function detectMoverCauses(workspaceId, products, N, opts = {}) {
         GROUP BY UPPER(ia.asin)`,
       [workspaceId, asins]
     );
-    for (const r of rows) wawiStock.set(r.asin, Number(r.stock));
+    for (const r of rows) wawiStock.set(r.asin, Number(r.nrows) > 0 ? Number(r.stock) : null);
   } catch (e) { logger.warn("detectMoverCauses: wawi stock query failed", { error: e.message }); }
 
   try {
@@ -485,15 +491,30 @@ async function detectMoverCauses(workspaceId, products, N, opts = {}) {
     const asin = String(p.asin || "").toUpperCase();
     const causes = [];
 
-    // Stock — surface both sources explicitly; flag only on a source that is actually known.
+    // Stock — surface both sources explicitly; flag only on genuinely-known values.
+    // Availability = the MAX across known sources, not the min: a product is in stock if
+    // ANY channel has units (e.g. ERP 100 / FBA 0 = sold via merchant, NOT out of stock).
+    // When no source is known we emit no cause rather than inventing "out of stock".
+    // Confidence in an empty signal depends on how many sources confirm it:
+    //   • BOTH sources known & 0 → stock_out (high, "out of stock") — empty everywhere we see.
+    //   • only ONE source known & 0 → a softer channel-specific signal (fba_empty / erp_empty,
+    //     medium): that channel is empty but the other is unknown, so the product may still
+    //     sell via the unknown channel (e.g. FBM) — don't overstate "out of stock".
     const erp = wawiStock.has(asin) ? wawiStock.get(asin) : null;
     const fba = fbaStock.has(asin) ? fbaStock.get(asin) : null;
     const known = [erp, fba].filter((v) => v != null);
     if (known.length) {
       const detail = `ERP: ${erp != null ? erp : "n/a"} · FBA: ${fba != null ? fba : "n/a"}`;
-      const minKnown = Math.min(...known);
-      if (minKnown <= 0)              causes.push({ type: "stock_out", severity: "high",   detail });
-      else if (minKnown <= lowStock)  causes.push({ type: "stock_low", severity: "medium", detail, value: minKnown });
+      const avail = Math.max(...known);
+      if (avail > 0) {
+        if (avail <= lowStock) causes.push({ type: "stock_low", severity: "medium", detail, value: avail });
+      } else if (known.length >= 2) {
+        causes.push({ type: "stock_out", severity: "high", detail });          // empty in every known channel
+      } else if (fba != null) {
+        causes.push({ type: "fba_empty", severity: "medium", detail });        // only FBA known & empty
+      } else {
+        causes.push({ type: "erp_empty", severity: "medium", detail });        // only ERP known & empty
+      }
     }
 
     // Price hike — only when it rose ≥ pricePct% window-over-window.

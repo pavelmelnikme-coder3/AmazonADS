@@ -830,6 +830,8 @@ export default {
     pmOpenAmazon: "Открыть на Amazon",
     pmCause_stock_out: "Нет в наличии",
     pmCause_stock_low: "Низкий остаток",
+    pmCause_fba_empty: "FBA пуст",
+    pmCause_erp_empty: "Склад (ERP) пуст",
     pmCause_price_up: "Цена выросла",
     pmCause_ad_cut: "Реклама урезана",
     pmCauseThresholds: "Пороги определения причин",

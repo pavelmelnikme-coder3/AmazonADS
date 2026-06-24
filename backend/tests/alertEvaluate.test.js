@@ -211,24 +211,68 @@ describe("detectMoverCauses", () => {
       .mockResolvedValueOnce({ rows: ad });
   };
 
-  it("flags out-of-stock (high) from ERP stock = 0, FBA n/a", async () => {
-    mockQueries({ wawi: [{ asin: "B0AAA00001", stock: "0" }] });
+  it("only ERP known & 0 (FBA n/a) → erp_empty (medium), not a hard out-of-stock", async () => {
+    mockQueries({ wawi: [{ asin: "B0AAA00001", stock: "0", nrows: "1" }] });
     const products = [{ asin: "B0AAA00001" }];
     await detectMoverCauses(WS_ID, products, 7);
     expect(products[0].causes).toEqual([
-      { type: "stock_out", severity: "high", detail: "ERP: 0 · FBA: n/a" },
+      { type: "erp_empty", severity: "medium", detail: "ERP: 0 · FBA: n/a" },
     ]);
   });
 
-  it("surfaces both stock sources and flags low stock by the smaller known value", async () => {
+  it("both sources known & 0 → stock_out (high)", async () => {
     mockQueries({
-      wawi: [{ asin: "B0AAA00002", stock: "4" }],
-      fba: [{ asin: "B0AAA00002", sellable: "2", nn: "1" }],
+      wawi: [{ asin: "B0AAA00010", stock: "0", nrows: "1" }],
+      fba:  [{ asin: "B0AAA00010", sellable: "0", nn: "1" }],
+    });
+    const products = [{ asin: "B0AAA00010" }];
+    await detectMoverCauses(WS_ID, products, 7);
+    expect(products[0].causes).toEqual([
+      { type: "stock_out", severity: "high", detail: "ERP: 0 · FBA: 0" },
+    ]);
+  });
+
+  it("does NOT flag out-of-stock when ERP has units but FBA is 0 (sold via merchant)", async () => {
+    // Regression: ERP 100 / FBA 0 must NOT be 'out of stock' (was a min() bug).
+    mockQueries({
+      wawi: [{ asin: "B0AAA00002", stock: "100", nrows: "1" }],
+      fba: [{ asin: "B0AAA00002", sellable: "0", nn: "2" }],
     });
     const products = [{ asin: "B0AAA00002" }];
     await detectMoverCauses(WS_ID, products, 7, { lowStock: 10 });
+    expect(products[0].causes).toEqual([]); // 100 units available → in stock
+  });
+
+  it("treats a mapped item with no stock row as UNKNOWN, not 0 (no false out-of-stock)", async () => {
+    // Regression: wawi_stocks holds only positive rows; a mapped item with nrows=0 is
+    // 'absent from feed', not a confirmed zero. With FBA also absent → no stock cause.
+    mockQueries({ wawi: [{ asin: "B0AAA00003", stock: null, nrows: "0" }] });
+    const products = [{ asin: "B0AAA00003" }];
+    await detectMoverCauses(WS_ID, products, 7);
+    expect(products[0].causes).toEqual([]);
+  });
+
+  it("genuine FBA 0 with ERP unknown → fba_empty (medium), not hard out-of-stock", async () => {
+    mockQueries({
+      wawi: [{ asin: "B0AAA00009", stock: null, nrows: "0" }], // ERP unknown
+      fba:  [{ asin: "B0AAA00009", sellable: "0", nn: "2" }],  // FBA genuinely 0
+    });
+    const products = [{ asin: "B0AAA00009" }];
+    await detectMoverCauses(WS_ID, products, 7);
+    expect(products[0].causes).toEqual([
+      { type: "fba_empty", severity: "medium", detail: "ERP: n/a · FBA: 0" },
+    ]);
+  });
+
+  it("surfaces both stock sources and flags low stock by the larger (sellable-max) value", async () => {
+    mockQueries({
+      wawi: [{ asin: "B0AAA00004", stock: "4", nrows: "1" }],
+      fba: [{ asin: "B0AAA00004", sellable: "2", nn: "1" }],
+    });
+    const products = [{ asin: "B0AAA00004" }];
+    await detectMoverCauses(WS_ID, products, 7, { lowStock: 10 });
     expect(products[0].causes).toContainEqual(
-      { type: "stock_low", severity: "medium", detail: "ERP: 4 · FBA: 2", value: 2 },
+      { type: "stock_low", severity: "medium", detail: "ERP: 4 · FBA: 2", value: 4 },
     );
   });
 

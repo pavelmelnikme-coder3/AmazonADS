@@ -835,6 +835,8 @@ export default {
     pmOpenAmazon: "Bei Amazon öffnen",
     pmCause_stock_out: "Nicht auf Lager",
     pmCause_stock_low: "Niedriger Bestand",
+    pmCause_fba_empty: "FBA leer",
+    pmCause_erp_empty: "Lager (ERP) leer",
     pmCause_price_up: "Preis gestiegen",
     pmCause_ad_cut: "Werbeausgaben gesunken",
     pmCauseThresholds: "Schwellen der Ursachenerkennung",
