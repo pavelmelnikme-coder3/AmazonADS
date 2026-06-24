@@ -276,35 +276,59 @@ describe("detectMoverCauses", () => {
     );
   });
 
+  // A breached "orders ↓" gives price_up / ad_cut a metric they can explain.
+  const ORDERS_DOWN = [{ metric: "orders", direction: "down" }];
+
   it("honours config-driven thresholds (price rise below threshold → no cause)", async () => {
     // 10% price rise; default pricePct=5 flags it, pricePct=15 does not.
     const price = [{ asin: "B0AAA00003", price_cur: "11.00", price_prev: "10.00" }];
     mockQueries({ price });
-    const a = [{ asin: "B0AAA00003" }];
+    const a = [{ asin: "B0AAA00003", metrics: ORDERS_DOWN }];
     await detectMoverCauses(WS_ID, a, 7, { pricePct: 5 });
     expect(a[0].causes).toContainEqual(
       { type: "price_up", severity: "medium", pct: 10, detail: "€10.00 → €11.00" },
     );
 
     mockQueries({ price });
-    const b = [{ asin: "B0AAA00003" }];
+    const b = [{ asin: "B0AAA00003", metrics: ORDERS_DOWN }];
     await detectMoverCauses(WS_ID, b, 7, { pricePct: 15 });
     expect(b[0].causes).toEqual([]);
   });
 
-  it("flags ad pullback when spend drops past the threshold", async () => {
+  it("flags ad pullback when spend drops past the threshold (volume-metric breach)", async () => {
     mockQueries({ ad: [{ asin: "B0AAA00004", cost_cur: "0", cost_prev: "0.28" }] });
-    const products = [{ asin: "B0AAA00004" }];
+    const products = [{ asin: "B0AAA00004", metrics: ORDERS_DOWN }];
     await detectMoverCauses(WS_ID, products, 7, { adPct: 50 });
     expect(products[0].causes).toContainEqual(
       { type: "ad_cut", severity: "medium", pct: -100, detail: "€0.28 → €0.00" },
     );
   });
 
+  it("does NOT show ad_cut/price_up for a pure ROAS drop (they'd contradict the move)", async () => {
+    // Spend really fell and price really rose, but the product breached ONLY roas — a
+    // spend cut RAISES roas, so 'ad cut' can't be the cause; suppress both demand causes.
+    mockQueries({
+      price: [{ asin: "B0AAA00006", price_cur: "12.00", price_prev: "10.00" }], // +20%
+      ad:    [{ asin: "B0AAA00006", cost_cur: "8.39", cost_prev: "23.11" }],     // -64%
+    });
+    const products = [{ asin: "B0AAA00006", metrics: [{ metric: "roas", direction: "down" }] }];
+    await detectMoverCauses(WS_ID, products, 7, { pricePct: 5, adPct: 50 });
+    expect(products[0].causes).toEqual([]);
+  });
+
+  it("still shows ad_cut for an orders drop even if roas is also breached", async () => {
+    mockQueries({ ad: [{ asin: "B0AAA00007", cost_cur: "8.39", cost_prev: "23.11" }] });
+    const products = [{ asin: "B0AAA00007", metrics: [{ metric: "roas", direction: "down" }, { metric: "orders", direction: "down" }] }];
+    await detectMoverCauses(WS_ID, products, 7, { adPct: 50 });
+    expect(products[0].causes).toContainEqual(
+      { type: "ad_cut", severity: "medium", pct: -64, detail: "€23.11 → €8.39" },
+    );
+  });
+
   it("does not invent a cause from a single missing source or a no-op move", async () => {
     // No wawi/fba rows → stock unknown; price flat → no price_up.
     mockQueries({ price: [{ asin: "B0AAA00005", price_cur: "10.00", price_prev: "10.00" }] });
-    const products = [{ asin: "B0AAA00005" }];
+    const products = [{ asin: "B0AAA00005", metrics: ORDERS_DOWN }];
     await detectMoverCauses(WS_ID, products, 7, { pricePct: 0 });
     expect(products[0].causes).toEqual([]);
   });

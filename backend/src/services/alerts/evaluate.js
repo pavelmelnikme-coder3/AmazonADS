@@ -487,9 +487,20 @@ async function detectMoverCauses(workspaceId, products, N, opts = {}) {
     for (const r of rows) adWin.set(r.asin, { cur: Number(r.cost_cur), prev: Number(r.cost_prev) });
   } catch (e) { logger.warn("detectMoverCauses: ad spend query failed", { error: e.message }); }
 
+  // Demand-side causes (price hike, ad pullback) only plausibly explain declines in
+  // VOLUME or RANK. They must NOT be shown for efficiency RATIOS where they contradict
+  // the move — e.g. cutting ad spend RAISES ROAS and LOWERS ACOS, so "ad cut" can never
+  // be the cause of a ROAS drop / ACOS rise. We only attach such a cause when at least
+  // one of the product's breached metrics is one the cause can actually drive.
+  // (Stock causes are exempt — no inventory collapses every metric, ratios included.)
+  const PRICE_UP_EXPLAINS = new Set(["bsr", "orders", "units", "sales", "ad_orders", "ad_sales", "cvr"]);
+  const AD_CUT_EXPLAINS   = new Set(["bsr", "orders", "units", "sales", "ad_orders", "ad_sales", "clicks", "impressions", "spend"]);
+
   for (const p of products) {
     const asin = String(p.asin || "").toUpperCase();
     const causes = [];
+    const breached = new Set((p.metrics || []).map((m) => m.metric));
+    const explains = (set) => [...breached].some((m) => set.has(m));
 
     // Stock — surface both sources explicitly; flag only on genuinely-known values.
     // Availability = the MAX across known sources, not the min: a product is in stock if
@@ -517,16 +528,17 @@ async function detectMoverCauses(workspaceId, products, N, opts = {}) {
       }
     }
 
-    // Price hike — only when it rose ≥ pricePct% window-over-window.
+    // Price hike — only when it rose ≥ pricePct% AND it can explain a breached metric.
     const pr = priceWin.get(asin);
-    if (pr && pr.prev > 0 && pr.cur != null) {
+    if (pr && pr.prev > 0 && pr.cur != null && explains(PRICE_UP_EXPLAINS)) {
       const chg = ((pr.cur - pr.prev) / pr.prev) * 100;
       if (chg > 0 && chg >= pricePct) causes.push({ type: "price_up", severity: "medium", pct: Math.round(chg), detail: `€${pr.prev.toFixed(2)} → €${pr.cur.toFixed(2)}` });
     }
 
-    // Ad pullback — spend down ≥ adPct% window-over-window.
+    // Ad pullback — spend down ≥ adPct% AND it can explain a breached metric (never for
+    // a pure efficiency-ratio drop like ROAS, where less spend would IMPROVE the metric).
     const ad = adWin.get(asin);
-    if (ad && ad.prev > 0) {
+    if (ad && ad.prev > 0 && explains(AD_CUT_EXPLAINS)) {
       const chg = ((ad.cur - ad.prev) / ad.prev) * 100;
       if (chg < 0 && chg <= -adPct) causes.push({ type: "ad_cut", severity: "medium", pct: Math.round(chg), detail: `€${ad.prev.toFixed(2)} → €${ad.cur.toFixed(2)}` });
     }
