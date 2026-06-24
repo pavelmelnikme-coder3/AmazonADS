@@ -268,11 +268,40 @@ POST /keyword-research/add-to-adgroup
   campaigns/keywords/rules/analytics. (`sales_14d` is also the only window the old upsert kept fresh, so
   switching to it gives correct values immediately; a 30-day re-backfill heals the residual rows the old
   upsert had zeroed.)
-- The alert engine (`services/alerts/evaluate.js`) deliberately stays on `sales_1d`/`orders_1d`:
-  product-movers compares a window vs the preceding one and 1-day attribution matures within a day,
-  avoiding false "drop" alerts from an immature recent 14-day window.
+- The alert engine (`services/alerts/evaluate.js`) was originally kept on `sales_1d`/`orders_1d` to
+  avoid immature-window "drop" alerts — **superseded 2026-06-24 (see below): now 14d like the rest of
+  the app.**
 
 ### Report-creation throttle resilience
 - `createReportRequest` now retries 429s up to 5× with exponential backoff (15→30→60→120 s) that honors
   the `Retry-After` header, plus jitter — Amazon's Sponsored Brands report-creation has a short burst
   limit that the old fixed 3×/15s+30s retry could not outlast.
+
+## 2026-06-24 changes (alerting capability + attribution unification)
+
+### Percentage-change threshold alerts
+- New operators `drop_pct` / `rise_pct` in `evaluateWorkspaceAlerts`. The threshold branch splits into an
+  *absolute* path and a *change* path: the change path reads the current window (`aggregateMetrics`) and
+  the preceding equal-length window (`aggregateMetricsRange(2N, N+1)`), requires a positive prior value,
+  and fires on `pct <= -value` (drop) / `pct >= value` (rise). Perf metrics only; route validation rejects
+  BSR and non-positive percentages.
+
+### Spend-alert per-campaign breakdown
+- `topSpendCampaigns(workspaceId, windowDays, limit)` returns the top spenders over the window with
+  `delta`/`delta_pct` vs the prior window and a health snapshot (`sales`/`orders`/`roas`/`acos`). Attached
+  to `data.top_campaigns` and the email for `metric === 'spend'` alerts (best-effort, non-fatal). Rendered
+  as an expandable row in-app and a table in the email.
+
+### Attribution unified to 14d in the alert engine
+- `aggregateMetricsRange`, `topSpendCampaigns`, and the `computeMoverFlags` ad-metrics query now sum
+  `sales_14d`/`orders_14d` (was `sales_1d`/`orders_1d`). Sponsored Brands report conversions **only** on
+  the 14d window, so 1d dropped all SB sales; SP fills every window identically. The window already
+  excludes today (`<= CURRENT_DATE - 1`), so the old "immature window" concern is moot. Now matches
+  Amazon's UI default and the rest of the app. A regression test asserts `aggregateMetrics` uses
+  `sales_14d`.
+
+### Product-movers cause accuracy
+- Stock: availability is `max` of genuinely-known sources (not `min`); a mapped item with no `wawi_stocks`
+  row is `n/a` (unknown), not `0`; `stock_out` only when every known source is empty, else `fba_empty` /
+  `erp_empty`. Demand-side causes (`price_up`/`ad_cut`) attach only when a volume/rank metric breached —
+  never for efficiency ratios (a spend cut raises ROAS, so it can't explain a ROAS drop).

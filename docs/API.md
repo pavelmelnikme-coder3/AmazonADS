@@ -272,7 +272,10 @@ BSR alert (per-product, latest snapshot — `asin` required, `window_days` ignor
 Performance metrics (account aggregate over `window_days`, default 7, max 90):
 `acos`, `roas`, `spend`, `sales`, `orders`, `clicks`, `impressions`, `ctr`, `cpc`, `cvr`.
 Product metric: `bsr` (requires `asin`).  
-Operators: `gt`, `lt`, `gte`, `lte`.  
+Operators: `gt`, `lt`, `gte`, `lte`, plus percentage-change `drop_pct` / `rise_pct` *(2026-06-23)*.  
+**Percentage-change operators** compare the current `window_days` window to the immediately-preceding equal-length window and fire when the metric **fell** (`drop_pct`) / **rose** (`rise_pct`) by ≥ `value` %. Perf metrics only (not BSR — point-in-time); `value` must be a positive percentage. Example — "ROAS dropped ≥30% over 7 days": `{ "metric": "roas", "operator": "drop_pct", "value": 30, "window_days": 7 }`.  
+Sales/orders use **14-day attribution** (`sales_14d`/`orders_14d`) — matches Amazon's campaign-manager default and captures Sponsored Brands, which report conversions only on the 14d window *(2026-06-24)*.  
+**Spend (`spend`) alerts** attach a per-campaign breakdown in `data.top_campaigns[]` — the top spenders over the window, each with `delta`/`delta_pct` vs the prior window and a health snapshot (`sales`, `orders`, `roas`, `acos`) — rendered in the instance (expandable) and the email *(2026-06-24)*.  
 Channels: `in_app` (creates an alert instance), `email` (sends via Brevo SMTP — to `email_to` or, if empty, workspace owners & admins).
 
 Product-movers alert *(per-product period-over-period, 2026-06-03)* — set `alert_type: "product_movers"`. Scans all active products and compares the last `window_days` vs the preceding equal window:
@@ -295,7 +298,8 @@ Product-movers alert *(per-product period-over-period, 2026-06-03)* — set `ale
 ```
 - `match`: `any` (OR) or `all` (AND, needs ≥2 conditions).
 - `direction`: `up` (metric rose by ≥ `change_pct` %) or `down` (fell by ≥). For BSR, `up` = rank worsened.
-- `metrics`: `bsr` (median rank); `orders`/`units`/`sales` = **total** (organic + ads, SP-API); `ad_orders`/`ad_sales` (ad-attributed); `spend`/`clicks`/`impressions`/`acos`/`ctr`/`cpc`/`cvr`/`roas` (ads).
+- `metrics`: `bsr` (median rank); `orders`/`units`/`sales` = **total** (organic + ads, SP-API); `ad_orders`/`ad_sales` (ad-attributed); `spend`/`clicks`/`impressions`/`acos`/`ctr`/`cpc`/`cvr`/`roas` (ads). Ad metrics use 14-day attribution *(2026-06-24)*.
+- `data.products[].causes[]` — data-derived likely causes shown per product: **stock** (`stock_out` only when every known source is 0; `fba_empty` / `erp_empty` when only one source is known to be empty — never synthesised from missing data), `price_up`, and `ad_cut`. Demand-side causes (`price_up`/`ad_cut`) are attached only when the product breached a **volume/rank** metric they can plausibly explain — never for a pure efficiency-ratio breach like ROAS, where e.g. cutting spend would *raise* ROAS *(2026-06-23/24)*.
 - `min_orders_prev`: noise floor — order/total metrics evaluated only if the product had ≥ N orders in the prior window (BSR is never gated).
 - `product_cooldown_days` *(default 7, `0` = off)*: per-ASIN dedup — a product already alerted within this many days is **suppressed** from new alerts to cut repeat noise. `escalation_pct` *(default 25)*: a suppressed product re-surfaces ("escalated") only if its worst single-metric move grew by ≥ this many points since the last alert; the cooldown auto-resets once it elapses.
 - Fires one instance (`entity_type: "product_movers"`, breached products in `data.products[]`, plus `fresh_count` / `escalated_count` / `suppressed_count`) and one digest email. Products are split into **New** and **Worsening** with a `+N suppressed` line; if every flagged product is suppressed, nothing fires. Legacy `{ bsr_change_pct, orders_change_pct, require_both }` payloads are still accepted and converted.
@@ -534,6 +538,7 @@ Discover keywords from multiple sources for a given product.
   "jungle_scout_available": false
 }
 ```
+Notes *(2026-06-22)*: `sources` drives which providers run; **AI scoring runs only when `"ai"` is in `sources`** (no billable Claude calls otherwise). Jungle Scout's own 0–100 relevance is mapped to `relevance_score` (so JS keywords show a real score, not `—`); Amazon recommendations get a fixed `relevance_score: 80`. When AI scoring does run, keywords the model drops (`keep:false` — forbidden/irrelevant terms) are removed rather than surviving on the default score.
 
 ### POST /keyword-research/add-to-adgroup
 Add selected keywords to an ad group (deduplicates, then pushes to Amazon).

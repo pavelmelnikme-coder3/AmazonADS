@@ -6,6 +6,64 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-24 — Alerts: ROAS-drop alerts, spend breakdown, attribution unification; keyword-research fixes; full test suite green
+
+A run of alert audits (each verified against raw prod rows and Amazon's campaign manager before
+shipping) added new alerting capability and closed several data-correctness gaps, plus a
+keyword-research parsing pass and a cleanup of the test suite back to fully green.
+
+### Added — percentage-change ("metric dropped/rose by N%") threshold alerts
+New operators `drop_pct` / `rise_pct` on the standard threshold alert. When selected, the engine
+compares the current `window_days` window to the immediately-preceding equal-length window and fires
+when the metric fell / rose by ≥ the configured %. Covers "notify me if ROAS drops more than 30% over
+7 days" and works for any perf metric. Perf-only (BSR is point-in-time); validated to reject BSR and
+non-positive percentages. Frontend exposes the operators (hidden for BSR), a `%` suffix, and a
+period-over-period hint; the list shows `↓% N / Nd`. E2E-verified on prod (cron fired
+"ROAS dropped 12% (7.91× → 6.99×)", matching an independent SQL recompute).
+
+### Added — per-campaign breakdown with health metrics on spend ("Перерасход") alerts
+The account-level spend alert now answers *which* campaign drove the overspend: the fired instance and
+the email carry `data.top_campaigns[]` — the top spenders over the window, each with `delta`/`delta_pct`
+vs the prior window **and** a health snapshot (`sales`, `orders`, `roas`, `acos`, ROAS colour-coded). In
+the live data this immediately separated a healthy ramp (a campaign at ROAS 20×) from a Sponsored Brands
+campaign burning budget at ROAS ~2×. Spend instances are now expandable in the UI.
+
+### Changed — alert metrics unified to 14-day attribution
+All alert metric paths (`aggregateMetrics` account aggregate → ROAS/sales/orders thresholds and the new
+change operators; `topSpendCampaigns`; `computeMoverFlags` ad metrics) now aggregate ad sales/orders on
+the **14-day** attribution window instead of 1-day. Sponsored Brands report conversions only on the 14d
+window, so 1d silently dropped all SB sales; Sponsored Products fill every window identically (unchanged).
+Numbers now reconcile to the cent with Amazon's campaign-manager UI (e.g. account 7d ROAS 8.59× vs the old
+7.82×). Supersedes the earlier "alerts kept on 1d" choice.
+
+### Fixed — product-movers detected causes were inaccurate
+- **False "out of stock".** Availability used `min(ERP, FBA)`, so a product with 100 units in the ERP
+  warehouse but 0 in FBA read as out-of-stock; and a mapped item with no `wawi_stocks` row (the feed
+  only stores positive quantities) had its ERP synthesised to `0`. Now availability is `max` of the
+  **genuinely-known** sources; missing data is `n/a`, not `0`; out-of-stock is asserted only when every
+  known source is empty (`stock_out`), with softer `fba_empty` / `erp_empty` when just one source is
+  known empty.
+- **Misleading "ad spend cut" on a ROAS drop.** `ad_cut` / `price_up` were attached regardless of which
+  metric breached — but cutting spend *raises* ROAS, so it can't be the cause of a ROAS *drop*. These
+  demand-side causes now attach only when the breached metric is one they can plausibly drive (volume /
+  rank), never for efficiency ratios.
+
+### Fixed — keyword research parsing
+- Jungle Scout's own 0–100 relevance was written to `relevancy_score` but read everywhere as
+  `relevance_score` → JS keywords showed `—`. Mapped correctly.
+- AI scoring ran even when the AI source was deselected (billable Claude calls). Now gated on `sources`.
+- Keywords the AI dropped (`keep:false` — forbidden/irrelevant) survived on a default score; now removed.
+- Frontend source-filter chips weren't reactive (missing `useMemo` dep); fixed.
+
+### Fixed — test suite back to 895/895 (was 868/895)
+Repaired 27 stale-mock failures across `rules` / `campaigns` / `ai` / `strategies` (test-only; no
+product code changed): DELETE routes now soft-delete to trash, the campaign PATCH payload is wrapped in
+`{ campaigns: [...] }`, AI entity-name enrichment requires a valid UUID, target fixtures use the v3
+`ASIN_SAME_AS` expression type, and a `dbQuery` queue-drain `afterEach` removed cross-test
+`mockResolvedValueOnce` leakage. Suite now passes across repeated/independent runs.
+
+---
+
 ## [Unreleased] — 2026-06-19 — Product-movers data integrity (FBA stock + phantom price spikes)
 
 Routine "how did the alerts fire" review surfaced two bad signals on the **product-movers** alert,
