@@ -8,7 +8,7 @@ jest.mock("../src/services/email", () => ({ sendAlertEmail: jest.fn().mockResolv
 
 const { query: dbQuery } = require("../src/db/pool");
 const { sendAlertEmail } = require("../src/services/email");
-const { computeMetric, compare, formatValue, evaluateWorkspaceAlerts, detectMoverCauses, topSpendCampaigns } = require("../src/services/alerts/evaluate");
+const { computeMetric, compare, formatValue, evaluateWorkspaceAlerts, detectMoverCauses, topSpendCampaigns, aggregateMetrics } = require("../src/services/alerts/evaluate");
 
 const WS_ID = "ws---0001-0000-0000-000000000001";
 
@@ -225,6 +225,17 @@ describe("evaluateWorkspaceAlerts", () => {
     expect(sendAlertEmail).toHaveBeenCalledWith(expect.objectContaining({
       topCampaigns: expect.arrayContaining([expect.objectContaining({ name: "AM - SP - Magic" })]),
     }));
+  });
+});
+
+describe("attribution window (Sponsored Brands coverage)", () => {
+  test("aggregateMetrics aggregates on 14-day attribution, not 1-day", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ cost: 0, sales: 0, orders: 0, clicks: 0, impressions: 0 }] });
+    await aggregateMetrics(WS_ID, 7);
+    const sql = String(dbQuery.mock.calls[0][0]);
+    expect(sql).toMatch(/sales_14d/);
+    expect(sql).toMatch(/orders_14d/);
+    expect(sql).not.toMatch(/sales_1d|orders_1d/);
   });
 });
 

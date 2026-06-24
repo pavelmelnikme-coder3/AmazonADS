@@ -95,11 +95,13 @@ async function resolveRecipients(workspaceId, emailTo) {
 
 // Account-level aggregate over the day range [CURRENT_DATE - fromOffset, CURRENT_DATE - toOffset]
 // (campaign rows → no double count). Inclusive on both ends.
+// Sales/orders use 14-day attribution (matches Amazon's UI default; Sponsored Brands
+// only report conversions on the 14d window, so 1d would undercount them).
 async function aggregateMetricsRange(workspaceId, fromOffset, toOffset) {
   const { rows: [agg] } = await query(
     `SELECT COALESCE(SUM(cost),0)        AS cost,
-            COALESCE(SUM(sales_1d),0)    AS sales,
-            COALESCE(SUM(orders_1d),0)   AS orders,
+            COALESCE(SUM(sales_14d),0)   AS sales,
+            COALESCE(SUM(orders_14d),0)  AS orders,
             COALESCE(SUM(clicks),0)      AS clicks,
             COALESCE(SUM(impressions),0) AS impressions
      FROM fact_metrics_daily
@@ -305,8 +307,8 @@ async function computeMoverFlags(workspaceId, cond, cfgName = "") {
     const { rows: adRows } = await query(
       `SELECT UPPER(f.amazon_id) AS asin,
          COALESCE(SUM(f.cost)        ${curF},0)  AS cost_cur,   COALESCE(SUM(f.cost)        ${prevF},0)  AS cost_prev,
-         COALESCE(SUM(f.sales_1d)    ${curF},0)  AS sales_cur,  COALESCE(SUM(f.sales_1d)    ${prevF},0)  AS sales_prev,
-         COALESCE(SUM(f.orders_1d)   ${curF},0)  AS ord_cur,    COALESCE(SUM(f.orders_1d)   ${prevF},0)  AS ord_prev,
+         COALESCE(SUM(f.sales_14d)   ${curF},0)  AS sales_cur,  COALESCE(SUM(f.sales_14d)   ${prevF},0)  AS sales_prev,
+         COALESCE(SUM(f.orders_14d)  ${curF},0)  AS ord_cur,    COALESCE(SUM(f.orders_14d)  ${prevF},0)  AS ord_prev,
          COALESCE(SUM(f.clicks)      ${curF},0)  AS clk_cur,    COALESCE(SUM(f.clicks)      ${prevF},0)  AS clk_prev,
          COALESCE(SUM(f.impressions) ${curF},0)  AS imp_cur,    COALESCE(SUM(f.impressions) ${prevF},0)  AS imp_prev
        FROM fact_metrics_daily f
