@@ -36,6 +36,7 @@ const QUEUES = {
   RANK_CHECK:       "rank-check",
   PRODUCT_META:     "product-meta-sync",
   WAWI_SYNC:        "wawi-sync",
+  EMAIL_DISPATCH:   "email-dispatch",
 };
 
 const defaultJobOptions = {
@@ -138,6 +139,21 @@ async function queueBulkOperation(workspaceId, operationType, items) {
       batchIndex: Math.floor(i / batchSize),
     });
   }
+}
+
+// Prepare a marketing campaign and enqueue one job per recipient batch. Deterministic
+// jobId per batch → BullMQ dedup prevents double-enqueue; per-(campaign,contact) send rows
+// prevent double-send even if a batch job retries.
+async function queueEmailCampaign(campaignId) {
+  const { prepareCampaign } = require("../services/email/dispatch");
+  const { total, batches } = await prepareCampaign(campaignId);
+  const queue = getQueue(QUEUES.EMAIL_DISPATCH);
+  for (let i = 0; i < batches.length; i++) {
+    await queue.add("send-batch",
+      { campaignId, contactIds: batches[i] },
+      { jobId: `emailcamp:${campaignId}:batch:${i}` });
+  }
+  return { total, batches: batches.length };
 }
 
 // ─── Workers ──────────────────────────────────────────────────────────────────
@@ -600,7 +616,23 @@ async function startWorkers() {
     logger.error("Wawi sync worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker, wawiSyncWorker];
+  // Marketing email dispatch. Batch size = SES_MAX_SEND_RATE; limiter caps at 1 batch/sec
+  // → ~SES_MAX_SEND_RATE messages/sec, staying under the SES account send rate.
+  const { processBatch } = require("../services/email/dispatch");
+  const emailDispatchWorker = new Worker(
+    QUEUES.EMAIL_DISPATCH,
+    async (job) => {
+      const r = await processBatch(job.data);
+      logger.info("Email batch sent", { campaignId: job.data.campaignId, ...r });
+      return r;
+    },
+    { connection: createRedisConnection(), concurrency: 1, limiter: { max: 1, duration: 1000 } }
+  );
+  emailDispatchWorker.on("failed", (job, err) => {
+    logger.error("Email dispatch worker failed", { jobId: job?.id, error: err.message });
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker, wawiSyncWorker, emailDispatchWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 
   // Mark stale processing/requested DB records as failed (left over from previous restarts)
@@ -634,6 +666,7 @@ module.exports = {
   queueRankCheck,
   queueProductMetaSync,
   queueWawiSync,
+  queueEmailCampaign,
   startWorkers,
   stopWorkers,
   QUEUES,

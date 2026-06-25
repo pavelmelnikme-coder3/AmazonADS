@@ -26,6 +26,7 @@ import {
   LineChart as LineChartIcon,
   FlaskConical, Briefcase, GripVertical, ExternalLink,
   Folder, Users, ShieldOff,
+  Mail, Send,
 } from 'lucide-react';
 
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -578,6 +579,7 @@ const NAV = [
   { id: "rules",      icon: Workflow      },
   { id: "strategies", icon: Orbit         },
   { id: "alerts",     icon: Bell          },
+  { id: "email",      icon: Mail          },
   { id: "ai",        icon: Sparkles       },
   { id: "audit",     icon: History        },
   { id: "wawi",      icon: Warehouse      },
@@ -16195,6 +16197,310 @@ const WawiPage = ({ workspaceId }) => {
   );
 };
 
+// ─── Email Marketing (Amazon SES bulk campaigns) ────────────────────────────────
+const Field = ({ label, children }) => (
+  <div style={{ marginBottom: 10 }}>
+    <label style={{ fontSize: 12, color: "var(--tx2)", display: "block", marginBottom: 4 }}>{label}</label>
+    {children}
+  </div>
+);
+const EMPTY_CAMPAIGN = { name: "", subject: "", from_name: "", from_email: "", reply_to: "", html_body: "", segment_id: "" };
+
+const EmailMarketingPage = ({ workspaceId }) => {
+  const { t } = useI18n();
+  const [tab, setTab] = useState("campaigns");
+  const [contacts, setContacts] = useState([]);
+  const [campaigns, setCampaigns] = useState([]);
+  const [segments, setSegments] = useState([]);
+  const [suppressions, setSuppressions] = useState([]);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importSource, setImportSource] = useState("");
+  const [composer, setComposer] = useState(null); // null | campaign object being edited
+  const [statsFor, setStatsFor] = useState(null);  // campaign id → stats panel
+  const [stats, setStats] = useState(null);
+  const [testEmail, setTestEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [toast, setToast] = useState("");
+
+  const putReq = (p, b) => apiFetch(p, { method: "PUT", body: JSON.stringify(b) });
+  const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
+
+  const loadContacts = () => apiFetch(`/email-marketing/contacts?limit=200${statusFilter ? `&status=${statusFilter}` : ""}`)
+    .then(d => setContacts(d?.data || [])).catch(() => {});
+  const loadCampaigns = () => apiFetch("/email-marketing/campaigns").then(d => setCampaigns(d?.data || [])).catch(() => {});
+  const loadSegments = () => apiFetch("/email-marketing/segments").then(d => setSegments(d?.data || [])).catch(() => {});
+  const loadSuppressions = () => apiFetch("/email-marketing/suppressions").then(d => setSuppressions(d?.data || [])).catch(() => {});
+
+  useEffect(() => { loadCampaigns(); loadSegments(); }, [workspaceId]);
+  useEffect(() => { if (tab === "contacts") loadContacts(); if (tab === "suppressions") loadSuppressions(); }, [tab, statusFilter, workspaceId]);
+
+  async function doImport() {
+    setErr("");
+    const emails = importText.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+    if (!emails.length) { setErr(t("email.importNoEmails")); return; }
+    if (!importSource.trim()) { setErr(t("email.importNeedConsent")); return; }
+    setBusy(true);
+    try {
+      const r = await post("/email-marketing/contacts/import", {
+        consent_source: importSource.trim(),
+        contacts: emails.map(e => ({ email: e })),
+      });
+      flash(t("email.importDone", { imported: r.imported, skipped: r.skipped, invalid: r.invalid }));
+      setShowImport(false); setImportText(""); loadContacts();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function saveCampaign() {
+    setErr("");
+    if (!composer.name) { setErr(t("email.needName")); return; }
+    setBusy(true);
+    try {
+      const body = { ...composer, segment_id: composer.segment_id || null };
+      if (composer.id) await putReq(`/email-marketing/campaigns/${composer.id}`, body);
+      else await post("/email-marketing/campaigns", body);
+      setComposer(null); loadCampaigns();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function sendTest() {
+    setErr("");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testEmail)) { setErr(t("email.needTestEmail")); return; }
+    setBusy(true);
+    try {
+      // Save first so the test reflects current edits, then send.
+      const body = { ...composer, segment_id: composer.segment_id || null };
+      let id = composer.id;
+      if (id) await putReq(`/email-marketing/campaigns/${id}`, body);
+      else { const c = await post("/email-marketing/campaigns", body); id = c.id; setComposer(c); loadCampaigns(); }
+      await post(`/email-marketing/campaigns/${id}/test`, { email: testEmail });
+      flash(t("email.testSent", { email: testEmail }));
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function sendCampaign(c) {
+    if (!window.confirm(t("email.confirmSend", { name: c.name }))) return;
+    setBusy(true); setErr("");
+    try { const r = await post(`/email-marketing/campaigns/${c.id}/send`, {}); flash(t("email.sendQueued", { n: r.total })); loadCampaigns(); }
+    catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function openStats(c) {
+    setStatsFor(c.id); setStats(null);
+    try { setStats(await apiFetch(`/email-marketing/campaigns/${c.id}/stats`)); } catch {}
+  }
+
+  const statusBadge = (s) => {
+    const map = { draft: "bg-bl", scheduled: "bg-amb", sending: "bg-pur", sent: "bg-grn", paused: "bg-amb", failed: "bg-red",
+      active: "bg-grn", unsubscribed: "bg-red", bounced: "bg-red", complained: "bg-red" };
+    return <span className={`badge ${map[s] || "bg-bl"}`} style={{ fontSize: 10 }}>{s}</span>;
+  };
+  const num = (n) => (n ?? 0).toLocaleString();
+
+  return (
+    <div style={{ padding: "24px 28px", position: "relative" }}>
+      {toast && <div style={{ position: "fixed", top: 18, right: 18, zIndex: 3000, background: "var(--grn)", color: "#fff", padding: "10px 16px", borderRadius: 8, fontSize: 13, boxShadow: "0 6px 20px rgba(0,0,0,.25)" }}>{toast}</div>}
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "-.3px" }}>{t("email.title")}</h2>
+        <p style={{ margin: "5px 0 0", color: "var(--tx2)", fontSize: 13 }}>{t("email.subtitle")}</p>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        {[["campaigns", t("email.tabCampaigns")], ["contacts", t("email.tabContacts")], ["suppressions", t("email.tabSuppressions")]].map(([id, lbl]) => (
+          <button key={id} onClick={() => setTab(id)} className={`btn ${tab === id ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 13 }}>{lbl}</button>
+        ))}
+      </div>
+
+      {err && <div style={{ background: "rgba(239,68,68,.1)", color: "var(--red)", padding: "8px 12px", borderRadius: 8, fontSize: 12, marginBottom: 12 }}>{err}</div>}
+
+      {/* ── Campaigns ── */}
+      {tab === "campaigns" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+            <button className="btn btn-primary" onClick={() => { setComposer({ ...EMPTY_CAMPAIGN }); setTestEmail(""); }}><Plus size={14} /> {t("email.newCampaign")}</button>
+          </div>
+          <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead><tr style={{ background: "var(--s2)", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colName")}</th>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colStatus")}</th>
+                <th style={{ textAlign: "right", padding: "10px 14px" }}>{t("email.colRecipients")}</th>
+                <th style={{ textAlign: "right", padding: "10px 14px" }}>{t("email.colSent")}</th>
+                <th style={{ textAlign: "right", padding: "10px 14px" }}>{t("email.colOpened")}</th>
+                <th style={{ textAlign: "right", padding: "10px 14px" }}></th>
+              </tr></thead>
+              <tbody>
+                {campaigns.map(c => (
+                  <tr key={c.id} style={{ borderTop: "1px solid var(--b1)" }}>
+                    <td style={{ padding: "10px 14px", fontWeight: 500 }}>{c.name}<div style={{ fontSize: 11, color: "var(--tx3)" }}>{c.subject}</div></td>
+                    <td style={{ padding: "10px 14px" }}>{statusBadge(c.status)}</td>
+                    <td style={{ padding: "10px 14px", textAlign: "right", fontFamily: "var(--mono)" }}>{num(c.recipients)}</td>
+                    <td style={{ padding: "10px 14px", textAlign: "right", fontFamily: "var(--mono)" }}>{num(c.sent)}</td>
+                    <td style={{ padding: "10px 14px", textAlign: "right", fontFamily: "var(--mono)" }}>{num(c.opened)}</td>
+                    <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
+                      <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openStats(c)}>{t("email.stats")}</button>
+                      {["draft", "scheduled", "paused"].includes(c.status) && <>
+                        <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setComposer({ ...EMPTY_CAMPAIGN, ...c, segment_id: c.segment_id || "" }); setTestEmail(""); }}>{t("common.edit") || "Edit"}</button>
+                        <button className="btn btn-primary" style={{ fontSize: 11, padding: "3px 8px" }} disabled={busy} onClick={() => sendCampaign(c)}><Send size={11} /> {t("email.send")}</button>
+                      </>}
+                    </td>
+                  </tr>
+                ))}
+                {!campaigns.length && <tr><td colSpan={6} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noCampaigns")}</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Contacts ── */}
+      {tab === "contacts" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10 }}>
+            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ fontSize: 13 }}>
+              <option value="">{t("email.allStatuses")}</option>
+              {["active", "unsubscribed", "bounced", "complained"].map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <button className="btn btn-primary" onClick={() => { setShowImport(true); setErr(""); }}><Plus size={14} /> {t("email.import")}</button>
+          </div>
+          <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead><tr style={{ background: "var(--s2)", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colEmail")}</th>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colName")}</th>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colStatus")}</th>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colConsent")}</th>
+              </tr></thead>
+              <tbody>
+                {contacts.map(c => (
+                  <tr key={c.id} style={{ borderTop: "1px solid var(--b1)" }}>
+                    <td style={{ padding: "10px 14px", fontFamily: "var(--mono)", fontSize: 12 }}>{c.email}</td>
+                    <td style={{ padding: "10px 14px" }}>{[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}</td>
+                    <td style={{ padding: "10px 14px" }}>{statusBadge(c.status)}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 11, color: "var(--tx3)" }}>{c.consent_source || "—"}</td>
+                  </tr>
+                ))}
+                {!contacts.length && <tr><td colSpan={4} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noContacts")}</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Suppressions ── */}
+      {tab === "suppressions" && (
+        <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead><tr style={{ background: "var(--s2)", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
+              <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colEmail")}</th>
+              <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colReason")}</th>
+              <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colDate")}</th>
+            </tr></thead>
+            <tbody>
+              {suppressions.map(s => (
+                <tr key={s.id} style={{ borderTop: "1px solid var(--b1)" }}>
+                  <td style={{ padding: "10px 14px", fontFamily: "var(--mono)", fontSize: 12 }}>{s.email}</td>
+                  <td style={{ padding: "10px 14px" }}>{statusBadge(s.reason)}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 11, color: "var(--tx3)" }}>{new Date(s.created_at).toLocaleDateString()}</td>
+                </tr>
+              ))}
+              {!suppressions.length && <tr><td colSpan={3} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noSuppressions")}</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Import modal ── */}
+      {showImport && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowImport(false)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 480, maxWidth: "92vw" }}>
+            <h3 style={{ margin: "0 0 6px", fontSize: 17 }}>{t("email.importTitle")}</h3>
+            <p style={{ fontSize: 12, color: "var(--tx3)", margin: "0 0 14px" }}>{t("email.importHint")}</p>
+            <label style={{ fontSize: 12, color: "var(--tx2)" }}>{t("email.importEmails")}</label>
+            <textarea value={importText} onChange={e => setImportText(e.target.value)} rows={6} style={{ width: "100%", margin: "5px 0 12px", fontFamily: "var(--mono)", fontSize: 12 }} placeholder="a@example.com, b@example.com …" />
+            <label style={{ fontSize: 12, color: "var(--tx2)" }}>{t("email.consentSource")} *</label>
+            <input value={importSource} onChange={e => setImportSource(e.target.value)} style={{ width: "100%", margin: "5px 0 4px" }} placeholder={t("email.consentPlaceholder")} />
+            <p style={{ fontSize: 11, color: "var(--tx3)", margin: "0 0 14px" }}>{t("email.consentNote")}</p>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setShowImport(false)}>{t("common.cancel") || "Cancel"}</button>
+              <button className="btn btn-primary" disabled={busy} onClick={doImport}>{t("email.import")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Composer modal ── */}
+      {composer && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "30px 16px" }} onClick={() => setComposer(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 920, maxWidth: "96vw" }}>
+            <h3 style={{ margin: "0 0 14px", fontSize: 17 }}>{composer.id ? t("email.editCampaign") : t("email.newCampaign")}</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+              <div>
+                <Field label={t("email.colName")}><input value={composer.name} onChange={e => setComposer(c => ({ ...c, name: e.target.value }))} style={{ width: "100%" }} /></Field>
+                <Field label={t("email.subject")}><input value={composer.subject} onChange={e => setComposer(c => ({ ...c, subject: e.target.value }))} style={{ width: "100%" }} placeholder="Hello {{first_name}}" /></Field>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Field label={t("email.fromName")}><input value={composer.from_name} onChange={e => setComposer(c => ({ ...c, from_name: e.target.value }))} style={{ width: "100%" }} /></Field>
+                  <Field label={t("email.fromEmail")}><input value={composer.from_email} onChange={e => setComposer(c => ({ ...c, from_email: e.target.value }))} style={{ width: "100%" }} placeholder="news@mail.adsflow.app" /></Field>
+                </div>
+                <Field label={t("email.segment")}>
+                  <select value={composer.segment_id || ""} onChange={e => setComposer(c => ({ ...c, segment_id: e.target.value }))} style={{ width: "100%" }}>
+                    <option value="">{t("email.allActive")}</option>
+                    {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </Field>
+                <Field label={t("email.htmlBody")}>
+                  <textarea value={composer.html_body} onChange={e => setComposer(c => ({ ...c, html_body: e.target.value }))} rows={12} style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12 }} placeholder="<h1>Hi {{first_name}}</h1> …" />
+                </Field>
+                <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t("email.mergeHint")}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 6 }}>{t("email.preview")}</div>
+                <div style={{ border: "1px solid var(--b2)", borderRadius: 8, padding: 14, background: "#fff", color: "#111", minHeight: 280, overflow: "auto", fontSize: 14 }}
+                  dangerouslySetInnerHTML={{ __html: (composer.html_body || "").replace(/\{\{\s*first_name\s*\}\}/g, "Pavel").replace(/\{\{\s*\w+\s*\}\}/g, "") }} />
+                <div style={{ marginTop: 12, padding: 10, border: "1px dashed var(--b2)", borderRadius: 8 }}>
+                  <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 6 }}>{t("email.sendTest")}</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input value={testEmail} onChange={e => setTestEmail(e.target.value)} placeholder="you@example.com" style={{ flex: 1 }} />
+                    <button className="btn btn-ghost" disabled={busy} onClick={sendTest}>{t("email.sendTest")}</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
+              <button className="btn btn-ghost" onClick={() => setComposer(null)}>{t("common.cancel") || "Cancel"}</button>
+              <button className="btn btn-primary" disabled={busy} onClick={saveCampaign}>{t("common.save") || "Save"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Stats panel ── */}
+      {statsFor && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setStatsFor(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 460, maxWidth: "92vw" }}>
+            <h3 style={{ margin: "0 0 14px", fontSize: 17 }}>{stats?.name || t("email.stats")}</h3>
+            {!stats ? <div style={{ color: "var(--tx3)" }}>…</div> : (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[["colRecipients", stats.recipients], ["colSent", stats.sent], ["colDelivered", stats.delivered], ["colOpened", stats.opened], ["colClicked", stats.clicked], ["colBounced", stats.bounced], ["colComplained", stats.complained], ["colUnsub", stats.unsubscribed]].map(([k, v]) => (
+                  <div key={k} style={{ background: "var(--s2)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t("email." + k)}</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--mono)" }}>{num(v)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="btn btn-ghost" onClick={() => setStatsFor(null)}>{t("common.close") || "Close"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AlertsPage = ({ workspaceId }) => {
   const { t } = useI18n();
   const [tab, setTab] = useState("configs");
@@ -18393,6 +18699,7 @@ export default function App() {
     rules: <RulesPage workspaceId={wid} />,
     strategies: <StrategiesPage workspaceId={wid} />,
     alerts: <AlertsPage workspaceId={wid} />,
+    email: <EmailMarketingPage workspaceId={wid} />,
     wawi: <WawiPage workspaceId={wid} />,
     ai: <AIPage workspaceId={wid} />,
     audit: <AuditPage workspaceId={wid} />,

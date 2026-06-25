@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync, queueWawiSync } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync, queueWawiSync, queueEmailCampaign } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 const { evaluateWorkspaceAlerts } = require("../services/alerts/evaluate");
@@ -280,7 +280,28 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob];
+  // Scheduled marketing campaigns: every 5 min, dispatch any due campaign exactly once.
+  // Flip to 'sending' inside the same UPDATE that selects it → two ticks can't double-fire.
+  const emailScheduleJob = new CronJob("*/5 * * * *", async () => {
+    try {
+      const { rows } = await query(
+        `UPDATE email_campaigns SET status='sending', updated_at=NOW()
+          WHERE id IN (SELECT id FROM email_campaigns
+                        WHERE status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= NOW()
+                        FOR UPDATE SKIP LOCKED)
+        RETURNING id`
+      );
+      for (const { id } of rows) {
+        try { await queueEmailCampaign(id); }
+        catch (e) { logger.error("Cron: email campaign dispatch failed", { campaignId: id, error: e.message }); }
+      }
+      if (rows.length) logger.info("Cron: email campaigns dispatched", { count: rows.length });
+    } catch (err) {
+      logger.error("Cron email schedule failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 
