@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-25 — Marketing email subsystem (Amazon SES, EU/GDPR)
+
+A new **bulk/newsletter** email pipeline on **Amazon SES** (`eu-central-1`, Frankfurt), fully separate
+from the transactional Brevo path so marketing complaints can't poison alert/invite deliverability.
+Ships behind config — with `SES_*` unset, nothing sends.
+
+### Added
+- **Data model** (migration `037_email_marketing.sql`): `email_contacts` (with GDPR consent proof +
+  opaque `unsubscribe_token`), `email_segments`, `email_campaigns` (+ counters), `email_sends`
+  (`UNIQUE(campaign,contact)` → idempotent), `email_suppressions`.
+- **SES adapter** (`services/email/ses.js`): SES v2, one Raw-MIME message per recipient carrying the
+  RFC 8058 `List-Unsubscribe` / `List-Unsubscribe-Post` headers; `isConfigured()` gate.
+- **Renderer** (`services/email/render.js`): `{{merge_tag}}` expansion + a mandatory footer (postal
+  address + unsubscribe link) appended to every email.
+- **Dispatch** (`services/email/dispatch.js`) + `email-dispatch` BullMQ queue: recipient resolution
+  (segment + suppression filter), batching, idempotent per-batch send (skips non-queued on retry),
+  counters, finish detection. Worker is rate-limited (~`SES_MAX_SEND_RATE` msg/s). A 5-min cron
+  dispatches due scheduled campaigns (`FOR UPDATE SKIP LOCKED` → no double-fire).
+- **API** (`/api/v1/email-marketing`, authed): contacts import (consent required) + CRUD, segments,
+  campaigns CRUD + `test`/`send`/`schedule`/`pause`/`stats`, suppressions.
+- **Public endpoints** (`/api/v1/email`, no auth): RFC 8058 one-click unsubscribe (GET page + POST
+  one-click) and the SES→SNS webhook (signature-validated; permanent bounce/complaint → suppress +
+  flag contact; delivery/open/click → counters; auto-confirms the SNS subscription).
+- **Frontend**: new "Email" page — campaigns list + composer (subject / from / segment / HTML editor +
+  live preview + test send), send/schedule, contacts (import with consent), suppressions, stats.
+  i18n en/ru/de.
+- **Tests**: +27 (render, SES adapter, dispatch idempotency, unsubscribe/webhook, route validation).
+  Full suite **922/922**.
+
+### Operator setup required before real sends
+Verify domain + Easy DKIM/SPF/DMARC, request SES production access (Marketing), create a configuration
+set + SNS topic, a public **HTTPS** domain (webhook + unsubscribe links), and fill the `SES_*` env.
+See `docs/EMAIL_SES_SETUP.md`.
+
+---
+
 ## [Unreleased] — 2026-06-24 — Alerts: ROAS-drop alerts, spend breakdown, attribution unification; keyword-research fixes; full test suite green
 
 A run of alert audits (each verified against raw prod rows and Amazon's campaign manager before

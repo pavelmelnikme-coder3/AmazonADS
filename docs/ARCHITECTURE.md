@@ -305,3 +305,23 @@ POST /keyword-research/add-to-adgroup
   row is `n/a` (unknown), not `0`; `stock_out` only when every known source is empty, else `fba_empty` /
   `erp_empty`. Demand-side causes (`price_up`/`ad_cut`) attach only when a volume/rank metric breached —
   never for efficiency ratios (a spend cut raises ROAS, so it can't explain a ROAS drop).
+
+## 2026-06-25 — Marketing email subsystem (Amazon SES)
+
+A separate bulk/newsletter pipeline, isolated from the transactional Brevo path so marketing
+complaints don't degrade alert/invite deliverability. Region `eu-central-1` (Frankfurt, GDPR).
+
+- **Tables** (migration 037): `email_contacts` (consent proof + `unsubscribe_token`), `email_segments`,
+  `email_campaigns` (+counters), `email_sends` (UNIQUE(campaign,contact)), `email_suppressions`.
+- **Send path**: `routes/emailMarketing.js` → `queueEmailCampaign()` (workers.js) → `email-dispatch`
+  queue → `dispatch.processBatch()` → `ses.sendBulkEmail()`. Each message is **Raw MIME per recipient**
+  (not SES SendBulkEmail templates) so the per-recipient RFC 8058 `List-Unsubscribe` headers can be set;
+  SES throttles by messages/sec regardless, so the queue limiter (`SES_MAX_SEND_RATE`, batch = rate,
+  1 batch/sec) is the real rate guard.
+- **Idempotency**: deterministic batch `jobId` + `email_sends UNIQUE(campaign,contact)` +
+  `processBatch` only sends rows still `status='queued'` → a job retry never re-sends.
+- **Compliance**: `render.js` appends postal address + unsubscribe footer to every email; consent proof
+  is required on import; account + app suppression lists; public webhook auto-suppresses hard
+  bounces/complaints (SNS signature-validated via `sns-validator`).
+- **Config gate**: `ses.isConfigured()` (needs `AWS_ACCESS_KEY_ID/SECRET` + `SES_FROM_EMAIL`) — unset =
+  no sends, app unaffected. Operator/AWS setup: see `docs/EMAIL_SES_SETUP.md`.

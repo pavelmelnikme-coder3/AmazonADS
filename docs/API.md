@@ -559,6 +559,48 @@ Add selected keywords to an ad group (deduplicates, then pushes to Amazon).
 
 ---
 
+## Email Marketing *(Amazon SES, 2026-06-25)*
+
+Bulk/newsletter sending on Amazon SES, separate from transactional (Brevo) mail. Behind config:
+with `SES_*` env unset, `send`/`test` return `400 "SES not configured"`.
+
+### Authenticated — `/api/v1/email-marketing` (requireAuth + requireWorkspace)
+Contacts:
+```
+GET    /contacts?status=&tag=&search=&page=&limit=     — paginated list
+POST   /contacts/import   { consent_source*, consent_method?, contacts:[{email,first_name?,last_name?,attributes?,tags?}] }
+                           → { imported, skipped, invalid }   (consent_source REQUIRED — GDPR proof; dedup via ON CONFLICT)
+PATCH  /contacts/:id      { first_name?, last_name?, attributes?, tags?, status? }
+DELETE /contacts/:id
+```
+Segments: `GET/POST/PUT/DELETE /segments` — `filter` JSON `{ tags:[], status:'active' }`; a campaign with no `segment_id` targets all active contacts.
+
+Campaigns:
+```
+GET    /campaigns                 GET /campaigns/:id
+POST   /campaigns   { name*, subject, from_name, from_email, reply_to, html_body, segment_id }
+PUT    /campaigns/:id             (editable only while draft/scheduled/paused)
+DELETE /campaigns/:id             (draft/scheduled/paused/failed only)
+POST   /campaigns/:id/test        { email }            — one-off test send (requires SES configured)
+POST   /campaigns/:id/send        → { ok, total, batches }   — enqueues; writes audit email_campaign.send
+POST   /campaigns/:id/schedule    { scheduled_at }     — future ISO timestamp; a 5-min cron dispatches it
+POST   /campaigns/:id/pause
+GET    /campaigns/:id/stats       → counters + per-status send breakdown
+```
+- `subject`/`html_body` support `{{first_name}}`, `{{last_name}}`, and any imported attribute. A postal-address + unsubscribe footer is appended automatically.
+
+Suppressions: `GET /suppressions`, `POST /suppressions { email }` (manual), `DELETE /suppressions/:id`.
+
+### Public — `/api/v1/email` (NO auth)
+```
+GET  /unsubscribe/:token   — human confirmation page (also unsubscribes)
+POST /unsubscribe/:token   — RFC 8058 one-click (body List-Unsubscribe=One-Click)
+POST /webhooks/ses         — SNS endpoint; signature-validated. Auto-confirms SubscriptionConfirmation;
+                             permanent Bounce/Complaint → suppress + flag contact; Delivery/Open/Click → counters.
+```
+
+---
+
 ## Error Responses
 
 All errors follow this format:
