@@ -4373,6 +4373,8 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [], onDeleteNote })
   const hovDate = hoverIdx != null && series[hoverIdx] ? series[hoverIdx].date : null;
   const hovPrevDate = prevSeries && hoverIdx != null && prevSeries[hoverIdx] ? prevSeries[hoverIdx].date : null;
   const fmtD = d => new Date(d + "T00:00:00Z").toLocaleDateString("de", { day: "2-digit", month: "short" });
+  // Notes carry a full date string already — parse directly (don't append a time like fmtD).
+  const fmtND = d => { const dt = new Date(d); return isNaN(dt) ? "—" : dt.toLocaleDateString("de", { day: "2-digit", month: "short" }); };
 
   // Resolve notes to chart positions. Notes within the series date window snap to the
   // nearest day; ones grouped on the same index share a pin. Same x-mapping as TrendChart
@@ -4435,9 +4437,9 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [], onDeleteNote })
                   boxShadow: "0 4px 16px rgba(0,0,0,0.5)" }}>
                   {m.items.map((n, j) => (
                     <div key={j} style={{ display: "flex", gap: 6, marginBottom: j < m.items.length - 1 ? 3 : 0 }}>
-                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{fmtD(n.note_date)}</span>
+                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{fmtND(n.note_date)}</span>
+                      <span style={{ color: n.product_id === null ? "#A78BFA" : "#F59E0B", fontFamily: "var(--mono)", fontSize: 10 }}>{n.product_id === null ? "ALL" : (n._asin || "")}</span>
                       <span>{n.text}</span>
-                      {n.product_id === null && <span style={{ color: "var(--pur)", fontSize: 10 }}>ALL</span>}
                     </div>
                   ))}
                 </div>
@@ -4506,10 +4508,12 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [], onDeleteNote })
               border: `1px solid ${n.product_id === null ? "rgba(167,139,250,0.25)" : "rgba(245,158,11,0.25)"}`,
             }}>
               <span style={{ color: n.product_id === null ? "#A78BFA" : "#F59E0B", fontSize: 12 }}>📌</span>
-              <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", minWidth: 52 }}>{fmtD(n.note_date)}</span>
-              {n.product_id === null && (
-                <span style={{ fontSize: 9, color: "#A78BFA", background: "rgba(167,139,250,0.15)", padding: "1px 5px", borderRadius: 3, fontFamily: "var(--mono)" }}>ALL</span>
-              )}
+              <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", minWidth: 52 }}>{fmtND(n.note_date)}</span>
+              <span style={{ fontSize: 9, fontFamily: "var(--mono)", padding: "1px 5px", borderRadius: 3,
+                color: n.product_id === null ? "#A78BFA" : "#F59E0B",
+                background: n.product_id === null ? "rgba(167,139,250,0.15)" : "rgba(245,158,11,0.15)" }}>
+                {n.product_id === null ? "ALL" : (n._asin || "—")}
+              </span>
               <span style={{ color: "var(--tx)", flex: 1 }}>{n.text}</span>
               {onDeleteNote && (
                 <button onClick={() => onDeleteNote(n)} title="Delete note"
@@ -5363,7 +5367,7 @@ const ProductsPage = ({ workspaceId }) => {
                         {loadingTs && !ts
                           ? <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.loading")}</div>
                           : <ListingTrendStack series={ts?.aggregate} prevSeries={ts?.prev?.aggregate} tr={tr}
-                              notes={[...L.children.flatMap(c => notes[c.id] || []), ...globalNotes]}
+                              notes={[...L.children.flatMap(c => (notes[c.id] || []).map(n => ({ ...n, _asin: c.asin }))), ...globalNotes]}
                               onDeleteNote={async (n) => { try { await del(`/products/notes/${n.id}`); await loadAllNotes(); } catch (e) { showToast(e.message, "err"); } }} />}
                       </div>
                     )}
