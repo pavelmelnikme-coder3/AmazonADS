@@ -4350,6 +4350,7 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [] }) {
   // tooltip. Lifted from whichever row the pointer is over so one tooltip can
   // follow the cursor across the whole stack (Grafana "all series" pattern).
   const [cursor, setCursor] = React.useState(null);
+  const [hovPin, setHovPin] = React.useState(null); // hovered note-pin index
   const handleHover = React.useCallback((idx, clientX, clientY) => {
     setHoverIdx(idx);
     if (idx == null) setCursor(null);
@@ -4402,20 +4403,42 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [] }) {
           {hovDate ? fmtD(hovDate) : `${fmtD(series[0].date)} – ${fmtD(series[series.length - 1].date)}`}
         </span>
       </div>
-      {/* Pins row: 📌 at each pinned date, aligned with the vertical guides below. */}
+      {/* Pins row: 📌 at each pinned date, aligned with the vertical guides below.
+          Hovering a pin shows the note text(s) in a floating tooltip. */}
       {noteMarks.length > 0 && (
         <div style={{ display: "flex", gap: 10, marginBottom: 2 }}>
           <div style={{ width: 80, flexShrink: 0 }} />
-          <div style={{ position: "relative", flex: 1, minWidth: 0, height: 16 }}>
+          <div style={{ position: "relative", flex: 1, minWidth: 0, height: 18 }}>
             {noteMarks.map(({ idx, items }, k) => {
               const isGlobal = items.some(n => n.product_id === null);
-              const label = items.map(n => `${fmtD(n.note_date)} — ${n.text}${n.product_id === null ? " (global)" : ""}`).join("\n");
               return (
-                <span key={k} title={label}
+                <span key={k}
+                  onMouseEnter={() => setHovPin(k)} onMouseLeave={() => setHovPin(null)}
                   style={{ position: "absolute", left: `${(xOfN(idx) / NW) * 100}%`, transform: "translateX(-50%)",
-                    fontSize: 11, lineHeight: "16px", cursor: "help", color: isGlobal ? "#A78BFA" : "#F59E0B" }}>📌</span>
+                    fontSize: 12, lineHeight: "18px", padding: "0 4px", cursor: "pointer",
+                    color: isGlobal ? "#A78BFA" : "#F59E0B" }}>📌</span>
               );
             })}
+            {hovPin != null && noteMarks[hovPin] && (() => {
+              const m = noteMarks[hovPin];
+              const isGlobal = m.items.some(n => n.product_id === null);
+              return (
+                <div style={{ position: "absolute", bottom: "calc(100% + 4px)",
+                  left: `clamp(60px, ${(xOfN(m.idx) / NW) * 100}%, calc(100% - 60px))`, transform: "translateX(-50%)",
+                  background: "var(--s3)", border: `1px solid ${isGlobal ? "#A78BFA" : "#F59E0B"}`,
+                  borderRadius: 6, padding: "6px 10px", pointerEvents: "none", zIndex: 30,
+                  fontSize: 11, color: "var(--tx)", maxWidth: 300, whiteSpace: "normal",
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.5)" }}>
+                  {m.items.map((n, j) => (
+                    <div key={j} style={{ display: "flex", gap: 6, marginBottom: j < m.items.length - 1 ? 3 : 0 }}>
+                      <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", whiteSpace: "nowrap" }}>{fmtD(n.note_date)}</span>
+                      <span>{n.text}</span>
+                      {n.product_id === null && <span style={{ color: "var(--pur)", fontSize: 10 }}>ALL</span>}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
