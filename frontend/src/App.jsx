@@ -4344,7 +4344,7 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, good = null
 // Stack of the product trend charts with a single shared crosshair + a hovered-date
 // header. `series`: [{date, bsr, price, orders, ad_spend, acos, tacos, roas}].
 // `prevSeries` (optional) is the previous period's aligned series for comparison.
-function ListingTrendStack({ series, prevSeries, tr, notes = [] }) {
+function ListingTrendStack({ series, prevSeries, tr, notes = [], onDeleteNote }) {
   const [hoverIdx, setHoverIdx] = React.useState(null);
   // Pixel position of the cursor (viewport coords) for the shared floating
   // tooltip. Lifted from whichever row the pointer is over so one tooltip can
@@ -4393,6 +4393,10 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [] }) {
   }
   const noteMarks = [...byIdx.entries()].map(([idx, items]) => ({ idx, items }));
   const noteIdxs = noteMarks.map(m => m.idx);
+  // Flat, date-sorted list of in-window notes for the readable list below the chart.
+  const windowNotes = (notes || [])
+    .filter(n => { const nd = new Date(n.note_date).getTime(); return nd >= firstMs && nd <= lastMs; })
+    .sort((a, b) => new Date(b.note_date) - new Date(a.note_date));
   return (
     <div style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", height: 16, marginBottom: 2 }}>
@@ -4492,6 +4496,29 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [] }) {
           </div>
         );
       })()}
+      {/* Readable notes list (same as the per-ASIN sparkline) — date, ALL tag, text, delete. */}
+      {windowNotes.length > 0 && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+          {windowNotes.map(n => (
+            <div key={n.id} style={{
+              display: "flex", alignItems: "center", gap: 8, fontSize: 11, padding: "4px 8px", borderRadius: 5,
+              background: n.product_id === null ? "rgba(167,139,250,0.08)" : "rgba(245,158,11,0.08)",
+              border: `1px solid ${n.product_id === null ? "rgba(167,139,250,0.25)" : "rgba(245,158,11,0.25)"}`,
+            }}>
+              <span style={{ color: n.product_id === null ? "#A78BFA" : "#F59E0B", fontSize: 12 }}>📌</span>
+              <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)", minWidth: 52 }}>{fmtD(n.note_date)}</span>
+              {n.product_id === null && (
+                <span style={{ fontSize: 9, color: "#A78BFA", background: "rgba(167,139,250,0.15)", padding: "1px 5px", borderRadius: 3, fontFamily: "var(--mono)" }}>ALL</span>
+              )}
+              <span style={{ color: "var(--tx)", flex: 1 }}>{n.text}</span>
+              {onDeleteNote && (
+                <button onClick={() => onDeleteNote(n)} title="Delete note"
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: "0 2px", fontSize: 13, lineHeight: 1 }}>×</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -5336,7 +5363,8 @@ const ProductsPage = ({ workspaceId }) => {
                         {loadingTs && !ts
                           ? <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.loading")}</div>
                           : <ListingTrendStack series={ts?.aggregate} prevSeries={ts?.prev?.aggregate} tr={tr}
-                              notes={[...L.children.flatMap(c => notes[c.id] || []), ...globalNotes]} />}
+                              notes={[...L.children.flatMap(c => notes[c.id] || []), ...globalNotes]}
+                              onDeleteNote={async (n) => { try { await del(`/products/notes/${n.id}`); await loadAllNotes(); } catch (e) { showToast(e.message, "err"); } }} />}
                       </div>
                     )}
 
