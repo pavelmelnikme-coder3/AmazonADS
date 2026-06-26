@@ -302,12 +302,39 @@ async function resolveEntityId(amazonId, entityType, workspaceId) {
 async function ingestReportData({ reportRequestId, workspaceId, profileDbId, reportLevel, rows, campaignType = "SP" }) {
   let processed = 0;
 
+  // Multiple report rows can map to the SAME upsert key (profile_id, amazon_id, entity_type, date):
+  // the advertised-product report breaks each ASIN out per campaign/ad group, so one ASIN appears in
+  // many rows per day. Writing them one-by-one with DO UPDATE = EXCLUDED would OVERWRITE (keep only
+  // the last row) and silently drop the rest — which lost ~half of per-ASIN ad spend. Pre-aggregate
+  // by the key first (sum the metrics), then upsert once per group → totals match Amazon, and the
+  // write stays idempotent (re-ingesting the same report reproduces the same sums). For levels whose
+  // amazon_id is already unique per day (campaign/ad_group/keyword/target) this is a harmless no-op.
+  const num = v => Number(v) || 0;
+  const agg = new Map();
   for (const row of rows) {
-    try {
-      const amazonEntityId = getEntityId(row, reportLevel);
-      const entityUuid     = await resolveEntityId(amazonEntityId, reportLevel, workspaceId);
-      const date = row.date || row.startDate;
+    const amazonEntityId = getEntityId(row, reportLevel);
+    const date = row.date || row.startDate;
+    if (!amazonEntityId || !date) continue;
+    const key = `${amazonEntityId}|${date}`;
+    let a = agg.get(key);
+    if (!a) { a = { amazonEntityId, date, impressions: 0, clicks: 0, cost: 0, s1: 0, s7: 0, s14: 0, s30: 0, o1: 0, o7: 0, o14: 0, o30: 0, units: 0 }; agg.set(key, a); }
+    a.impressions += num(row.impressions);
+    a.clicks      += num(row.clicks);
+    a.cost        += num(row.cost);
+    a.s1  += num(row.sales1d);
+    a.s7  += num(row.sales7d);
+    a.s14 += num(row.sales14d) || num(row.sales);          // SD uses 'sales' (no window suffix)
+    a.s30 += num(row.sales30d);
+    a.o1  += num(row.purchases1d);
+    a.o7  += num(row.purchases7d);
+    a.o14 += num(row.purchases14d) || num(row.purchases);  // SD uses 'purchases'
+    a.o30 += num(row.purchases30d);
+    a.units += num(row.unitsSoldClicks14d) || num(row.unitsSold);
+  }
 
+  for (const a of agg.values()) {
+    try {
+      const entityUuid = await resolveEntityId(a.amazonEntityId, reportLevel, workspaceId);
       await query(
         `INSERT INTO fact_metrics_daily
            (workspace_id, profile_id, date, entity_type, entity_id, amazon_id,
@@ -328,33 +355,18 @@ async function ingestReportData({ reportRequestId, workspaceId, profileDbId, rep
            report_id = EXCLUDED.report_id,
            entity_id = COALESCE(EXCLUDED.entity_id, fact_metrics_daily.entity_id)`,
         [
-          workspaceId,
-          profileDbId,
-          date,
-          reportLevel,
-          entityUuid,
-          amazonEntityId,
-          // Amazon report rows do NOT carry a campaign-type field — it must come from
-          // the report request (campaignType), not row.campaignType (always undefined → 'SP').
+          workspaceId, profileDbId, a.date, reportLevel, entityUuid, a.amazonEntityId,
+          // Amazon report rows do NOT carry a campaign-type field — it comes from the request.
           campaignType,
-          row.impressions || 0,
-          row.clicks || 0,
-          row.cost || 0,
-          row.sales1d || 0,
-          row.sales7d || 0,
-          row.sales14d || row.sales || 0,             // SD uses 'sales' (no window suffix)
-          row.sales30d || 0,
-          row.purchases1d || 0,
-          row.purchases7d || 0,
-          row.purchases14d || row.purchases || 0,     // SD uses 'purchases' (no window suffix)
-          row.purchases30d || 0,
-          row.unitsSoldClicks14d || row.unitsSold || 0,  // SD uses 'unitsSold'
-          reportRequestId,
+          a.impressions, a.clicks, a.cost,
+          a.s1, a.s7, a.s14, a.s30,
+          a.o1, a.o7, a.o14, a.o30,
+          a.units, reportRequestId,
         ]
       );
       processed++;
     } catch (err) {
-      logger.warn("Failed to ingest report row", { error: err.message, row: JSON.stringify(row).substring(0, 100) });
+      logger.warn("Failed to ingest report row", { error: err.message, key: `${a.amazonEntityId}|${a.date}` });
     }
   }
 
