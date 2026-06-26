@@ -4211,7 +4211,7 @@ const BsrSparkline = ({ pts, notes = [], onDeleteNote }) => {
 // `prev` (optional) is the previous period's values aligned by index → drawn as a
 // faded dashed overlay for period-over-period comparison.
 // hoverIdx/onHover are lifted to the parent so every stacked chart shares one cursor.
-function TrendChart({ title, color, data, prev, fmt, invert = false, good = null, hoverIdx, onHover, height = 52 }) {
+function TrendChart({ title, color, data, prev, fmt, invert = false, good = null, hoverIdx, onHover, height = 52, noteIdxs = [] }) {
   const W = 720, H = height, PAD = 6;
   const N = data.length;
   const curVals = data.map(d => d.value).filter(v => v != null && !Number.isNaN(v));
@@ -4287,6 +4287,12 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, good = null
             </linearGradient>
           </defs>
           {areaPts && <polygon points={areaPts} fill={`url(#${gid})`} />}
+          {/* Note markers: vertical guides at pinned dates — drawn on every row so the
+              pin lines up through the whole synced stack (mirrors the crosshair). */}
+          {noteIdxs.map((idx, k) => idx >= 0 && idx < N && (
+            <line key={"nm" + k} x1={xOf(idx)} y1={PAD} x2={xOf(idx)} y2={H - PAD}
+              stroke="#A78BFA" strokeWidth="1.5" strokeDasharray="3 2" opacity="0.6" vectorEffect="non-scaling-stroke" />
+          ))}
           {prevSegs.map((s, si) => s.length >= 2 && (
             <polyline key={"p" + si} points={s.join(" ")} fill="none" stroke={color} strokeWidth="1.5"
               strokeDasharray="4 3" opacity="0.4" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
@@ -4338,7 +4344,7 @@ function TrendChart({ title, color, data, prev, fmt, invert = false, good = null
 // Stack of the product trend charts with a single shared crosshair + a hovered-date
 // header. `series`: [{date, bsr, price, orders, ad_spend, acos, tacos, roas}].
 // `prevSeries` (optional) is the previous period's aligned series for comparison.
-function ListingTrendStack({ series, prevSeries, tr }) {
+function ListingTrendStack({ series, prevSeries, tr, notes = [] }) {
   const [hoverIdx, setHoverIdx] = React.useState(null);
   // Pixel position of the cursor (viewport coords) for the shared floating
   // tooltip. Lifted from whichever row the pointer is over so one tooltip can
@@ -4366,6 +4372,26 @@ function ListingTrendStack({ series, prevSeries, tr }) {
   const hovDate = hoverIdx != null && series[hoverIdx] ? series[hoverIdx].date : null;
   const hovPrevDate = prevSeries && hoverIdx != null && prevSeries[hoverIdx] ? prevSeries[hoverIdx].date : null;
   const fmtD = d => new Date(d + "T00:00:00Z").toLocaleDateString("de", { day: "2-digit", month: "short" });
+
+  // Resolve notes to chart positions. Notes within the series date window snap to the
+  // nearest day; ones grouped on the same index share a pin. Same x-mapping as TrendChart
+  // (W=720, PAD=6) so the pins line up with the vertical guides drawn inside each row.
+  const NW = 720, NPAD = 6, NN = series.length;
+  const xOfN = i => NPAD + (i / (NN - 1 || 1)) * (NW - NPAD * 2);
+  const firstMs = new Date(series[0].date + "T00:00:00Z").getTime() - 86400000;
+  const lastMs = new Date(series[NN - 1].date + "T00:00:00Z").getTime() + 86400000;
+  const seriesMs = series.map(s => new Date(s.date + "T00:00:00Z").getTime());
+  const byIdx = new Map();
+  for (const n of (notes || [])) {
+    const nd = new Date(n.note_date).getTime();
+    if (nd < firstMs || nd > lastMs) continue;
+    let bestI = 0, bestDiff = Infinity;
+    seriesMs.forEach((ms, i) => { const d = Math.abs(ms - nd); if (d < bestDiff) { bestDiff = d; bestI = i; } });
+    if (!byIdx.has(bestI)) byIdx.set(bestI, []);
+    byIdx.get(bestI).push(n);
+  }
+  const noteMarks = [...byIdx.entries()].map(([idx, items]) => ({ idx, items }));
+  const noteIdxs = noteMarks.map(m => m.idx);
   return (
     <div style={{ background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 14px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", height: 16, marginBottom: 2 }}>
@@ -4376,12 +4402,29 @@ function ListingTrendStack({ series, prevSeries, tr }) {
           {hovDate ? fmtD(hovDate) : `${fmtD(series[0].date)} – ${fmtD(series[series.length - 1].date)}`}
         </span>
       </div>
+      {/* Pins row: 📌 at each pinned date, aligned with the vertical guides below. */}
+      {noteMarks.length > 0 && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 2 }}>
+          <div style={{ width: 80, flexShrink: 0 }} />
+          <div style={{ position: "relative", flex: 1, minWidth: 0, height: 16 }}>
+            {noteMarks.map(({ idx, items }, k) => {
+              const isGlobal = items.some(n => n.product_id === null);
+              const label = items.map(n => `${fmtD(n.note_date)} — ${n.text}${n.product_id === null ? " (global)" : ""}`).join("\n");
+              return (
+                <span key={k} title={label}
+                  style={{ position: "absolute", left: `${(xOfN(idx) / NW) * 100}%`, transform: "translateX(-50%)",
+                    fontSize: 11, lineHeight: "16px", cursor: "help", color: isGlobal ? "#A78BFA" : "#F59E0B" }}>📌</span>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {metrics.map(m => (
           <TrendChart key={m.key} title={m.title} color={m.color} invert={m.invert} good={m.good} fmt={m.fmt}
             data={series.map(s => ({ date: s.date, value: s[m.key] }))}
             prev={prevSeries ? prevSeries.map(s => s[m.key]) : null}
-            hoverIdx={hoverIdx} onHover={handleHover} />
+            hoverIdx={hoverIdx} onHover={handleHover} noteIdxs={noteIdxs} />
         ))}
       </div>
       {/* Shared floating tooltip — lists every metric's value for the hovered day
@@ -4697,6 +4740,10 @@ const ProductsPage = ({ workspaceId }) => {
       setGlobalNotes(glob);
     } catch {}
   };
+
+  // Notes power the pins on both the per-ASIN sparklines and the by-listing trend stack —
+  // load them all up front so the by-listing view shows them without per-chart fetches.
+  useEffect(() => { loadAllNotes(); }, [workspaceId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleHistory = async (id) => {
     const wasExpanded = expandedIds.has(id);
@@ -5265,7 +5312,8 @@ const ProductsPage = ({ workspaceId }) => {
                       <div style={{ marginTop: 12 }}>
                         {loadingTs && !ts
                           ? <div style={{ fontSize: 12, color: "var(--tx3)", padding: "8px 0" }}>{tr("products.loading")}</div>
-                          : <ListingTrendStack series={ts?.aggregate} prevSeries={ts?.prev?.aggregate} tr={tr} />}
+                          : <ListingTrendStack series={ts?.aggregate} prevSeries={ts?.prev?.aggregate} tr={tr}
+                              notes={[...L.children.flatMap(c => notes[c.id] || []), ...globalNotes]} />}
                       </div>
                     )}
 
