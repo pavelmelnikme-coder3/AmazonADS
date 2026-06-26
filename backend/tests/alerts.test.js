@@ -227,7 +227,9 @@ describe("PUT /alerts/configs/:id", () => {
 
   it("updates alert config and returns it", async () => {
     const updated = { ...SAMPLE_CONFIG, name: "Updated Alert" };
-    dbQuery.mockResolvedValueOnce({ rows: [updated] });
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ conditions: {} }] }) // SELECT existing (schedule preserve)
+      .mockResolvedValueOnce({ rows: [updated] });           // UPDATE
 
     const res = await request(app).put(`/alerts/configs/${CFG_ID}`).send(VALID_PAYLOAD);
     expect(res.status).toBe(200);
@@ -235,7 +237,9 @@ describe("PUT /alerts/configs/:id", () => {
   });
 
   it("returns 404 when config not found", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery
+      .mockResolvedValueOnce({ rows: [] }) // SELECT existing (schedule preserve) → none
+      .mockResolvedValueOnce({ rows: [] }); // UPDATE → not found
 
     const res = await request(app).put(`/alerts/configs/nonexistent`).send(VALID_PAYLOAD);
     expect(res.status).toBe(404);

@@ -595,7 +595,7 @@ async function evaluateProductMovers(workspaceId, cfg, workspaceName) {
   const freshCount = notified.filter((p) => p.status !== "escalated").length;
   const escalatedCount = notified.length - freshCount;
   const severity = notified.some((f) => f.metrics.some((m) => Math.abs(m.pct) >= 75)) ? "high" : "medium";
-  const title = `${notified.length} product${notified.length > 1 ? "s" : ""} moved beyond thresholds`;
+  const title = `${notified.length} product${notified.length > 1 ? "s" : ""} moved beyond thresholds · ${N}d vs prior ${N}d`;
   const summary = notified.slice(0, 25)
     .map((f) => `${f.asin}: ${f.metrics.map((m) => `${m.label} ${m.pct >= 0 ? "+" : ""}${m.pct}%`).join(", ")}`).join(" | ");
   const message = `${cfg.name ? cfg.name + ": " : ""}${notified.length} product(s) breached over the last ${N} days vs the prior ${N} days${suppressedCount ? ` (+${suppressedCount} continuing, suppressed)` : ""}. ${summary}`;
@@ -676,11 +676,31 @@ async function topSpendCampaigns(workspaceId, windowDays, limit = 6) {
   });
 }
 
+// Optional per-alert schedule: conditions.schedule = { weekday: 0-6 (0=Sun…5=Fri), hour: 0-23,
+// tz: "Europe/Berlin" }. When set, the alert only evaluates during the matching weekday+hour in
+// that timezone — the hourly cron then fires it once that day (e.g. a Friday-08:00 weekly digest).
+// No schedule → always due (the cooldown still governs frequency).
+function isScheduledDue(cfg, now = new Date()) {
+  const s = cfg.conditions && cfg.conditions.schedule;
+  if (!s || s.weekday == null || s.hour == null) return true;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: s.tz || "UTC", weekday: "short", hour: "2-digit", hourCycle: "h23",
+    }).formatToParts(now);
+    const wdMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    const wd = wdMap[parts.find((p) => p.type === "weekday")?.value];
+    const hr = parseInt(parts.find((p) => p.type === "hour")?.value, 10);
+    return wd === Number(s.weekday) && hr === Number(s.hour);
+  } catch { return true; } // bad tz → don't silently block the alert
+}
+
 /**
  * Evaluate all active alerts for a workspace.
+ * @param {object} [opts]
+ * @param {boolean} [opts.force] - bypass per-alert schedule (manual "Check now")
  * @returns {Promise<{evaluated:number, triggered:number, emailed:number}>}
  */
-async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {}) {
+async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null, force = false } = {}) {
   const { rows: configs } = await query(
     `SELECT * FROM alert_configs WHERE workspace_id = $1 AND is_active = true`,
     [workspaceId]
@@ -691,6 +711,9 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   let triggered = 0, emailed = 0;
 
   for (const cfg of configs) {
+    // Per-alert schedule gate (e.g. a Friday-08:00 weekly digest). Manual "Check now" forces.
+    if (!force && !isScheduledDue(cfg)) continue;
+
     // Per-product BSR/orders movers — its own evaluation + digest email path.
     if (cfg.alert_type === "product_movers") {
       try {
@@ -818,4 +841,4 @@ async function evaluateWorkspaceAlerts(workspaceId, { workspaceName = null } = {
   return { evaluated: configs.length, triggered, emailed };
 }
 
-module.exports = { evaluateWorkspaceAlerts, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, aggregateMetricsRange, topSpendCampaigns, latestBsr, amazonProductUrl, PERF_METRICS, CHANGE_OPERATORS };
+module.exports = { evaluateWorkspaceAlerts, isScheduledDue, evaluateProductMovers, computeMoverFlags, detectMoverCauses, moverMetricValue, normalizeMoverConditions, moverWorstPct, partitionMovers, getRecentMoverHistory, PRODUCT_MOVER_METRICS, computeMetric, compare, formatValue, resolveRecipients, aggregateMetrics, aggregateMetricsRange, topSpendCampaigns, latestBsr, amazonProductUrl, PERF_METRICS, CHANGE_OPERATORS };

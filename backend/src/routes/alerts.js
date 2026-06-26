@@ -36,6 +36,16 @@ router.get("/configs", async (req, res, next) => {
 // POST /alerts/configs
 // Build { alertType, conditions } from a request body, validating per alert type.
 // Returns { error } on validation failure.
+// Optional delivery schedule, stored in conditions.schedule. When set, the engine only fires the
+// alert during the matching weekday+hour in `tz` (e.g. a Friday-08:00 weekly digest).
+function parseSchedule(body) {
+  const s = body.schedule;
+  if (!s || s.weekday == null || s.hour == null) return null;
+  const weekday = parseInt(s.weekday, 10), hour = parseInt(s.hour, 10);
+  if (!(weekday >= 0 && weekday <= 6) || !(hour >= 0 && hour <= 23)) return null;
+  return { weekday, hour, tz: typeof s.tz === "string" && s.tz ? s.tz : "UTC" };
+}
+
 function buildAlertConfig(body) {
   if (body.alert_type === "product_movers") {
     const ALLOWED = ["bsr", "orders", "units", "sales", "spend", "clicks", "impressions", "acos", "ctr", "cpc", "cvr", "roas", "ad_orders", "ad_sales"];
@@ -71,6 +81,8 @@ function buildAlertConfig(body) {
         ? Math.max(0, parseInt(body.cause_low_stock)) : 10, // stock ≤ this (but >0) → "low stock"
       metrics,
     };
+    const sched = parseSchedule(body);
+    if (sched) conditions.schedule = sched;
     return { alertType: "product_movers", conditions };
   }
   // Single-metric threshold alert (legacy default).
@@ -88,10 +100,10 @@ function buildAlertConfig(body) {
     if (metric === "bsr") return { error: "Percentage-change alerts are not available for BSR" };
     if (!(Number(value) > 0)) return { error: "Percentage value must be greater than 0" };
   }
-  return {
-    alertType: metric,
-    conditions: { metric, operator, value, window_days: window_days || 7, asin: asin || null },
-  };
+  const conditions = { metric, operator, value, window_days: window_days || 7, asin: asin || null };
+  const sched = parseSchedule(body);
+  if (sched) conditions.schedule = sched;
+  return { alertType: metric, conditions };
 }
 
 router.post("/configs", async (req, res, next) => {
@@ -116,6 +128,15 @@ router.put("/configs/:id", async (req, res, next) => {
     if (!name) return res.status(400).json({ error: "name required" });
     const built = buildAlertConfig(req.body);
     if (built.error) return res.status(400).json({ error: built.error });
+    // Preserve an existing delivery schedule when the client doesn't send one (no UI field yet),
+    // so editing other settings doesn't silently drop the Friday-08:00 cadence.
+    if (!built.conditions.schedule) {
+      const { rows: [ex] } = await query(
+        "SELECT conditions FROM alert_configs WHERE id=$1 AND workspace_id=$2",
+        [req.params.id, req.workspaceId]
+      );
+      if (ex?.conditions?.schedule) built.conditions.schedule = ex.conditions.schedule;
+    }
     const { rows: [config] } = await query(
       `UPDATE alert_configs
        SET name=$1, alert_type=$2, conditions=$3, channels=$4, suppression_hours=$5, updated_at=NOW()
@@ -195,7 +216,8 @@ router.get("/", async (req, res, next) => {
 router.post("/check", async (req, res, next) => {
   try {
     const { rows: [ws] } = await query("SELECT name FROM workspaces WHERE id = $1", [req.workspaceId]);
-    const result = await evaluateWorkspaceAlerts(req.workspaceId, { workspaceName: ws?.name || null });
+    // Manual run bypasses per-alert delivery schedules (so "Check now" tests fire immediately).
+    const result = await evaluateWorkspaceAlerts(req.workspaceId, { workspaceName: ws?.name || null, force: true });
     res.json(result);
   } catch (err) { next(err); }
 });
