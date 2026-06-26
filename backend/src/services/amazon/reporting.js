@@ -650,6 +650,7 @@ async function queueMetricsBackfillJobs(workspaceId, queueReportPipelineFn, date
 
   const reportTypes = [
     ["SP", "campaign"],
+    ["SP", "ad_group"],
     ["SP", "keyword"],
     ["SP", "searchTerm"],
     ["SP", "target"],
