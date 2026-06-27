@@ -302,7 +302,13 @@ Product-movers alert *(per-product period-over-period, 2026-06-03)* — set `ale
 - `data.products[].causes[]` — data-derived likely causes shown per product: **stock** (`stock_out` only when every known source is 0; `fba_empty` / `erp_empty` when only one source is known to be empty — never synthesised from missing data), `price_up`, and `ad_cut`. Demand-side causes (`price_up`/`ad_cut`) are attached only when the product breached a **volume/rank** metric they can plausibly explain — never for a pure efficiency-ratio breach like ROAS, where e.g. cutting spend would *raise* ROAS *(2026-06-23/24)*.
 - `min_orders_prev`: noise floor — order/total metrics evaluated only if the product had ≥ N orders in the prior window (BSR is never gated).
 - `product_cooldown_days` *(default 7, `0` = off)*: per-ASIN dedup — a product already alerted within this many days is **suppressed** from new alerts to cut repeat noise. `escalation_pct` *(default 25)*: a suppressed product re-surfaces ("escalated") only if its worst single-metric move grew by ≥ this many points since the last alert; the cooldown auto-resets once it elapses.
-- Fires one instance (`entity_type: "product_movers"`, breached products in `data.products[]`, plus `fresh_count` / `escalated_count` / `suppressed_count`) and one digest email. Products are split into **New** and **Worsening** with a `+N suppressed` line; if every flagged product is suppressed, nothing fires. Legacy `{ bsr_change_pct, orders_change_pct, require_both }` payloads are still accepted and converted.
+- Fires one instance (`entity_type: "product_movers"`, breached products in `data.products[]`, plus `fresh_count` / `escalated_count` / `suppressed_count`) and one digest email. Products are split into **New** and **Worsening** with a `+N suppressed` line; if every flagged product is suppressed, nothing fires. Legacy `{ bsr_change_pct, orders_change_pct, require_both }` payloads are still accepted and converted. The instance title shows the comparison window (`· Nd vs prior Nd`).
+
+**Delivery schedule** *(optional, any alert type, 2026-06-26)* — add a `schedule` object to pin the alert to a weekday + hour instead of firing whenever the cooldown elapses:
+```json
+"schedule": { "weekday": 5, "hour": 8, "tz": "Europe/Berlin" }
+```
+`weekday` 0–6 (`0`=Sun … `5`=Fri), `hour` 0–23, `tz` an IANA zone (default `UTC`). The hourly alert cron then evaluates the alert **only** during that weekday+hour in `tz` — e.g. a Friday-08:00 weekly digest. Omit for the default behaviour (every cron tick, gated only by `cooldown_hours`). `POST /alerts/check` ("Check now") ignores the schedule so manual tests fire immediately. On `PUT`, an existing schedule is preserved when the body omits it.
 
 ### PUT /alerts/configs/:id
 ### DELETE /alerts/configs/:id

@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-06-26 — Ad-data integrity (per-ASIN + ad-group) & scheduled alert digests
+
+### Fixed
+- **Per-ASIN ad spend under-reported ~46%** (`services/amazon/reporting.js`). The `spAdvertisedProduct`
+  report returns one row per *(campaign/ad group, ASIN, date)*, so a single ASIN appears in many rows
+  per day. `ingestReportData` upserted each row to key `(profile_id, amazon_id, entity_type, date)`
+  with `DO UPDATE = EXCLUDED` — an **overwrite**, so only the last campaign's row survived and the rest
+  were silently dropped. The whole Products page (PPC/ACOS/TACOS/ROAS) therefore under-counted ad
+  spend, and some advertised products showed €0. **Fix:** pre-aggregate report rows by
+  `(amazon_id, date)` (sum metrics) and upsert once per group — idempotent, and a no-op for levels
+  whose `amazon_id` is unique per day (campaign/ad_group/keyword/target). Verified on prod: window
+  advertised_product cost €856 → **€1,580.58 = exactly the SP campaign total**. History re-backfilled.
+- **SP ad-group metrics were stale/incomplete.** Two issues: (1) `["SP","ad_group"]` was missing from
+  both the daily (`scheduler.js`) and backfill (`reporting.js`) report-level lists (SB/SD had it, SP
+  didn't); (2) the SP ad-group config used `reportType: "spAdGroups"`, which Amazon rejects as invalid
+  — SP ad-group metrics come from the **`spCampaigns`** report with `groupBy: ["adGroup"]` (and
+  `campaignId/campaignName` are not valid columns at that grouping; the campaign link resolves from
+  `adGroupId`). Added SP ad_group to both lists and corrected the config. History re-backfilled.
+
+### Added
+- **Per-alert delivery schedule** (`conditions.schedule = { weekday: 0-6 (0=Sun…5=Fri), hour: 0-23, tz }`).
+  When set, the hourly alert cron only fires the alert during the matching weekday+hour in that timezone
+  — e.g. a **Friday-08:00 Europe/Berlin weekly product-movers digest** instead of a daily one. No
+  schedule → unchanged (cooldown still governs frequency). `evaluateWorkspaceAlerts({ force })` lets the
+  manual "Check now" fire immediately regardless of schedule. `parseSchedule()` validates on POST/PUT and
+  PUT preserves an existing schedule when the client omits it. Product-movers digest title now shows the
+  comparison window (`· Nd vs prior Nd`) so the 7-day period is obvious at a glance.
+- **Tests**: +3 ingest-aggregation, +4 schedule-gate. Full suite **929/929**.
+
 ## [Unreleased] — 2026-06-25 — Marketing email subsystem (Amazon SES, EU/GDPR)
 
 A new **bulk/newsletter** email pipeline on **Amazon SES** (`eu-central-1`, Frankfurt), fully separate

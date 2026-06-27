@@ -33,9 +33,13 @@ const REPORT_CONFIGS = {
         "sales1d","sales7d","sales14d","sales30d","date"],
     },
     ad_group: {
-      reportType: "spAdGroups",
+      // SP has no dedicated "spAdGroups" report type (Amazon rejects it as invalid).
+      // Ad-group metrics come from the spCampaigns report grouped by adGroup. With that
+      // groupBy, campaignId/campaignName are NOT valid columns — the campaign link is
+      // resolved from adGroupId via the ad_groups table at ingest time.
+      reportType: "spCampaigns",
       groupBy: ["adGroup"],
-      metrics: ["adGroupId","adGroupName","campaignId","campaignName",
+      metrics: ["adGroupId","adGroupName",
         "impressions","clicks","cost",
         "purchases1d","purchases7d","purchases14d","purchases30d",
         "sales1d","sales7d","sales14d","sales30d","date"],

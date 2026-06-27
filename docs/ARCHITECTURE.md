@@ -325,3 +325,40 @@ complaints don't degrade alert/invite deliverability. Region `eu-central-1` (Fra
   bounces/complaints (SNS signature-validated via `sns-validator`).
 - **Config gate**: `ses.isConfigured()` (needs `AWS_ACCESS_KEY_ID/SECRET` + `SES_FROM_EMAIL`) — unset =
   no sends, app unaffected. Operator/AWS setup: see `docs/EMAIL_SES_SETUP.md`.
+
+## 2026-06-26 changes (ad-data integrity: per-ASIN + ad-group, scheduled alert digests)
+
+### `ingestReportData` pre-aggregates by `(amazon_id, date)`
+- The `spAdvertisedProduct` report returns one row per *(campaign/ad group, ASIN, date)* — a single ASIN
+  appears in many rows per day. The upsert key is `(profile_id, amazon_id, entity_type, date)`, so writing
+  rows one-by-one with `DO UPDATE = EXCLUDED` **overwrote**: only the last campaign's row survived per
+  ASIN/day, dropping the rest. Net effect: per-ASIN advertised_product spend (the basis of the entire
+  Products page — PPC/ACOS/TACOS/ROAS) was under-counted ~46%, and overwritten-away ASINs showed €0.
+- Fix: build a `Map` keyed by `(amazon_id, date)`, **sum** every metric across the rows, then upsert once
+  per group. Idempotent (re-ingest reproduces the same sums) and a no-op for levels whose `amazon_id` is
+  already unique per day (campaign/ad_group/keyword/target). Proof on prod: a sample window's
+  advertised_product cost went €856 → **€1,580.58 = exactly the SP campaign-level total**; the full
+  90-day range reconciled to within 0.02%. History re-backfilled by re-requesting the reports (Amazon caps
+  a report range at **31 days**, so backfills chunk into ≤31-day windows).
+
+### SP ad-group report fixed (was silently failing)
+- SP ad-group metrics (`fact_metrics_daily entity_type='ad_group', campaign_type='SP'`, read by the
+  ad-groups route's "direct" branch) were frozen/incomplete because (a) `["SP","ad_group"]` was absent
+  from both report-level lists — the daily one in `scheduler.js` and the backfill one in
+  `reporting.js` (SB/SD had it, SP didn't); and (b) the SP `ad_group` config used
+  `reportType: "spAdGroups"`, which **Amazon rejects as an invalid reportTypeId**. SP ad-group data comes
+  from the **`spCampaigns`** report with `groupBy: ["adGroup"]`; at that grouping `campaignId`/
+  `campaignName` are not valid columns, so they were removed (the campaign link resolves from `adGroupId`
+  via the `ad_groups` table in `resolveEntityId`). Added SP ad_group to both lists + corrected the config;
+  history re-backfilled.
+
+### Per-alert delivery schedule
+- `conditions.schedule = { weekday: 0-6 (0=Sun…5=Fri), hour: 0-23, tz }`. `isScheduledDue(cfg, now)` in
+  `evaluate.js` computes the current weekday+hour in `tz` (via `Intl.DateTimeFormat`, fail-open on a bad
+  zone) and gates each config at the top of the `evaluateWorkspaceAlerts` loop — so the hourly alert cron
+  (`15 * * * *`) fires a scheduled alert **only** during its weekday+hour, e.g. a Friday-08:00
+  Europe/Berlin weekly product-movers digest. `evaluateWorkspaceAlerts({ force })` bypasses the gate for
+  the manual `POST /alerts/check`. `parseSchedule()` validates on POST/PUT; PUT carries an existing
+  schedule forward when the client omits it (no UI field yet). The product-movers digest title now carries
+  the comparison window (`· Nd vs prior Nd`). Cooldown for the scheduled movers was set to 120h (< the 168h
+  between Fridays) so the weekly run is never blocked by a not-quite-elapsed cooldown.
