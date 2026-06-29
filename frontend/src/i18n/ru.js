@@ -223,6 +223,7 @@ export default {
     spApiWarning: "SP-API не настроен — добавьте SP_API_* в .env для включения синхронизации BSR",
     refresh: "Обновить BSR",
     history: "История",
+    note: "Заметка",
     expandAll: "Раскрыть все",
     collapseAll: "Свернуть все",
     expandAllHint: "Открыть историю BSR для всех видимых товаров",

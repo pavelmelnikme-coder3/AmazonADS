@@ -223,6 +223,7 @@ export default {
     spApiWarning: "SP-API not configured — add SP_API_* vars to .env to enable BSR sync",
     refresh: "Refresh BSR",
     history: "History",
+    note: "Note",
     expandAll: "Expand all",
     collapseAll: "Collapse all",
     expandAllHint: "Open BSR history for every visible product",

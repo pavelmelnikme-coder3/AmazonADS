@@ -4596,7 +4596,9 @@ const ProductsPage = ({ workspaceId }) => {
   const [filterAds, setFilterAds]     = useState("all"); // all | advertised | not_advertised
   const [sortBy, setSortBy] = useState("bsr");
   // Listing grouping (parent ASIN → variation family) + lazy trend charts.
-  const [groupByListing, setGroupByListing] = useState(true);
+  // Default to the per-ASIN view on load / first entry; user can switch to
+  // listing grouping via the toggle.
+  const [groupByListing, setGroupByListing] = useState(false);
   const [expandedListings, setExpandedListings] = useState(() => new Set());      // listing rows showing their child ASINs
   const [listingChartsOpen, setListingChartsOpen] = useState(() => new Set());    // listing IDs showing the aggregate charts
   const [childChartsOpen, setChildChartsOpen] = useState(() => new Set());        // child ASINs showing per-ASIN charts
@@ -4807,6 +4809,25 @@ const ProductsPage = ({ workspaceId }) => {
       return next;
     });
     if (wasExpanded) { setAddingNote(null); return; }
+    const tasks = [];
+    if (!history[id]) tasks.push(fetchHistory(id, histStart, histEnd));
+    tasks.push(loadNotes(id));
+    await Promise.all(tasks);
+  };
+
+  // "Note" button in the row header: expands the history panel (so the chart +
+  // note form are visible) and opens the add-note form. If the row is already
+  // expanded, just toggles the note form open/closed.
+  const handleNote = async (id) => {
+    const resetForm = () => setNoteForm({ date: new Date().toISOString().slice(0, 10), text: "", forAll: false });
+    if (expandedIds.has(id)) {
+      setAddingNote(prev => (prev === id ? null : id));
+      resetForm();
+      return;
+    }
+    setExpandedIds(prev => new Set(prev).add(id));
+    setAddingNote(id);
+    resetForm();
     const tasks = [];
     if (!history[id]) tasks.push(fetchHistory(id, histStart, histEnd));
     tasks.push(loadNotes(id));
@@ -5608,6 +5629,14 @@ const ProductsPage = ({ workspaceId }) => {
                       {isExpanded ? <ChevronUp size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> : <ChevronDown size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />} {tr("products.history")}
                     </button>
                     <button
+                      onClick={() => handleNote(p.id)}
+                      className="btn btn-ghost"
+                      style={{ fontSize: 11, padding: "4px 10px", color: addingNote === p.id ? "var(--amb)" : undefined }}
+                      title={tr("products.note")}
+                    >
+                      📌 {tr("products.note")}
+                    </button>
+                    <button
                       onClick={() => handleRefresh(p.id)}
                       disabled={isRefreshing}
                       className="btn btn-ghost"
@@ -5633,12 +5662,6 @@ const ProductsPage = ({ workspaceId }) => {
                         textTransform: "uppercase", letterSpacing: ".06em" }}>
                         BSR History ({hist.filter(s => s.best_rank).length} points)
                       </span>
-                      <button
-                        onClick={() => { setAddingNote(addingNote === p.id ? null : p.id); setNoteForm({ date: new Date().toISOString().slice(0, 10), text: "", forAll: false }); }}
-                        className="btn btn-ghost"
-                        style={{ fontSize: 10, padding: "3px 8px", color: "var(--amb)" }}>
-                        📌 + Заметка
-                      </button>
                     </div>
 
                     {/* Add note form */}
@@ -11592,7 +11615,7 @@ const AnalyticsPage = ({ workspaceId }) => {
                 {detailColgroup}
                 <thead>
                   <tr style={{ background:"var(--s2)", borderBottom:"1px solid var(--b2)" }}>
-                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1, position:"relative" }}>
+                    <th style={{ padding:"8px 10px", textAlign:"left", whiteSpace:"nowrap", position:"sticky", left:0, background:"var(--s2)", zIndex:1 }}>
                       {tr("analytics.colProduct")}{detailRH(0)}
                     </th>
                     <SortTh label={tr("analytics.colLabel")} k="label" onSort={toggleSort} sortK={sortKey} sortD={sortDir} style={{ padding:"8px 6px", textAlign:"center" }} handle={detailRH(1)} />

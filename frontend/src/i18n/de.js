@@ -223,6 +223,7 @@ export default {
     spApiWarning: "SP-API nicht konfiguriert — füge SP_API_* Variablen zur .env hinzu",
     refresh: "BSR aktualisieren",
     history: "Verlauf",
+    note: "Notiz",
     expandAll: "Alle öffnen",
     collapseAll: "Alle schließen",
     expandAllHint: "BSR-Verlauf für alle sichtbaren Produkte öffnen",
