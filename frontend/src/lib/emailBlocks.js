@@ -97,7 +97,10 @@ function cleanInlineHtml(html) {
   container.innerHTML = html;
   const unwrap = (node) => {
     [...node.childNodes].forEach((child) => {
-      if (child.nodeType !== 1) return; // text/comment nodes pass through untouched
+      if (child.nodeType === 8) { node.removeChild(child); return; } // strip comment nodes —
+      // Outlook-only markup is commonly hidden as <!--[if mso]>...VML...<![endif]--> and
+      // would otherwise leak its literal (unparsed) contents straight into the text block.
+      if (child.nodeType !== 1) return; // text nodes pass through untouched
       unwrap(child);
       if (INLINE_ALLOW.has(child.tagName)) {
         const href = child.tagName === "A" ? child.getAttribute("href") : null;
@@ -120,15 +123,23 @@ function looksLikeButton(a) {
   return /background(-color)?\s*:/.test(style) && /display\s*:\s*(inline-block|block)/.test(style);
 }
 
+// Newsletter2Go/Outlook table templates pepper layout cells with invisible filler
+// characters (soft hyphen, zero-width space/joiners) purely to control spacing — these
+// must not count as "real" text or every such filler <td> becomes a spurious blank block.
+const INVISIBLE_RE = /[\u00ad\u200b\u200c\u200d\ufeff]/g;
+const hasRealText = (el) => el.textContent.replace(INVISIBLE_RE, "").trim().length > 0;
+
 /**
  * Best-effort HTML -> blocks conversion for switching a legacy raw-HTML campaign into the
  * visual editor. Inherently heuristic — arbitrary email templates (nested tables, VML
  * button fallbacks, mso- conditional markup) can't be perfectly reconstructed as a
  * single-column block list. Extracts, in document order: images, button-like links,
- * and paragraph/heading/list text — anything else (layout tables, spacer cells, the
- * <style> block itself) is dropped since none of it survives into the compiled output
- * anyway. Returns a single default text block if nothing recognizable was found.
+ * and text — anything else (layout tables, spacer cells, the <style> block itself) is
+ * dropped since none of it survives into the compiled output anyway. Returns a single
+ * default text block if nothing recognizable was found.
  */
+const BLOCK_LEVEL_SELECTOR = "p, div, td, th, li, h1, h2, h3, h4, table";
+
 export function htmlToBlocks(html) {
   const doc = new DOMParser().parseFromString(html || "", "text/html");
   doc.querySelectorAll("style, script").forEach((el) => el.remove());
@@ -137,7 +148,7 @@ export function htmlToBlocks(html) {
   const seenImgSrc = new Set();
   const seenText = new Set();
 
-  doc.body.querySelectorAll("img, a, p, h1, h2, h3, h4, li").forEach((el) => {
+  doc.body.querySelectorAll(`img, a, ${BLOCK_LEVEL_SELECTOR}`).forEach((el) => {
     if (el.tagName === "IMG") {
       const src = el.getAttribute("src");
       if (!src || seenImgSrc.has(src)) return;
@@ -164,16 +175,26 @@ export function htmlToBlocks(html) {
       });
       return;
     }
-    // Text-bearing element: skip if it's button text (already captured above), just wraps
-    // an image, or is an empty spacer paragraph (e.g. <p><br></p> used for vertical gaps).
-    if (el.closest("a") && looksLikeButton(el.closest("a"))) return;
-    if (el.querySelector("img")) return;
-    if (!el.textContent.trim()) return;
+    // Text-bearing element. TABLE itself is never a text leaf (it's only in the selector so
+    // the "does this have a nested block descendant" check below can see table boundaries).
+    if (el.tagName === "TABLE") return;
+    // DIV/TD/TH are common alternatives to <p> for paragraph text (Mailchimp classic,
+    // hand-built table templates, ...) — only treat them as a leaf when they have no
+    // nested block-level descendant, otherwise the ancestor would duplicate whatever its
+    // descendant already contributes (e.g. a <td> wrapping a <p> should yield just the <p>).
+    if (["DIV", "TD", "TH"].includes(el.tagName) && el.querySelector(BLOCK_LEVEL_SELECTOR)) return;
+    if (el.closest("a") && looksLikeButton(el.closest("a"))) return; // it's a button's own label
+    if (el.querySelector("img")) return; // pure image wrapper
+    if ([...el.querySelectorAll("a")].some(looksLikeButton)) return; // wraps a button (+ its mso/VML fallback comments)
+    if (!hasRealText(el)) return; // empty / spacer (e.g. <p><br></p>, "&nbsp;", soft-hyphen filler cells)
     const cleaned = cleanInlineHtml(el.innerHTML);
     if (!cleaned || seenText.has(cleaned)) return;
     seenText.add(cleaned);
-    const tag = /^H[1-4]$/.test(el.tagName) ? "p" : (el.tagName === "LI" ? "li" : "p"); // compiled output only supports <p>-level text
-    blocks.push({ ...newBlock("text"), html: `<${tag}>${cleaned}</${tag}>` });
+    if (el.tagName === "LI") {
+      blocks.push({ ...newBlock("text"), html: `<ul><li>${cleaned}</li></ul>` });
+    } else {
+      blocks.push({ ...newBlock("text"), html: `<p>${cleaned}</p>` }); // compiled output only supports <p>-level text
+    }
   });
 
   return blocks.length ? blocks : [newBlock("text")];
