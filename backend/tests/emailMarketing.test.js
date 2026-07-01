@@ -95,6 +95,52 @@ describe("POST /contacts/import-file", () => {
   });
 });
 
+describe("POST /campaigns — content_blocks", () => {
+  test("persists content_blocks when provided", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID, content_blocks: { version: 1, blocks: [] } }] });
+    const res = await request(app()).post("/email-marketing/campaigns")
+      .send({ name: "C", content_blocks: { version: 1, blocks: [] } });
+    expect(res.status).toBe(201);
+    const params = dbQuery.mock.calls[0][1];
+    expect(JSON.parse(params[8])).toEqual({ version: 1, blocks: [] });
+  });
+
+  test("content_blocks defaults to null (legacy raw-HTML campaigns)", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID }] });
+    await request(app()).post("/email-marketing/campaigns").send({ name: "C" });
+    const params = dbQuery.mock.calls[0][1];
+    expect(params[8]).toBeNull();
+  });
+});
+
+describe("PUT /campaigns/:id — content_blocks explicit-null handling", () => {
+  test("omitting content_blocks leaves the column untouched (CASE branch false)", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID }] });
+    await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ name: "renamed" });
+    const params = dbQuery.mock.calls[0][1];
+    expect(params[9]).toBe(false);  // hasContentBlocks
+    expect(params[10]).toBeNull();
+  });
+
+  test("explicit content_blocks:null actually nulls the column (switch to HTML mode)", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID, content_blocks: null }] });
+    await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ content_blocks: null });
+    const params = dbQuery.mock.calls[0][1];
+    expect(params[9]).toBe(true);  // hasContentBlocks — CASE takes the "set it" branch
+    expect(params[10]).toBe("null"); // JSON.stringify(null) → the JSON scalar null, cast via ::jsonb
+    const sql = dbQuery.mock.calls[0][0];
+    expect(sql).toMatch(/CASE WHEN \$10 THEN \$11::jsonb ELSE content_blocks END/);
+  });
+
+  test("explicit content_blocks:{...} sets the new value", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID }] });
+    await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ content_blocks: { version: 1, blocks: [{ id: "b1", type: "text" }] } });
+    const params = dbQuery.mock.calls[0][1];
+    expect(params[9]).toBe(true);
+    expect(JSON.parse(params[10])).toEqual({ version: 1, blocks: [{ id: "b1", type: "text" }] });
+  });
+});
+
 describe("POST /campaigns/:id/send guards", () => {
   test("400 when SES not configured", async () => {
     ses.isConfigured.mockReturnValue(false);

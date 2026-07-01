@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
+import EmailBlockEditor from "./components/EmailBlockEditor.jsx";
+import { newBlock, compileBlocksToHtml, buildPreviewDoc } from "./lib/emailBlocks.js";
 import {
   Activity, Megaphone, Tag, Package, Newspaper,
   Layers, Workflow, Bell, Sparkles, History, Cable, Cog, Warehouse,
@@ -16331,7 +16333,10 @@ const Field = ({ label, children }) => (
     {children}
   </div>
 );
-const EMPTY_CAMPAIGN = { name: "", subject: "", from_name: "", from_email: "", reply_to: "", html_body: "", segment_id: "" };
+const EMPTY_CAMPAIGN = () => ({
+  name: "", subject: "", from_name: "", from_email: "", reply_to: "", html_body: "", segment_id: "",
+  content_blocks: { version: 1, blocks: [newBlock("text")] }, attachments: [],
+});
 
 const EmailMarketingPage = ({ workspaceId }) => {
   const { t } = useI18n();
@@ -16352,9 +16357,12 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
+  const hostedFileRef = useRef(null);
+  const smtpFileRef = useRef(null);
 
   const putReq = (p, b) => apiFetch(p, { method: "PUT", body: JSON.stringify(b) });
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
+  const attachmentTotalBytes = (list) => (list || []).reduce((s, a) => s + (a.size || 0), 0);
 
   const loadContacts = () => apiFetch(`/email-marketing/contacts?limit=200${statusFilter ? `&status=${statusFilter}` : ""}`)
     .then(d => setContacts(d?.data || [])).catch(() => {});
@@ -16394,14 +16402,25 @@ const EmailMarketingPage = ({ workspaceId }) => {
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
 
+  // Compiles content_blocks -> html_body (block mode) and saves the campaign, creating it
+  // on first save. Used by Save, Send test, and the attachment uploaders (which need a
+  // campaign id to attach to) — none of them close the composer.
+  async function ensureSaved() {
+    const html_body = composer.content_blocks ? compileBlocksToHtml(composer.content_blocks) : composer.html_body;
+    const body = { ...composer, html_body, segment_id: composer.segment_id || null };
+    if (composer.id) { await putReq(`/email-marketing/campaigns/${composer.id}`, body); return composer.id; }
+    const c = await post("/email-marketing/campaigns", body);
+    setComposer(cur => ({ ...cur, id: c.id }));
+    loadCampaigns();
+    return c.id;
+  }
+
   async function saveCampaign() {
     setErr("");
     if (!composer.name) { setErr(t("email.needName")); return; }
     setBusy(true);
     try {
-      const body = { ...composer, segment_id: composer.segment_id || null };
-      if (composer.id) await putReq(`/email-marketing/campaigns/${composer.id}`, body);
-      else await post("/email-marketing/campaigns", body);
+      await ensureSaved();
       setComposer(null); loadCampaigns();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
@@ -16411,14 +16430,62 @@ const EmailMarketingPage = ({ workspaceId }) => {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testEmail)) { setErr(t("email.needTestEmail")); return; }
     setBusy(true);
     try {
-      // Save first so the test reflects current edits, then send.
-      const body = { ...composer, segment_id: composer.segment_id || null };
-      let id = composer.id;
-      if (id) await putReq(`/email-marketing/campaigns/${id}`, body);
-      else { const c = await post("/email-marketing/campaigns", body); id = c.id; setComposer(c); loadCampaigns(); }
+      const id = await ensureSaved(); // save first so the test reflects current edits
       await post(`/email-marketing/campaigns/${id}/test`, { email: testEmail });
       flash(t("email.testSent", { email: testEmail }));
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  const updateBlocks = (newBlocks) => setComposer(c => ({ ...c, content_blocks: { ...(c.content_blocks || { version: 1 }), blocks: newBlocks } }));
+
+  function switchToHtmlMode() {
+    if (!window.confirm(t("email.editorSwitchToHtmlConfirm"))) return;
+    setComposer(c => ({ ...c, html_body: compileBlocksToHtml(c.content_blocks), content_blocks: null }));
+  }
+  function switchToBlocksMode() {
+    if (!window.confirm(t("email.editorSwitchToBlocksConfirm"))) return;
+    setComposer(c => ({ ...c, content_blocks: { version: 1, blocks: [] } }));
+  }
+
+  // Image block uploads — hosted on the backend, referenced by URL from block content.
+  async function uploadImage(file) {
+    const fd = new FormData();
+    fd.append("file", file);
+    return apiFetch("/email-marketing/uploads/image", { method: "POST", body: fd });
+  }
+
+  // Hosted-file link (price list / presentation) — uploaded once, URL copied to the
+  // clipboard so it can be pasted into a Button/Text link or the UTM builder. This is how
+  // real ESPs handle campaign attachments (no per-recipient bandwidth/deliverability hit).
+  async function uploadHostedFile(file) {
+    setBusy(true); setErr("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await apiFetch("/email-marketing/uploads/file", { method: "POST", body: fd });
+      try { await navigator.clipboard.writeText(res.url); } catch {}
+      flash(`${t("email.attachmentUploadHosted")}: ${res.url}`);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  // True SMTP attachment — embedded in every sent email. Needs a saved campaign id.
+  async function uploadSmtpAttachment(file) {
+    setBusy(true); setErr("");
+    try {
+      const id = await ensureSaved();
+      const fd = new FormData();
+      fd.append("file", file);
+      const updated = await apiFetch(`/email-marketing/campaigns/${id}/attachments`, { method: "POST", body: fd });
+      setComposer(c => ({ ...c, attachments: updated.attachments }));
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function removeSmtpAttachment(attId) {
+    if (!composer.id) return;
+    try {
+      const updated = await del(`/email-marketing/campaigns/${composer.id}/attachments/${attId}`);
+      setComposer(c => ({ ...c, attachments: updated.attachments }));
+    } catch (e) { setErr(e.message); }
   }
 
   async function sendCampaign(c) {
@@ -16460,7 +16527,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
       {tab === "campaigns" && (
         <div>
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-            <button className="btn btn-primary" onClick={() => { setComposer({ ...EMPTY_CAMPAIGN }); setTestEmail(""); }}><Plus size={14} /> {t("email.newCampaign")}</button>
+            <button className="btn btn-primary" onClick={() => { setComposer(EMPTY_CAMPAIGN()); setTestEmail(""); }}><Plus size={14} /> {t("email.newCampaign")}</button>
           </div>
           <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -16483,7 +16550,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
                     <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
                       <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => openStats(c)}>{t("email.stats")}</button>
                       {["draft", "scheduled", "paused"].includes(c.status) && <>
-                        <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setComposer({ ...EMPTY_CAMPAIGN, ...c, segment_id: c.segment_id || "" }); setTestEmail(""); }}>{t("common.edit") || "Edit"}</button>
+                        <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => { setComposer({ ...EMPTY_CAMPAIGN(), ...c, segment_id: c.segment_id || "" }); setTestEmail(""); }}>{t("common.edit") || "Edit"}</button>
                         <button className="btn btn-primary" style={{ fontSize: 11, padding: "3px 8px" }} disabled={busy} onClick={() => sendCampaign(c)}><Send size={11} /> {t("email.send")}</button>
                       </>}
                     </td>
@@ -16594,7 +16661,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
       {/* ── Composer modal ── */}
       {composer && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "30px 16px" }} onClick={() => setComposer(null)}>
-          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 920, maxWidth: "96vw" }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 960, maxWidth: "96vw" }}>
             <h3 style={{ margin: "0 0 14px", fontSize: 17 }}>{composer.id ? t("email.editCampaign") : t("email.newCampaign")}</h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
               <div>
@@ -16610,20 +16677,67 @@ const EmailMarketingPage = ({ workspaceId }) => {
                     {segments.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </Field>
-                <Field label={t("email.htmlBody")}>
-                  <textarea value={composer.html_body} onChange={e => setComposer(c => ({ ...c, html_body: e.target.value }))} rows={12} style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12 }} placeholder="<h1>Hi {{first_name}}</h1> …" />
-                </Field>
+
+                <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                  <button type="button" className={`btn ${composer.content_blocks ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12 }}
+                    onClick={switchToBlocksMode} disabled={!!composer.content_blocks}>{t("email.editorVisual")}</button>
+                  <button type="button" className={`btn ${!composer.content_blocks ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12 }}
+                    onClick={switchToHtmlMode} disabled={!composer.content_blocks}>{t("email.editorHtml")}</button>
+                </div>
+
+                {composer.content_blocks ? (
+                  <EmailBlockEditor blocks={composer.content_blocks.blocks} campaignName={composer.name}
+                    onChange={updateBlocks} onUploadImage={uploadImage} />
+                ) : (
+                  <Field label={t("email.htmlBody")}>
+                    <textarea value={composer.html_body} onChange={e => setComposer(c => ({ ...c, html_body: e.target.value }))} rows={12} style={{ width: "100%", fontFamily: "var(--mono)", fontSize: 12 }} placeholder="<h1>Hi {{first_name}}</h1> …" />
+                  </Field>
+                )}
                 <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t("email.mergeHint")}</div>
               </div>
               <div>
                 <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 6 }}>{t("email.preview")}</div>
-                <div style={{ border: "1px solid var(--b2)", borderRadius: 8, padding: 14, background: "#fff", color: "#111", minHeight: 280, overflow: "auto", fontSize: 14 }}
-                  dangerouslySetInnerHTML={{ __html: (composer.html_body || "").replace(/\{\{\s*first_name\s*\}\}/g, "Pavel").replace(/\{\{\s*\w+\s*\}\}/g, "") }} />
+                <iframe title="email-preview" sandbox="allow-same-origin"
+                  srcDoc={buildPreviewDoc(composer.content_blocks ? compileBlocksToHtml(composer.content_blocks) : (composer.html_body || ""))}
+                  style={{ border: "1px solid var(--b2)", borderRadius: 8, width: "100%", minHeight: 280, background: "#fff" }} />
                 <div style={{ marginTop: 12, padding: 10, border: "1px dashed var(--b2)", borderRadius: 8 }}>
                   <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 6 }}>{t("email.sendTest")}</div>
                   <div style={{ display: "flex", gap: 6 }}>
                     <input value={testEmail} onChange={e => setTestEmail(e.target.value)} placeholder="you@example.com" style={{ flex: 1 }} />
                     <button className="btn btn-ghost" disabled={busy} onClick={sendTest}>{t("email.sendTest")}</button>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 12, padding: 10, border: "1px dashed var(--b2)", borderRadius: 8 }}>
+                  <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 8 }}>{t("email.attachments")}</div>
+
+                  <div style={{ marginBottom: 10 }}>
+                    <input ref={hostedFileRef} type="file" accept=".pdf,.ppt,.pptx,.xls,.xlsx" style={{ display: "none" }}
+                      onChange={e => { const f = e.target.files?.[0]; if (f) uploadHostedFile(f); e.target.value = ""; }} />
+                    <button type="button" className="btn btn-ghost" style={{ fontSize: 12, width: "100%" }} disabled={busy}
+                      onClick={() => hostedFileRef.current?.click()}>{t("email.attachmentUploadHosted")}</button>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 4 }}>{t("email.attachmentHostedHint")}</div>
+                  </div>
+
+                  <div>
+                    <input ref={smtpFileRef} type="file" accept=".pdf,.ppt,.pptx,.xls,.xlsx" style={{ display: "none" }}
+                      onChange={e => { const f = e.target.files?.[0]; if (f) uploadSmtpAttachment(f); e.target.value = ""; }} />
+                    <button type="button" className="btn btn-ghost" style={{ fontSize: 12, width: "100%" }} disabled={busy}
+                      onClick={() => smtpFileRef.current?.click()}>{t("email.attachmentUploadSmtp")}</button>
+                    <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 4 }}>{t("email.attachmentSmtpHint")}</div>
+                    {!!(composer.attachments || []).length && (
+                      <div style={{ marginTop: 8 }}>
+                        {composer.attachments.map(a => (
+                          <div key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 8px", background: "var(--s2)", borderRadius: 6, marginBottom: 4, fontSize: 11 }}>
+                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.filename} · {(a.size / 1024).toFixed(0)} KB</span>
+                            <button className="btn btn-ghost" style={{ padding: "1px 6px", fontSize: 11 }} onClick={() => removeSmtpAttachment(a.id)}>×</button>
+                          </div>
+                        ))}
+                        {attachmentTotalBytes(composer.attachments) > 2 * 1024 * 1024 && (
+                          <div style={{ fontSize: 10, color: "var(--amb)", marginTop: 4 }}>{t("email.attachmentSizeWarning")}</div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

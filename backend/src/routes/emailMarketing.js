@@ -9,6 +9,8 @@
  */
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const multer = require("multer");
 const router = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
@@ -18,13 +20,28 @@ const { writeAudit } = require("./audit");
 const { isConfigured, sendBulkEmail } = require("../services/email/provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("../services/email/render");
 const { parseContactsFile } = require("../services/email/importParser");
+const { UPLOAD_ROOT, imageStorage, fileStorage, attachmentStorage, buildAttachmentList, IMAGE_EXT_BY_MIME, FILE_EXT_ALLOW } = require("../services/email/uploads");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+const uploadImage = multer({ storage: imageStorage(), limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => IMAGE_EXT_BY_MIME[file.mimetype] ? cb(null, true) : cb(new Error("Unsupported file type")) });
+const uploadFile = multer({ storage: fileStorage(), limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => FILE_EXT_ALLOW.includes(path.extname(file.originalname).toLowerCase()) ? cb(null, true) : cb(new Error("Unsupported file type")) });
+const uploadAttachment = multer({ storage: attachmentStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 router.use(requireAuth, requireWorkspace);
 
 const newToken = () => crypto.randomBytes(24).toString("hex");
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+
+// Wraps a multer middleware so oversize/bad-type uploads come back as a clean 400 instead
+// of falling through to the generic 500 handler (MulterError has no .status of its own).
+const withUpload = (mw) => (req, res, next) => mw(req, res, (err) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) return res.status(400).json({ error: `Upload error: ${err.message}` });
+  if (err.message === "Unsupported file type") return res.status(400).json({ error: err.message });
+  next(err);
+});
 
 // Shared insert path for both /contacts/import (pasted emails) and /contacts/import-file
 // (parsed spreadsheet). ON CONFLICT keeps re-imports idempotent.
@@ -81,13 +98,7 @@ router.post("/contacts/import", async (req, res, next) => {
 
 // Import from an uploaded .xlsx/.csv file — columns (email/first name/last name) are
 // auto-detected from the header row; any other columns are kept as merge-tag attributes.
-router.post("/contacts/import-file", (req, res, next) => {
-  upload.single("file")(req, res, (err) => {
-    if (!err) return next();
-    if (err instanceof multer.MulterError) return res.status(400).json({ error: `Upload error: ${err.message}` });
-    next(err);
-  });
-}, async (req, res, next) => {
+router.post("/contacts/import-file", withUpload(upload.single("file")), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: "file required (field 'file')" });
     const { consent_source, consent_method = "import" } = req.body;
@@ -189,12 +200,13 @@ router.get("/campaigns/:id", async (req, res, next) => {
 
 router.post("/campaigns", async (req, res, next) => {
   try {
-    const { name, subject = "", from_name, from_email, reply_to, html_body = "", segment_id = null } = req.body;
+    const { name, subject = "", from_name, from_email, reply_to, html_body = "", segment_id = null, content_blocks = null } = req.body;
     if (!name) return res.status(400).json({ error: "name required" });
     const { rows: [c] } = await query(
-      `INSERT INTO email_campaigns (workspace_id, name, subject, from_name, from_email, reply_to, html_body, segment_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [req.workspaceId, name, subject, from_name || null, from_email || null, reply_to || null, html_body, segment_id, req.user.id]
+      `INSERT INTO email_campaigns (workspace_id, name, subject, from_name, from_email, reply_to, html_body, segment_id, content_blocks, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [req.workspaceId, name, subject, from_name || null, from_email || null, reply_to || null, html_body, segment_id,
+       content_blocks ? JSON.stringify(content_blocks) : null, req.user.id]
     );
     res.status(201).json(c);
   } catch (err) { next(err); }
@@ -203,19 +215,41 @@ router.post("/campaigns", async (req, res, next) => {
 router.put("/campaigns/:id", async (req, res, next) => {
   try {
     const { name, subject, from_name, from_email, reply_to, html_body, segment_id } = req.body;
+    // content_blocks needs to be explicitly settable to NULL (switching a campaign back to
+    // raw-HTML mode) — COALESCE can't express "set to null", so use a presence check instead.
+    const hasContentBlocks = Object.prototype.hasOwnProperty.call(req.body, "content_blocks");
     // Only editable while not in-flight.
     const { rows: [c] } = await query(
       `UPDATE email_campaigns SET
          name=COALESCE($3,name), subject=COALESCE($4,subject), from_name=COALESCE($5,from_name),
          from_email=COALESCE($6,from_email), reply_to=COALESCE($7,reply_to), html_body=COALESCE($8,html_body),
-         segment_id=$9, updated_at=NOW()
+         segment_id=$9, content_blocks = CASE WHEN $10 THEN $11::jsonb ELSE content_blocks END,
+         updated_at=NOW()
        WHERE id=$1 AND workspace_id=$2 AND status IN ('draft','scheduled','paused') RETURNING *`,
       [req.params.id, req.workspaceId, name ?? null, subject ?? null, from_name ?? null,
-       from_email ?? null, reply_to ?? null, html_body ?? null, segment_id ?? null]
+       from_email ?? null, reply_to ?? null, html_body ?? null, segment_id ?? null,
+       hasContentBlocks, hasContentBlocks ? JSON.stringify(req.body.content_blocks) : null]
     );
     if (!c) return res.status(409).json({ error: "Campaign not found or not editable" });
     res.json(c);
   } catch (err) { next(err); }
+});
+
+// ─── Uploads (images / hosted files for block content) ─────────────────────────
+router.post("/uploads/image", withUpload(uploadImage.single("file")), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "file required (field 'file')" });
+  res.json({
+    url: `${process.env.APP_PUBLIC_URL || ""}/api/v1/email/uploads/images/${req.workspaceId}/${req.file.filename}`,
+    filename: req.file.filename, size: req.file.size, mime: req.file.mimetype,
+  });
+});
+
+router.post("/uploads/file", withUpload(uploadFile.single("file")), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "file required (field 'file')" });
+  res.json({
+    url: `${process.env.APP_PUBLIC_URL || ""}/api/v1/email/uploads/files/${req.workspaceId}/${req.file.filename}`,
+    filename: req.file.originalname, storedName: req.file.filename, size: req.file.size, mime: req.file.mimetype,
+  });
 });
 
 router.delete("/campaigns/:id", async (req, res, next) => {
@@ -223,7 +257,50 @@ router.delete("/campaigns/:id", async (req, res, next) => {
     const { rowCount } = await query("DELETE FROM email_campaigns WHERE id=$1 AND workspace_id=$2 AND status IN ('draft','scheduled','paused','failed')",
       [req.params.id, req.workspaceId]);
     if (!rowCount) return res.status(409).json({ error: "Campaign not found or not deletable" });
+    fs.rm(path.join(UPLOAD_ROOT, "email", "attachments", req.params.id), { recursive: true, force: true },
+      (e) => { if (e) logger.warn("Failed to clean up campaign attachment files", { campaignId: req.params.id, error: e.message }); });
     res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ─── Campaign attachments (true SMTP attachments — small files only) ───────────
+router.post("/campaigns/:id/attachments", withUpload(uploadAttachment.single("file")), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "file required (field 'file')" });
+    const { rows: [c] } = await query(
+      "SELECT attachments FROM email_campaigns WHERE id=$1 AND workspace_id=$2 AND status IN ('draft','scheduled','paused')",
+      [req.params.id, req.workspaceId]);
+    if (!c) { fs.unlink(req.file.path, () => {}); return res.status(409).json({ error: "Campaign not found or not editable" }); }
+    const existingTotal = (c.attachments || []).reduce((s, a) => s + a.size, 0);
+    if (existingTotal + req.file.size > 10 * 1024 * 1024) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: "Total attachments would exceed 10MB for this campaign — use a hosted file link instead" });
+    }
+    const entry = {
+      id: crypto.randomUUID(), filename: req.file.originalname, storedName: req.file.filename,
+      mime: req.file.mimetype, size: req.file.size, uploadedAt: new Date().toISOString(),
+    };
+    const { rows: [updated] } = await query(
+      "UPDATE email_campaigns SET attachments = attachments || $2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING attachments",
+      [req.params.id, JSON.stringify([entry])]);
+    res.json(updated);
+  } catch (err) { next(err); }
+});
+
+router.delete("/campaigns/:id/attachments/:attId", async (req, res, next) => {
+  try {
+    const { rows: [c] } = await query(
+      "SELECT attachments FROM email_campaigns WHERE id=$1 AND workspace_id=$2 AND status IN ('draft','scheduled','paused')",
+      [req.params.id, req.workspaceId]);
+    if (!c) return res.status(409).json({ error: "Campaign not found or not editable" });
+    const entry = (c.attachments || []).find((a) => a.id === req.params.attId);
+    const remaining = (c.attachments || []).filter((a) => a.id !== req.params.attId);
+    const { rows: [updated] } = await query(
+      "UPDATE email_campaigns SET attachments=$2::jsonb, updated_at=NOW() WHERE id=$1 RETURNING attachments",
+      [req.params.id, JSON.stringify(remaining)]);
+    if (entry) fs.unlink(path.join(UPLOAD_ROOT, "email", "attachments", req.params.id, entry.storedName),
+      (e) => { if (e) logger.warn("Failed to remove attachment file", { error: e.message }); });
+    res.json(updated);
   } catch (err) { next(err); }
 });
 
@@ -243,6 +320,7 @@ router.post("/campaigns/:id/test", async (req, res, next) => {
       configurationSet: process.env.SES_CONFIGURATION_SET,
       entries: [{ email, subject: `[TEST] ${applyMergeTags(c.subject || "", contactFields(fakeContact))}`,
                   html: renderHtmlForContact(c.html_body || "", fakeContact), unsubscribeToken: fakeContact.unsubscribe_token }],
+      attachments: buildAttachmentList(c.attachments, c.id),
     });
     if (r.status !== "sent") return res.status(502).json({ error: r.error || "send failed" });
     res.json({ ok: true, messageId: r.messageId });

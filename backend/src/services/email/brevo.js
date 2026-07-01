@@ -64,10 +64,11 @@ function chunk(arr, size) {
  * @param {string} [p.fromName]
  * @param {string} [p.replyTo]
  * @param {Array}  p.entries  - [{ email, subject, html, unsubscribeToken }]
+ * @param {Array}  [p.attachments] - [{ filename, path }] — true SMTP attachments, same for every recipient
  * @param {number} [p.concurrency=8]
  * @returns {Promise<Array<{email,messageId,status,error}>>}  status: sent | failed | deferred
  */
-async function sendBulkEmail({ fromEmail, fromName, replyTo, entries, concurrency = 8 }) {
+async function sendBulkEmail({ fromEmail, fromName, replyTo, entries, attachments = [], concurrency = 8 }) {
   if (!isConfigured()) {
     return entries.map((e) => ({ email: e.email, messageId: null, status: "failed", error: "Brevo not configured" }));
   }
@@ -83,6 +84,7 @@ async function sendBulkEmail({ fromEmail, fromName, replyTo, entries, concurrenc
           replyTo: replyTo || undefined,
           subject: e.subject,
           html: e.html,
+          attachments: attachments.length ? attachments : undefined,
           headers: {
             "List-Unsubscribe": `<${unsub}>`,
             "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",

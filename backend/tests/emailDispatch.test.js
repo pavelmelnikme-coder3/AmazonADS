@@ -104,6 +104,62 @@ describe("processBatch idempotency + counters", () => {
   });
 });
 
+describe("processBatch attachments", () => {
+  test("passes campaign.attachments through to provider.sendBulkEmail as {filename,path}", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: "camp1", workspace_id: "ws1", subject: "S", html_body: "B",
+        attachments: [{ id: "a1", filename: "price-list.pdf", storedName: "stored-a1.pdf", size: 100 }],
+      }] })
+      .mockResolvedValueOnce({ rows: [{ id: "c1", email: "a@b.com", attributes: {}, unsubscribe_token: "t1" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
+
+    await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
+    const call = provider.sendBulkEmail.mock.calls[0][0];
+    expect(call.attachments).toHaveLength(1);
+    expect(call.attachments[0].filename).toBe("price-list.pdf");
+    expect(call.attachments[0].path).toMatch(/email[\\/]attachments[\\/]camp1[\\/]stored-a1\.pdf$/);
+  });
+
+  test("empty/absent attachments → empty array, no warning", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ id: "camp1", workspace_id: "ws1", subject: "S", html_body: "B", attachments: [] }] })
+      .mockResolvedValueOnce({ rows: [{ id: "c1", email: "a@b.com", attributes: {}, unsubscribe_token: "t1" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
+
+    await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
+    expect(provider.sendBulkEmail.mock.calls[0][0].attachments).toEqual([]);
+  });
+
+  test("warns (doesn't throw) when attachments exist but the active provider is ses", async () => {
+    provider.name.mockReturnValueOnce("ses");
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: "camp1", workspace_id: "ws1", subject: "S", html_body: "B",
+        attachments: [{ id: "a1", filename: "f.pdf", storedName: "s.pdf", size: 10 }],
+      }] })
+      .mockResolvedValueOnce({ rows: [{ id: "c1", email: "a@b.com", attributes: {}, unsubscribe_token: "t1" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
+
+    const logger = require("../src/config/logger");
+    await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/SES.*attachments/i), expect.anything());
+  });
+});
+
 describe("dripSend daily budget", () => {
   test("stops when today's budget is exhausted", async () => {
     provider.isConfigured.mockReturnValue(true);

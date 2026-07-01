@@ -10,9 +10,32 @@ const https = require("https");
 const router = express.Router();
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
+const { resolveUploadPath } = require("../services/email/uploads");
 
 const MessageValidator = require("sns-validator");
 const snsValidator = new MessageValidator();
+
+// ── Uploaded campaign images / files (unauthenticated — mail clients have no session) ──
+const CONTENT_TYPE_BY_EXT = {
+  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+  ".pdf": "application/pdf", ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+
+function serveUpload(subdir) {
+  return (req, res) => {
+    const filePath = resolveUploadPath(subdir, req.params.id, req.params.filename);
+    if (!filePath) return res.status(404).send("Not found");
+    const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
+    res.set("Content-Type", CONTENT_TYPE_BY_EXT[ext] || "application/octet-stream");
+    res.set("Cache-Control", "public, max-age=31536000, immutable");
+    res.sendFile(filePath);
+  };
+}
+
+router.get("/uploads/images/:id/:filename", serveUpload("images"));
+router.get("/uploads/files/:id/:filename", serveUpload("files"));
 
 // ── Unsubscribe (RFC 8058) ───────────────────────────────────────────────────
 // Resolve the opaque per-contact token → mark unsubscribed + add to suppression list.

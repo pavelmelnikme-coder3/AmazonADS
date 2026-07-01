@@ -6,6 +6,7 @@ const { query } = require("../../db/pool");
 const logger = require("../../config/logger");
 const provider = require("./provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("./render");
+const { buildAttachmentList } = require("./uploads");
 
 // Messages/sec ceiling — also the batch size, so workers.js can cap at 1 batch/sec.
 const SEND_RATE = Math.max(1, parseInt(process.env.SES_MAX_SEND_RATE, 10) || 10);
@@ -96,12 +97,16 @@ async function processBatch({ campaignId, contactIds }) {
     _contactId: c.id,
   }));
 
+  if (campaign.attachments?.length && provider.name() === "ses") {
+    logger.warn("SES provider does not support attachments; they will be silently dropped", { campaignId });
+  }
   const results = await provider.sendBulkEmail({
     fromEmail: campaign.from_email || process.env.MAIL_FROM_EMAIL || process.env.SES_FROM_EMAIL,
     fromName:  campaign.from_name  || process.env.MAIL_FROM_NAME  || process.env.SES_FROM_NAME,
     replyTo:   campaign.reply_to   || process.env.MAIL_REPLY_TO   || process.env.SES_REPLY_TO,
     configurationSet: process.env.SES_CONFIGURATION_SET,
     entries,
+    attachments: buildAttachmentList(campaign.attachments, campaignId),
   });
 
   const byEmail = new Map(results.map((r) => [r.email, r]));

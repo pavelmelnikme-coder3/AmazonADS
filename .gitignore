@@ -15,5 +15,8 @@ dist/
 coverage/
 *.lcov
 
+# User-uploaded email images/files/attachments — binary, per-server, not source
+backend/uploads/
+
 # Local Claude Code config (per-machine)
 .claude/
