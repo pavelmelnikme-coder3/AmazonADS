@@ -13,7 +13,7 @@ const CAMP_ID = "camp-0001-0000-0000-000000000001";
 jest.mock("../src/db/pool", () => ({ query: jest.fn() }));
 jest.mock("../src/config/logger", () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock("../src/routes/audit", () => ({ writeAudit: jest.fn().mockResolvedValue("aud1"), updateAuditStatus: jest.fn() }));
-jest.mock("../src/services/email/ses", () => ({ isConfigured: jest.fn(), sendBulkEmail: jest.fn() }));
+jest.mock("../src/services/email/provider", () => ({ name: jest.fn().mockReturnValue("brevo"), isConfigured: jest.fn(), sendBulkEmail: jest.fn() }));
 jest.mock("../src/jobs/workers", () => ({ queueEmailCampaign: jest.fn().mockResolvedValue({ total: 3, batches: 1 }) }));
 jest.mock("../src/middleware/auth", () => ({
   requireAuth: (req, _res, next) => { req.user = { id: USER_ID, name: "T", org_id: ORG_ID }; req.orgId = ORG_ID; next(); },
@@ -21,7 +21,7 @@ jest.mock("../src/middleware/auth", () => ({
 }));
 
 const { query: dbQuery } = require("../src/db/pool");
-const ses = require("../src/services/email/ses");
+const ses = require("../src/services/email/provider");
 const { queueEmailCampaign } = require("../src/jobs/workers");
 const router = require("../src/routes/emailMarketing");
 
@@ -61,7 +61,7 @@ describe("POST /campaigns/:id/send guards", () => {
     ses.isConfigured.mockReturnValue(false);
     const res = await request(app()).post(`/email-marketing/campaigns/${CAMP_ID}/send`).send({});
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/SES not configured/i);
+    expect(res.body.error).toMatch(/not configured/i);
     expect(queueEmailCampaign).not.toHaveBeenCalled();
   });
 

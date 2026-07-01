@@ -4,13 +4,14 @@
  */
 jest.mock("../src/db/pool", () => ({ query: jest.fn() }));
 jest.mock("../src/config/logger", () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock("../src/services/email/ses", () => ({
+jest.mock("../src/services/email/provider", () => ({
+  name: jest.fn().mockReturnValue("brevo"),
   isConfigured: jest.fn().mockReturnValue(true),
   sendBulkEmail: jest.fn(),
 }));
 
 const { query: dbQuery } = require("../src/db/pool");
-const ses = require("../src/services/email/ses");
+const provider = require("../src/services/email/provider");
 
 // SES_MAX_SEND_RATE = batch size; set before requiring dispatch.
 process.env.SES_MAX_SEND_RATE = "2";
@@ -60,7 +61,7 @@ describe("processBatch idempotency + counters", () => {
       .mockResolvedValueOnce({ rows: [{ n: 0 }] }) // maybeFinish: none queued
       .mockResolvedValueOnce({ rows: [] }); // UPDATE campaign sent/sent_at
 
-    ses.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
+    provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
 
     const r = await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1", "c2"] });
     expect(r).toEqual({ sent: 1, failed: 0 });
@@ -68,7 +69,7 @@ describe("processBatch idempotency + counters", () => {
     const sel = dbQuery.mock.calls[1][0];
     expect(sel).toMatch(/s\.status = 'queued'/);
     // SES called with the rendered, merged entry
-    const entry = ses.sendBulkEmail.mock.calls[0][0].entries[0];
+    const entry = provider.sendBulkEmail.mock.calls[0][0].entries[0];
     expect(entry.subject).toBe("Hi Ann");
     expect(entry.html).toContain("<p>Ann</p>");
     // campaign marked sent once nothing queued remains
@@ -82,6 +83,69 @@ describe("processBatch idempotency + counters", () => {
       .mockResolvedValueOnce({ rows: [{ n: 2 }] });                            // maybeFinish: still queued elsewhere
     const r = await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
     expect(r).toEqual({ sent: 0, failed: 0 });
-    expect(ses.sendBulkEmail).not.toHaveBeenCalled();
+    expect(provider.sendBulkEmail).not.toHaveBeenCalled();
+  });
+
+  test("'deferred' (provider quota) leaves the send row queued, doesn't finish the campaign", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ id: "camp1", workspace_id: "ws1", subject: "S", html_body: "B" }] }) // campaign
+      .mockResolvedValueOnce({ rows: [{ id: "c1", email: "a@b.com", attributes: {}, unsubscribe_token: "t1" }] }) // queued
+      .mockResolvedValueOnce({ rows: [] })          // UPDATE campaign sent + 0
+      .mockResolvedValueOnce({ rows: [{ n: 1 }] }); // maybeFinish: still queued → no finish
+
+    provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: null, status: "deferred", error: "quota exceeded" }]);
+
+    const r = await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
+    expect(r).toEqual({ sent: 0, failed: 0 });
+    // deferred row is NOT written to email_sends (stays 'queued' for the next drip day)
+    expect(dbQuery.mock.calls.some((c) => /UPDATE email_sends SET status/.test(c[0]))).toBe(false);
+    // campaign not marked sent
+    expect(dbQuery.mock.calls.some((c) => /SET status='sent'/.test(c[0]))).toBe(false);
+  });
+});
+
+describe("dripSend daily budget", () => {
+  test("stops when today's budget is exhausted", async () => {
+    provider.isConfigured.mockReturnValue(true);
+    dbQuery.mockResolvedValueOnce({ rows: [{ n: dispatch.DAILY_CAP }] }); // sentToday == cap
+    const r = await dispatch.dripSend();
+    expect(r).toEqual({ sent: 0, budget: 0 });
+    expect(provider.sendBulkEmail).not.toHaveBeenCalled();
+  });
+
+  test("sends queued recipients up to budget, grouped by campaign", async () => {
+    provider.isConfigured.mockReturnValue(true);
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })  // sentToday → full budget
+      .mockResolvedValueOnce({ rows: [             // queued pick (LIMIT budget)
+        { campaign_id: "camp1", contact_id: "c1" },
+        { campaign_id: "camp1", contact_id: "c2" },
+      ] })
+      // processBatch("camp1", [c1,c2]):
+      .mockResolvedValueOnce({ rows: [{ id: "camp1", workspace_id: "ws1", subject: "S", html_body: "B" }] })
+      .mockResolvedValueOnce({ rows: [
+        { id: "c1", email: "a@b.com", attributes: {}, unsubscribe_token: "t1" },
+        { id: "c2", email: "b@b.com", attributes: {}, unsubscribe_token: "t2" },
+      ] })
+      .mockResolvedValueOnce({ rows: [] })  // UPDATE email_sends c1
+      .mockResolvedValueOnce({ rows: [] })  // UPDATE email_sends c2
+      .mockResolvedValueOnce({ rows: [] })  // UPDATE campaign sent + 2
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] }) // maybeFinish
+      .mockResolvedValueOnce({ rows: [] }); // UPDATE status='sent'
+
+    provider.sendBulkEmail.mockResolvedValueOnce([
+      { email: "a@b.com", messageId: "m1", status: "sent", error: null },
+      { email: "b@b.com", messageId: "m2", status: "sent", error: null },
+    ]);
+
+    const r = await dispatch.dripSend();
+    expect(r.sent).toBe(2);
+    expect(r.budget).toBe(dispatch.DAILY_CAP);
+    // budget-limited pick was ordered FIFO and bounded by LIMIT
+    const pick = dbQuery.mock.calls[1][0];
+    expect(pick).toMatch(/es\.status = 'queued' AND c\.status = 'sending'/);
+    expect(pick).toMatch(/ORDER BY c\.created_at, es\.created_at/);
+    expect(pick).toMatch(/LIMIT \$1/);
+    expect(dbQuery.mock.calls[1][1]).toEqual([dispatch.DAILY_CAP]);
   });
 });

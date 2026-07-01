@@ -141,19 +141,16 @@ async function queueBulkOperation(workspaceId, operationType, items) {
   }
 }
 
-// Prepare a marketing campaign and enqueue one job per recipient batch. Deterministic
-// jobId per batch → BullMQ dedup prevents double-enqueue; per-(campaign,contact) send rows
-// prevent double-send even if a batch job retries.
+// Prepare a marketing campaign (create per-(campaign,contact) send rows, flip to 'sending')
+// then kick an immediate drip. Actual sending is budget-gated by dispatch.dripSend() and
+// continued day-by-day by the drip cron — this keeps us under the provider's daily cap
+// (Brevo free = 300/day account-wide) instead of firing all recipients at once.
 async function queueEmailCampaign(campaignId) {
-  const { prepareCampaign } = require("../services/email/dispatch");
-  const { total, batches } = await prepareCampaign(campaignId);
-  const queue = getQueue(QUEUES.EMAIL_DISPATCH);
-  for (let i = 0; i < batches.length; i++) {
-    await queue.add("send-batch",
-      { campaignId, contactIds: batches[i] },
-      { jobId: `emailcamp:${campaignId}:batch:${i}` });
-  }
-  return { total, batches: batches.length };
+  const { prepareCampaign, dripSend } = require("../services/email/dispatch");
+  const { total } = await prepareCampaign(campaignId);
+  // Fire-and-forget: send today's budget worth now; the cron picks up the rest each day.
+  dripSend().catch((e) => logger.warn("Immediate drip after send failed", { campaignId, error: e.message }));
+  return { total };
 }
 
 // ─── Workers ──────────────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ export default {
     settings: "Настройки",
   },
   email: {
-    title: "Email-рассылки", subtitle: "Массовые рассылки через Amazon SES — по согласию, по нормам ЕС.",
+    title: "Email-рассылки", subtitle: "Массовые рассылки через Brevo — по согласию, по нормам ЕС.",
     tabCampaigns: "Кампании", tabContacts: "Контакты", tabSuppressions: "Исключения",
     newCampaign: "Новая кампания", editCampaign: "Изменить кампанию", noCampaigns: "Пока нет кампаний.",
     colName: "Название", colStatus: "Статус", colRecipients: "Получатели", colSent: "Отправлено", colOpened: "Открыли",

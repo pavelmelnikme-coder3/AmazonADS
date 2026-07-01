@@ -14,7 +14,7 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 const { writeAudit } = require("./audit");
-const { isConfigured, sendBulkEmail } = require("../services/email/ses");
+const { isConfigured, sendBulkEmail } = require("../services/email/provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("../services/email/render");
 
 router.use(requireAuth, requireWorkspace);
@@ -196,16 +196,16 @@ router.delete("/campaigns/:id", async (req, res, next) => {
 // Send a one-off test to a single address (no contact row needed; uses a throwaway token).
 router.post("/campaigns/:id/test", async (req, res, next) => {
   try {
-    if (!isConfigured()) return res.status(400).json({ error: "SES not configured" });
+    if (!isConfigured()) return res.status(400).json({ error: "Email sender not configured" });
     const { email } = req.body;
     if (!isEmail(email)) return res.status(400).json({ error: "valid email required" });
     const { rows: [c] } = await query("SELECT * FROM email_campaigns WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     if (!c) return res.status(404).json({ error: "Campaign not found" });
     const fakeContact = { email, first_name: "", last_name: "", attributes: {}, unsubscribe_token: "test-" + newToken() };
     const [r] = await sendBulkEmail({
-      fromEmail: c.from_email || process.env.SES_FROM_EMAIL,
-      fromName:  c.from_name  || process.env.SES_FROM_NAME,
-      replyTo:   c.reply_to   || process.env.SES_REPLY_TO,
+      fromEmail: c.from_email || process.env.MAIL_FROM_EMAIL || process.env.SES_FROM_EMAIL,
+      fromName:  c.from_name  || process.env.MAIL_FROM_NAME  || process.env.SES_FROM_NAME,
+      replyTo:   c.reply_to   || process.env.MAIL_REPLY_TO   || process.env.SES_REPLY_TO,
       configurationSet: process.env.SES_CONFIGURATION_SET,
       entries: [{ email, subject: `[TEST] ${applyMergeTags(c.subject || "", contactFields(fakeContact))}`,
                   html: renderHtmlForContact(c.html_body || "", fakeContact), unsubscribeToken: fakeContact.unsubscribe_token }],
@@ -217,7 +217,7 @@ router.post("/campaigns/:id/test", async (req, res, next) => {
 
 router.post("/campaigns/:id/send", async (req, res, next) => {
   try {
-    if (!isConfigured()) return res.status(400).json({ error: "SES not configured" });
+    if (!isConfigured()) return res.status(400).json({ error: "Email sender not configured" });
     const { rows: [c] } = await query("SELECT * FROM email_campaigns WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     if (!c) return res.status(404).json({ error: "Campaign not found" });
     if (!["draft", "scheduled", "paused"].includes(c.status)) return res.status(409).json({ error: `Cannot send a campaign in status '${c.status}'` });

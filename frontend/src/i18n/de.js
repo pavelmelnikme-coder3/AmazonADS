@@ -19,7 +19,7 @@ export default {
     settings: "Einstellungen",
   },
   email: {
-    title: "E-Mail-Marketing", subtitle: "Massen-Newsletter über Amazon SES — einwilligungsbasiert, EU-konform.",
+    title: "E-Mail-Marketing", subtitle: "Massen-Newsletter über Brevo — einwilligungsbasiert, EU-konform.",
     tabCampaigns: "Kampagnen", tabContacts: "Kontakte", tabSuppressions: "Sperrliste",
     newCampaign: "Neue Kampagne", editCampaign: "Kampagne bearbeiten", noCampaigns: "Noch keine Kampagnen.",
     colName: "Name", colStatus: "Status", colRecipients: "Empfänger", colSent: "Gesendet", colOpened: "Geöffnet",

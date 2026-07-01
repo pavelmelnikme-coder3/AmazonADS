@@ -302,7 +302,20 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob];
+  // Marketing email drip: every 5 min, send as much of any 'sending' campaign's queue as
+  // today's account-wide budget allows (Brevo free = 300/day, shared with transactional).
+  // Campaigns larger than the daily budget drain automatically over subsequent days.
+  const emailDripJob = new CronJob("*/5 * * * *", async () => {
+    try {
+      const { dripSend } = require("../services/email/dispatch");
+      const r = await dripSend();
+      if (r.sent) logger.info("Cron: email drip sent", r);
+    } catch (err) {
+      logger.error("Cron email drip failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob, emailDripJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

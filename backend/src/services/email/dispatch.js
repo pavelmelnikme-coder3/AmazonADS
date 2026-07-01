@@ -4,11 +4,16 @@
  */
 const { query } = require("../../db/pool");
 const logger = require("../../config/logger");
-const ses = require("./ses");
+const provider = require("./provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("./render");
 
 // Messages/sec ceiling — also the batch size, so workers.js can cap at 1 batch/sec.
 const SEND_RATE = Math.max(1, parseInt(process.env.SES_MAX_SEND_RATE, 10) || 10);
+
+// Account-wide daily send budget. Brevo's free plan caps the WHOLE account at 300/day
+// (marketing + transactional share it), so we default conservatively to 250 to leave
+// headroom for transactional alerts. dripSend() never exceeds today's remaining budget.
+const DAILY_CAP = Math.max(1, parseInt(process.env.EMAIL_DAILY_CAP, 10) || 250);
 
 // Active, non-suppressed recipients for a campaign (segment filter is tags + status).
 async function resolveRecipientIds(campaign) {
@@ -91,10 +96,10 @@ async function processBatch({ campaignId, contactIds }) {
     _contactId: c.id,
   }));
 
-  const results = await ses.sendBulkEmail({
-    fromEmail: campaign.from_email || process.env.SES_FROM_EMAIL,
-    fromName:  campaign.from_name  || process.env.SES_FROM_NAME,
-    replyTo:   campaign.reply_to   || process.env.SES_REPLY_TO,
+  const results = await provider.sendBulkEmail({
+    fromEmail: campaign.from_email || process.env.MAIL_FROM_EMAIL || process.env.SES_FROM_EMAIL,
+    fromName:  campaign.from_name  || process.env.MAIL_FROM_NAME  || process.env.SES_FROM_NAME,
+    replyTo:   campaign.reply_to   || process.env.MAIL_REPLY_TO   || process.env.SES_REPLY_TO,
     configurationSet: process.env.SES_CONFIGURATION_SET,
     entries,
   });
@@ -103,6 +108,9 @@ async function processBatch({ campaignId, contactIds }) {
   let sent = 0, failed = 0;
   for (const c of contacts) {
     const r = byEmail.get(c.email) || { status: "failed", error: "no result" };
+    // 'deferred' = provider hit the daily quota → leave the row 'queued' so the next
+    // drip day retries it, rather than burning the recipient as a permanent failure.
+    if (r.status === "deferred") continue;
     if (r.status === "sent") sent++; else failed++;
     await query(
       `UPDATE email_sends SET status=$3, ses_message_id=$4, error=$5,
@@ -129,4 +137,61 @@ async function maybeFinish(campaignId) {
   }
 }
 
-module.exports = { SEND_RATE, resolveRecipientIds, prepareCampaign, processBatch, maybeFinish };
+// ── Daily-budget drip ─────────────────────────────────────────────────────────
+// Emails already sent today (account-wide across all campaigns). Transactional alerts
+// aren't tracked here, so DAILY_CAP is set below the provider's real cap to leave headroom.
+async function sentToday() {
+  const { rows: [{ n }] } = await query(
+    `SELECT COUNT(*)::int AS n FROM email_sends
+       WHERE sent_at >= date_trunc('day', now()) AND status <> 'queued'`);
+  return n;
+}
+
+let _dripRunning = false;
+/**
+ * Send as many queued recipients as today's budget allows, oldest campaign first, across
+ * ALL 'sending' campaigns in the account. Idempotent and self-serialising (in-process lock)
+ * so the 5-min cron and a manual send can't double-fire. Campaigns drain over several days
+ * until the budget clears their queue; maybeFinish (inside processBatch) marks each 'sent'
+ * once nothing is left queued for it.
+ * @returns {Promise<{sent:number, budget:number, skipped?:boolean}>}
+ */
+async function dripSend() {
+  if (_dripRunning) return { sent: 0, budget: 0, skipped: true };
+  _dripRunning = true;
+  try {
+    if (!provider.isConfigured()) return { sent: 0, budget: 0, skipped: true };
+    const budget = DAILY_CAP - (await sentToday());
+    if (budget <= 0) { logger.info("Email drip: daily budget exhausted", { cap: DAILY_CAP }); return { sent: 0, budget: 0 }; }
+
+    // Pick up to `budget` queued recipients, FIFO by campaign then recipient.
+    const { rows } = await query(
+      `SELECT es.campaign_id, es.contact_id
+         FROM email_sends es
+         JOIN email_campaigns c ON c.id = es.campaign_id
+        WHERE es.status = 'queued' AND c.status = 'sending'
+        ORDER BY c.created_at, es.created_at
+        LIMIT $1`,
+      [budget]
+    );
+    if (!rows.length) return { sent: 0, budget };
+
+    // Group by campaign; processBatch is idempotent per (campaign, contact).
+    const byCampaign = new Map();
+    for (const r of rows) {
+      if (!byCampaign.has(r.campaign_id)) byCampaign.set(r.campaign_id, []);
+      byCampaign.get(r.campaign_id).push(r.contact_id);
+    }
+    let sent = 0;
+    for (const [campaignId, contactIds] of byCampaign) {
+      const r = await processBatch({ campaignId, contactIds });
+      sent += r.sent;
+    }
+    logger.info("Email drip sent", { sent, budget, cap: DAILY_CAP });
+    return { sent, budget };
+  } finally {
+    _dripRunning = false;
+  }
+}
+
+module.exports = { SEND_RATE, DAILY_CAP, resolveRecipientIds, prepareCampaign, processBatch, maybeFinish, dripSend, sentToday };
