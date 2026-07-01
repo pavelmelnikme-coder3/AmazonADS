@@ -305,11 +305,24 @@ export function unpackStandaloneHtml(rawHtml, { settleMs = 700, timeoutMs = 1000
 // A bundler that lazy-loads images via URL.createObjectURL() leaves `blob:` src
 // references in the unpacked DOM — these only resolve inside that exact (now-destroyed)
 // document and are meaningless anywhere else, so they must be stripped rather than sent
-// as-is (they'd just render as a broken image for every recipient). Blanking the src
-// keeps the surrounding layout/alt-text intact so the gap is easy to spot and re-fill.
+// as-is (they'd just render as a broken image for every recipient).
+//
+// Neither of the two "obvious" fixes is actually safe here:
+//   - src="" renders as nothing at all in every browser/mail client tested (no broken-image
+//     icon, no alt text) — a silent gap that's trivial to miss. This is what originally shipped.
+//   - a data:-URI placeholder image is blocked outright by Outlook desktop (Word rendering
+//     engine never loads data: URIs) and many clients hide ALL images, including data: ones,
+//     until the recipient clicks "show images" — so it can't be relied on to be visible either.
+// The only rendering that needs zero network/image request and isn't subject to any
+// image-blocking policy is plain text on a styled block — so the whole <img> tag is replaced
+// with a text+CSS placeholder, not just its src swapped out.
+const BLOB_PLACEHOLDER_HTML = '<div style="width:100%;max-width:600px;margin:0 auto;padding:60px 20px;'
+  + 'text-align:center;background:#e2e8f0;color:#64748b;font-family:Arial,Helvetica,sans-serif;'
+  + 'font-size:14px;border:1px dashed #94a3b8;box-sizing:border-box;">'
+  + '⚠ Image missing — please re-upload</div>';
 export function stripBlobUrls(html) {
   let count = 0;
-  const cleaned = (html || "").replace(/\ssrc=(["'])blob:[^"']*\1/gi, () => { count += 1; return ' src=""'; });
+  const cleaned = (html || "").replace(/<img\b[^>]*\bsrc=(["'])blob:[^"']*\1[^>]*\/?>/gi, () => { count += 1; return BLOB_PLACEHOLDER_HTML; });
   return { html: cleaned, strippedCount: count };
 }
 

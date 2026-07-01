@@ -67,7 +67,7 @@ export default {
     htmlImportScriptWarning: "Imported, but most of this file is a <script> block (looks like an interactive \"standalone preview\" export, not flattened HTML) and automatic unpacking didn't produce usable markup — email clients never run scripts, so the sent email will likely be blank. Try re-exporting from the original tool, or open the file in a browser, wait for it to finish loading, then use DevTools → Inspect → Copy outerHTML on the <html> element.",
     htmlImportUnpacking: "This looks like a self-unpacking file — running it safely in the background to extract the real content…",
     htmlImportUnpacked: "Unpacked successfully — please review the result below.",
-    htmlImportUnpackedWithBlobs: "Unpacked, but {n} image(s) used temporary references that don't survive outside the preview — re-upload them via an Image block (switch to Visual mode) or paste a real URL in HTML mode.",
+    htmlImportUnpackedWithBlobs: "Unpacked, but {n} image(s) used temporary references that don't survive outside the preview — replaced with a visible \"Image missing\" placeholder so it can't ship unnoticed. Look for it in the preview and replace it: switch to Visual mode and re-upload via an Image block, or paste a real image URL in HTML mode.",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi data — cost, stock and all-channel orders (read-only)",
