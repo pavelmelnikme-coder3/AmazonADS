@@ -4,7 +4,7 @@ import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
 import EmailBlockEditor from "./components/EmailBlockEditor.jsx";
-import { newBlock, compileBlocksToHtml, buildPreviewDoc } from "./lib/emailBlocks.js";
+import { newBlock, compileBlocksToHtml, buildPreviewDoc, htmlToBlocks } from "./lib/emailBlocks.js";
 import {
   Activity, Megaphone, Tag, Package, Newspaper,
   Layers, Workflow, Bell, Sparkles, History, Cable, Cog, Warehouse,
@@ -16444,7 +16444,9 @@ const EmailMarketingPage = ({ workspaceId }) => {
   }
   function switchToBlocksMode() {
     if (!window.confirm(t("email.editorSwitchToBlocksConfirm"))) return;
-    setComposer(c => ({ ...c, content_blocks: { version: 1, blocks: [] } }));
+    const blocks = htmlToBlocks(composer.html_body);
+    setComposer(c => ({ ...c, content_blocks: { version: 1, blocks } }));
+    flash(t("email.editorConverted", { n: blocks.length }));
   }
 
   // Image block uploads — hosted on the backend, referenced by URL from block content.
