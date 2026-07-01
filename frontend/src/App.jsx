@@ -16441,12 +16441,21 @@ const EmailMarketingPage = ({ workspaceId }) => {
 
   function switchToHtmlMode() {
     if (!window.confirm(t("email.editorSwitchToHtmlConfirm"))) return;
+    // Compiling blocks back to HTML always loses styling the block editor can't represent
+    // (per-element background/text colors, custom layout, etc.) — if we still have the HTML
+    // that existed right before the user switched INTO block mode, offer to restore that
+    // instead of the freshly-recompiled (styling-stripped) version. Without this, a plain
+    // Blocks→HTML round trip silently and irreversibly destroys a well-designed template.
+    if (composer._htmlBeforeBlocks && window.confirm(t("email.editorRestoreOriginalConfirm"))) {
+      setComposer(c => ({ ...c, html_body: c._htmlBeforeBlocks, content_blocks: null }));
+      return;
+    }
     setComposer(c => ({ ...c, html_body: compileBlocksToHtml(c.content_blocks), content_blocks: null }));
   }
   function switchToBlocksMode() {
     if (!window.confirm(t("email.editorSwitchToBlocksConfirm"))) return;
     const blocks = htmlToBlocks(composer.html_body);
-    setComposer(c => ({ ...c, content_blocks: { version: 1, blocks } }));
+    setComposer(c => ({ ...c, content_blocks: { version: 1, blocks }, _htmlBeforeBlocks: c.html_body }));
     flash(t("email.editorConverted", { n: blocks.length }));
   }
 
