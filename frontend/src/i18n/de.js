@@ -63,7 +63,10 @@ export default {
     attachmentRemove: "Entfernen", attachmentRemoveConfirm: "Diesen Anhang entfernen?",
     htmlImportFile: "HTML-Datei importieren", htmlImportConfirm: "Aktuellen Inhalt durch diese Datei ersetzen? Dies kann nicht rückgängig gemacht werden.",
     htmlImportDone: "HTML-Datei importiert.", htmlImportTooLarge: "Datei ist zu groß (max. 10MB).",
-    htmlImportScriptWarning: "Importiert, aber der Großteil dieser Datei ist ein <script>-Block (sieht nach einem interaktiven \"Standalone-Vorschau\"-Export aus, nicht nach fertigem HTML) — E-Mail-Programme führen niemals Skripte aus, die versendete E-Mail wird daher wahrscheinlich leer sein. Suchen Sie im Tool, mit dem die Datei erstellt wurde, nach einer einfachen \"HTML exportieren\"/\"Code abrufen\"-Option.",
+    htmlImportScriptWarning: "Importiert, aber der Großteil dieser Datei ist ein <script>-Block (sieht nach einem interaktiven \"Standalone-Vorschau\"-Export aus, nicht nach fertigem HTML), und das automatische Entpacken hat keine brauchbare Auszeichnung ergeben — E-Mail-Programme führen niemals Skripte aus, die versendete E-Mail wird daher wahrscheinlich leer sein. Versuchen Sie, im Original-Tool erneut zu exportieren, oder öffnen Sie die Datei im Browser, warten Sie auf das Laden und kopieren Sie über DevTools → Inspect → Copy outerHTML am <html>-Element die fertige Auszeichnung.",
+    htmlImportUnpacking: "Sieht nach einer sich selbst entpackenden Datei aus — wird sicher im Hintergrund ausgeführt, um den echten Inhalt zu extrahieren…",
+    htmlImportUnpacked: "Erfolgreich entpackt — bitte das Ergebnis unten prüfen.",
+    htmlImportUnpackedWithBlobs: "Entpackt, aber {n} Bild(er) verwendeten temporäre Referenzen, die außerhalb der Vorschau nicht erhalten bleiben — laden Sie sie über einen Bild-Block erneut hoch (zu Visuell wechseln) oder fügen Sie im HTML-Modus eine echte URL ein.",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi-Daten — Einkaufspreis, Bestand und Bestellungen aller Kanäle (nur Lesen)",

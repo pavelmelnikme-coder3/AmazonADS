@@ -4,7 +4,7 @@ import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
 import EmailBlockEditor from "./components/EmailBlockEditor.jsx";
-import { newBlock, compileBlocksToHtml, buildPreviewDoc, htmlToBlocks } from "./lib/emailBlocks.js";
+import { newBlock, compileBlocksToHtml, buildPreviewDoc, htmlToBlocks, unpackStandaloneHtml, LOOKS_LIKE_BUNDLE, stripBlobUrls } from "./lib/emailBlocks.js";
 import {
   Activity, Megaphone, Tag, Package, Newspaper,
   Layers, Workflow, Bell, Sparkles, History, Cable, Cog, Warehouse,
@@ -16452,6 +16452,11 @@ const EmailMarketingPage = ({ workspaceId }) => {
 
   // Imports a whole .html file (e.g. exported from an email design tool) straight into
   // HTML mode — read client-side, no backend round-trip needed since it's just text.
+  // Some design-tool exports ("Standalone preview" bundles) are almost entirely a
+  // <script> blob that only unpacks the real markup when run in a real browser — email
+  // clients never execute <script>, so importing one of these as-is yields a blank email.
+  // When detected, we run it once in a fully sandboxed off-screen iframe (no same-origin
+  // access — see unpackStandaloneHtml) to capture the real, unpacked markup automatically.
   async function importHtmlFile(file) {
     setErr("");
     try {
@@ -16459,18 +16464,32 @@ const EmailMarketingPage = ({ workspaceId }) => {
       if (text.length > 10 * 1024 * 1024) { setErr(t("email.htmlImportTooLarge")); return; }
       const hasExisting = composer.content_blocks ? composer.content_blocks.blocks.length > 0 : !!composer.html_body.trim();
       if (hasExisting && !window.confirm(t("email.htmlImportConfirm"))) return;
-      setComposer(c => ({ ...c, html_body: text, content_blocks: null }));
-      // Some design-tool exports ("Standalone preview" bundles) are almost entirely a
-      // <script> blob that unpacks the real markup only when run in a real browser — email
-      // clients never execute <script>, so importing one of these yields a blank/broken
-      // email. Heuristic: if scripts make up most of the file, warn instead of pretending it worked.
-      const scriptChars = [...text.matchAll(/<script[\s\S]*?<\/script>/gi)].reduce((s, m) => s + m[0].length, 0);
-      if (text.length > 2000 && scriptChars / text.length > 0.5) {
+
+      if (LOOKS_LIKE_BUNDLE(text)) {
+        setBusy(true);
+        flash(t("email.htmlImportUnpacking"));
+        const unpacked = await unpackStandaloneHtml(text);
+        setBusy(false);
+        if (unpacked && !LOOKS_LIKE_BUNDLE(unpacked)) {
+          // Bundlers that lazy-load images via URL.createObjectURL() leave blob: src
+          // references that only resolve inside the now-destroyed sandbox iframe — blank
+          // them out (keeps layout/alt text) rather than ship a guaranteed-broken image.
+          const { html: cleanHtml, strippedCount } = stripBlobUrls(unpacked);
+          setComposer(c => ({ ...c, html_body: cleanHtml, content_blocks: null }));
+          if (strippedCount) setErr(t("email.htmlImportUnpackedWithBlobs", { n: strippedCount }));
+          else flash(t("email.htmlImportUnpacked"));
+          return;
+        }
+        // Unpack timed out or still looks bundle-heavy — import the raw text anyway
+        // (matches pre-unpack behavior) and explain why it likely won't render.
+        setComposer(c => ({ ...c, html_body: text, content_blocks: null }));
         setErr(t("email.htmlImportScriptWarning"));
-      } else {
-        flash(t("email.htmlImportDone"));
+        return;
       }
-    } catch (e) { setErr(e.message); }
+
+      setComposer(c => ({ ...c, html_body: text, content_blocks: null }));
+      flash(t("email.htmlImportDone"));
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
 
   // Image block uploads — hosted on the backend, referenced by URL from block content.

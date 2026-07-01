@@ -63,7 +63,10 @@ export default {
     attachmentRemove: "Remove", attachmentRemoveConfirm: "Remove this attachment?",
     htmlImportFile: "Import HTML file", htmlImportConfirm: "Replace the current content with this file? This can't be undone.",
     htmlImportDone: "HTML file imported.", htmlImportTooLarge: "File is too large (max 10MB).",
-    htmlImportScriptWarning: "Imported, but most of this file is a <script> block (looks like an interactive \"standalone preview\" export, not flattened HTML) — email clients never run scripts, so the sent email will likely be blank. Look for a plain \"export HTML\"/\"get code\" option in the tool that generated it instead.",
+    htmlImportScriptWarning: "Imported, but most of this file is a <script> block (looks like an interactive \"standalone preview\" export, not flattened HTML) and automatic unpacking didn't produce usable markup — email clients never run scripts, so the sent email will likely be blank. Try re-exporting from the original tool, or open the file in a browser, wait for it to finish loading, then use DevTools → Inspect → Copy outerHTML on the <html> element.",
+    htmlImportUnpacking: "This looks like a self-unpacking file — running it safely in the background to extract the real content…",
+    htmlImportUnpacked: "Unpacked successfully — please review the result below.",
+    htmlImportUnpackedWithBlobs: "Unpacked, but {n} image(s) used temporary references that don't survive outside the preview — re-upload them via an Image block (switch to Visual mode) or paste a real URL in HTML mode.",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi data — cost, stock and all-channel orders (read-only)",

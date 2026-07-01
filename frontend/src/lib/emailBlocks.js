@@ -4,11 +4,16 @@
  *     layout — no <style> blocks, no classes, so it renders identically everywhere).
  *   - htmlToBlocks: best-effort reverse — parses arbitrary/messy campaign HTML (Word,
  *     Newsletter2Go/Brevo drag-drop exports, etc.) into editable blocks.
+ *   - unpackStandaloneHtml: some design-tool exports are a self-executing JS "bundle"
+ *     (the real markup only exists after a script unpacks it in a real browser) rather
+ *     than flat HTML — runs that script in an isolated sandboxed iframe and captures the
+ *     resulting DOM.
  *   - buildPreviewDoc: wraps HTML in a standalone document for an isolated iframe preview.
  *   - buildUtmUrl: merges UTM params into a URL without duplicating existing ones.
- * Everything except htmlToBlocks is pure/dependency-free (no DOM) on purpose, so it's
- * trivially unit-testable. htmlToBlocks needs a real DOM (DOMParser) and only ever runs
- * client-side when the user explicitly asks to convert — never during compile/send.
+ * Everything except htmlToBlocks/unpackStandaloneHtml is pure/dependency-free (no DOM) on
+ * purpose, so it's trivially unit-testable. The other two need a real DOM/browser and only
+ * ever run client-side when the user explicitly asks to convert/import — never during
+ * compile/send.
  */
 
 let _uid = 0;
@@ -123,6 +128,16 @@ function looksLikeButton(a) {
   return /background(-color)?\s*:/.test(style) && /display\s*:\s*(inline-block|block)/.test(style);
 }
 
+// Walks up the ancestor chain checking each element's own `style` attribute for
+// display:none — catches the standard hidden-preheader pattern (a <div> wrapping the
+// inbox-preview snippet text) without needing a live/attached document for getComputedStyle.
+function isHiddenByInlineStyle(el) {
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    if (/display\s*:\s*none/i.test(node.getAttribute("style") || "")) return true;
+  }
+  return false;
+}
+
 // Newsletter2Go/Outlook table templates pepper layout cells with invisible filler
 // characters (soft hyphen, zero-width space/joiners) purely to control spacing — these
 // must not count as "real" text or every such filler <td> becomes a spurious blank block.
@@ -149,6 +164,11 @@ export function htmlToBlocks(html) {
   const seenText = new Set();
 
   doc.body.querySelectorAll(`img, a, ${BLOCK_LEVEL_SELECTOR}`).forEach((el) => {
+    // Skip anything sitting inside a display:none container — almost always the hidden
+    // "preheader" trick (invisible text used only for the inbox preview snippet). Since
+    // the compiler always renders text blocks visibly, importing it as-is would turn
+    // previously-invisible content into a visible regression.
+    if (isHiddenByInlineStyle(el)) return;
     if (el.tagName === "IMG") {
       const src = el.getAttribute("src");
       if (!src || seenImgSrc.has(src)) return;
@@ -198,6 +218,99 @@ export function htmlToBlocks(html) {
   });
 
   return blocks.length ? blocks : [newBlock("text")];
+}
+
+// Fraction of a document's characters that live inside <script> tags — used to detect
+// design-tool "standalone preview" bundles (real markup only exists after a script
+// unpacks it in a real browser) as opposed to flat, ready-to-send HTML.
+export function scriptRatio(html) {
+  const text = html || "";
+  if (!text.length) return 0;
+  const scriptChars = [...text.matchAll(/<script[\s\S]*?<\/script>/gi)].reduce((s, m) => s + m[0].length, 0);
+  return scriptChars / text.length;
+}
+export const LOOKS_LIKE_BUNDLE = (html) => (html || "").length > 2000 && scriptRatio(html) > 0.5;
+
+/**
+ * Runs a self-executing HTML "bundle" (script-heavy design-tool export) inside a fully
+ * sandboxed, off-screen iframe and captures the DOM it produces once it settles.
+ *
+ * Safety: `sandbox="allow-scripts"` with NO `allow-same-origin` puts the iframe's content
+ * in a unique, opaque origin — it can run its own script, but cannot read/write our
+ * cookies, localStorage or any of our DOM, cannot navigate the parent window, cannot open
+ * popups, and any fetch() it makes carries none of our session credentials (it's a
+ * different origin as far as the browser's same-origin credential rules are concerned).
+ * The only channel out is postMessage, which we only accept from this exact iframe
+ * instance (`event.source === iframe.contentWindow`). This is the same technique
+ * CodePen/JSFiddle-style sandboxed previews use to run untrusted script safely.
+ *
+ * Detection of "done unpacking" is a generic heuristic (no bundler-specific hooks): a
+ * MutationObserver on the whole document, considered settled once nothing has changed
+ * for ~700ms after load, with a hard timeout so a bundle that never settles doesn't hang
+ * the import forever.
+ *
+ * @returns {Promise<string|null>} the captured `documentElement.outerHTML`, or null on timeout/failure.
+ */
+export function unpackStandaloneHtml(rawHtml, { settleMs = 700, timeoutMs = 10000 } = {}) {
+  return new Promise((resolve) => {
+    const captureScript = `<script>(function(){
+      var lastChange = Date.now();
+      var obs = new MutationObserver(function(){ lastChange = Date.now(); });
+      obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+      var start = Date.now();
+      function tick() {
+        var settled = Date.now() - lastChange > ${settleMs};
+        var timedOut = Date.now() - start > ${timeoutMs - 500};
+        if (settled || timedOut) {
+          obs.disconnect();
+          try { window.parent.postMessage({ __adsflowUnpack: true, html: document.documentElement.outerHTML, timedOut: timedOut && !settled }, "*"); }
+          catch (e) {}
+          return;
+        }
+        setTimeout(tick, 150);
+      }
+      if (document.readyState === "complete") setTimeout(tick, 300);
+      else window.addEventListener("load", function () { setTimeout(tick, 300); });
+    })();</script>`;
+
+    const doc = rawHtml.includes("</body>")
+      ? rawHtml.replace("</body>", captureScript + "</body>")
+      : rawHtml + captureScript;
+
+    const iframe = document.createElement("iframe");
+    iframe.setAttribute("sandbox", "allow-scripts");
+    iframe.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:800px;height:600px;border:0;visibility:hidden;";
+
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      window.removeEventListener("message", onMessage);
+      clearTimeout(hardTimeout);
+      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+      resolve(result);
+    };
+    const onMessage = (e) => {
+      if (e.source !== iframe.contentWindow || !e.data || !e.data.__adsflowUnpack) return;
+      finish(e.data.timedOut ? null : e.data.html);
+    };
+    const hardTimeout = setTimeout(() => finish(null), timeoutMs);
+
+    window.addEventListener("message", onMessage);
+    iframe.srcdoc = doc;
+    document.body.appendChild(iframe);
+  });
+}
+
+// A bundler that lazy-loads images via URL.createObjectURL() leaves `blob:` src
+// references in the unpacked DOM — these only resolve inside that exact (now-destroyed)
+// document and are meaningless anywhere else, so they must be stripped rather than sent
+// as-is (they'd just render as a broken image for every recipient). Blanking the src
+// keeps the surrounding layout/alt-text intact so the gap is easy to spot and re-fill.
+export function stripBlobUrls(html) {
+  let count = 0;
+  const cleaned = (html || "").replace(/\ssrc=(["'])blob:[^"']*\1/gi, () => { count += 1; return ' src=""'; });
+  return { html: cleaned, strippedCount: count };
 }
 
 // Substitutes {{first_name}} etc. with sample values, purely for the live preview —
