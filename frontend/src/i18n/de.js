@@ -67,6 +67,7 @@ export default {
     htmlImportScriptWarning: "Importiert, aber der Großteil dieser Datei ist ein <script>-Block (sieht nach einem interaktiven \"Standalone-Vorschau\"-Export aus, nicht nach fertigem HTML), und das automatische Entpacken hat keine brauchbare Auszeichnung ergeben — E-Mail-Programme führen niemals Skripte aus, die versendete E-Mail wird daher wahrscheinlich leer sein. Versuchen Sie, im Original-Tool erneut zu exportieren, oder öffnen Sie die Datei im Browser, warten Sie auf das Laden und kopieren Sie über DevTools → Inspect → Copy outerHTML am <html>-Element die fertige Auszeichnung.",
     htmlImportUnpacking: "Sieht nach einer sich selbst entpackenden Datei aus — wird sicher im Hintergrund ausgeführt, um den echten Inhalt zu extrahieren…",
     htmlImportUnpacked: "Erfolgreich entpackt — bitte das Ergebnis unten prüfen.",
+    htmlImportUnpackedWithImages: "Erfolgreich entpackt — {n} eingebettete(s) Bild(er) wurden automatisch wiederhergestellt und neu gehostet.",
     htmlImportUnpackedWithBlobs: "Entpackt, aber {n} Bild(er) verwendeten temporäre Referenzen, die außerhalb der Vorschau nicht erhalten bleiben — durch einen gut sichtbaren \"Image missing\"-Platzhalter ersetzt, damit das nicht unbemerkt bleibt. Suchen Sie ihn in der Vorschau und ersetzen Sie ihn: zu Visuell wechseln und über einen Bild-Block erneut hochladen, oder im HTML-Modus eine echte Bild-URL einfügen.",
   },
   wawi: {

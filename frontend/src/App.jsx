@@ -4,7 +4,7 @@ import { useI18n } from "./i18n/index.jsx";
 import LanguageSwitcher from "./components/LanguageSwitcher.jsx";
 import SyncStatusToast from "./components/SyncStatusToast.jsx";
 import EmailBlockEditor from "./components/EmailBlockEditor.jsx";
-import { newBlock, compileBlocksToHtml, buildPreviewDoc, htmlToBlocks, unpackStandaloneHtml, LOOKS_LIKE_BUNDLE, stripBlobUrls } from "./lib/emailBlocks.js";
+import { newBlock, compileBlocksToHtml, buildPreviewDoc, htmlToBlocks, unpackStandaloneHtml, LOOKS_LIKE_BUNDLE, stripBlobUrls, recoverBlobImages } from "./lib/emailBlocks.js";
 import {
   Activity, Megaphone, Tag, Package, Newspaper,
   Layers, Workflow, Bell, Sparkles, History, Cable, Cog, Warehouse,
@@ -16478,17 +16478,23 @@ const EmailMarketingPage = ({ workspaceId }) => {
         setBusy(true);
         flash(t("email.htmlImportUnpacking"));
         const unpacked = await unpackStandaloneHtml(text);
-        setBusy(false);
-        if (unpacked && !LOOKS_LIKE_BUNDLE(unpacked)) {
+        if (unpacked && !LOOKS_LIKE_BUNDLE(unpacked.html)) {
           // Bundlers that lazy-load images via URL.createObjectURL() leave blob: src
-          // references that only resolve inside the now-destroyed sandbox iframe — blank
-          // them out (keeps layout/alt text) rather than ship a guaranteed-broken image.
-          const { html: cleanHtml, strippedCount } = stripBlobUrls(unpacked);
-          setComposer(c => ({ ...c, html_body: cleanHtml, content_blocks: null }));
+          // references that only resolve inside the now-destroyed sandbox iframe — but the
+          // actual bytes were already recovered (fetched from inside that same iframe) into
+          // `unpacked.images`, so re-host each one for real instead of losing it.
+          const { html: recoveredHtml, recovered, failed } = await recoverBlobImages(unpacked.html, unpacked.images, uploadImage);
+          // Safety net: anything that couldn't be recovered (fetch/upload failure) still
+          // gets a visible placeholder rather than a silently-blank image slot.
+          const { html: finalHtml, strippedCount } = stripBlobUrls(recoveredHtml);
+          setBusy(false);
+          setComposer(c => ({ ...c, html_body: finalHtml, content_blocks: null }));
           if (strippedCount) setErr(t("email.htmlImportUnpackedWithBlobs", { n: strippedCount }));
+          else if (recovered) flash(t("email.htmlImportUnpackedWithImages", { n: recovered }));
           else flash(t("email.htmlImportUnpacked"));
           return;
         }
+        setBusy(false);
         // Unpack timed out or still looks bundle-heavy — import the raw text anyway
         // (matches pre-unpack behavior) and explain why it likely won't render.
         setComposer(c => ({ ...c, html_body: text, content_blocks: null }));

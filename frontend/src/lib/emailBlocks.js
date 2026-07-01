@@ -249,7 +249,17 @@ export const LOOKS_LIKE_BUNDLE = (html) => (html || "").length > 2000 && scriptR
  * for ~700ms after load, with a hard timeout so a bundle that never settles doesn't hang
  * the import forever.
  *
- * @returns {Promise<string|null>} the captured `documentElement.outerHTML`, or null on timeout/failure.
+ * Bundlers commonly load images via `URL.createObjectURL()`, leaving `<img src="blob:...">`
+ * references that only resolve inside that exact document. The underlying bytes are real
+ * and recoverable though (the bundler already has them decoded in memory) — before posting
+ * back, the capture script `fetch()`es each blob: URL **from inside its own document**
+ * (blob URLs are only fetchable from the context that created them, which is exactly where
+ * this code runs) and reads it back out as a data: URL via FileReader, so the caller can
+ * re-host the actual image instead of losing it.
+ *
+ * @returns {Promise<{html: string, images: Record<string,string>}|null>} the captured
+ *   `documentElement.outerHTML` plus a { blobUrl: dataUrl } map for any blob: images found,
+ *   or null on timeout/failure.
  */
 export function unpackStandaloneHtml(rawHtml, { settleMs = 700, timeoutMs = 10000 } = {}) {
   return new Promise((resolve) => {
@@ -258,13 +268,32 @@ export function unpackStandaloneHtml(rawHtml, { settleMs = 700, timeoutMs = 1000
       var obs = new MutationObserver(function(){ lastChange = Date.now(); });
       obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
       var start = Date.now();
+      function captureBlobImages() {
+        var imgs = Array.prototype.slice.call(document.querySelectorAll('img[src^="blob:"]'));
+        return Promise.all(imgs.map(function(img) {
+          return fetch(img.src).then(function(r){ return r.blob(); }).then(function(blob) {
+            return new Promise(function(res) {
+              var reader = new FileReader();
+              reader.onload = function() { res([img.src, reader.result]); };
+              reader.onerror = function() { res([img.src, null]); };
+              reader.readAsDataURL(blob);
+            });
+          }).catch(function(){ return [img.src, null]; });
+        })).then(function(pairs) {
+          var map = {};
+          pairs.forEach(function(p) { if (p[1]) map[p[0]] = p[1]; });
+          return map;
+        });
+      }
       function tick() {
         var settled = Date.now() - lastChange > ${settleMs};
         var timedOut = Date.now() - start > ${timeoutMs - 500};
         if (settled || timedOut) {
           obs.disconnect();
-          try { window.parent.postMessage({ __adsflowUnpack: true, html: document.documentElement.outerHTML, timedOut: timedOut && !settled }, "*"); }
-          catch (e) {}
+          captureBlobImages().then(function(images) {
+            try { window.parent.postMessage({ __adsflowUnpack: true, html: document.documentElement.outerHTML, images: images, timedOut: timedOut && !settled }, "*"); }
+            catch (e) {}
+          });
           return;
         }
         setTimeout(tick, 150);
@@ -292,7 +321,7 @@ export function unpackStandaloneHtml(rawHtml, { settleMs = 700, timeoutMs = 1000
     };
     const onMessage = (e) => {
       if (e.source !== iframe.contentWindow || !e.data || !e.data.__adsflowUnpack) return;
-      finish(e.data.timedOut ? null : e.data.html);
+      finish(e.data.timedOut ? null : { html: e.data.html, images: e.data.images || {} });
     };
     const hardTimeout = setTimeout(() => finish(null), timeoutMs);
 
@@ -300,6 +329,43 @@ export function unpackStandaloneHtml(rawHtml, { settleMs = 700, timeoutMs = 1000
     iframe.srcdoc = doc;
     document.body.appendChild(iframe);
   });
+}
+
+// Converts a data: URL (e.g. from unpackStandaloneHtml's `images` map) into a File object
+// suitable for uploading through the existing image-upload endpoint.
+export async function dataUrlToFile(dataUrl, filename) {
+  const res = await fetch(dataUrl);
+  const blob = await res.blob();
+  const ext = (blob.type.split("/")[1] || "jpg").split("+")[0];
+  return new File([blob], `${filename}.${ext}`, { type: blob.type });
+}
+
+/**
+ * Re-hosts every recovered blob: image (see unpackStandaloneHtml) through a real upload,
+ * replacing the blob: reference in the HTML with the returned public URL. `uploadFn` is
+ * injected (rather than calling a fetch endpoint directly here) so this stays a plain,
+ * dependency-free function — the caller (App.jsx) already owns the authenticated upload call.
+ * @param {string} html
+ * @param {Record<string,string>} images - { blobUrl: dataUrl }
+ * @param {(file: File) => Promise<{url: string}>} uploadFn
+ * @returns {Promise<{html: string, recovered: number, failed: number}>}
+ */
+export async function recoverBlobImages(html, images, uploadFn) {
+  let result = html;
+  let recovered = 0, failed = 0;
+  let i = 0;
+  for (const [blobUrl, dataUrl] of Object.entries(images || {})) {
+    i += 1;
+    try {
+      const file = await dataUrlToFile(dataUrl, `recovered-image-${i}`);
+      const res = await uploadFn(file);
+      result = result.split(blobUrl).join(res.url);
+      recovered += 1;
+    } catch (e) {
+      failed += 1;
+    }
+  }
+  return { html: result, recovered, failed };
 }
 
 // A bundler that lazy-loads images via URL.createObjectURL() leaves `blob:` src
