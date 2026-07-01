@@ -61,6 +61,9 @@ export default {
     attachmentSmtpHint: "Embeds the file directly in every sent email. Fine for small files, but multiplies bandwidth per recipient — prefer a hosted link for large campaigns.",
     attachmentSizeWarning: "Attachments add up fast across many recipients — consider a hosted link instead.",
     attachmentRemove: "Remove", attachmentRemoveConfirm: "Remove this attachment?",
+    htmlImportFile: "Import HTML file", htmlImportConfirm: "Replace the current content with this file? This can't be undone.",
+    htmlImportDone: "HTML file imported.", htmlImportTooLarge: "File is too large (max 10MB).",
+    htmlImportScriptWarning: "Imported, but most of this file is a <script> block (looks like an interactive \"standalone preview\" export, not flattened HTML) — email clients never run scripts, so the sent email will likely be blank. Look for a plain \"export HTML\"/\"get code\" option in the tool that generated it instead.",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi data — cost, stock and all-channel orders (read-only)",

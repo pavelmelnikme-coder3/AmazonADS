@@ -61,6 +61,9 @@ export default {
     attachmentSmtpHint: "Bettet die Datei direkt in jede gesendete E-Mail ein. Für kleine Dateien geeignet, erhöht aber das Datenvolumen pro Empfänger — bei großen Kampagnen lieber einen Link verwenden.",
     attachmentSizeWarning: "Anhänge summieren sich bei vielen Empfängern schnell — erwägen Sie stattdessen einen Link.",
     attachmentRemove: "Entfernen", attachmentRemoveConfirm: "Diesen Anhang entfernen?",
+    htmlImportFile: "HTML-Datei importieren", htmlImportConfirm: "Aktuellen Inhalt durch diese Datei ersetzen? Dies kann nicht rückgängig gemacht werden.",
+    htmlImportDone: "HTML-Datei importiert.", htmlImportTooLarge: "Datei ist zu groß (max. 10MB).",
+    htmlImportScriptWarning: "Importiert, aber der Großteil dieser Datei ist ein <script>-Block (sieht nach einem interaktiven \"Standalone-Vorschau\"-Export aus, nicht nach fertigem HTML) — E-Mail-Programme führen niemals Skripte aus, die versendete E-Mail wird daher wahrscheinlich leer sein. Suchen Sie im Tool, mit dem die Datei erstellt wurde, nach einer einfachen \"HTML exportieren\"/\"Code abrufen\"-Option.",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi-Daten — Einkaufspreis, Bestand und Bestellungen aller Kanäle (nur Lesen)",

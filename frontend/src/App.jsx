@@ -16359,6 +16359,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const [toast, setToast] = useState("");
   const hostedFileRef = useRef(null);
   const smtpFileRef = useRef(null);
+  const htmlFileRef = useRef(null);
 
   const putReq = (p, b) => apiFetch(p, { method: "PUT", body: JSON.stringify(b) });
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
@@ -16447,6 +16448,29 @@ const EmailMarketingPage = ({ workspaceId }) => {
     const blocks = htmlToBlocks(composer.html_body);
     setComposer(c => ({ ...c, content_blocks: { version: 1, blocks } }));
     flash(t("email.editorConverted", { n: blocks.length }));
+  }
+
+  // Imports a whole .html file (e.g. exported from an email design tool) straight into
+  // HTML mode — read client-side, no backend round-trip needed since it's just text.
+  async function importHtmlFile(file) {
+    setErr("");
+    try {
+      const text = await file.text();
+      if (text.length > 10 * 1024 * 1024) { setErr(t("email.htmlImportTooLarge")); return; }
+      const hasExisting = composer.content_blocks ? composer.content_blocks.blocks.length > 0 : !!composer.html_body.trim();
+      if (hasExisting && !window.confirm(t("email.htmlImportConfirm"))) return;
+      setComposer(c => ({ ...c, html_body: text, content_blocks: null }));
+      // Some design-tool exports ("Standalone preview" bundles) are almost entirely a
+      // <script> blob that unpacks the real markup only when run in a real browser — email
+      // clients never execute <script>, so importing one of these yields a blank/broken
+      // email. Heuristic: if scripts make up most of the file, warn instead of pretending it worked.
+      const scriptChars = [...text.matchAll(/<script[\s\S]*?<\/script>/gi)].reduce((s, m) => s + m[0].length, 0);
+      if (text.length > 2000 && scriptChars / text.length > 0.5) {
+        setErr(t("email.htmlImportScriptWarning"));
+      } else {
+        flash(t("email.htmlImportDone"));
+      }
+    } catch (e) { setErr(e.message); }
   }
 
   // Image block uploads — hosted on the backend, referenced by URL from block content.
@@ -16685,6 +16709,10 @@ const EmailMarketingPage = ({ workspaceId }) => {
                     onClick={switchToBlocksMode} disabled={!!composer.content_blocks}>{t("email.editorVisual")}</button>
                   <button type="button" className={`btn ${!composer.content_blocks ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12 }}
                     onClick={switchToHtmlMode} disabled={!composer.content_blocks}>{t("email.editorHtml")}</button>
+                  <input ref={htmlFileRef} type="file" accept=".html,.htm" style={{ display: "none" }}
+                    onChange={e => { const f = e.target.files?.[0]; if (f) importHtmlFile(f); e.target.value = ""; }} />
+                  <button type="button" className="btn btn-ghost" style={{ fontSize: 12 }}
+                    onClick={() => htmlFileRef.current?.click()}>{t("email.htmlImportFile")}</button>
                 </div>
 
                 {composer.content_blocks ? (
