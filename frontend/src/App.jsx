@@ -353,7 +353,8 @@ const API = (import.meta?.env?.VITE_API_URL) || "http://localhost:4000/api/v1";
 async function apiFetch(path, opts = {}, asBlob = false) {
   const token = localStorage.getItem("af_token");
   const wsId = localStorage.getItem("af_workspace");
-  const headers = { "Content-Type": "application/json", ...opts.headers };
+  // FormData needs the browser to set its own multipart boundary in Content-Type.
+  const headers = { ...(opts.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...opts.headers };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   if (wsId) headers["x-workspace-id"] = wsId;
 
@@ -16343,6 +16344,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [importSource, setImportSource] = useState("");
+  const [importFile, setImportFile] = useState(null);
   const [composer, setComposer] = useState(null); // null | campaign object being edited
   const [statsFor, setStatsFor] = useState(null);  // campaign id → stats panel
   const [stats, setStats] = useState(null);
@@ -16365,9 +16367,10 @@ const EmailMarketingPage = ({ workspaceId }) => {
 
   async function doImport() {
     setErr("");
+    if (!importSource.trim()) { setErr(t("email.importNeedConsent")); return; }
+    if (importFile) return doImportFile();
     const emails = importText.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
     if (!emails.length) { setErr(t("email.importNoEmails")); return; }
-    if (!importSource.trim()) { setErr(t("email.importNeedConsent")); return; }
     setBusy(true);
     try {
       const r = await post("/email-marketing/contacts/import", {
@@ -16376,6 +16379,18 @@ const EmailMarketingPage = ({ workspaceId }) => {
       });
       flash(t("email.importDone", { imported: r.imported, skipped: r.skipped, invalid: r.invalid }));
       setShowImport(false); setImportText(""); loadContacts();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  async function doImportFile() {
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", importFile);
+      fd.append("consent_source", importSource.trim());
+      const r = await apiFetch("/email-marketing/contacts/import-file", { method: "POST", body: fd });
+      flash(t("email.importFileDone", { imported: r.imported, skipped: r.skipped, invalid: r.invalid, col: r.detected?.email || "?" }));
+      setShowImport(false); setImportFile(null); loadContacts();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
 
@@ -16489,7 +16504,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
               <option value="">{t("email.allStatuses")}</option>
               {["active", "unsubscribed", "bounced", "complained"].map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            <button className="btn btn-primary" onClick={() => { setShowImport(true); setErr(""); }}><Plus size={14} /> {t("email.import")}</button>
+            <button className="btn btn-primary" onClick={() => { setShowImport(true); setErr(""); setImportFile(null); }}><Plus size={14} /> {t("email.import")}</button>
           </div>
           <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -16545,7 +16560,26 @@ const EmailMarketingPage = ({ workspaceId }) => {
             <h3 style={{ margin: "0 0 6px", fontSize: 17 }}>{t("email.importTitle")}</h3>
             <p style={{ fontSize: 12, color: "var(--tx3)", margin: "0 0 14px" }}>{t("email.importHint")}</p>
             <label style={{ fontSize: 12, color: "var(--tx2)" }}>{t("email.importEmails")}</label>
-            <textarea value={importText} onChange={e => setImportText(e.target.value)} rows={6} style={{ width: "100%", margin: "5px 0 12px", fontFamily: "var(--mono)", fontSize: 12 }} placeholder="a@example.com, b@example.com …" />
+            <textarea value={importText} onChange={e => setImportText(e.target.value)} disabled={!!importFile} rows={5} style={{ width: "100%", margin: "5px 0 12px", fontFamily: "var(--mono)", fontSize: 12, opacity: importFile ? 0.5 : 1 }} placeholder="a@example.com, b@example.com …" />
+
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "2px 0 12px" }}>
+              <div style={{ flex: 1, height: 1, background: "var(--b1)" }} />
+              <span style={{ fontSize: 11, color: "var(--tx3)" }}>{t("email.importOr")}</span>
+              <div style={{ flex: 1, height: 1, background: "var(--b1)" }} />
+            </div>
+
+            <label style={{ fontSize: 12, color: "var(--tx2)" }}>{t("email.importFile")}</label>
+            <input type="file" accept=".csv,.xlsx,.xls,.txt" disabled={!!importText.trim()}
+                   onChange={e => setImportFile(e.target.files?.[0] || null)}
+                   style={{ width: "100%", margin: "5px 0 4px", fontSize: 12, opacity: importText.trim() ? 0.5 : 1 }} />
+            {importFile && (
+              <div style={{ fontSize: 11, color: "var(--tx3)", margin: "0 0 6px", display: "flex", alignItems: "center", gap: 8 }}>
+                <span>{importFile.name} · {(importFile.size / 1024).toFixed(0)} KB</span>
+                <button className="btn btn-ghost" style={{ padding: "1px 6px", fontSize: 11 }} onClick={() => setImportFile(null)}>×</button>
+              </div>
+            )}
+            <p style={{ fontSize: 11, color: "var(--tx3)", margin: "0 0 14px" }}>{t("email.importFileHint")}</p>
+
             <label style={{ fontSize: 12, color: "var(--tx2)" }}>{t("email.consentSource")} *</label>
             <input value={importSource} onChange={e => setImportSource(e.target.value)} style={{ width: "100%", margin: "5px 0 4px" }} placeholder={t("email.consentPlaceholder")} />
             <p style={{ fontSize: 11, color: "var(--tx3)", margin: "0 0 14px" }}>{t("email.consentNote")}</p>

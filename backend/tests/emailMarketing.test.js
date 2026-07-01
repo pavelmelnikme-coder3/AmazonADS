@@ -56,6 +56,45 @@ describe("POST /contacts/import", () => {
   });
 });
 
+describe("POST /contacts/import-file", () => {
+  test("400 without a file", async () => {
+    const res = await request(app()).post("/email-marketing/contacts/import-file").field("consent_source", "csv upload");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/file required/i);
+  });
+
+  test("400 without consent_source", async () => {
+    const res = await request(app()).post("/email-marketing/contacts/import-file")
+      .attach("file", Buffer.from("EMAIL\na@b.com\n"), "c.csv");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/consent_source/i);
+  });
+
+  test("400 when the file has no detectable email column", async () => {
+    const res = await request(app()).post("/email-marketing/contacts/import-file")
+      .field("consent_source", "csv upload")
+      .attach("file", Buffer.from("NAME,PHONE\nAnna,123\n"), "c.csv");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/email column/i);
+  });
+
+  test("parses a CSV, auto-detects columns, imports valid rows", async () => {
+    dbQuery.mockResolvedValueOnce({ rowCount: 1 });
+    const csv = "EMAIL,VORNAME,NACHNAME,JOB_TITLE\na@b.com,Anna,Ernst,Manager\n";
+    const res = await request(app()).post("/email-marketing/contacts/import-file")
+      .field("consent_source", "csv upload")
+      .attach("file", Buffer.from(csv), "contacts.csv");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ imported: 1, skipped: 0, invalid: 0, rows: 1 });
+    expect(res.body.detected).toMatchObject({ email: "EMAIL", first_name: "VORNAME", last_name: "NACHNAME" });
+    const params = dbQuery.mock.calls[0][1];
+    expect(params[1]).toBe("a@b.com");
+    expect(params[2]).toBe("Anna");
+    expect(params[3]).toBe("Ernst");
+    expect(JSON.parse(params[4])).toEqual({ job_title: "Manager" });
+  });
+});
+
 describe("POST /campaigns/:id/send guards", () => {
   test("400 when SES not configured", async () => {
     ses.isConfigured.mockReturnValue(false);

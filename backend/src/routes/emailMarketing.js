@@ -9,6 +9,7 @@
  */
 const express = require("express");
 const crypto = require("crypto");
+const multer = require("multer");
 const router = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
@@ -16,11 +17,36 @@ const logger = require("../config/logger");
 const { writeAudit } = require("./audit");
 const { isConfigured, sendBulkEmail } = require("../services/email/provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("../services/email/render");
+const { parseContactsFile } = require("../services/email/importParser");
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 router.use(requireAuth, requireWorkspace);
 
 const newToken = () => crypto.randomBytes(24).toString("hex");
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+
+// Shared insert path for both /contacts/import (pasted emails) and /contacts/import-file
+// (parsed spreadsheet). ON CONFLICT keeps re-imports idempotent.
+async function insertContacts(workspaceId, contacts, consentSource, consentMethod, ip) {
+  let imported = 0, skipped = 0, invalid = 0;
+  for (const c of contacts) {
+    const email = String(c.email || "").trim().toLowerCase();
+    if (!isEmail(email)) { invalid++; continue; }
+    const { rowCount } = await query(
+      `INSERT INTO email_contacts
+         (workspace_id, email, first_name, last_name, attributes, tags, status,
+          consent_source, consent_method, consent_at, consent_ip, unsubscribe_token)
+       VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8,NOW(),$9,$10)
+       ON CONFLICT (workspace_id, lower(email)) DO NOTHING`,
+      [workspaceId, email, c.first_name || null, c.last_name || null,
+       JSON.stringify(c.attributes || {}), Array.isArray(c.tags) ? c.tags : [],
+       consentSource, consentMethod, c.consent_ip || ip || null, newToken()]
+    );
+    if (rowCount) imported++; else skipped++;
+  }
+  return { imported, skipped, invalid };
+}
 
 // ─── Contacts ─────────────────────────────────────────────────────────────────
 router.get("/contacts", async (req, res, next) => {
@@ -48,24 +74,32 @@ router.post("/contacts/import", async (req, res, next) => {
     const { contacts, consent_source, consent_method = "import" } = req.body;
     if (!Array.isArray(contacts) || !contacts.length) return res.status(400).json({ error: "contacts[] required" });
     if (!consent_source) return res.status(400).json({ error: "consent_source required (GDPR proof of opt-in)" });
+    const result = await insertContacts(req.workspaceId, contacts, consent_source, consent_method, req.ip);
+    res.json(result);
+  } catch (err) { next(err); }
+});
 
-    let imported = 0, skipped = 0, invalid = 0;
-    for (const c of contacts) {
-      const email = String(c.email || "").trim().toLowerCase();
-      if (!isEmail(email)) { invalid++; continue; }
-      const { rowCount } = await query(
-        `INSERT INTO email_contacts
-           (workspace_id, email, first_name, last_name, attributes, tags, status,
-            consent_source, consent_method, consent_at, consent_ip, unsubscribe_token)
-         VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8,NOW(),$9,$10)
-         ON CONFLICT (workspace_id, lower(email)) DO NOTHING`,
-        [req.workspaceId, email, c.first_name || null, c.last_name || null,
-         JSON.stringify(c.attributes || {}), Array.isArray(c.tags) ? c.tags : [],
-         consent_source, consent_method, c.consent_ip || req.ip || null, newToken()]
-      );
-      if (rowCount) imported++; else skipped++;
-    }
-    res.json({ imported, skipped, invalid });
+// Import from an uploaded .xlsx/.csv file — columns (email/first name/last name) are
+// auto-detected from the header row; any other columns are kept as merge-tag attributes.
+router.post("/contacts/import-file", (req, res, next) => {
+  upload.single("file")(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) return res.status(400).json({ error: `Upload error: ${err.message}` });
+    next(err);
+  });
+}, async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "file required (field 'file')" });
+    const { consent_source, consent_method = "import" } = req.body;
+    if (!consent_source) return res.status(400).json({ error: "consent_source required (GDPR proof of opt-in)" });
+
+    let parsed;
+    try { parsed = await parseContactsFile(req.file.buffer, req.file.originalname); }
+    catch (e) { return res.status(400).json({ error: `Could not read file: ${e.message}` }); }
+    if (!parsed.contacts.length) return res.status(400).json({ error: "No contact rows found in file" });
+
+    const result = await insertContacts(req.workspaceId, parsed.contacts, consent_source, consent_method, req.ip);
+    res.json({ ...result, detected: parsed.detected, rows: parsed.contacts.length });
   } catch (err) { next(err); }
 });
 
