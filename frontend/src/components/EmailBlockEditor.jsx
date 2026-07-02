@@ -146,8 +146,13 @@ function ButtonBlockEditor({ block, onUpdate, onOpenUtm }) {
   return (
     <div>
       <Field label={t("email.buttonText")}><input value={block.text || ""} onChange={(e) => onUpdate({ text: e.target.value })} style={{ width: "100%" }} /></Field>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-        <div style={{ flex: 1, fontSize: 12, color: block.link ? "var(--tx)" : "var(--tx3)", fontFamily: "var(--mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, minWidth: 0 }}>
+        {/* minWidth:0 on both this row and the text div below: a flex item's default
+            min-width is `auto`, which for nowrap text resolves to its full unwrapped
+            width — overflow:hidden/textOverflow:ellipsis alone don't override that, so a
+            long UTM-tagged URL (common after HTML import) silently blew out this block,
+            its column, and the whole composer modal instead of truncating. */}
+        <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: block.link ? "var(--tx)" : "var(--tx3)", fontFamily: "var(--mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {block.link || t("email.buttonLink")}
         </div>
         <button type="button" className="btn btn-ghost" style={{ fontSize: 11, flexShrink: 0 }}

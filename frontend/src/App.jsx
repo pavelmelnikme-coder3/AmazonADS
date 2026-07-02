@@ -16721,9 +16721,17 @@ const EmailMarketingPage = ({ workspaceId }) => {
       {/* ── Composer modal ── */}
       {composer && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "flex-start", justifyContent: "center", overflowY: "auto", padding: "30px 16px" }} onClick={() => setComposer(null)}>
-          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 960, maxWidth: "96vw" }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 960, maxWidth: "96vw", overflowX: "hidden" }}>
             <h3 style={{ margin: "0 0 14px", fontSize: 17 }}>{composer.id ? t("email.editCampaign") : t("email.newCampaign")}</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            {/* minmax(0, 1fr) not bare 1fr: a bare `1fr` track defaults to minmax(auto, 1fr),
+                where "auto" is the max-content width of everything inside — a single long
+                unbroken string anywhere in the block editor (a UTM-tagged URL, a long
+                attachment filename) forces the whole track wider than the modal, and no
+                amount of overflow:hidden/min-width:0 on a *descendant* fixes that, since it
+                only helps once an ancestor has a definite (already-resolved) width to shrink
+                within. minmax(0, *) makes the track's base size 0 instead of "auto", so the
+                1fr proportional split actually applies and content can't blow the grid out. */}
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 16 }}>
               <div>
                 <Field label={t("email.colName")}><input value={composer.name} onChange={e => setComposer(c => ({ ...c, name: e.target.value }))} style={{ width: "100%" }} /></Field>
                 <Field label={t("email.subject")}><input value={composer.subject} onChange={e => setComposer(c => ({ ...c, subject: e.target.value }))} style={{ width: "100%" }} placeholder="Hello {{first_name}}" /></Field>
@@ -16793,8 +16801,8 @@ const EmailMarketingPage = ({ workspaceId }) => {
                       <div style={{ marginTop: 8 }}>
                         {composer.attachments.map(a => (
                           <div key={a.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 8px", background: "var(--s2)", borderRadius: 6, marginBottom: 4, fontSize: 11 }}>
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.filename} · {(a.size / 1024).toFixed(0)} KB</span>
-                            <button className="btn btn-ghost" style={{ padding: "1px 6px", fontSize: 11 }} onClick={() => removeSmtpAttachment(a.id)}>×</button>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.filename} · {(a.size / 1024).toFixed(0)} KB</span>
+                            <button className="btn btn-ghost" style={{ flexShrink: 0, padding: "1px 6px", fontSize: 11 }} onClick={() => removeSmtpAttachment(a.id)}>×</button>
                           </div>
                         ))}
                         {attachmentTotalBytes(composer.attachments) > 2 * 1024 * 1024 && (
