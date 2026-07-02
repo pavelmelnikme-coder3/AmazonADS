@@ -16740,12 +16740,12 @@ const EmailMarketingPage = ({ workspaceId }) => {
 
                 <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
                   <button type="button" className={`btn ${composer.content_blocks ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12 }}
-                    onClick={switchToBlocksMode} disabled={!!composer.content_blocks}>{t("email.editorVisual")}</button>
+                    onClick={switchToBlocksMode} disabled={busy || !!composer.content_blocks}>{t("email.editorVisual")}</button>
                   <button type="button" className={`btn ${!composer.content_blocks ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 12 }}
-                    onClick={switchToHtmlMode} disabled={!composer.content_blocks}>{t("email.editorHtml")}</button>
+                    onClick={switchToHtmlMode} disabled={busy || !composer.content_blocks}>{t("email.editorHtml")}</button>
                   <input ref={htmlFileRef} type="file" accept=".html,.htm" style={{ display: "none" }}
                     onChange={e => { const f = e.target.files?.[0]; if (f) importHtmlFile(f); e.target.value = ""; }} />
-                  <button type="button" className="btn btn-ghost" style={{ fontSize: 12 }}
+                  <button type="button" className="btn btn-ghost" style={{ fontSize: 12 }} disabled={busy}
                     onClick={() => htmlFileRef.current?.click()}>{t("email.htmlImportFile")}</button>
                 </div>
 
