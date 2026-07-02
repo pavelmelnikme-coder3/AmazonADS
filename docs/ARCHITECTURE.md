@@ -306,7 +306,7 @@ POST /keyword-research/add-to-adgroup
   `erp_empty`. Demand-side causes (`price_up`/`ad_cut`) attach only when a volume/rank metric breached —
   never for efficiency ratios (a spend cut raises ROAS, so it can't explain a ROAS drop).
 
-## 2026-06-25 — Marketing email subsystem (Amazon SES)
+## 2026-06-25 — Marketing email subsystem (originally Amazon SES, migrated to Brevo — see below)
 
 A separate bulk/newsletter pipeline, isolated from the transactional Brevo path so marketing
 complaints don't degrade alert/invite deliverability. Region `eu-central-1` (Frankfurt, GDPR).
@@ -314,17 +314,85 @@ complaints don't degrade alert/invite deliverability. Region `eu-central-1` (Fra
 - **Tables** (migration 037): `email_contacts` (consent proof + `unsubscribe_token`), `email_segments`,
   `email_campaigns` (+counters), `email_sends` (UNIQUE(campaign,contact)), `email_suppressions`.
 - **Send path**: `routes/emailMarketing.js` → `queueEmailCampaign()` (workers.js) → `email-dispatch`
-  queue → `dispatch.processBatch()` → `ses.sendBulkEmail()`. Each message is **Raw MIME per recipient**
-  (not SES SendBulkEmail templates) so the per-recipient RFC 8058 `List-Unsubscribe` headers can be set;
-  SES throttles by messages/sec regardless, so the queue limiter (`SES_MAX_SEND_RATE`, batch = rate,
-  1 batch/sec) is the real rate guard.
+  queue → `dispatch.processBatch()` → `provider.sendBulkEmail()` (provider = `ses` or `brevo`, see
+  2026-07-01 below — **`brevo` is what's actually configured in prod**). Each message is rendered and
+  sent **per recipient** (not templated bulk-send) so the per-recipient RFC 8058 `List-Unsubscribe`
+  headers can be set; the provider throttles by messages/sec regardless, so the queue limiter
+  (`SES_MAX_SEND_RATE`, batch = rate) is the real rate guard.
 - **Idempotency**: deterministic batch `jobId` + `email_sends UNIQUE(campaign,contact)` +
   `processBatch` only sends rows still `status='queued'` → a job retry never re-sends.
 - **Compliance**: `render.js` appends postal address + unsubscribe footer to every email; consent proof
-  is required on import; account + app suppression lists; public webhook auto-suppresses hard
-  bounces/complaints (SNS signature-validated via `sns-validator`).
-- **Config gate**: `ses.isConfigured()` (needs `AWS_ACCESS_KEY_ID/SECRET` + `SES_FROM_EMAIL`) — unset =
-  no sends, app unaffected. Operator/AWS setup: see `docs/EMAIL_SES_SETUP.md`.
+  is required on import; account + app suppression lists; provider webhook auto-suppresses hard
+  bounces/complaints (SES: SNS, signature-validated via `sns-validator`; Brevo: shared-secret URL token,
+  see below).
+- **Config gate**: `provider.isConfigured()` — unset = no sends, app unaffected. Operator setup:
+  see `docs/EMAIL_SES_SETUP.md` (despite the filename, now documents the Brevo path prod actually uses).
+
+## 2026-07-01 — Brevo migration, visual block editor, uploads/attachments, HTML import
+
+Marketing email moved from Amazon SES (never left the sandbox in practice) to **Brevo SMTP relay**
+(`services/email/brevo.js`, same `sendBulkEmail(...)` interface as `ses.js` — `provider.js` picks one
+by `EMAIL_PROVIDER` env, defaults `brevo`). Brevo free plan caps the **whole account** at 300 msg/day
+(marketing + transactional share it); `dispatch.js`'s `dripSend()` enforces a conservative
+`EMAIL_DAILY_CAP` (default 250) across ALL `sending` campaigns account-wide, draining a large campaign
+over several days rather than bursting — a 5-min cron plus the manual send path both call the same
+self-serialising (`_dripRunning` in-process lock) function, so they can't double-fire.
+
+- **Visual block editor** (`content_blocks` jsonb column on `email_campaigns`, nullable — null = legacy
+  raw-HTML mode). `frontend/src/lib/emailBlocks.js` (`compileBlocksToHtml`) turns a flat block list
+  (text/image/button/divider/spacer) into inline-styled table HTML with **zero `<style>` blocks or
+  classes** — the actual fix for "looks fine in Gmail, broken in the in-app preview" (Gmail strips
+  `<style>` blocks on receipt; the old raw-textarea mode didn't). Buttons use the "bulletproof button"
+  table pattern (background on the `<td>`, not the `<a>`) since Outlook desktop's Word rendering engine
+  ignores anchor padding/border-radius. `frontend/src/components/EmailBlockEditor.jsx` is the editor UI
+  (drag-reorder via the existing `@dnd-kit` pattern used elsewhere in the app); preview renders inside a
+  sandboxed `<iframe srcDoc>` (isolated document, own `<style>` reset) rather than
+  `dangerouslySetInnerHTML` directly in the app DOM.
+- **`htmlToBlocks(html)`** — best-effort reverse parser for converting a legacy raw-HTML campaign into
+  blocks (one-way, `window.confirm`-gated; a `_htmlBeforeBlocks` snapshot lets the user restore the
+  original HTML instead of the lossy recompiled version if they switch back).
+- **Uploads**: `services/email/uploads.js` (multer diskStorage under `backend/uploads/email/{images,
+  files,attachments}/`, not committed — see `.gitignore`) + public unauthenticated serve routes in
+  `routes/emailPublic.js` (mail clients have no AdsFlow session), path-traversal guarded. Images/hosted
+  files persist independent of any campaign (no orphan cleanup yet — a known gap, not urgent at current
+  volume). True SMTP attachments are campaign-scoped (`attachments` jsonb column, 8MB/file, 10MB
+  cumulative cap) and only forwarded to `nodemailer.sendMail` on Brevo — SES has no attachment path.
+- **Standalone-HTML-bundle import**: some design tools ("Save as standalone preview") export a
+  self-executing JS bundle rather than flat HTML — `unpackStandaloneHtml()` runs it once in a fully
+  sandboxed off-screen `<iframe sandbox="allow-scripts">` (no `allow-same-origin` → opaque origin, no
+  access to our cookies/DOM/session) and captures `document.documentElement.outerHTML` once a
+  `MutationObserver` reports the DOM has settled. Such bundles typically embed images as base64 (+
+  optional gzip) inside a `<script type="__bundler/manifest">` tag, decoded client-side via
+  `URL.createObjectURL()` into `blob:` URLs that only resolve inside that now-destroyed iframe — the
+  capture script also `fetch()`es each `blob:` image **from inside its own document** (the only context
+  they're fetchable from) and returns it as a `data:` URL, which `recoverBlobImages()` then re-uploads
+  through the real image-upload endpoint to get a permanent hosted URL. Any image that still fails to
+  recover gets a **visible text+CSS placeholder** (`stripBlobUrls()`) — deliberately not `src=""`
+  (renders as nothing, no broken-image icon, in every client tested) or a `data:` URI placeholder
+  (Outlook desktop never loads `data:` images; many clients block all images including `data:` by
+  default) — a pure text/CSS block needs no image request at all, so it can't silently vanish.
+- **Engagement tracking (delivered/opened/clicked/bounced/complained/unsubscribed)**: previously only
+  wired for SES (`applySesEvent`, SNS webhook) — dead code against the actual `brevo` provider, so these
+  counters sat at 0 forever regardless of real outcomes. `brevo.js sendBulkEmail` now sets
+  `X-Mailin-Tag: <email_sends.id>` per recipient — Brevo recognizes this header even over plain SMTP
+  relay (not just their REST API) and echoes it back verbatim as `tag` on every webhook event, so
+  `routes/emailPublic.js`'s new `POST /webhooks/brevo` (`applyBrevoEvent`) correlates straight back to
+  the send row with no provider-message-id matching needed (falls back to `ses_message_id` for sends made
+  before the tag existed). Brevo doesn't sign webhook payloads, so authenticity is a shared secret baked
+  into the URL (`BREVO_WEBHOOK_SECRET`, fails closed if unset). Aggregate `opened`/`clicked` counters are
+  gated on the send row's own `opened_at`/`clicked_at` being `NULL` (first occurrence only) — both here
+  and in the legacy SES path — since a provider fires one event per open/click and re-opens are common;
+  the un-gated version could push `campaign.opened` past `recipients`. `doUnsubscribe()` now also
+  attributes the unsubscribe to the contact's most recent campaign send (best-effort — the unsubscribe
+  token is per-contact, not per-send) and bumps that campaign's `unsubscribed` counter, which it
+  previously never touched at all. `GET /campaigns/:id/stats` additionally returns computed `rates`
+  (open/click/click-to-open/bounce/complaint/unsubscribe, denominated on `delivered` falling back to
+  `sent`), `null` rather than `0` when the denominator is 0 so the UI shows a dash instead of a
+  misleading percentage.
+- **Manual step required** (can't be done from code — the Brevo SMTP credentials don't double as a REST
+  API key in this account): register the webhook URL in Brevo's dashboard, Transactional → Settings →
+  Webhook, for events delivered/opened/click/hard_bounce/soft_bounce/blocked/spam. Until that's done,
+  only `recipients`/`sent` reflect reality; the rest stay at 0.
 
 ## 2026-06-26 changes (ad-data integrity: per-ASIN + ad-group, scheduled alert digests)
 

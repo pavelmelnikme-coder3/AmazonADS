@@ -6,6 +6,57 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-07-02 — Email marketing: Brevo migration, visual block editor, real delivery/open/click tracking
+
+### Added
+- **Migrated marketing email from Amazon SES to Brevo SMTP relay** (`EMAIL_PROVIDER=brevo`, default;
+  `ses` kept as a legacy fallback, no attachment support). Account-wide daily send budget
+  (`EMAIL_DAILY_CAP`, default 250, below Brevo's free-plan 300/day account cap) drains a large campaign
+  over several days rather than bursting.
+- **Visual block editor** for campaigns (`content_blocks` jsonb, null = legacy raw-HTML mode): drag-
+  reorderable Text/Image/Button/Divider/Spacer blocks compiled to inline-styled, `<style>`-block-free
+  table HTML — the actual fix for "looks right in Gmail, broken in the in-app preview" (Gmail strips
+  `<style>` blocks on receipt; the preview now also renders in a sandboxed iframe instead of inline in
+  the app DOM). Buttons use the bulletproof-button table pattern for Outlook desktop. One-way
+  HTML→Blocks conversion (best-effort reverse parser) with a restore-to-original snapshot so a round
+  trip can't silently destroy a hand-built template's styling.
+- **Image/file uploads + true SMTP attachments**: hosted image/file uploads (persist independently, for
+  Image blocks or linking a price list), plus small (≤8MB/≤10MB-per-campaign) attachments embedded
+  directly in every send (Brevo-only).
+- **Standalone-HTML-bundle import**: some design-tool exports are a self-executing JS bundle rather than
+  flat HTML — automatically unpacked in a fully sandboxed off-screen iframe, including recovering any
+  embedded images (base64-encoded inside the bundle, exposed at runtime only as ephemeral `blob:` URLs)
+  by re-uploading them through the real image-upload endpoint rather than losing them.
+- **File-based (.csv/.xlsx) contact import** with automatic email/first-name/last-name column detection.
+- **Real delivered/opened/clicked/bounced/complained stats** via a new Brevo webhook handler
+  (`POST /email/webhooks/brevo`, shared-secret authenticated). Previously these counters were only wired
+  for SES's SNS webhook — which nothing in prod actually uses — so every campaign showed 0 delivered/
+  opened/clicked regardless of real outcomes; only `recipients`/`sent` were ever real. Correlates events
+  back to the exact recipient via a per-send `X-Mailin-Tag` header (Brevo echoes it back on every
+  webhook event, works over plain SMTP relay). `GET /campaigns/:id/stats` now also returns computed
+  open/click/click-to-open/bounce/complaint/unsubscribe **rates** (null, not 0%, when nothing has landed
+  yet). Requires a one-time manual step in Brevo's dashboard to register the webhook URL — see
+  `docs/EMAIL_SES_SETUP.md`.
+
+### Fixed
+- **`opened`/`clicked` campaign counters double-counted** — incremented on every open/click *event*
+  instead of once per unique recipient (a provider fires one event per open, and re-opens are common),
+  so the aggregate could exceed `recipients`. Now gated on the recipient's own first-occurrence
+  timestamp, in both the SES and new Brevo webhook paths.
+- **Unsubscribes never reflected in campaign stats at all** — `doUnsubscribe()` updated the contact and
+  the global suppression list but never touched the campaign's `unsubscribed` counter or attributed the
+  suppression to a campaign. Now attributes to the contact's most recent send (best-effort — the
+  unsubscribe link is per-contact, not per-send) and bumps the counter.
+- Several UI bugs surfaced during a full pass of the composer: mode-toggle/import buttons weren't
+  disabled during an in-flight async unpack (race condition on double-click); the composer modal could
+  overflow horizontally and bleed into the page behind it when a campaign contained a long UTM-tagged
+  button URL — root cause was a CSS Grid `1fr 1fr` track defaulting to `minmax(auto, 1fr)`, where "auto"
+  is computed from unwrapped content's full width regardless of any descendant's `overflow:hidden`.
+
+### Docs
+- `docs/EMAIL_SES_SETUP.md` rewritten to lead with the Brevo setup + webhook registration steps actually
+  needed in prod (SES kept as an appendix); `docs/API.md` and `docs/ARCHITECTURE.md` updated to match.
+
 ## [Unreleased] — 2026-06-26 — Ad-data integrity (per-ASIN + ad-group) & scheduled alert digests
 
 ### Fixed

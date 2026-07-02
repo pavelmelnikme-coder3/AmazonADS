@@ -565,17 +565,19 @@ Add selected keywords to an ad group (deduplicates, then pushes to Amazon).
 
 ---
 
-## Email Marketing *(Amazon SES, 2026-06-25)*
+## Email Marketing *(Brevo SMTP relay in prod; SES adapter kept as a legacy fallback — 2026-06-25, updated 2026-07-01/02)*
 
-Bulk/newsletter sending on Amazon SES, separate from transactional (Brevo) mail. Behind config:
-with `SES_*` env unset, `send`/`test` return `400 "SES not configured"`.
+Bulk/newsletter sending via `EMAIL_PROVIDER` (default `brevo`; `ses` still supported). Behind config:
+with the active provider's creds unset, `send`/`test` return `400 "... not configured"`.
 
 ### Authenticated — `/api/v1/email-marketing` (requireAuth + requireWorkspace)
 Contacts:
 ```
 GET    /contacts?status=&tag=&search=&page=&limit=     — paginated list
-POST   /contacts/import   { consent_source*, consent_method?, contacts:[{email,first_name?,last_name?,attributes?,tags?}] }
-                           → { imported, skipped, invalid }   (consent_source REQUIRED — GDPR proof; dedup via ON CONFLICT)
+POST   /contacts/import        { consent_source*, consent_method?, contacts:[{email,first_name?,last_name?,attributes?,tags?}] }
+                                → { imported, skipped, invalid }   (consent_source REQUIRED — GDPR proof; dedup via ON CONFLICT)
+POST   /contacts/import-file   multipart file (.csv/.xlsx) + consent_source*  — auto-detects email/first/last-name columns,
+                                other columns become merge-tag attributes → { imported, skipped, invalid, detected, rows }
 PATCH  /contacts/:id      { first_name?, last_name?, attributes?, tags?, status? }
 DELETE /contacts/:id
 ```
@@ -584,25 +586,47 @@ Segments: `GET/POST/PUT/DELETE /segments` — `filter` JSON `{ tags:[], status:'
 Campaigns:
 ```
 GET    /campaigns                 GET /campaigns/:id
-POST   /campaigns   { name*, subject, from_name, from_email, reply_to, html_body, segment_id }
-PUT    /campaigns/:id             (editable only while draft/scheduled/paused)
+POST   /campaigns   { name*, subject, from_name, from_email, reply_to, html_body, segment_id, content_blocks? }
+PUT    /campaigns/:id             (editable only while draft/scheduled/paused; content_blocks explicitly settable to null)
 DELETE /campaigns/:id             (draft/scheduled/paused/failed only)
-POST   /campaigns/:id/test        { email }            — one-off test send (requires SES configured)
-POST   /campaigns/:id/send        → { ok, total, batches }   — enqueues; writes audit email_campaign.send
+POST   /campaigns/:id/test        { email }            — ⚠️ ALWAYS use this for verification, not /send (see below)
+POST   /campaigns/:id/send        → { ok, total, batches }   — ⚠️ targets the campaign's REAL, FULL audience
+                                     (or its segment) immediately, no dry-run mode; writes audit email_campaign.send
 POST   /campaigns/:id/schedule    { scheduled_at }     — future ISO timestamp; a 5-min cron dispatches it
 POST   /campaigns/:id/pause
-GET    /campaigns/:id/stats       → counters + per-status send breakdown
+GET    /campaigns/:id/stats       → counters + per-status send breakdown + computed `rates` (open/click/
+                                     click-to-open/bounce/complaint/unsubscribe %, null if denominator is 0)
 ```
 - `subject`/`html_body` support `{{first_name}}`, `{{last_name}}`, and any imported attribute. A postal-address + unsubscribe footer is appended automatically.
+- `content_blocks: { version:1, blocks:[...] }` (block types: text/image/button/divider/spacer) — the visual editor's format; when set, `html_body` is the last-compiled-from-blocks output (source of truth for sending either way).
+- **`/send` has no test/dry-run mode** — omitting `segment_id` targets ALL active contacts. Always use `/campaigns/:id/test` (single explicit recipient) to verify a campaign or the send pipeline itself; never call `/send` "just to check it works."
+
+Uploads (images/hosted files for block content — persist independent of any campaign, public URLs):
+```
+POST /uploads/image   multipart file (jpeg/png/webp/gif, ≤5MB) → { url, filename, size, mime }
+POST /uploads/file    multipart file (pdf/ppt/pptx/xls/xlsx, ≤15MB) → { url, filename, storedName, size, mime }
+```
+True SMTP attachments (embedded in every send — small files only, Brevo-only; SES silently drops them with a warning logged):
+```
+POST   /campaigns/:id/attachments             multipart file (≤8MB/file, ≤10MB cumulative per campaign)
+DELETE /campaigns/:id/attachments/:attId
+```
 
 Suppressions: `GET /suppressions`, `POST /suppressions { email }` (manual), `DELETE /suppressions/:id`.
 
 ### Public — `/api/v1/email` (NO auth)
 ```
-GET  /unsubscribe/:token   — human confirmation page (also unsubscribes)
-POST /unsubscribe/:token   — RFC 8058 one-click (body List-Unsubscribe=One-Click)
-POST /webhooks/ses         — SNS endpoint; signature-validated. Auto-confirms SubscriptionConfirmation;
-                             permanent Bounce/Complaint → suppress + flag contact; Delivery/Open/Click → counters.
+GET  /unsubscribe/:token         — human confirmation page (also unsubscribes; attributes to the contact's
+                                    most recent campaign send + bumps its unsubscribed counter, best-effort)
+POST /unsubscribe/:token         — RFC 8058 one-click (body List-Unsubscribe=One-Click)
+GET  /uploads/images/:id/:file   GET /uploads/files/:id/:file   — serves uploaded campaign assets (path-traversal guarded)
+POST /webhooks/ses               — legacy. SNS endpoint; signature-validated. Auto-confirms SubscriptionConfirmation;
+                                    permanent Bounce/Complaint → suppress + flag contact; Delivery/Open/Click → counters.
+POST /webhooks/brevo?token=<BREVO_WEBHOOK_SECRET>   — the one actually in use. delivered/opened/unique_opened/
+                                    click/hard_bounce/soft_bounce/blocked/invalid_email/spam/unsubscribed events,
+                                    correlated by the `tag` Brevo echoes back (set at send time to email_sends.id).
+                                    Not signed by Brevo → 403 without the correct ?token. Must be registered manually
+                                    in Brevo's dashboard (Transactional → Settings → Webhook) — see docs/EMAIL_SES_SETUP.md.
 ```
 
 ---
