@@ -25,6 +25,7 @@ export default {
     colName: "Название", colStatus: "Статус", colRecipients: "Получатели", colSent: "Отправлено", colOpened: "Открыли",
     colEmail: "Email", colConsent: "Согласие", colReason: "Причина", colDate: "Дата",
     colDelivered: "Доставлено", colClicked: "Клики", colBounced: "Отказы", colComplained: "Жалобы", colUnsub: "Отписались",
+    clickToOpenRate: "Клики от открывших", engagementTrackingHint: "Пока нет данных о доставке/открытиях/кликах — нужно настроить вебхук Brevo (Transactional → Settings → Webhook, события: delivered, opened, click, hard_bounce, soft_bounce, blocked, spam) на адрес /api/v1/email/webhooks/brevo этого сервера. До этого отслеживаются только Получатели/Отправлено.",
     stats: "Статистика", send: "Отправить", subject: "Тема", fromName: "Имя отправителя", fromEmail: "Email отправителя",
     segment: "Сегмент", allActive: "Все активные контакты", htmlBody: "HTML-тело", preview: "Превью",
     mergeHint: "Подстановки: {{first_name}}, {{last_name}}, плюс любые импортированные поля.",

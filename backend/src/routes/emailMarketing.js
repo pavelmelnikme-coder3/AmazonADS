@@ -371,6 +371,11 @@ router.post("/campaigns/:id/pause", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Percentage rounded to 1 decimal, or null (not 0) when the denominator is 0 — "0%" implies
+// "we measured this and it was zero", which is misleading before any engagement webhook has
+// landed; null lets the UI show a dash instead.
+const pct = (num, den) => (den > 0 ? Math.round((num / den) * 1000) / 10 : null);
+
 router.get("/campaigns/:id/stats", async (req, res, next) => {
   try {
     const { rows: [c] } = await query(
@@ -379,7 +384,23 @@ router.get("/campaigns/:id/stats", async (req, res, next) => {
     if (!c) return res.status(404).json({ error: "Campaign not found" });
     const { rows: byStatus } = await query(
       "SELECT status, COUNT(*)::int AS n FROM email_sends WHERE campaign_id=$1 GROUP BY status", [req.params.id]);
-    res.json({ ...c, sends: Object.fromEntries(byStatus.map((r) => [r.status, r.n])) });
+    // Delivered is the standard denominator for engagement rates (undelivered mail can't be
+    // opened/clicked) — falls back to `sent` while no delivered-webhook has landed yet, so
+    // rates aren't stuck at null forever on a provider/config that only reports opens/clicks.
+    const engagedBase = c.delivered || c.sent;
+    res.json({
+      ...c,
+      sends: Object.fromEntries(byStatus.map((r) => [r.status, r.n])),
+      rates: {
+        deliveredRate: pct(c.delivered, c.sent),
+        openRate: pct(c.opened, engagedBase),
+        clickRate: pct(c.clicked, engagedBase),
+        clickToOpenRate: pct(c.clicked, c.opened),
+        bounceRate: pct(c.bounced, c.sent),
+        complaintRate: pct(c.complained, engagedBase),
+        unsubscribeRate: pct(c.unsubscribed, engagedBase),
+      },
+    });
   } catch (err) { next(err); }
 });
 

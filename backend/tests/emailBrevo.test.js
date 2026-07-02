@@ -58,6 +58,19 @@ test("List-Unsubscribe headers are set per recipient", async () => {
   expect(mockSentMail[0].headers["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
 });
 
+test("sendId sets X-Mailin-Tag (Brevo echoes it back on webhook events for correlation)", async () => {
+  await brevo.sendBulkEmail({
+    fromEmail: "from@x.com",
+    entries: [{ email: "a@b.com", subject: "s", html: "h", unsubscribeToken: "t1", sendId: "send-row-42" }],
+  });
+  expect(mockSentMail[0].headers["X-Mailin-Tag"]).toBe("send-row-42");
+});
+
+test("no sendId (e.g. one-off test sends) → no X-Mailin-Tag header sent at all", async () => {
+  await brevo.sendBulkEmail({ fromEmail: "from@x.com", entries: [{ email: "a@b.com", subject: "s", html: "h", unsubscribeToken: "t1" }] });
+  expect(mockSentMail[0].headers["X-Mailin-Tag"]).toBeUndefined();
+});
+
 test("quota-looking errors classify as 'deferred', others as 'failed'", async () => {
   let call = 0;
   mockNextResult = () => { call++; return call === 1 ? Object.assign(new Error("Daily sending quota exceeded"), {}) : new Error("mailbox not found"); };

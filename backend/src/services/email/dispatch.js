@@ -81,8 +81,11 @@ async function processBatch({ campaignId, contactIds }) {
   if (!campaign) { logger.warn("processBatch: campaign gone", { campaignId }); return { sent: 0, failed: 0 }; }
 
   // Only contacts still queued for THIS campaign (idempotency on retry).
+  // s.id (the send row's own id) doubles as the per-recipient tracking tag passed to the
+  // provider — see brevo.js's X-Mailin-Tag — so open/click/bounce webhook events can be
+  // correlated straight back to this row without depending on the provider's own message id.
   const { rows: contacts } = await query(
-    `SELECT c.* FROM email_contacts c
+    `SELECT c.*, s.id AS send_id FROM email_contacts c
        JOIN email_sends s ON s.contact_id = c.id AND s.campaign_id = $1
       WHERE c.id = ANY($2::uuid[]) AND s.status = 'queued'`,
     [campaignId, contactIds]
@@ -94,6 +97,7 @@ async function processBatch({ campaignId, contactIds }) {
     subject: applyMergeTags(campaign.subject || "", contactFields(c)),
     html: renderHtmlForContact(campaign.html_body || "", c),
     unsubscribeToken: c.unsubscribe_token,
+    sendId: c.send_id,
     _contactId: c.id,
   }));
 

@@ -25,6 +25,7 @@ export default {
     colName: "Name", colStatus: "Status", colRecipients: "Empfänger", colSent: "Gesendet", colOpened: "Geöffnet",
     colEmail: "E-Mail", colConsent: "Einwilligung", colReason: "Grund", colDate: "Datum",
     colDelivered: "Zugestellt", colClicked: "Klicks", colBounced: "Bounces", colComplained: "Beschwerden", colUnsub: "Abgemeldet",
+    clickToOpenRate: "Click-to-Open-Rate", engagementTrackingHint: "Noch keine Zustellungs-/Öffnungs-/Klickdaten — dafür muss der Brevo-Webhook (Transactional → Settings → Webhook, Events: delivered, opened, click, hard_bounce, soft_bounce, blocked, spam) auf /api/v1/email/webhooks/brevo dieses Servers konfiguriert werden. Bis dahin werden nur Empfänger/Gesendet erfasst.",
     stats: "Statistik", send: "Senden", subject: "Betreff", fromName: "Absendername", fromEmail: "Absender-E-Mail",
     segment: "Segment", allActive: "Alle aktiven Kontakte", htmlBody: "HTML-Inhalt", preview: "Vorschau",
     mergeHint: "Platzhalter: {{first_name}}, {{last_name}} sowie importierte Felder.",

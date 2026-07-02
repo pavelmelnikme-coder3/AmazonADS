@@ -174,3 +174,50 @@ describe("POST /campaigns/:id/schedule", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("GET /campaigns/:id/stats", () => {
+  test("computes engagement rates against delivered (falls back to sent while delivered is still 0)", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: CAMP_ID, name: "C", status: "sent", recipients: 100, sent: 100, delivered: 0,
+        opened: 40, clicked: 10, bounced: 5, complained: 1, unsubscribed: 2, sent_at: "2026-01-01",
+      }] })
+      .mockResolvedValueOnce({ rows: [{ status: "sent", n: 100 }] });
+    const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
+    expect(res.status).toBe(200);
+    // no delivered-webhook landed yet → rates fall back to `sent` as the denominator
+    expect(res.body.rates).toEqual({
+      deliveredRate: 0, openRate: 40, clickRate: 10, clickToOpenRate: 25,
+      bounceRate: 5, complaintRate: 1, unsubscribeRate: 2,
+    });
+  });
+
+  test("prefers delivered as the denominator once it's populated", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: CAMP_ID, name: "C", status: "sent", recipients: 100, sent: 100, delivered: 80,
+        opened: 40, clicked: 20, bounced: 20, complained: 0, unsubscribed: 0, sent_at: "2026-01-01",
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
+    expect(res.body.rates.openRate).toBe(50);   // 40/80, not 40/100
+    expect(res.body.rates.clickRate).toBe(25);  // 20/80
+  });
+
+  test("zero denominator → null (not 0 or NaN), so the UI can show a dash", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: CAMP_ID, name: "C", status: "draft", recipients: 0, sent: 0, delivered: 0,
+        opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, sent_at: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
+    expect(Object.values(res.body.rates).every((v) => v === null)).toBe(true);
+  });
+
+  test("404 for a campaign outside the workspace", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
+    expect(res.status).toBe(404);
+  });
+});

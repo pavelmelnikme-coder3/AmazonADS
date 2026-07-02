@@ -16827,16 +16827,29 @@ const EmailMarketingPage = ({ workspaceId }) => {
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setStatsFor(null)}>
           <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 460, maxWidth: "92vw" }}>
             <h3 style={{ margin: "0 0 14px", fontSize: 17 }}>{stats?.name || t("email.stats")}</h3>
-            {!stats ? <div style={{ color: "var(--tx3)" }}>…</div> : (
+            {!stats ? <div style={{ color: "var(--tx3)" }}>…</div> : (<>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                {[["colRecipients", stats.recipients], ["colSent", stats.sent], ["colDelivered", stats.delivered], ["colOpened", stats.opened], ["colClicked", stats.clicked], ["colBounced", stats.bounced], ["colComplained", stats.complained], ["colUnsub", stats.unsubscribed]].map(([k, v]) => (
+                {[["colRecipients", stats.recipients, null], ["colSent", stats.sent, null],
+                  ["colDelivered", stats.delivered, stats.rates?.deliveredRate], ["colOpened", stats.opened, stats.rates?.openRate],
+                  ["colClicked", stats.clicked, stats.rates?.clickRate], ["colBounced", stats.bounced, stats.rates?.bounceRate],
+                  ["colComplained", stats.complained, stats.rates?.complaintRate], ["colUnsub", stats.unsubscribed, stats.rates?.unsubscribeRate]]
+                  .map(([k, v, rate]) => (
                   <div key={k} style={{ background: "var(--s2)", borderRadius: 8, padding: "10px 12px" }}>
                     <div style={{ fontSize: 11, color: "var(--tx3)" }}>{t("email." + k)}</div>
-                    <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--mono)" }}>{num(v)}</div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                      <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--mono)" }}>{num(v)}</div>
+                      {rate != null && <div style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)" }}>{rate}%</div>}
+                    </div>
                   </div>
                 ))}
               </div>
-            )}
+              {stats.rates?.clickToOpenRate != null && (
+                <div style={{ marginTop: 10, fontSize: 11, color: "var(--tx3)" }}>{t("email.clickToOpenRate")}: <b style={{ color: "var(--tx2)" }}>{stats.rates.clickToOpenRate}%</b></div>
+              )}
+              {stats.sent > 0 && !stats.delivered && !stats.opened && !stats.clicked && (
+                <div style={{ marginTop: 10, fontSize: 11, color: "var(--amb)", background: "rgba(245,158,11,.1)", padding: "8px 10px", borderRadius: 7 }}>{t("email.engagementTrackingHint")}</div>
+              )}
+            </>)}
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
               <button className="btn btn-ghost" onClick={() => setStatsFor(null)}>{t("common.close") || "Close"}</button>
             </div>

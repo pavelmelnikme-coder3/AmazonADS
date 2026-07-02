@@ -63,7 +63,12 @@ function chunk(arr, size) {
  * @param {string} p.fromEmail
  * @param {string} [p.fromName]
  * @param {string} [p.replyTo]
- * @param {Array}  p.entries  - [{ email, subject, html, unsubscribeToken }]
+ * @param {Array}  p.entries  - [{ email, subject, html, unsubscribeToken, sendId }]
+ *   sendId (optional): our own email_sends.id. Set as the X-Mailin-Tag SMTP header, which
+ *   Brevo recognizes even over plain SMTP relay (not just their REST API) and echoes back
+ *   verbatim as `tag` on every webhook event for that message — see routes/emailPublic.js's
+ *   applyBrevoEvent, which correlates purely on this tag rather than any provider message id.
+ *   Omitted for one-off test sends (routes/emailMarketing.js's /test), which have no send row.
  * @param {Array}  [p.attachments] - [{ filename, path }] — true SMTP attachments, same for every recipient
  * @param {number} [p.concurrency=8]
  * @returns {Promise<Array<{email,messageId,status,error}>>}  status: sent | failed | deferred
@@ -88,6 +93,7 @@ async function sendBulkEmail({ fromEmail, fromName, replyTo, entries, attachment
           headers: {
             "List-Unsubscribe": `<${unsub}>`,
             "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+            ...(e.sendId ? { "X-Mailin-Tag": e.sendId } : {}),
           },
         });
         return { email: e.email, messageId: info.messageId || null, status: "sent", error: null };

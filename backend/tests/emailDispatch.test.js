@@ -76,6 +76,20 @@ describe("processBatch idempotency + counters", () => {
     expect(dbQuery.mock.calls.some((c) => /SET status='sent'/.test(c[0]))).toBe(true);
   });
 
+  test("passes each contact's send-row id through as entry.sendId (for the provider's tracking tag)", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{ id: "camp1", workspace_id: "ws1", subject: "S", html_body: "B" }] })
+      .mockResolvedValueOnce({ rows: [{ id: "c1", email: "a@b.com", attributes: {}, unsubscribe_token: "t1", send_id: "send-abc" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ n: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
+
+    await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
+    expect(provider.sendBulkEmail.mock.calls[0][0].entries[0].sendId).toBe("send-abc");
+  });
+
   test("no queued contacts → no send, still checks finish", async () => {
     dbQuery
       .mockResolvedValueOnce({ rows: [{ id: "camp1", workspace_id: "ws1" }] }) // campaign
