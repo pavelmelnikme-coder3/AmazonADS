@@ -147,6 +147,20 @@ describe("applyBrevoEvent", () => {
     expect(lookup[1]).toEqual(["mid-1"]);
   });
 
+  test("unwraps a JSON-stringified single-element array tag (real Brevo SMTP webhook shape)", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    await _internal.applyBrevoEvent({ event: "delivered", tag: '["send1"]' });
+    const lookup = dbQuery.mock.calls[0];
+    expect(lookup[1]).toEqual(["send1"]); // unwrapped, not the raw '["send1"]' string
+    expect(dbQuery.mock.calls.some((c) => /delivered = delivered \+ 1/.test(c[0]))).toBe(true);
+  });
+
+  test("a malformed bracket tag falls back to the raw string rather than throwing", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    await expect(_internal.applyBrevoEvent({ event: "delivered", tag: "[not json" })).resolves.not.toThrow();
+    expect(dbQuery.mock.calls[0][1]).toEqual(["[not json"]);
+  });
+
   test("opened → unique-gated: first opened event counts, repeat does not", async () => {
     dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [] });
     await _internal.applyBrevoEvent({ event: "opened", tag: "send1" });

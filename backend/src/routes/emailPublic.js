@@ -183,16 +183,34 @@ router.post("/webhooks/ses", express.text({ type: "*/*", limit: "1mb" }), async 
 // Payload shape (per Brevo's transactional webhook docs — same fields for delivered/opened/click/
 // bounce/spam/unsubscribed): { event, email, "message-id", tag, date, link?, reason? }. Brevo posts
 // one event per request; defensively also accept an array in case that ever changes.
+// A single X-Mailin-Tag SMTP header comes back from Brevo's webhook as a JSON-stringified
+// one-element array (e.g. '["<uuid>"]') rather than the bare value — presumably because Brevo
+// models tags as a list internally regardless of transport. Passing that string straight into
+// a `uuid = $1` query 400s in Postgres ("invalid input syntax for type uuid"), silently dropping
+// every delivered/opened/click event. Unwrap it defensively; a plain tag passes through as-is.
+function normalizeTag(tag) {
+  if (tag == null) return null;
+  const s = String(tag);
+  if (s.startsWith("[") && s.endsWith("]")) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) return arr[0] != null ? String(arr[0]) : null;
+    } catch { /* not actually JSON — fall through and use the raw string */ }
+  }
+  return s;
+}
+
 async function applyBrevoEvent(evt) {
   const type = String(evt?.event || "").toLowerCase();
   if (!type) return;
 
   let send = null;
-  if (evt.tag) {
+  const tag = normalizeTag(evt.tag);
+  if (tag) {
     const { rows } = await query(
       `SELECT es.id, es.campaign_id, es.contact_id, es.email, es.delivered_at, es.opened_at, es.clicked_at, c.workspace_id
          FROM email_sends es JOIN email_campaigns c ON c.id = es.campaign_id WHERE es.id = $1`,
-      [evt.tag]);
+      [tag]);
     send = rows[0] || null;
   }
   // Fallback for sends made before the tag was wired up (matches nodemailer's own message-id,
