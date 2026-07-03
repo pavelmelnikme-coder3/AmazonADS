@@ -70,6 +70,8 @@ export default {
     htmlImportUnpacked: "Unpacked successfully — please review the result below.",
     htmlImportUnpackedWithImages: "Unpacked successfully — {n} embedded image(s) were recovered and re-hosted automatically.",
     htmlImportUnpackedWithBlobs: "Unpacked, but {n} image(s) used temporary references that don't survive outside the preview — replaced with a visible \"Image missing\" placeholder so it can't ship unnoticed. Look for it in the preview and replace it: switch to Visual mode and re-upload via an Image block, or paste a real image URL in HTML mode.",
+    sendProgress: "Sending progress", queuedLeft: "{n} left in queue",
+    etaDays: "~{n} more day(s) at {cap}/day", etaToday: "Finishing today",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi data — cost, stock and all-channel orders (read-only)",

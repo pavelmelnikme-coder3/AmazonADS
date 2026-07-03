@@ -70,6 +70,8 @@ export default {
     htmlImportUnpacked: "Erfolgreich entpackt — bitte das Ergebnis unten prüfen.",
     htmlImportUnpackedWithImages: "Erfolgreich entpackt — {n} eingebettete(s) Bild(er) wurden automatisch wiederhergestellt und neu gehostet.",
     htmlImportUnpackedWithBlobs: "Entpackt, aber {n} Bild(er) verwendeten temporäre Referenzen, die außerhalb der Vorschau nicht erhalten bleiben — durch einen gut sichtbaren \"Image missing\"-Platzhalter ersetzt, damit das nicht unbemerkt bleibt. Suchen Sie ihn in der Vorschau und ersetzen Sie ihn: zu Visuell wechseln und über einen Bild-Block erneut hochladen, oder im HTML-Modus eine echte Bild-URL einfügen.",
+    sendProgress: "Sendefortschritt", queuedLeft: "{n} noch in der Warteschlange",
+    etaDays: "~{n} weitere Tag(e) bei {cap}/Tag", etaToday: "Wird heute abgeschlossen",
   },
   wawi: {
     title: "Wawi (ERP)", subtitle: "JTL-Wawi-Daten — Einkaufspreis, Bestand und Bestellungen aller Kanäle (nur Lesen)",

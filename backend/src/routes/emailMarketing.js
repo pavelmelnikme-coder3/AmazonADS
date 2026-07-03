@@ -20,6 +20,7 @@ const { writeAudit } = require("./audit");
 const { isConfigured, sendBulkEmail } = require("../services/email/provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("../services/email/render");
 const { parseContactsFile } = require("../services/email/importParser");
+const { DAILY_CAP } = require("../services/email/dispatch");
 const { UPLOAD_ROOT, imageStorage, fileStorage, attachmentStorage, buildAttachmentList, IMAGE_EXT_BY_MIME, FILE_EXT_ALLOW } = require("../services/email/uploads");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
@@ -186,7 +187,26 @@ router.delete("/segments/:id", async (req, res, next) => {
 router.get("/campaigns", async (req, res, next) => {
   try {
     const { rows } = await query("SELECT * FROM email_campaigns WHERE workspace_id=$1 ORDER BY created_at DESC", [req.workspaceId]);
-    res.json({ data: rows });
+    // Still-queued count per campaign, for a lightweight "% through the drip" progress bar
+    // in the list without a per-row stats round-trip. Only campaigns currently sending have
+    // any 'sending'-status rows worth joining against email_sends.
+    const sendingIds = rows.filter((c) => c.status === "sending").map((c) => c.id);
+    const queuedById = new Map();
+    if (sendingIds.length) {
+      const { rows: q } = await query(
+        `SELECT campaign_id, COUNT(*)::int AS n FROM email_sends
+          WHERE campaign_id = ANY($1::uuid[]) AND status = 'queued' GROUP BY campaign_id`,
+        [sendingIds]
+      );
+      for (const r of q) queuedById.set(r.campaign_id, r.n);
+    }
+    const data = rows.map((c) => {
+      if (c.status !== "sending") return c;
+      const queued = queuedById.get(c.id) || 0;
+      const processed = Math.max(0, (c.recipients || 0) - queued);
+      return { ...c, progress: { queued, processed, percent: c.recipients > 0 ? Math.round((processed / c.recipients) * 100) : 0 } };
+    });
+    res.json({ data });
   } catch (err) { next(err); }
 });
 
@@ -388,6 +408,11 @@ router.get("/campaigns/:id/stats", async (req, res, next) => {
     // opened/clicked) — falls back to `sent` while no delivered-webhook has landed yet, so
     // rates aren't stuck at null forever on a provider/config that only reports opens/clicks.
     const engagedBase = c.delivered || c.sent;
+    // Drip-send progress: `queued` is still waiting its turn (the daily-budget cron drains
+    // it a bit at a time — see dispatch.js dripSend), so recipients-minus-queued is how far
+    // through the campaign we actually are, regardless of individual send outcome.
+    const queued = byStatus.find((r) => r.status === "queued")?.n || 0;
+    const processed = Math.max(0, (c.recipients || 0) - queued);
     res.json({
       ...c,
       sends: Object.fromEntries(byStatus.map((r) => [r.status, r.n])),
@@ -399,6 +424,12 @@ router.get("/campaigns/:id/stats", async (req, res, next) => {
         bounceRate: pct(c.bounced, c.sent),
         complaintRate: pct(c.complained, engagedBase),
         unsubscribeRate: pct(c.unsubscribed, engagedBase),
+      },
+      progress: {
+        queued, processed,
+        percent: c.recipients > 0 ? Math.round((processed / c.recipients) * 100) : 0,
+        dailyCap: DAILY_CAP,
+        etaDays: queued > 0 ? Math.ceil(queued / DAILY_CAP) : 0,
       },
     });
   } catch (err) { next(err); }

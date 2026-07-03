@@ -220,4 +220,47 @@ describe("GET /campaigns/:id/stats", () => {
     const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
     expect(res.status).toBe(404);
   });
+
+  test("progress reflects queued vs processed, with an ETA at the daily cap", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: CAMP_ID, name: "C", status: "sending", recipients: 1990, sent: 250, delivered: 0,
+        opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, sent_at: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [{ status: "sent", n: 250 }, { status: "queued", n: 1740 }] });
+    const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
+    expect(res.body.progress).toEqual({ queued: 1740, processed: 250, percent: 13, dailyCap: 250, etaDays: 7 });
+  });
+
+  test("progress.etaDays is 0 once nothing is left queued", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [{
+        id: CAMP_ID, name: "C", status: "sent", recipients: 100, sent: 100, delivered: 0,
+        opened: 0, clicked: 0, bounced: 0, complained: 0, unsubscribed: 0, sent_at: "2026-01-01",
+      }] })
+      .mockResolvedValueOnce({ rows: [{ status: "sent", n: 100 }] });
+    const res = await request(app()).get(`/email-marketing/campaigns/${CAMP_ID}/stats`);
+    expect(res.body.progress).toEqual({ queued: 0, processed: 100, percent: 100, dailyCap: 250, etaDays: 0 });
+  });
+});
+
+describe("GET /campaigns — list progress", () => {
+  test("attaches a progress object only for campaigns currently sending", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        { id: CAMP_ID, status: "sending", recipients: 1990 },
+        { id: "camp-0002", status: "draft", recipients: 0 },
+      ] })
+      .mockResolvedValueOnce({ rows: [{ campaign_id: CAMP_ID, n: 1740 }] });
+    const res = await request(app()).get("/email-marketing/campaigns");
+    expect(res.body.data[0].progress).toEqual({ queued: 1740, processed: 250, percent: 13 });
+    expect(res.body.data[1].progress).toBeUndefined();
+  });
+
+  test("no extra query fires when no campaign is sending", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID, status: "draft", recipients: 0 }] });
+    const res = await request(app()).get("/email-marketing/campaigns");
+    expect(res.status).toBe(200);
+    expect(dbQuery).toHaveBeenCalledTimes(1);
+  });
 });

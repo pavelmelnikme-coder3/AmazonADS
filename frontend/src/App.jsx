@@ -16383,6 +16383,16 @@ const EmailMarketingPage = ({ workspaceId }) => {
   useEffect(() => { loadCampaigns(); loadSegments(); }, [workspaceId]);
   useEffect(() => { if (tab === "contacts") loadContacts(); if (tab === "suppressions") loadSuppressions(); }, [tab, statusFilter, workspaceId]);
 
+  // While a campaign is actively drip-sending, poll the list so its progress bar moves
+  // without the user having to refresh — the drip cron itself only ticks every 5 min, so
+  // this interval doesn't need to be tighter than that.
+  const hasSendingCampaign = campaigns.some(c => c.status === "sending");
+  useEffect(() => {
+    if (!hasSendingCampaign) return;
+    const id = setInterval(loadCampaigns, 20000);
+    return () => clearInterval(id);
+  }, [hasSendingCampaign]);
+
   async function doImport() {
     setErr("");
     if (!importSource.trim()) { setErr(t("email.importNeedConsent")); return; }
@@ -16569,12 +16579,38 @@ const EmailMarketingPage = ({ workspaceId }) => {
     try { setStats(await apiFetch(`/email-marketing/campaigns/${c.id}/stats`)); } catch {}
   }
 
+  // Keep the open stats panel live while its campaign is still sending.
+  useEffect(() => {
+    if (!statsFor || stats?.status !== "sending") return;
+    const id = setInterval(() => {
+      apiFetch(`/email-marketing/campaigns/${statsFor}/stats`).then(setStats).catch(() => {});
+    }, 15000);
+    return () => clearInterval(id);
+  }, [statsFor, stats?.status]);
+
   const statusBadge = (s) => {
     const map = { draft: "bg-bl", scheduled: "bg-amb", sending: "bg-pur", sent: "bg-grn", paused: "bg-amb", failed: "bg-red",
       active: "bg-grn", unsubscribed: "bg-red", bounced: "bg-red", complained: "bg-red" };
     return <span className={`badge ${map[s] || "bg-bl"}`} style={{ fontSize: 10 }}>{s}</span>;
   };
   const num = (n) => (n ?? 0).toLocaleString();
+
+  // Thin drip-send progress bar (same visual language as GlobalProgressBar) + queue/ETA text.
+  const SendProgressBar = ({ progress }) => {
+    if (!progress) return null;
+    const pct = Math.max(0, Math.min(100, progress.percent ?? 0));
+    return (
+      <div style={{ marginTop: 6, minWidth: 140 }}>
+        <div style={{ height: 4, background: "var(--b2)", borderRadius: 4, overflow: "hidden" }}>
+          <div style={{ height: "100%", borderRadius: 4, background: "linear-gradient(90deg, var(--ac), var(--ac2))", width: `${pct}%`, transition: "width .5s ease" }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--tx3)", marginTop: 3, gap: 8 }}>
+          <span>{pct}%</span>
+          <span>{t("email.queuedLeft", { n: num(progress.queued) })}</span>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div style={{ padding: "24px 28px", position: "relative" }}>
@@ -16612,7 +16648,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
                 {campaigns.map(c => (
                   <tr key={c.id} style={{ borderTop: "1px solid var(--b1)" }}>
                     <td style={{ padding: "10px 14px", fontWeight: 500 }}>{c.name}<div style={{ fontSize: 11, color: "var(--tx3)" }}>{c.subject}</div></td>
-                    <td style={{ padding: "10px 14px" }}>{statusBadge(c.status)}</td>
+                    <td style={{ padding: "10px 14px" }}>{statusBadge(c.status)}{c.status === "sending" && <SendProgressBar progress={c.progress} />}</td>
                     <td style={{ padding: "10px 14px", textAlign: "right", fontFamily: "var(--mono)" }}>{num(c.recipients)}</td>
                     <td style={{ padding: "10px 14px", textAlign: "right", fontFamily: "var(--mono)" }}>{num(c.sent)}</td>
                     <td style={{ padding: "10px 14px", textAlign: "right", fontFamily: "var(--mono)" }}>{num(c.opened)}</td>
@@ -16837,6 +16873,22 @@ const EmailMarketingPage = ({ workspaceId }) => {
           <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 460, maxWidth: "92vw" }}>
             <h3 style={{ margin: "0 0 14px", fontSize: 17 }}>{stats?.name || t("email.stats")}</h3>
             {!stats ? <div style={{ color: "var(--tx3)" }}>…</div> : (<>
+              {stats.status === "sending" && stats.progress && (
+                <div style={{ marginBottom: 14, background: "var(--s2)", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--tx3)", marginBottom: 6 }}>
+                    <span>{t("email.sendProgress")}</span>
+                    <span>{stats.progress.percent}%</span>
+                  </div>
+                  <div style={{ height: 6, background: "var(--b2)", borderRadius: 6, overflow: "hidden" }}>
+                    <div style={{ height: "100%", borderRadius: 6, background: "linear-gradient(90deg, var(--ac), var(--ac2))", width: `${Math.max(0, Math.min(100, stats.progress.percent))}%`, transition: "width .5s ease" }} />
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 11, color: "var(--tx3)" }}>
+                    {t("email.queuedLeft", { n: num(stats.progress.queued) })} · {stats.progress.etaDays > 0
+                      ? t("email.etaDays", { n: stats.progress.etaDays, cap: num(stats.progress.dailyCap) })
+                      : t("email.etaToday")}
+                  </div>
+                </div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 {[["colRecipients", stats.recipients, null], ["colSent", stats.sent, null],
                   ["colDelivered", stats.delivered, stats.rates?.deliveredRate], ["colOpened", stats.opened, stats.rates?.openRate],
