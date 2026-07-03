@@ -231,14 +231,22 @@ router.patch("/:id", async (req, res, next) => {
           group: "campaigns",
         }).catch(e => logger.warn("Placement write-back failed (non-fatal)", { error: e.message }));
       } else {
-        await apiPut({
-          connectionId: campaign.connection_id,
-          profileId: String(campaign.amazon_profile_id),
-          marketplace: campaign.marketplace_id,
-          path: endpoint,
-          data: campaignsData,
-          group: "campaigns",
-        });
+        // Non-fatal — an Amazon-side failure here (e.g. a connection auth issue) must not
+        // propagate as an HTTP error: `next(err)` would forward err.status (401 for a stale
+        // Amazon token) straight to the client, and the frontend can't tell that apart from
+        // the user's own AdsFlow session being invalid — it would log them out of the app.
+        try {
+          await apiPut({
+            connectionId: campaign.connection_id,
+            profileId: String(campaign.amazon_profile_id),
+            marketplace: campaign.marketplace_id,
+            path: endpoint,
+            data: campaignsData,
+            group: "campaigns",
+          });
+        } catch (e) {
+          logger.warn("Campaign write-back failed (non-fatal)", { id: req.params.id, error: e.message });
+        }
       }
     }
 

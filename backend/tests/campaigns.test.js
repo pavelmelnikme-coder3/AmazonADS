@@ -752,11 +752,22 @@ describe("PATCH /campaigns/:id", () => {
     expect(res.body.error).toMatch(/not found/i);
   });
 
-  it("Amazon failure propagates as 500 (required API call)", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [CAMPAIGN_DB_ROW] });
+  it("Amazon failure is non-fatal — campaign still updated in DB", async () => {
+    mockPatch();
     apiPut.mockRejectedValueOnce(new Error("Amazon 503"));
     const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ state: "paused" });
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    expect(res.body.after.state).toBe("paused");
+  });
+
+  it("Amazon 401 (stale connection token) does not propagate as HTTP 401", async () => {
+    // A write-back failure must never surface as 401 — the frontend treats any 401 as
+    // "your AdsFlow session is dead" and force-logs the user out. An Amazon-side auth
+    // issue is unrelated to the user's own login and must not trigger that.
+    mockPatch();
+    apiPut.mockRejectedValueOnce(Object.assign(new Error("Amazon authorization expired"), { status: 401 }));
+    const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ state: "paused" });
+    expect(res.status).toBe(200);
   });
 
   it("writes audit event after patch", async () => {

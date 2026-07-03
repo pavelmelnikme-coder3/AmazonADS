@@ -8,7 +8,7 @@ async function requireAuth(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Authentication required" });
+      return res.status(401).json({ error: "Authentication required", code: "NO_TOKEN" });
     }
 
     const token = authHeader.slice(7);
@@ -20,7 +20,7 @@ async function requireAuth(req, res, next) {
     );
 
     if (!rows.length || !rows[0].is_active) {
-      return res.status(401).json({ error: "User not found or inactive" });
+      return res.status(401).json({ error: "User not found or inactive", code: "USER_INACTIVE" });
     }
 
     req.user = rows[0];
@@ -31,7 +31,7 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ error: "Token expired", code: "TOKEN_EXPIRED" });
     }
     if (err.name === "JsonWebTokenError") {
-      return res.status(401).json({ error: "Invalid token" });
+      return res.status(401).json({ error: "Invalid token", code: "INVALID_TOKEN" });
     }
     next(err);
   }

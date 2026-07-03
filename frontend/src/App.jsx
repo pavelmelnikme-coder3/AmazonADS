@@ -362,9 +362,18 @@ async function apiFetch(path, opts = {}, asBlob = false) {
 
   const res = await fetch(`${API}${path}`, { ...opts, headers });
   if (res.status === 401) {
-    localStorage.removeItem("af_token");
-    window.location.reload();
-    return;
+    // Only nuke the user's own session for auth codes that actually mean "your AdsFlow
+    // login is invalid". A 401 can also come from an unrelated Amazon Ads connection issue
+    // bubbling through a write-back call (e.g. PATCH /campaigns/:id) — that should surface
+    // as a normal error, not silently log the user out of the whole app.
+    const SESSION_DEAD_CODES = new Set(["TOKEN_EXPIRED", "NO_TOKEN", "INVALID_TOKEN", "USER_INACTIVE"]);
+    let code = null;
+    try { code = (await res.clone().json())?.code; } catch {}
+    if (SESSION_DEAD_CODES.has(code)) {
+      localStorage.removeItem("af_token");
+      window.location.reload();
+      return;
+    }
   }
   if (asBlob) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
