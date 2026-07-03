@@ -43,6 +43,13 @@ describe("render", () => {
     expect(html).toContain("/api/v1/email/unsubscribe/T1");
     expect(html).toMatch(/Unsubscribe/i);
   });
+
+  test("renderHtmlForContact({isTest:true}) shows a note instead of a real (always-dead) unsubscribe link", () => {
+    const html = render.renderHtmlForContact("<p>Hello</p>",
+      { email: "a@b.com", first_name: "", attributes: {}, unsubscribe_token: "test-abc123" }, { isTest: true });
+    expect(html).not.toContain("/api/v1/email/unsubscribe/");
+    expect(html).toMatch(/test send/i);
+  });
 });
 
 describe("ses adapter", () => {

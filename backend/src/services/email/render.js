@@ -38,15 +38,22 @@ function contactFields(contact) {
  * Render the final HTML for one recipient: merge tags applied + a compliance footer
  * appended (postal address from COMPANY_POSTAL_ADDRESS + unsubscribe link). The footer
  * is always added so every marketing email is legally complete even if the author omits it.
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.isTest] - test sends use a throwaway token with no matching
+ *   contact row, so a real unsubscribe link would always resolve to "expired or invalid".
+ *   Show a plain note instead of a dead link so that isn't mistaken for a bug.
  */
-function renderHtmlForContact(htmlBody, contact) {
+function renderHtmlForContact(htmlBody, contact, opts = {}) {
   const body = applyMergeTags(htmlBody, contactFields(contact));
   const addr = process.env.COMPANY_POSTAL_ADDRESS || "";
-  const unsub = unsubscribeUrl(contact.unsubscribe_token);
+  const unsubLine = opts.isTest
+    ? `<div>[TEST] Unsubscribe link is disabled in test sends — it only works for real recipients.</div>`
+    : `<div>You are receiving this because you opted in. <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;">Unsubscribe</a>.</div>`;
   const footer = `
   <div style="margin-top:28px;padding-top:14px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
     ${addr ? `<div style="margin-bottom:6px;">${esc(addr)}</div>` : ""}
-    <div>You are receiving this because you opted in. <a href="${esc(unsub)}" style="color:#64748b;">Unsubscribe</a>.</div>
+    ${unsubLine}
   </div>`;
   return `${body}${footer}`;
 }
