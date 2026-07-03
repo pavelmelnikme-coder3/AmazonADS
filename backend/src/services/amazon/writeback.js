@@ -28,6 +28,75 @@ function isDuplicateError(msg) {
 }
 
 /**
+ * Recover the real Amazon id of a negative keyword after a "duplicate" rejection —
+ * the earlier negative was PAUSED (not deleted) by archiveNegativeKeyword, so Amazon
+ * still holds it under its original id and rejects a fresh create as a dupe. Without
+ * this lookup the local row keeps its `rule-*` placeholder id forever, which then
+ * blocks any future archive/re-enable of it (see hasRealId guards in routes/rules.js).
+ * SP only — matches the scope of the existing entities.js sync (SB negatives aren't synced).
+ */
+async function findExistingNegativeKeyword({ connectionId, profileId, marketplaceId, path, dataKey, amazonCampaignId, amazonAdGroupId, keywordText, matchType, level }) {
+  if (!path.startsWith("/sp/")) return null; // SB negatives aren't listable via this path today
+  try {
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = { stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] }, maxResults: 500 };
+      if (nextToken) body.nextToken = nextToken;
+      const result = await post({
+        connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
+        path: `${path}/list`, data: body, group: "keywords",
+      });
+      const items = result?.[dataKey] || [];
+      const match = items.find((kw) =>
+        String(kw.campaignId) === String(amazonCampaignId) &&
+        (level !== "ad_group" || String(kw.adGroupId) === String(amazonAdGroupId)) &&
+        String(kw.keywordText || "").toLowerCase() === String(keywordText || "").toLowerCase() &&
+        String(kw.matchType || "").toUpperCase() === String(matchType || "").toUpperCase()
+      );
+      if (match) return { id: match.keywordId, state: match.state };
+      nextToken = result?.nextToken || null;
+      page++;
+    } while (nextToken && page < 20);
+    return null;
+  } catch (e) {
+    logger.warn("findExistingNegativeKeyword lookup failed", { profileId, path, error: e.message });
+    return null;
+  }
+}
+
+/**
+ * Same recovery as findExistingNegativeKeyword, for negative targeting clauses (ASINs).
+ */
+async function findExistingNegativeTarget({ connectionId, profileId, marketplaceId, amazonCampaignId, amazonAdGroupId, asinValue }) {
+  try {
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = { stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] }, maxResults: 500 };
+      if (nextToken) body.nextToken = nextToken;
+      const result = await post({
+        connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
+        path: "/sp/negativeTargets/list", data: body, group: "keywords",
+      });
+      const items = result?.negativeTargetingClauses || [];
+      const match = items.find((t) =>
+        String(t.campaignId) === String(amazonCampaignId) &&
+        (!amazonAdGroupId || String(t.adGroupId) === String(amazonAdGroupId)) &&
+        (t.expression || []).some((e) => e.type === "ASIN_SAME_AS" && String(e.value).toUpperCase() === String(asinValue).toUpperCase())
+      );
+      if (match) return { id: match.targetId, state: match.state };
+      nextToken = result?.nextToken || null;
+      page++;
+    } while (nextToken && page < 20);
+    return null;
+  } catch (e) {
+    logger.warn("findExistingNegativeTarget lookup failed", { profileId, error: e.message });
+    return null;
+  }
+}
+
+/**
  * Push keyword bid/state updates to Amazon.
  *
  * @param {Array<{amazonKeywordId, campaignType, connectionId, profileId, marketplaceId, bid?, state?}>} updates
@@ -131,16 +200,31 @@ async function pushNegativeKeyword({
 }) {
   if (!connectionId || !profileId) return { ok: false, error: "No Amazon connection" };
 
-  try {
-    // SP v3 API requires SCREAMING_SNAKE_CASE enums for both endpoints
-    const MT_MAP = {
-      negativeExact:  "NEGATIVE_EXACT",
-      negativePhrase: "NEGATIVE_PHRASE",
-      NEGATIVE_EXACT:  "NEGATIVE_EXACT",
-      NEGATIVE_PHRASE: "NEGATIVE_PHRASE",
-    };
-    const amazonMatchType = MT_MAP[matchType] || matchType.toUpperCase();
+  // SP v3 API requires SCREAMING_SNAKE_CASE enums for both endpoints
+  const MT_MAP = {
+    negativeExact:  "NEGATIVE_EXACT",
+    negativePhrase: "NEGATIVE_PHRASE",
+    NEGATIVE_EXACT:  "NEGATIVE_EXACT",
+    NEGATIVE_PHRASE: "NEGATIVE_PHRASE",
+  };
+  const amazonMatchType = MT_MAP[matchType] || matchType.toUpperCase();
 
+  let path;
+  let dataKey;
+  if (campaignType === "sponsoredProducts" || campaignType === "SP") {
+    if (level === "ad_group") {
+      path = "/sp/negativeKeywords";
+      dataKey = "negativeKeywords";
+    } else {
+      path = "/sp/campaignNegativeKeywords";
+      dataKey = "campaignNegativeKeywords";
+    }
+  } else {
+    path = "/sb/negativeKeywords";
+    dataKey = "negativeKeywords";
+  }
+
+  try {
     const payload = {
       keywordText,
       matchType: amazonMatchType,
@@ -149,21 +233,6 @@ async function pushNegativeKeyword({
     };
     if (level === "ad_group" && amazonAdGroupId) {
       payload.adGroupId = amazonAdGroupId;
-    }
-
-    let path;
-    let dataKey;
-    if (campaignType === "sponsoredProducts" || campaignType === "SP") {
-      if (level === "ad_group") {
-        path = "/sp/negativeKeywords";
-        dataKey = "negativeKeywords";
-      } else {
-        path = "/sp/campaignNegativeKeywords";
-        dataKey = "campaignNegativeKeywords";
-      }
-    } else {
-      path = "/sb/negativeKeywords";
-      dataKey = "negativeKeywords";
     }
 
     const result = await post({
@@ -192,21 +261,61 @@ async function pushNegativeKeyword({
       const errors = result?.[dataKey]?.error || [];
       const errMsg = errors[0]?.description || errors[0]?.message || (errors.length ? JSON.stringify(errors[0]) : null);
       if (isDuplicateError(errMsg)) {
-        logger.info("Negative keyword already exists on Amazon (idempotent)", { profileId, path, keywordText });
-        return { ok: true, duplicate: true };
+        return recoverDuplicateNegativeKeyword({
+          connectionId, profileId, marketplaceId, path, dataKey, localId,
+          amazonCampaignId, amazonAdGroupId, keywordText, matchType: amazonMatchType, level,
+        });
       }
+      logger.warn("Negative keyword rejected by Amazon", { profileId, path, amazonError: errMsg });
+      return { ok: false, error: errMsg || "no realId in response" };
     }
 
     logger.info("Negative keyword write-back ok", { profileId, path, realId });
     return { ok: true };
   } catch (e) {
     if (isDuplicateError(e.message)) {
-      logger.info("Negative keyword already exists on Amazon (idempotent)", { profileId, keywordText });
-      return { ok: true, duplicate: true };
+      return recoverDuplicateNegativeKeyword({
+        connectionId, profileId, marketplaceId, path, dataKey, localId,
+        amazonCampaignId, amazonAdGroupId, keywordText, matchType: amazonMatchType, level,
+      });
     }
     logger.warn("Negative keyword write-back failed (non-fatal)", { profileId, error: e.message });
     return { ok: false, error: e.message };
   }
+}
+
+/**
+ * On a duplicate rejection, look up the existing negative's real id, backfill it locally,
+ * and re-enable it on Amazon if it was left PAUSED from an earlier archive — otherwise
+ * this "add" silently no-ops forever (see findExistingNegativeKeyword doc comment).
+ */
+async function recoverDuplicateNegativeKeyword({ connectionId, profileId, marketplaceId, path, dataKey, localId, amazonCampaignId, amazonAdGroupId, keywordText, matchType, level }) {
+  logger.info("Negative keyword already exists on Amazon (idempotent) — recovering real id", { profileId, path, keywordText });
+  const existing = await findExistingNegativeKeyword({
+    connectionId, profileId, marketplaceId, path, dataKey, amazonCampaignId, amazonAdGroupId, keywordText, matchType, level,
+  });
+  if (!existing?.id) {
+    logger.warn("Duplicate negative keyword but lookup could not recover its id", { profileId, path, keywordText });
+    return { ok: true, duplicate: true };
+  }
+  if (localId) {
+    // The periodic entity sync may have already created its own row for this real id
+    // (upserted on (profile_id, amazon_neg_keyword_id)). If so, this placeholder row is a
+    // redundant duplicate of it — drop the placeholder rather than violate the unique index.
+    await query("UPDATE negative_keywords SET amazon_neg_keyword_id = $1 WHERE id = $2", [String(existing.id), localId])
+      .catch(async (e) => {
+        if (e.code !== "23505") throw e;
+        logger.info("Duplicate neg keyword real id already tracked by a synced row — dropping placeholder", { profileId, localId, realId: existing.id });
+        await query("DELETE FROM negative_keywords WHERE id = $1", [localId]);
+      });
+  }
+  if (existing.state && existing.state !== "ENABLED") {
+    await put({
+      connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
+      path, data: { [dataKey]: [{ keywordId: existing.id, state: "ENABLED" }] }, group: "keywords",
+    }).catch((e) => logger.warn("Re-enable duplicate negative keyword failed", { profileId, keywordId: existing.id, error: e.message }));
+  }
+  return { ok: true, duplicate: true, realId: existing.id };
 }
 
 /**
@@ -299,8 +408,7 @@ async function pushNegativeAsin({
       if (errors.length > 0) {
         const errMsg = errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
         if (isDuplicateError(errMsg)) {
-          logger.info("Negative ASIN already exists on Amazon (idempotent)", { profileId, path, asinValue });
-          return { ok: true, duplicate: true };
+          return recoverDuplicateNegativeTarget({ connectionId, profileId, marketplaceId, localId, amazonCampaignId, amazonAdGroupId, asinValue });
         }
         logger.warn("Negative ASIN rejected by Amazon", { profileId, path, amazonError: errMsg });
         return { ok: false, error: errMsg };
@@ -320,12 +428,39 @@ async function pushNegativeAsin({
     return { ok: true };
   } catch (e) {
     if (isDuplicateError(e.message)) {
-      logger.info("Negative ASIN already exists on Amazon (idempotent)", { profileId, asinValue });
-      return { ok: true, duplicate: true };
+      return recoverDuplicateNegativeTarget({ connectionId, profileId, marketplaceId, localId, amazonCampaignId, amazonAdGroupId, asinValue });
     }
     logger.warn("Negative ASIN write-back failed (non-fatal)", { profileId, error: e.message });
     return { ok: false, error: e.message };
   }
+}
+
+/**
+ * On a duplicate rejection, look up the existing negative target's real id, backfill it
+ * locally, and re-enable it on Amazon if it was left PAUSED from an earlier archive.
+ */
+async function recoverDuplicateNegativeTarget({ connectionId, profileId, marketplaceId, localId, amazonCampaignId, amazonAdGroupId, asinValue }) {
+  logger.info("Negative ASIN already exists on Amazon (idempotent) — recovering real id", { profileId, asinValue });
+  const existing = await findExistingNegativeTarget({ connectionId, profileId, marketplaceId, amazonCampaignId, amazonAdGroupId, asinValue });
+  if (!existing?.id) {
+    logger.warn("Duplicate negative ASIN but lookup could not recover its id", { profileId, asinValue });
+    return { ok: true, duplicate: true };
+  }
+  if (localId) {
+    await query("UPDATE negative_targets SET amazon_neg_target_id = $1 WHERE id = $2", [String(existing.id), localId])
+      .catch(async (e) => {
+        if (e.code !== "23505") throw e;
+        logger.info("Duplicate neg target real id already tracked by a synced row — dropping placeholder", { profileId, localId, realId: existing.id });
+        await query("DELETE FROM negative_targets WHERE id = $1", [localId]);
+      });
+  }
+  if (existing.state && existing.state !== "ENABLED") {
+    await put({
+      connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
+      path: "/sp/negativeTargets", data: { negativeTargetingClauses: [{ targetId: existing.id, state: "ENABLED" }] }, group: "keywords",
+    }).catch((e) => logger.warn("Re-enable duplicate negative target failed", { profileId, targetId: existing.id, error: e.message }));
+  }
+  return { ok: true, duplicate: true, realId: existing.id };
 }
 
 /**
