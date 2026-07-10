@@ -3,12 +3,15 @@ const pool = require("../../db/pool");
 const logger = require("../../config/logger");
 const {
   getCatalogItem,
+  getListingContent,
+  getAplusStatus,
   getInventory,
   getOrders,
   getOrderItems,
   getFinancialEvents,
   getCompetitivePricing,
 } = require("./spClient");
+const { computeListingIssues } = require("./listingHealth");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function _startLog(workspaceId, marketplaceId, syncType) {
@@ -61,6 +64,67 @@ async function syncBsr(workspaceId, marketplaceId, refreshToken) {
           await _sleep(10000);
         } else {
           logger.warn(`BSR sync failed for ASIN ${product.asin}`, { error: err.message });
+        }
+      }
+    }
+    await _finishLog(logId, "success", { fetched, upserted });
+    return { fetched, upserted };
+  } catch (err) {
+    await _finishLog(logId, "failed", { fetched, upserted }, { error: err.message });
+    throw err;
+  }
+}
+
+// ─── Listing Health sync ──────────────────────────────────────────────────────
+// Recomputes Amazon's own "listing improvement recommendations" checks per ASIN
+// (title length, bullets, description, image count/zoom, A+ content). Two SP-API
+// calls per product (Catalog Items + A+ Content), so this runs far less often
+// than BSR — daily, not every 4h (see scheduler.js listingHealthJob).
+async function syncListingHealth(workspaceId, marketplaceId, refreshToken) {
+  const logId = await _startLog(workspaceId, marketplaceId, "listing_health");
+  let fetched = 0, upserted = 0;
+  try {
+    const { rows: products } = await pool.query(
+      `SELECT id, asin FROM products WHERE workspace_id=$1 AND marketplace_id=$2 AND is_active=true`,
+      [workspaceId, marketplaceId]
+    );
+    for (const product of products) {
+      try {
+        const content = await getListingContent(product.asin, marketplaceId, refreshToken);
+        await _sleep(500);
+        const aplus = await getAplusStatus(product.asin, marketplaceId, refreshToken);
+        fetched++;
+
+        const result = computeListingIssues({
+          title: content.title,
+          bulletPoints: content.bulletPoints,
+          description: content.description,
+          images: content.images,
+          hasAplus: aplus.hasAplus,
+        });
+
+        await pool.query(
+          `INSERT INTO product_listing_health
+             (product_id, title_len, bullet_count, image_count, has_zoomable_image,
+              has_description, has_aplus, issues, issue_count, raw_data, checked_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+           ON CONFLICT (product_id) DO UPDATE SET
+             title_len=$2, bullet_count=$3, image_count=$4, has_zoomable_image=$5,
+             has_description=$6, has_aplus=$7, issues=$8, issue_count=$9, raw_data=$10, checked_at=NOW()`,
+          [
+            product.id, result.titleLen, result.bulletCount, result.imageCount,
+            result.hasZoomableImage, result.hasDescription, result.hasAplus,
+            JSON.stringify(result.issues), result.issueCount, JSON.stringify(content.rawData || {}),
+          ]
+        );
+        upserted++;
+        await _sleep(500);
+      } catch (err) {
+        if (err.message?.includes("rate limit")) {
+          logger.warn(`Listing health sync rate-limited, pausing 10s`, { asin: product.asin });
+          await _sleep(10000);
+        } else {
+          logger.warn(`Listing health sync failed for ASIN ${product.asin}`, { error: err.message });
         }
       }
     }
@@ -350,4 +414,4 @@ async function syncPricing(workspaceId, marketplaceId, refreshToken) {
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing };
+module.exports = { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing, syncListingHealth };

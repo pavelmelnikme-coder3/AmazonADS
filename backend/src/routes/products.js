@@ -41,6 +41,9 @@ router.get("/", async (req, res, next) => {
          s.classification_ranks,
          s.display_group_ranks,
          s.captured_at as bsr_updated_at,
+         lh.issue_count AS lh_issue_count,
+         lh.issues AS lh_issues,
+         lh.checked_at AS lh_checked_at,
          COALESCE(sm.sku, '') AS internal_sku,
          COALESCE(inv.seller_skus, ARRAY[]::text[]) AS seller_skus,
          -- cost / price metadata
@@ -82,6 +85,7 @@ router.get("/", async (req, res, next) => {
          ORDER BY captured_at DESC
          LIMIT 1
        ) s ON true
+       LEFT JOIN product_listing_health lh ON lh.product_id = p.id
        LEFT JOIN sku_mapping sm
          ON sm.workspace_id = p.workspace_id AND sm.asin = p.asin
        LEFT JOIN LATERAL (

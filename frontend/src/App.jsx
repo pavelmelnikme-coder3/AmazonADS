@@ -4539,6 +4539,46 @@ function ListingTrendStack({ series, prevSeries, tr, notes = [], onDeleteNote })
   );
 }
 
+// Listing-health issue codes → i18n keys. Mirrors the 6 checkable criteria from
+// Amazon's own "Listing improvement recommendations" (Ads console → ad group),
+// computed server-side in backend/src/services/amazon/listingHealth.js since
+// that Amazon feature has no public API.
+const LISTING_ISSUE_LABEL_KEYS = {
+  title:        "products.recTitle",
+  bullets:      "products.recBullets",
+  description:  "products.recDescription",
+  images_count: "products.recImagesCount",
+  images_zoom:  "products.recImagesZoom",
+  aplus:        "products.recAplus",
+};
+
+const ListingIssueRow = ({ issue, tr }) => (
+  <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", fontSize: 12 }}>
+    <span style={{ color: "var(--amb)", flexShrink: 0, marginTop: 1 }}>⚠</span>
+    <span style={{ color: "var(--tx2)" }}>{tr(LISTING_ISSUE_LABEL_KEYS[issue.code] || issue.code)}</span>
+  </div>
+);
+
+// Recommendations panel content — shared by the flat per-ASIN card and the
+// per-ASIN row inside a grouped listing card.
+const ListingRecommendationsPanel = ({ issues, checkedAt, tr }) => {
+  if (!checkedAt) {
+    return <div style={{ fontSize: 12, color: "var(--tx3)" }}>{tr("products.recNotChecked")}</div>;
+  }
+  if (!issues || issues.length === 0) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--grn)" }}>
+        <Check size={13} strokeWidth={2} /> {tr("products.recNone")}
+      </div>
+    );
+  }
+  return (
+    <div>
+      {issues.map((issue, i) => <ListingIssueRow key={issue.code || i} issue={issue} tr={tr} />)}
+    </div>
+  );
+};
+
 const ProductsPage = ({ workspaceId }) => {
   const { t: tr } = useI18n();
   const [newAsin, setNewAsin] = useState("");
@@ -4547,6 +4587,10 @@ const ProductsPage = ({ workspaceId }) => {
   // Set of product IDs currently expanded. Allows multi-expand and a
   // master "expand all / collapse all" toggle for sweeping BSR review.
   const [expandedIds, setExpandedIds] = useState(() => new Set());
+  // Listing-health "Рекомендации" panels — separate expand state per view so
+  // opening one doesn't affect the other when the user toggles groupByListing.
+  const [expandedRecs, setExpandedRecs] = useState(() => new Set());
+  const [expandedListingRecs, setExpandedListingRecs] = useState(() => new Set());
   const [history, setHistory] = useState({});
   const [histStart, setHistStart] = useState('');
   const [histEnd, setHistEnd] = useState('');
@@ -4606,6 +4650,8 @@ const ProductsPage = ({ workspaceId }) => {
   const [filterBrand, setFilterBrand] = useState("all");
   const [filterAvail, setFilterAvail] = useState("all"); // all | available | unavailable
   const [filterAds, setFilterAds]     = useState("all"); // all | advertised | not_advertised
+  // all | any | none | title | bullets | description | images | aplus
+  const [filterRec, setFilterRec]     = useState("all");
   const [sortBy, setSortBy] = useState("bsr");
   // Listing grouping (parent ASIN → variation family) + lazy trend charts.
   // Default to the per-ASIN view on load / first entry; user can switch to
@@ -4665,6 +4711,12 @@ const ProductsPage = ({ workspaceId }) => {
     if (filterAvail === "unavailable") list = list.filter(p => !p.is_available);
     if (filterAds === "advertised")     list = list.filter(p => p.is_advertised);
     if (filterAds === "not_advertised") list = list.filter(p => !p.is_advertised);
+    if (filterRec === "any")  list = list.filter(p => (p.lh_issue_count || 0) > 0);
+    if (filterRec === "none") list = list.filter(p => p.lh_checked_at && (p.lh_issue_count || 0) === 0);
+    if (filterRec === "images") list = list.filter(p => (p.lh_issues || []).some(i => i.code === "images_count" || i.code === "images_zoom"));
+    if (["title", "bullets", "description", "aplus"].includes(filterRec)) {
+      list = list.filter(p => (p.lh_issues || []).some(i => i.code === filterRec));
+    }
     list = [...list].sort((a, b) => {
       if (sortBy === "bsr") {
         const ra = [...(a.classification_ranks||[]),...(a.display_group_ranks||[])];
@@ -4681,10 +4733,11 @@ const ProductsPage = ({ workspaceId }) => {
       if (sortBy === "asin") return a.asin.localeCompare(b.asin);
       if (sortBy === "updated") return new Date(b.bsr_updated_at || 0) - new Date(a.bsr_updated_at || 0);
       if (sortBy === "title") return (a.title || "").localeCompare(b.title || "");
+      if (sortBy === "recommendations") return (b.lh_issue_count ?? -1) - (a.lh_issue_count ?? -1);
       return 0;
     });
     return list;
-  }, [products, search, filterBrand, filterAvail, filterAds, sortBy, periodOrders]);
+  }, [products, search, filterBrand, filterAvail, filterAds, filterRec, sortBy, periodOrders]);
 
   // Group filtered products into listings by parent ASIN (variation family);
   // products without a parent are their own single-ASIN listing.
@@ -4709,6 +4762,11 @@ const ProductsPage = ({ workspaceId }) => {
         asin_count: ch.length,
         title: rep.title, image_url: rep.image_url, brand: rep.brand, marketplace_id: rep.marketplace_id,
         best_rank: ranks.length ? Math.min(...ranks) : null,
+        issue_count: ch.reduce((s, c) => s + (num(c.lh_issue_count)), 0),
+        // Distinguish "every variation checked, 0 issues" from "some variation
+        // was never synced" — an unchecked child must never render as a silent
+        // 0 in the sum above and get mistaken for a clean listing.
+        all_checked: ch.every(c => c.lh_checked_at),
         ad_spend_7d: adSpend7,
         orders_7d: ch.reduce((s, c) => s + num(c.qty_7d), 0),
         acos_7d: adSales7 > 0 ? (adSpend7 / adSales7) * 100 : null,
@@ -4720,6 +4778,13 @@ const ProductsPage = ({ workspaceId }) => {
       };
     });
     if (sortBy === "orders") out.sort((a, b) => b.period_orders - a.period_orders || (a.best_rank ?? Infinity) - (b.best_rank ?? Infinity));
+    else if (sortBy === "recommendations") {
+      // Mirror the flat-view convention: a listing with zero checked children must sort
+      // behind clean (checked, 0-issue) listings, not tie with them — same reasoning as
+      // the "not all checked" badge above, just for the sort key.
+      const key = L => L.children.some(c => c.lh_checked_at) ? L.issue_count : -1;
+      out.sort((a, b) => key(b) - key(a));
+    }
     else out.sort((a, b) => (a.best_rank ?? Infinity) - (b.best_rank ?? Infinity));
     return out;
   }, [filteredProducts, sortBy, periodOrders]);
@@ -5127,6 +5192,22 @@ const ProductsPage = ({ workspaceId }) => {
           </select>
 
           <select
+            value={filterRec}
+            onChange={e => setFilterRec(e.target.value)}
+            title={tr("products.filterRecHint")}
+            style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: filterRec === "all" ? "var(--tx)" : "var(--ac2)", cursor: "pointer" }}
+          >
+            <option value="all">{tr("products.filterRecAll")}</option>
+            <option value="any">{tr("products.filterRecAny")}</option>
+            <option value="none">{tr("products.filterRecNone")}</option>
+            <option value="title">{tr("products.filterRecTitle")}</option>
+            <option value="bullets">{tr("products.filterRecBullets")}</option>
+            <option value="description">{tr("products.filterRecDescription")}</option>
+            <option value="images">{tr("products.filterRecImages")}</option>
+            <option value="aplus">{tr("products.filterRecAplus")}</option>
+          </select>
+
+          <select
             value={sortBy}
             onChange={e => {
               const v = e.target.value;
@@ -5145,6 +5226,7 @@ const ProductsPage = ({ workspaceId }) => {
             <option value="title">{tr("products.sortTitle")}</option>
             <option value="asin">{tr("products.sortAsin")}</option>
             <option value="updated">{tr("products.sortUpdated")}</option>
+            <option value="recommendations">{tr("products.sortRecommendations")}</option>
           </select>
 
           {/* Fixed date-range presets */}
@@ -5294,7 +5376,7 @@ const ProductsPage = ({ workspaceId }) => {
       ) : filteredProducts.length === 0 ? (
         <div className="card" style={{ padding: "32px 24px", textAlign: "center" }}>
           <div style={{ fontSize: 13, color: "var(--tx3)" }}>No products match your filter</div>
-          <button onClick={() => { setSearch(""); setFilterBrand("all"); }} style={{ marginTop: 10, fontSize: 12, color: "var(--ac2)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
+          <button onClick={() => { setSearch(""); setFilterBrand("all"); setFilterAvail("all"); setFilterAds("all"); setFilterRec("all"); }} style={{ marginTop: 10, fontSize: 12, color: "var(--ac2)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
             Clear filters
           </button>
         </div>
@@ -5355,6 +5437,15 @@ const ProductsPage = ({ workspaceId }) => {
                           {grouped
                             ? <span className="badge" style={{ fontSize: 10, fontWeight: 700, background: "rgba(99,102,241,.16)", color: "var(--ac2)", border: "1px solid rgba(99,102,241,.35)" }}>{tr("products.variations", { n: L.asin_count })}</span>
                             : <span className="badge bg-bl" style={{ fontSize: 9 }}>{tr("products.single")}</span>}
+                          {L.children.some(c => c.lh_checked_at) && (
+                            L.issue_count > 0
+                              ? <span className="badge bg-red" style={{ fontSize: 9 }}>⚠ {L.issue_count}</span>
+                              : L.all_checked
+                                ? <span className="badge bg-grn" style={{ fontSize: 9 }}><Check size={9} strokeWidth={2} style={{ display: "inline", verticalAlign: "middle" }} /></span>
+                                // 0 issues so far, but not every variation has been synced yet —
+                                // don't claim "all good" for ASINs we haven't checked at all.
+                                : <span className="badge bg-amb" style={{ fontSize: 9 }} title={tr("products.recPartialHint")}>{tr("products.recPartial")}</span>
+                          )}
                         </div>
                         {L.title && <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{L.title}</div>}
                         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
@@ -5385,6 +5476,14 @@ const ProductsPage = ({ workspaceId }) => {
                             {fullyOpen ? tr("products.collapseAllCharts") : tr("products.expandAllCharts")}
                           </button>
                         )}
+                        <button
+                          onClick={() => toggleSet(setExpandedListingRecs, L.listing_id)}
+                          className="btn btn-ghost"
+                          style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5,
+                            color: L.issue_count > 0 ? "var(--red)" : undefined }}>
+                          {expandedListingRecs.has(L.listing_id) ? <ChevronUp size={12} strokeWidth={1.75} /> : <ChevronDown size={12} strokeWidth={1.75} />}
+                          {tr("products.recommendations")}{L.issue_count > 0 ? ` (${L.issue_count})` : ""}
+                        </button>
                         <ChartToggle open={chartsOpen} onClick={() => { toggleSet(setListingChartsOpen, L.listing_id); if (!ts) fetchTimeseries(L.listing_id, L.asins); }} />
                         {grouped && (
                           <button onClick={() => toggleSet(setExpandedListings, L.listing_id)} className="btn btn-ghost" style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5 }}>
@@ -5393,6 +5492,26 @@ const ProductsPage = ({ workspaceId }) => {
                         )}
                       </div>
                     </div>
+
+                    {/* Recommendations */}
+                    {expandedListingRecs.has(L.listing_id) && (
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                        {L.children.some(c => c.lh_checked_at) ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                            {L.children.map(c => (
+                              <div key={c.id}>
+                                {grouped && (
+                                  <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx3)", marginBottom: 3 }}>{c.asin}</div>
+                                )}
+                                <ListingRecommendationsPanel issues={c.lh_issues} checkedAt={c.lh_checked_at} tr={tr} />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 12, color: "var(--tx3)" }}>{tr("products.recNotChecked")}</div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Aggregate charts */}
                     {chartsOpen && (
@@ -5458,6 +5577,7 @@ const ProductsPage = ({ workspaceId }) => {
             ];
             const hist = history[p.id] || [];
             const isExpanded = expandedIds.has(p.id);
+            const isRecExpanded = expandedRecs.has(p.id);
             const isRefreshing = refreshingId === p.id;
             const bsrUpdated = p.bsr_updated_at
               ? new Date(p.bsr_updated_at).toLocaleString("en", {
@@ -5490,6 +5610,11 @@ const ProductsPage = ({ workspaceId }) => {
                         <span className="badge bg-bl" style={{ fontSize: 10 }}>{p.brand}</span>
                       )}
                       <span className="badge bg-bl" style={{ fontSize: 9 }}>{p.marketplace_id}</span>
+                      {p.lh_checked_at && (
+                        p.lh_issue_count > 0
+                          ? <span className="badge bg-red" style={{ fontSize: 9 }}>⚠ {p.lh_issue_count}</span>
+                          : <span className="badge bg-grn" style={{ fontSize: 9 }}><Check size={9} strokeWidth={2} style={{ display: "inline", verticalAlign: "middle" }} /></span>
+                      )}
                       {bsrUpdated && (
                         <span style={{ fontSize: 10, color: "var(--tx3)", marginLeft: "auto" }}>
                           Updated: {bsrUpdated}
@@ -5634,6 +5759,13 @@ const ProductsPage = ({ workspaceId }) => {
 
                   <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                     <button
+                      onClick={() => setExpandedRecs(s => { const n = new Set(s); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n; })}
+                      className="btn btn-ghost"
+                      style={{ fontSize: 11, padding: "4px 10px", color: p.lh_checked_at && p.lh_issue_count > 0 ? "var(--red)" : undefined }}
+                    >
+                      {isRecExpanded ? <ChevronUp size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> : <ChevronDown size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />} {tr("products.recommendations")}{p.lh_checked_at && p.lh_issue_count > 0 ? ` (${p.lh_issue_count})` : ""}
+                    </button>
+                    <button
                       onClick={() => handleHistory(p.id)}
                       className="btn btn-ghost"
                       style={{ fontSize: 11, padding: "4px 10px" }}
@@ -5665,6 +5797,16 @@ const ProductsPage = ({ workspaceId }) => {
                     </button>
                   </div>
                 </div>
+
+                {isRecExpanded && (
+                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--b1)" }}>
+                    <div style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)",
+                      textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>
+                      {tr("products.recommendations")}
+                    </div>
+                    <ListingRecommendationsPanel issues={p.lh_issues} checkedAt={p.lh_checked_at} tr={tr} />
+                  </div>
+                )}
 
                 {isExpanded && (
                   <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--b1)" }}>

@@ -103,6 +103,53 @@ async function getCatalogItem(asin, marketplaceId, refreshToken) {
   };
 }
 
+// ─── Catalog Items — listing content (title/bullets/description/images) ──────
+// Separate call from getCatalogItem: adds `attributes` to includedData, which
+// Amazon does not return by default (and which BSR sync doesn't need). Verified
+// on the current SP-API app registration: bullet_point and product_description
+// are present; generic_keyword (backend search terms) is NOT — Amazon removed it
+// from Catalog Items API in 2023, it now requires Listings Items API + seller ID.
+async function getListingContent(asin, marketplaceId, refreshToken) {
+  const token = refreshToken || process.env.SP_API_REFRESH_TOKEN;
+  if (!token) throw new Error("SP_API_REFRESH_TOKEN not configured");
+  const region = MARKETPLACE_REGION[marketplaceId] || "EU";
+  const data = await _spRequest(region, `/catalog/2022-04-01/items/${asin}`, {
+    marketplaceIds: marketplaceId,
+    includedData: "attributes,images,summaries",
+  }, token);
+
+  const attrs       = data.attributes || {};
+  const summaryList = (data.summaries || []).find(s => s.marketplaceId === marketplaceId) || {};
+  const imageList    = (data.images   || []).find(i => i.marketplaceId === marketplaceId) || {};
+  const images        = imageList.images || [];
+
+  const title = summaryList.itemName || null;
+  const bulletPoints = (attrs.bullet_point || [])
+    .filter(b => b.marketplace_id === marketplaceId)
+    .map(b => b.value)
+    .filter(Boolean);
+  const description = (attrs.product_description || [])
+    .find(d => d.marketplace_id === marketplaceId)?.value || null;
+
+  return { asin, title, bulletPoints, description, images, rawData: data };
+}
+
+// ─── A+ Content — published status per ASIN ──────────────────────────────────
+// contentPublishRecords is the only A+ Content endpoint that accepts an `asin`
+// filter directly, so it correctly scopes to a single product without needing
+// the contentDocument→ASIN relations endpoint (which 403s under our current
+// SP-API app role — verified). Empty list = no A+ content live for this ASIN.
+async function getAplusStatus(asin, marketplaceId, refreshToken) {
+  const token = refreshToken || process.env.SP_API_REFRESH_TOKEN;
+  if (!token) throw new Error("SP_API_REFRESH_TOKEN not configured");
+  const region = MARKETPLACE_REGION[marketplaceId] || "EU";
+  const data = await _spRequest(region, "/aplus/2020-11-01/contentPublishRecords", {
+    marketplaceId,
+    asin,
+  }, token);
+  return { hasAplus: (data.publishRecordList || []).length > 0 };
+}
+
 // ─── FBA Inventory ────────────────────────────────────────────────────────────
 async function getInventory(marketplaceId, refreshToken) {
   const token = refreshToken || process.env.SP_API_REFRESH_TOKEN;
@@ -265,6 +312,8 @@ function _chunk(arr, size) {
 
 module.exports = {
   getCatalogItem,
+  getListingContent,
+  getAplusStatus,
   getSpAccessToken,
   getInventory,
   getOrders,

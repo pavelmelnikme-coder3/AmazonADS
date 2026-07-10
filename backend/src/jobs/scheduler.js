@@ -185,6 +185,24 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
+  // ─── Listing health: daily at 02:00 UTC (title/bullets/description/images/A+) ─
+  // Separate from the 4-hourly BSR job: two extra SP-API calls per ASIN (Catalog
+  // Items attributes + A+ Content) and listing content rarely changes intraday.
+  const listingHealthJob = new CronJob("0 2 * * *", async () => {
+    if (!process.env.SP_API_REFRESH_TOKEN) return;
+    try {
+      const { rows } = await query(
+        "SELECT DISTINCT workspace_id, marketplace_id FROM products WHERE is_active = true"
+      );
+      for (const { workspace_id, marketplace_id } of rows) {
+        await queueSpSync(workspace_id, marketplace_id, ["listing_health"]);
+      }
+      logger.info("Cron: Listing health sync queued", { pairs: rows.length });
+    } catch (err) {
+      logger.error("Cron listing health sync failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
   // ─── SP-API orders + financials: daily at 05:00 UTC ──────────────────────────
   const spDailyJob = new CronJob("0 5 * * *", async () => {
     if (!process.env.SP_API_REFRESH_TOKEN) return;
@@ -315,7 +333,7 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob, emailDripJob];
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, listingHealthJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob, emailDripJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

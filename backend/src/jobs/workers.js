@@ -453,7 +453,7 @@ async function startWorkers() {
     logger.error("AI analysis worker failed", { jobId: job?.id, error: err.message });
   });
 
-  const { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing } = require("../services/amazon/spSync");
+  const { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing, syncListingHealth } = require("../services/amazon/spSync");
   const { decrypt } = require("../config/encryption");
   const spSyncWorker = new Worker(
     QUEUES.SP_SYNC,
@@ -475,6 +475,7 @@ async function startWorkers() {
           if (type === "orders")     results.orders     = await syncOrders(workspaceId, marketplaceId, refreshToken);
           if (type === "financials") results.financials = await syncFinancials(workspaceId, marketplaceId, refreshToken);
           if (type === "pricing")    results.pricing    = await syncPricing(workspaceId, marketplaceId, refreshToken);
+          if (type === "listing_health") results.listing_health = await syncListingHealth(workspaceId, marketplaceId, refreshToken);
         } catch (err) {
           logger.warn(`SP_SYNC: ${type} failed`, { workspaceId, error: err.message });
           results[type] = { error: err.message };

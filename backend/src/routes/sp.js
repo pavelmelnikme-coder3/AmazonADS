@@ -7,7 +7,7 @@ const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
 
-const VALID_SYNC_TYPES = ["bsr", "inventory", "orders", "financials", "pricing"];
+const VALID_SYNC_TYPES = ["bsr", "inventory", "orders", "financials", "pricing", "listing_health"];
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
 router.get("/inventory", async (req, res, next) => {
