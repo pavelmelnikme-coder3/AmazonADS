@@ -89,9 +89,22 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   // whether the change actually reached Amazon (amazon_status). Handles both raw put() promises
   // (resolve = success, reject = error) and writeback helpers that resolve to { ok, error }.
   // Always non-fatal — a failed write-back never throws out of executeRule (local DB stays updated).
-  const trackWriteback = (auditId, promise, warnMsg) => promise
-    .then(r => updateAuditStatus(auditId, r && r.ok === false ? "error" : "success", r && r.error))
-    .catch(e => { logger.warn(warnMsg, { error: e.message }); return updateAuditStatus(auditId, "error", e.message); });
+  //
+  // Every call is also collected into pendingWritebacks (see below) — these promises are
+  // fire-and-forget from the caller's perspective (the main entity loop doesn't await them, so
+  // network I/O doesn't block per-entity processing), but a duplicate-add write-back can end up
+  // deleting a negative_keywords/negative_targets row (see writeback.js recoverDuplicateNegativeKeyword)
+  // *after* it's already been re-read and archived by the reconciliation pass later in this same
+  // function, silently discarding that archive's intent. Awaiting pendingWritebacks before
+  // reconciliation starts (below) closes that race.
+  const pendingWritebacks = [];
+  const trackWriteback = (auditId, promise, warnMsg) => {
+    const tracked = promise
+      .then(r => updateAuditStatus(auditId, r && r.ok === false ? "error" : "success", r && r.error))
+      .catch(e => { logger.warn(warnMsg, { error: e.message }); return updateAuditStatus(auditId, "error", e.message); });
+    pendingWritebacks.push(tracked);
+    return tracked;
+  };
 
   // Separate bid/budget threshold conditions (applied in SQL WHERE) from metric conditions (post-fetch filter).
   // daily_budget is only a valid SQL threshold on campaign scope; for other scopes it stays in metricConditions
@@ -1443,6 +1456,12 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     }
   }
 
+  // Let every write-back fired during the main pass above (adds, budget/bid changes, etc.)
+  // finish before reconciliation reads negative_keywords/negative_targets below — otherwise a
+  // still-in-flight duplicate-add recovery can delete a row out from under an archive this
+  // reconciliation pass just committed (see pendingWritebacks comment above).
+  await Promise.all(pendingWritebacks);
+
   // ── Reconciliation: un-negate previously negated items whose conditions no longer hold ──
   // Only applies to negatives created by this rule (source_rule_id = rule.id).
   // For each active negative: re-evaluate the same conditions against current metrics.
@@ -1606,6 +1625,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       }
     }
   }
+
+  // Wait for reconciliation's own archive write-backs too, so the rule run is fully
+  // settled on Amazon's side (not just locally) before this function — and the audit
+  // trail's amazon_status — is considered final.
+  await Promise.all(pendingWritebacks);
 
   return {
     matched_count:   matched.length,
