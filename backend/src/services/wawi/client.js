@@ -10,11 +10,16 @@
  *   x-appid: <AppId>   x-appversion: <Version>   api-version: <ver>   x-challengecode: <code>
  */
 const axios = require("axios");
+const https = require("https");
 const { query } = require("../../db/pool");
 const { decrypt } = require("../../config/encryption");
 const logger = require("../../config/logger");
 
 const DEFAULT_PAGE_SIZE = 250;
+
+// The on-prem Wawi host (Kestrel) serves HTTPS only, with a self-signed cert —
+// there's no public CA to validate against, so skip verification for this host only.
+const wawiHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 // Load the active Wawi connection for a workspace (with decrypted API key).
 async function getConnection(workspaceId) {
@@ -47,7 +52,7 @@ function authHeaders(conn) {
  */
 async function wawiGet(conn, path, params = {}, { timeout = 30000 } = {}) {
   const url = conn.base_url.replace(/\/$/, "") + "/" + String(path).replace(/^\//, "");
-  const res = await axios.get(url, { headers: authHeaders(conn), params, timeout });
+  const res = await axios.get(url, { headers: authHeaders(conn), params, timeout, httpsAgent: wawiHttpsAgent });
   return res.data;
 }
 

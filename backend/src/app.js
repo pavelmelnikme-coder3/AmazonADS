@@ -47,6 +47,7 @@ const portfoliosRoutes = require("./routes/portfolios");
 const trashRoutes = require("./routes/trash");
 const emailMarketingRoutes = require("./routes/emailMarketing");
 const emailPublicRoutes = require("./routes/emailPublic");
+const leadFinderRoutes = require("./routes/leadFinder");
 
 const app = express();
 
@@ -141,6 +142,7 @@ app.use(`${API}/portfolios`, portfoliosRoutes);
 app.use(`${API}/trash`, trashRoutes);
 app.use(`${API}/email-marketing`, emailMarketingRoutes);
 app.use(`${API}/email`, emailPublicRoutes);
+app.use(`${API}/lead-finder`, leadFinderRoutes);
 
 // ─── Global error handler ──────────────────────────────────────────────────────
 app.use((err, req, res, next) => {

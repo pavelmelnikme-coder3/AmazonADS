@@ -20,6 +20,7 @@ const { writeAudit } = require("./audit");
 const { isConfigured, sendBulkEmail } = require("../services/email/provider");
 const { renderHtmlForContact, applyMergeTags, contactFields } = require("../services/email/render");
 const { parseContactsFile } = require("../services/email/importParser");
+const { insertContacts } = require("../services/email/contacts");
 const { DAILY_CAP } = require("../services/email/dispatch");
 const { UPLOAD_ROOT, imageStorage, fileStorage, attachmentStorage, buildAttachmentList, IMAGE_EXT_BY_MIME, FILE_EXT_ALLOW } = require("../services/email/uploads");
 
@@ -44,29 +45,22 @@ const withUpload = (mw) => (req, res, next) => mw(req, res, (err) => {
   next(err);
 });
 
-// Shared insert path for both /contacts/import (pasted emails) and /contacts/import-file
-// (parsed spreadsheet). ON CONFLICT keeps re-imports idempotent.
-async function insertContacts(workspaceId, contacts, consentSource, consentMethod, ip) {
-  let imported = 0, skipped = 0, invalid = 0;
-  for (const c of contacts) {
-    const email = String(c.email || "").trim().toLowerCase();
-    if (!isEmail(email)) { invalid++; continue; }
-    const { rowCount } = await query(
-      `INSERT INTO email_contacts
-         (workspace_id, email, first_name, last_name, attributes, tags, status,
-          consent_source, consent_method, consent_at, consent_ip, unsubscribe_token)
-       VALUES ($1,$2,$3,$4,$5,$6,'active',$7,$8,NOW(),$9,$10)
-       ON CONFLICT (workspace_id, lower(email)) DO NOTHING`,
-      [workspaceId, email, c.first_name || null, c.last_name || null,
-       JSON.stringify(c.attributes || {}), Array.isArray(c.tags) ? c.tags : [],
-       consentSource, consentMethod, c.consent_ip || ip || null, newToken()]
-    );
-    if (rowCount) imported++; else skipped++;
-  }
-  return { imported, skipped, invalid };
-}
-
 // ─── Contacts ─────────────────────────────────────────────────────────────────
+// Distinct tags across this workspace's contacts, with counts — powers the "lists" filter in
+// the Contacts tab (each Lead Finder search, or a manually-tagged import, shows up as one tag).
+router.get("/contacts/tags", async (req, res, next) => {
+  try {
+    const { rows } = await query(
+      `SELECT tag, COUNT(*)::int AS count
+       FROM email_contacts, UNNEST(tags) AS tag
+       WHERE workspace_id = $1
+       GROUP BY tag ORDER BY count DESC, tag ASC`,
+      [req.workspaceId]
+    );
+    res.json({ data: rows });
+  } catch (err) { next(err); }
+});
+
 router.get("/contacts", async (req, res, next) => {
   try {
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));

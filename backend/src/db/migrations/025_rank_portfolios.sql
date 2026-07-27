@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS rank_portfolios (
   id           SERIAL PRIMARY KEY,
-  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id UUID    NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   name         TEXT    NOT NULL,
   display_order INTEGER,
   created_at   TIMESTAMPTZ DEFAULT NOW()

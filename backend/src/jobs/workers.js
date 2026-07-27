@@ -21,6 +21,10 @@ const { generateRecommendations } = require("../services/ai/orchestrator");
 const { executeRules } = require("../services/rules/engine");
 const { executeAllDueRules } = require("../routes/rules");
 const { query } = require("../db/pool");
+const { searchBusinesses } = require("../services/leadFinder/overpass");
+const { persistResults } = require("../services/leadFinder/persistResults");
+const { MAX_RESULTS_PER_SEARCH } = require("../services/leadFinder/tiles");
+const { filterByPolygon } = require("../services/leadFinder/geofilter");
 
 // ─── Queue definitions ────────────────────────────────────────────────────────
 const QUEUES = {
@@ -37,6 +41,7 @@ const QUEUES = {
   PRODUCT_META:     "product-meta-sync",
   WAWI_SYNC:        "wawi-sync",
   EMAIL_DISPATCH:   "email-dispatch",
+  LEAD_FINDER_SEARCH: "lead-finder-search",
 };
 
 const defaultJobOptions = {
@@ -139,6 +144,11 @@ async function queueBulkOperation(workspaceId, operationType, items) {
       batchIndex: Math.floor(i / batchSize),
     });
   }
+}
+
+async function queueLeadFinderSearch(searchId, workspaceId, tiles, businessQuery, polygon) {
+  const queue = getQueue(QUEUES.LEAD_FINDER_SEARCH);
+  return queue.add("tiled-search", { searchId, workspaceId, tiles, businessQuery, polygon });
 }
 
 // Prepare a marketing campaign (create per-(campaign,contact) send rows, flip to 'sending')
@@ -630,7 +640,85 @@ async function startWorkers() {
     logger.error("Email dispatch worker failed", { jobId: job?.id, error: err.message });
   });
 
-  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker, wawiSyncWorker, emailDispatchWorker];
+  // Lead Finder country-scale search: a whole-country bbox got split into ~1°x1° tiles
+  // (routes/leadFinder.js) because a broad-word regex tag-scan over that much area blows past
+  // Overpass's own query timeout. Processed one tile at a time (concurrency:1 — same rationale
+  // as report-pipeline: don't hammer a shared free public API with concurrent large queries).
+  const leadFinderSearchWorker = new Worker(
+    QUEUES.LEAD_FINDER_SEARCH,
+    async (job) => {
+      const { searchId, workspaceId, tiles, businessQuery, polygon } = job.data;
+      logger.info("Lead finder tiled search started", { searchId, tileCount: tiles.length });
+
+      let currentTotal = 0;
+      let tilesDone = 0;
+      let truncated = false;
+
+      for (const tile of tiles) {
+        const { rows: [row] } = await query(`SELECT cancel_requested FROM lead_searches WHERE id = $1`, [searchId]);
+        if (!row) break; // search row gone (deleted workspace/search) — nothing left to update
+        if (row.cancel_requested) {
+          await query(`UPDATE lead_searches SET status = 'cancelled' WHERE id = $1`, [searchId]);
+          logger.info("Lead finder tiled search cancelled", { searchId, tilesDone });
+          return;
+        }
+
+        const remaining = MAX_RESULTS_PER_SEARCH - currentTotal;
+        if (remaining <= 0) { truncated = true; break; }
+
+        try {
+          const rawBusinesses = await searchBusinesses({ bbox: tile, query: businessQuery, limit: remaining + 1 });
+          // Tile bboxes are rectangles too — a tile straddling the real border (e.g. the
+          // Rhine valley near France) can still return foreign-territory matches; filter
+          // against the region's actual polygon boundary, not just its bounding rectangle.
+          const businesses = filterByPolygon(rawBusinesses, polygon);
+          const capped = businesses.length > remaining;
+          const toInsert = capped ? businesses.slice(0, remaining) : businesses;
+          if (capped) truncated = true;
+          const inserted = await persistResults(searchId, workspaceId, toInsert);
+          currentTotal += inserted.length;
+        } catch (e) {
+          // One tile timing out (or Overpass being briefly overloaded) shouldn't kill the
+          // whole country search — partial coverage beats aborting entirely.
+          logger.warn("Lead finder tile failed, skipping", { searchId, tile, error: e.message });
+        }
+
+        tilesDone++;
+        await query(
+          `UPDATE lead_searches SET tiles_done = $1, result_count = $2, truncated = $3 WHERE id = $4`,
+          [tilesDone, currentTotal, truncated, searchId]
+        );
+        await job.updateProgress(Math.round((tilesDone / tiles.length) * 100));
+
+        if (truncated) break;
+        // Polite pacing between tiles — same spirit as the scrape batch delay (routes/leadFinder.js),
+        // avoids hammering the free public Overpass instance with back-to-back large-area queries.
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      // Always re-persist truncated/result_count here too — the "remaining <= 0" branch above
+      // can set `truncated = true` in JS and `break` before the per-tile UPDATE runs (that
+      // check fires at the *top* of an iteration, before any DB write in that iteration), so
+      // relying solely on the last per-tile write would silently leave truncated=false in a
+      // hit-the-cap-exactly case.
+      await query(
+        `UPDATE lead_searches SET status = 'completed', tiles_done = $1, result_count = $2, truncated = $3
+         WHERE id = $4 AND status = 'running'`,
+        [tilesDone, currentTotal, truncated, searchId]
+      );
+      logger.info("Lead finder tiled search completed", { searchId, tilesDone, currentTotal, truncated });
+    },
+    { connection: createRedisConnection(), concurrency: 1 }
+  );
+  leadFinderSearchWorker.on("failed", (job, err) => {
+    logger.error("Lead finder tiled search failed", { jobId: job?.id, error: err.message });
+    if (job?.data?.searchId) {
+      query(`UPDATE lead_searches SET status = 'failed', error_message = $1 WHERE id = $2`,
+        [err.message, job.data.searchId]).catch(() => {});
+    }
+  });
+
+  workers = [syncWorker, reportWorker, backfillWorker, ruleEngineWorker, ruleExecutionWorker, aiWorker, spSyncWorker, rankCheckWorker, productMetaWorker, wawiSyncWorker, emailDispatchWorker, leadFinderSearchWorker];
   logger.info("Workers started", { queues: Object.values(QUEUES) });
 
   // Mark stale processing/requested DB records as failed (left over from previous restarts)
@@ -665,6 +753,7 @@ module.exports = {
   queueProductMetaSync,
   queueWawiSync,
   queueEmailCampaign,
+  queueLeadFinderSearch,
   startWorkers,
   stopWorkers,
   QUEUES,
