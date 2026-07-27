@@ -162,6 +162,103 @@ router.get("/", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /products/new-unadvertised — recently-arrived Wawi items that carry an ASIN
+// (i.e. are listed on Amazon) but have NO enabled ad in any enabled campaign.
+// Deduped by ASIN (multiple Wawi SKUs — e.g. FBA vs local "ANGEBOT_" — collapse
+// to one row). "New" = wawi_items.added_at within the last `days` days.
+router.get("/new-unadvertised", async (req, res, next) => {
+  try {
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 90));
+    const { rows } = await query(
+      `WITH new_asins AS (
+         SELECT UPPER(wa.asin)                                    AS asin,
+                max(wi.added_at)                                  AS added_at,
+                bool_or(wi.is_active)                             AS is_active,
+                (array_agg(wi.name ORDER BY wi.added_at DESC NULLS LAST))[1] AS wawi_name,
+                max(wi.sales_price_net)                           AS sales_price_net,
+                min(wi.purchase_price_net)                        AS purchase_price_net,
+                max(wi.amazon_price)                              AS amazon_price,
+                count(DISTINCT wi.wawi_id)                        AS wawi_sku_count,
+                array_agg(DISTINCT wi.wawi_id)                    AS wawi_ids
+           FROM wawi_items wi
+           JOIN wawi_item_asins wa
+             ON wa.workspace_id = wi.workspace_id AND wa.wawi_item_id = wi.wawi_id
+          WHERE wi.workspace_id = $1
+            AND wi.added_at IS NOT NULL
+            AND wi.added_at > now() - make_interval(days => $2)
+            AND (wi.parent_item_id = 0 OR wi.parent_item_id IS NULL)
+            AND wa.asin IS NOT NULL AND wa.asin <> ''
+          GROUP BY UPPER(wa.asin)
+       )
+       SELECT na.asin, na.added_at, na.is_active, na.wawi_name,
+              na.sales_price_net, na.purchase_price_net, na.amazon_price,
+              na.wawi_sku_count,
+              p.id AS product_id,
+              COALESCE(p.title, ic.title, na.wawi_name)  AS title,
+              COALESCE(p.image_url, ic.image_url)        AS image_url,
+              (ic.asin IS NOT NULL)                      AS img_cached,
+              p.brand,
+              -- display price: prefer a real (non-zero) Amazon price, else the Wawi net sales price
+              CASE WHEN COALESCE(na.amazon_price, 0) > 0 THEN na.amazon_price ELSE na.sales_price_net END AS price,
+              COALESCE(st.stock, 0) AS stock
+         FROM new_asins na
+         LEFT JOIN products p
+                ON p.workspace_id = $1 AND UPPER(p.asin) = na.asin
+         LEFT JOIN asin_image_cache ic
+                ON ic.workspace_id = $1 AND ic.asin = na.asin
+         LEFT JOIN LATERAL (
+                SELECT COALESCE(sum(ws.quantity_total), 0) AS stock
+                  FROM wawi_stocks ws
+                 WHERE ws.workspace_id = $1 AND ws.wawi_item_id = ANY(na.wawi_ids)
+              ) st ON true
+        WHERE NOT EXISTS (
+                SELECT 1 FROM product_ads pa JOIN campaigns c ON c.id = pa.campaign_id
+                 WHERE pa.workspace_id = $1 AND UPPER(pa.asin) = na.asin
+                   AND pa.state = 'enabled' AND c.state = 'enabled'
+              )
+        ORDER BY na.added_at DESC`,
+      [req.workspaceId, days]
+    );
+
+    // Best-effort: for rows still missing a photo (ASIN not tracked in products and
+    // not yet cached), pull the Amazon catalog image + real title, cache it, and patch
+    // this response. Bounded + non-fatal so a slow/failed SP-API call never breaks the list.
+    const marketplaceId = "A1PA6795UKMFR9"; // DE
+    // Only ASINs with no image AND no cache row yet — a cached row (even with a null
+    // image, meaning Amazon has none) is left alone so we don't re-hit SP-API each load.
+    const missing = rows.filter(r => !r.image_url && !r.img_cached).slice(0, 25);
+    if (missing.length) {
+      const enrichOne = async (r) => {
+        try {
+          const data = await getCatalogItem(r.asin, marketplaceId);
+          const img = data?.imageUrl || null;
+          const ttl = data?.title || null;
+          if (img || ttl) {
+            await query(
+              `INSERT INTO asin_image_cache (workspace_id, asin, image_url, title, fetched_at)
+                 VALUES ($1, $2, $3, $4, NOW())
+               ON CONFLICT (workspace_id, asin)
+               DO UPDATE SET image_url = EXCLUDED.image_url, title = EXCLUDED.title, fetched_at = NOW()`,
+              [req.workspaceId, r.asin, img, ttl]
+            );
+            if (img) r.image_url = img;
+            if (ttl && (!r.title || r.title === r.wawi_name)) r.title = ttl;
+          }
+        } catch (e) {
+          logger.warn("new-unadvertised catalog image fetch failed", { asin: r.asin, error: e.message });
+        }
+      };
+      // small concurrency to respect SP-API catalog rate limits
+      const CONC = 3;
+      for (let i = 0; i < missing.length; i += CONC) {
+        await Promise.all(missing.slice(i, i + CONC).map(enrichOne));
+      }
+    }
+
+    res.json({ days, items: rows });
+  } catch (err) { next(err); }
+});
+
 // POST /products — add ASIN to track
 router.post("/", async (req, res, next) => {
   try {

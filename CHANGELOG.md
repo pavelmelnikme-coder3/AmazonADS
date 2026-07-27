@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-07-27 — Products: Wawi "new arrivals, not advertised" tab + listing-health/BSR fixes
+
+### Added
+- **"New — not advertised" tab on the Products page** (`GET /products/new-unadvertised?days=`): recently
+  arrived Wawi items (`wawi_items.added_at` within N days) that carry an ASIN (i.e. are listed on Amazon)
+  but have **no enabled ad in any enabled campaign** — the products worth starting ads on. **Deduplicated
+  by ASIN** (multiple Wawi SKUs — e.g. FBA vs local "ANGEBOT_" — collapse to one row, with a `wawi_sku_count`).
+  Shows arrival date, Wawi stock, cost, price and Amazon deep-link. Selectable window (30/60/90/180 days)
+  and **click-to-sort** on every column.
+- **Amazon catalog image + real title enrichment** for that tab: ASINs not tracked in `products` (so with no
+  local image/title) get their MAIN image and proper Amazon title pulled from SP-API Catalog Items,
+  best-effort with bounded concurrency, and cached in a new `asin_image_cache` table (migration
+  `043_asin_image_cache.sql`) so later loads don't re-hit SP-API. Replaces the ugly Wawi "FBA ANGEBOT_" names
+  with the real listing titles.
+
+### Fixed
+- **Listing-health: stop flagging "no product description" when the listing has A+ content.** A+ content
+  supersedes the plain description section on Amazon, so `computeListingIssues` now only raises the
+  `description` issue when there is **neither** a description **nor** A+ content. Backfilled existing stored
+  recommendations (removed the now-invalid `description` issue from 117 listings that have A+).
+- **Corrected the misleading "No BSR data — configure SP_API_REFRESH_TOKEN in .env" message.** The token and
+  BSR sync are fine; ~305/551 active products simply have **no Best Sellers Rank published by Amazon** (live
+  Catalog Items returns empty `classificationRanks`/`displayGroupRanks`). The label now reads "Amazon publishes
+  no Best Sellers Rank for this product" (i18n `products.noBsr`, EN/RU/DE) instead of blaming configuration.
+- **Price column showing "—" for every new-arrival row.** Postgres returns `NUMERIC` as a string, so the JS
+  `amazon_price || sales_price_net` fallback always picked the truthy `"0.0000"`; price is now resolved
+  server-side (prefer a non-zero Amazon price, else the Wawi net sales price).
+
+---
+
 ## [Unreleased] — 2026-07-02 — Email marketing: Brevo migration, visual block editor, real delivery/open/click tracking
 
 ### Added

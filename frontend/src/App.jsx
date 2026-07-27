@@ -4650,6 +4650,9 @@ const ProductsPage = ({ workspaceId }) => {
   const [filterBrand, setFilterBrand] = useState("all");
   const [filterAvail, setFilterAvail] = useState("all"); // all | available | unavailable
   const [filterAds, setFilterAds]     = useState("all"); // all | advertised | not_advertised
+  // Page view tab: "all" (the full products table) | "new" (Wawi new arrivals not yet advertised)
+  const [view, setView] = useState("all");
+  const [newDays, setNewDays] = useState(90);
   // all | any | none | title | bullets | description | images | aplus
   const [filterRec, setFilterRec]     = useState("all");
   const [sortBy, setSortBy] = useState("bsr");
@@ -4669,6 +4672,34 @@ const ProductsPage = ({ workspaceId }) => {
     () => workspaceId ? get("/products") : Promise.resolve([]),
     [workspaceId, tick]
   );
+
+  // New-arrivals-not-advertised feed (Wawi added_at within N days, has ASIN, no enabled ad).
+  // Only fetched while the "new" tab is active to avoid the Wawi join on every page load.
+  const { data: newFeed, loading: newLoading } = useAsync(
+    () => (workspaceId && view === "new") ? get(`/products/new-unadvertised?days=${newDays}`) : Promise.resolve(null),
+    [workspaceId, view, newDays, tick]
+  );
+  const newItems = newFeed?.items || [];
+  // Column sort for the "new, not advertised" tab. Default: newest arrivals first.
+  const [newSort, setNewSort] = useState({ key: "added_at", dir: "desc" });
+  const toggleNewSort = (key) => setNewSort(s =>
+    s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+                  : { key, dir: key === "title" ? "asc" : "desc" }); // text→A–Z, numbers/date→high-first
+  const sortedNewItems = useMemo(() => {
+    const { key, dir } = newSort;
+    const mul = dir === "asc" ? 1 : -1;
+    const numCols = new Set(["stock", "purchase_price_net", "price", "wawi_sku_count"]);
+    return [...newItems].sort((a, b) => {
+      if (key === "title") {
+        return String(a.title || a.wawi_name || "").localeCompare(String(b.title || b.wawi_name || "")) * mul;
+      }
+      if (key === "added_at") {
+        return ((a.added_at ? new Date(a.added_at).getTime() : 0) - (b.added_at ? new Date(b.added_at).getTime() : 0)) * mul;
+      }
+      if (numCols.has(key)) return ((Number(a[key]) || 0) - (Number(b[key]) || 0)) * mul;
+      return 0;
+    });
+  }, [newItems, newSort]);
 
   // Fetch the daily time-series for a whole listing in one call (feeds both the
   // aggregate stack and every child ASIN stack). Uses the toolbar BSR date range.
@@ -5127,6 +5158,23 @@ const ProductsPage = ({ workspaceId }) => {
         </div>
       </div>
 
+      {/* View tabs: full products table vs. Wawi new-arrivals-not-advertised */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 18, borderBottom: "1px solid var(--b2)" }}>
+        {[["all", tr("products.tabAll")], ["new", tr("products.tabNew")]].map(([v, label]) => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            style={{
+              padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer",
+              background: "none", border: "none", borderBottom: "2px solid " + (view === v ? "var(--ac2)" : "transparent"),
+              color: view === v ? "var(--tx)" : "var(--tx3)", marginBottom: -1,
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {error && (
         <div style={{
           background: "rgba(239,68,68,.1)", border: "1px solid rgba(239,68,68,.3)",
@@ -5136,7 +5184,7 @@ const ProductsPage = ({ workspaceId }) => {
         </div>
       )}
 
-      {!loading && products?.length > 0 && (
+      {view === "all" && !loading && products?.length > 0 && (
         <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
           <div style={{ position: "relative", flex: "1 1 200px" }}>
             <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
@@ -5345,7 +5393,7 @@ const ProductsPage = ({ workspaceId }) => {
         </div>
       )}
 
-      {loading ? (
+      {view === "all" && (loading ? (
         <div style={{ color: "var(--tx3)", fontSize: 13 }}>Loading…</div>
       ) : (!products?.length) ? (
         <div className="card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center',
@@ -5699,7 +5747,7 @@ const ProductsPage = ({ workspaceId }) => {
                       </div>
                     ) : (
                       <div style={{ fontSize: 12, color: "var(--tx3)" }}>
-                        No BSR data — configure SP_API_REFRESH_TOKEN in .env
+                        {tr("products.noBsr")}
                       </div>
                     )}
 
@@ -5875,6 +5923,103 @@ const ProductsPage = ({ workspaceId }) => {
             );
           })}
         </div>
+      ))}
+
+      {/* ── New arrivals (Wawi) not yet advertised ── */}
+      {view === "new" && (
+        newLoading ? (
+          <div style={{ color: "var(--tx3)", fontSize: 13 }}>{tr("products.loading")}</div>
+        ) : (
+          <div className="fade">
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12, color: "var(--tx3)", flex: "1 1 320px" }}>
+                {tr("products.newSubtitle")}
+              </div>
+              <label style={{ fontSize: 12, color: "var(--tx3)", display: "flex", alignItems: "center", gap: 6 }}>
+                {tr("products.newRange")}
+                <select
+                  value={newDays}
+                  onChange={e => setNewDays(Number(e.target.value))}
+                  style={{ padding: "5px 8px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }}
+                >
+                  <option value={30}>{tr("products.range30d")}</option>
+                  <option value={60}>{tr("products.range60d")}</option>
+                  <option value={90}>{tr("products.range90d")}</option>
+                  <option value={180}>{tr("products.range180d")}</option>
+                </select>
+              </label>
+              <span style={{ fontSize: 12, color: "var(--tx3)", whiteSpace: "nowrap" }}>
+                {tr("products.newCount", { n: newItems.length })}
+              </span>
+            </div>
+
+            {newItems.length === 0 ? (
+              <div className="card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 32px", gap: 16, textAlign: "center" }}>
+                <Ic icon={Package} size={48} style={{ color: "var(--grn)", opacity: 0.5 }} />
+                <div style={{ fontSize: 14, color: "var(--tx2)", maxWidth: 460 }}>{tr("products.newEmpty")}</div>
+              </div>
+            ) : (
+              <div className="card" style={{ overflowX: "auto", padding: 0 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--b2)", textAlign: "left", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      {[
+                        ["added_at", "newColArrived", "left"],
+                        ["title", "newColProduct", "left"],
+                        ["stock", "newColStock", "right"],
+                        ["purchase_price_net", "newColCost", "right"],
+                        ["price", "newColPrice", "right"],
+                        ["wawi_sku_count", "newColSkus", "center"],
+                      ].map(([key, label, align]) => {
+                        const active = newSort.key === key;
+                        return (
+                          <th key={key} onClick={() => toggleNewSort(key)}
+                            title={tr("products.newSortHint")}
+                            style={{ padding: "10px 14px", textAlign: align, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: active ? "var(--tx)" : undefined }}>
+                            {tr("products." + label)}{active ? (newSort.dir === "asc" ? " ▲" : " ▼") : ""}
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedNewItems.map(it => {
+                      const m = v => (v == null || Number(v) === 0 ? "—" : "€" + Number(v).toFixed(2));
+                      const name = it.title || it.wawi_name || "—";
+                      const arrived = it.added_at ? new Date(it.added_at).toLocaleDateString() : "—";
+                      return (
+                        <tr key={it.asin} style={{ borderBottom: "1px solid var(--b1)" }}>
+                          <td style={{ padding: "10px 14px", whiteSpace: "nowrap", color: "var(--tx2)" }}>{arrived}</td>
+                          <td style={{ padding: "10px 14px" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                              {it.image_url
+                                ? <img src={it.image_url} alt="" style={{ width: 34, height: 34, borderRadius: 5, objectFit: "cover", flexShrink: 0 }} />
+                                : <div style={{ width: 34, height: 34, borderRadius: 5, background: "var(--s2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Package size={16} style={{ color: "var(--tx3)" }} /></div>}
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontWeight: 600, color: "var(--tx)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 360 }} title={name}>{name}</div>
+                                <a href={amazonProductUrl(it.asin, "A1PA6795UKMFR9")} target="_blank" rel="noopener noreferrer"
+                                  style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ac2)", textDecoration: "none" }}>
+                                  {it.asin}
+                                </a>
+                                {it.is_active === false && (
+                                  <span className="badge bg-amb" style={{ fontSize: 9, marginLeft: 8 }}>{tr("products.newInactive")}</span>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: Number(it.stock) > 0 ? "var(--tx)" : "var(--tx3)" }}>{Number(it.stock || 0).toLocaleString()}</td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: "var(--tx2)" }}>{m(it.purchase_price_net)}</td>
+                          <td style={{ padding: "10px 14px", textAlign: "right", color: "var(--grn)" }}>{m(it.price)}</td>
+                          <td style={{ padding: "10px 14px", textAlign: "center", color: "var(--tx3)" }}>{it.wawi_sku_count}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )
       )}
 
       {/* ── Export Report Modal ── */}
@@ -16497,6 +16642,8 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const [segments, setSegments] = useState([]);
   const [suppressions, setSuppressions] = useState([]);
   const [statusFilter, setStatusFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
+  const [contactTags, setContactTags] = useState([]); // [{tag, count}] — the "lists" a user has collected
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [importSource, setImportSource] = useState("");
@@ -16508,6 +16655,21 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [toast, setToast] = useState("");
+  const [leadRegion, setLeadRegion] = useState("");
+  const [leadQuery, setLeadQuery] = useState("");
+  const [leadSearches, setLeadSearches] = useState([]);
+  const [leadSearchId, setLeadSearchId] = useState(null);
+  const [leadResults, setLeadResults] = useState([]);
+  const [leadSearching, setLeadSearching] = useState(false);
+  const [leadScraping, setLeadScraping] = useState(false);
+  const [leadScrapeProgress, setLeadScrapeProgress] = useState(null); // {attempted,found,remaining_pending}
+  const [leadScrapeRun, setLeadScrapeRun] = useState(null); // live progress across auto-continued batches: {done, total, found}
+  const leadScrapeCancelRef = useRef(false);
+  const [showLeadTagModal, setShowLeadTagModal] = useState(false);
+  const [leadTag, setLeadTag] = useState("");
+  // Set while a country-scale search is running as a background job (tiled bbox, see
+  // jobs/workers.js "lead-finder-search" queue) — polled every ~3s until a terminal status.
+  const [leadCountrySearchRun, setLeadCountrySearchRun] = useState(null); // {status, tilesDone, tilesTotal, resultCount}
   const hostedFileRef = useRef(null);
   const smtpFileRef = useRef(null);
   const htmlFileRef = useRef(null);
@@ -16516,14 +16678,17 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
   const attachmentTotalBytes = (list) => (list || []).reduce((s, a) => s + (a.size || 0), 0);
 
-  const loadContacts = () => apiFetch(`/email-marketing/contacts?limit=200${statusFilter ? `&status=${statusFilter}` : ""}`)
+  const loadContacts = () => apiFetch(`/email-marketing/contacts?limit=200${statusFilter ? `&status=${statusFilter}` : ""}${tagFilter ? `&tag=${encodeURIComponent(tagFilter)}` : ""}`)
     .then(d => setContacts(d?.data || [])).catch(() => {});
+  const loadContactTags = () => apiFetch("/email-marketing/contacts/tags").then(d => setContactTags(d?.data || [])).catch(() => {});
   const loadCampaigns = () => apiFetch("/email-marketing/campaigns").then(d => setCampaigns(d?.data || [])).catch(() => {});
   const loadSegments = () => apiFetch("/email-marketing/segments").then(d => setSegments(d?.data || [])).catch(() => {});
   const loadSuppressions = () => apiFetch("/email-marketing/suppressions").then(d => setSuppressions(d?.data || [])).catch(() => {});
+  const loadLeadSearches = () => apiFetch("/lead-finder/searches").then(d => setLeadSearches(d?.data || [])).catch(() => {});
+  const loadLeadResults = (id) => apiFetch(`/lead-finder/searches/${id}/results`).then(d => setLeadResults(d?.data || [])).catch(() => {});
 
   useEffect(() => { loadCampaigns(); loadSegments(); }, [workspaceId]);
-  useEffect(() => { if (tab === "contacts") loadContacts(); if (tab === "suppressions") loadSuppressions(); }, [tab, statusFilter, workspaceId]);
+  useEffect(() => { if (tab === "contacts") { loadContacts(); loadContactTags(); } if (tab === "suppressions") loadSuppressions(); if (tab === "leads") loadLeadSearches(); }, [tab, statusFilter, tagFilter, workspaceId]);
 
   // While a campaign is actively drip-sending, poll the list so its progress bar moves
   // without the user having to refresh — the drip cron itself only ticks every 5 min, so
@@ -16534,6 +16699,35 @@ const EmailMarketingPage = ({ workspaceId }) => {
     const id = setInterval(loadCampaigns, 20000);
     return () => clearInterval(id);
   }, [hasSendingCampaign]);
+
+  // Country-scale Lead Finder search runs as a background job (bbox tiled into ~0.5° chunks —
+  // one Overpass query per tile blows past its timeout otherwise). Poll until it reaches a
+  // terminal status, then load whatever it found.
+  useEffect(() => {
+    if (leadCountrySearchRun?.status !== "running" || !leadSearchId) return;
+    const searchId = leadSearchId;
+    const poll = async () => {
+      try {
+        const s = await apiFetch(`/lead-finder/searches/${searchId}`);
+        setLeadCountrySearchRun({ status: s.status, tilesDone: s.tiles_done, tilesTotal: s.tiles_total, resultCount: s.result_count });
+        await loadLeadResults(searchId); // refresh the table as results come in tile by tile
+        if (s.status !== "running") {
+          loadLeadSearches();
+          if (s.status === "failed") setErr(s.error_message || t("email.leadsSearchFailed"));
+          else if (s.status === "cancelled") flash(t("email.leadsSearchCancelled"));
+          else flash(s.truncated ? t("email.leadsSearchDoneTruncated", { n: s.result_count }) : t("email.leadsSearchDone", { n: s.result_count }));
+        }
+      } catch { /* transient poll failure — try again next tick */ }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, [leadCountrySearchRun?.status, leadSearchId]);
+
+  async function doCancelCountrySearch() {
+    if (!leadSearchId) return;
+    try { await post(`/lead-finder/searches/${leadSearchId}/cancel`, {}); } catch (e) { setErr(e.message); }
+  }
 
   async function doImport() {
     setErr("");
@@ -16563,6 +16757,100 @@ const EmailMarketingPage = ({ workspaceId }) => {
       setShowImport(false); setImportFile(null); loadContacts();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
   }
+
+  // A "list" in the Contacts tab is just a tag — campaigns target a *segment* (a saved
+  // {tags,status} filter, email_segments table), and nothing in the UI ever created one, so
+  // the composer's Segment dropdown only ever showed "All active contacts". This wraps a tag
+  // into a one-click segment so it becomes selectable there.
+  const segmentForTag = (tag) => segments.find(s => Array.isArray(s.filter?.tags) && s.filter.tags.length === 1 && s.filter.tags[0] === tag);
+  async function doCreateSegmentFromTag() {
+    if (!tagFilter || segmentForTag(tagFilter)) return;
+    setBusy(true); setErr("");
+    try {
+      await post("/email-marketing/segments", { name: tagFilter, filter: { tags: [tagFilter], status: "active" } });
+      await loadSegments();
+      flash(t("email.segmentCreated", { name: tagFilter }));
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  // ── Lead Finder ── search public businesses (OpenStreetMap) by region + free-text query,
+  // then optionally scrape emails off their websites and promote them into contacts.
+  async function doLeadSearch() {
+    setErr("");
+    if (!leadRegion.trim() || !leadQuery.trim()) { setErr(t("email.leadsNeedInputs")); return; }
+    setLeadSearching(true);
+    try {
+      const r = await post("/lead-finder/search", { region: leadRegion.trim(), query: leadQuery.trim() });
+      setLeadSearchId(r.search.id);
+      setLeadResults(r.results);
+      setLeadScrapeProgress(null);
+      loadLeadSearches();
+      if (r.status === "running") {
+        // Country-scale — bbox got tiled into a background job (jobs/workers.js); the polling
+        // effect above takes over from here.
+        setLeadCountrySearchRun({ status: "running", tilesDone: 0, tilesTotal: r.search.tiles_total, resultCount: 0 });
+      } else {
+        setLeadCountrySearchRun(null);
+        flash(r.truncated
+          ? t("email.leadsSearchDoneTruncated", { n: r.results.length })
+          : t("email.leadsSearchDone", { n: r.results.length }));
+      }
+    } catch (e) { setErr(e.message); } finally { setLeadSearching(false); }
+  }
+
+  function openLeadSearch(s) {
+    // The scrape loop keeps calling loadLeadResults(leadSearchId) for whichever search it
+    // started on — switching the visible search mid-scrape would let it periodically clobber
+    // the results table with the OLD search's data. Block switching until it's done/stopped.
+    // Same reasoning for a running country-scale search's polling effect.
+    if (leadScraping || leadCountrySearchRun?.status === "running") return;
+    setLeadSearchId(s.id);
+    setLeadRegion(s.region_query);
+    setLeadQuery(s.business_query);
+    setLeadScrapeProgress(null);
+    setLeadCountrySearchRun(s.status === "running"
+      ? { status: "running", tilesDone: s.tiles_done, tilesTotal: s.tiles_total, resultCount: s.result_count }
+      : null);
+    loadLeadResults(s.id);
+  }
+
+  // Auto-continues across batches (backend does 25 sites/call) so the user sees one running
+  // progress bar instead of having to click "scrape" again after every batch.
+  async function doScrapeLeadEmails() {
+    if (!leadSearchId) return;
+    const total = leadPendingCount;
+    if (!total) return;
+    setLeadScraping(true); setErr("");
+    leadScrapeCancelRef.current = false;
+    setLeadScrapeRun({ done: 0, total, found: 0 });
+    let done = 0, found = 0, noEmail = 0, errors = 0;
+    try {
+      while (!leadScrapeCancelRef.current) {
+        const r = await post(`/lead-finder/searches/${leadSearchId}/scrape`, {});
+        done += r.attempted; found += r.found; noEmail += r.no_email; errors += r.errors;
+        setLeadScrapeRun({ done, total, found });
+        await loadLeadResults(leadSearchId);
+        if (r.attempted === 0 || r.remaining_pending === 0) break;
+      }
+      setLeadScrapeProgress({ attempted: done, found, no_email: noEmail, errors, remaining_pending: Math.max(0, total - done) });
+    } catch (e) { setErr(e.message); } finally { setLeadScraping(false); setLeadScrapeRun(null); }
+  }
+
+  function stopLeadScrape() { leadScrapeCancelRef.current = true; }
+
+  async function doAddLeadsToContacts() {
+    if (!leadSearchId) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await post(`/lead-finder/searches/${leadSearchId}/add-to-contacts`, { tag: leadTag.trim() || undefined });
+      flash(t("email.leadsAddDone", { added: r.added, tag: r.tag }));
+      setShowLeadTagModal(false); setLeadTag("");
+      await loadLeadResults(leadSearchId);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
+  const leadFoundCount = leadResults.filter(r => r.emails?.length && !r.added_to_contacts).length;
+  const leadPendingCount = leadResults.filter(r => r.scrape_status === "pending").length;
 
   // Compiles content_blocks -> html_body (block mode) and saves the campaign, creating it
   // on first save. Used by Save, Send test, and the attachment uploaders (which need a
@@ -16763,7 +17051,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
       </div>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        {[["campaigns", t("email.tabCampaigns")], ["contacts", t("email.tabContacts")], ["suppressions", t("email.tabSuppressions")]].map(([id, lbl]) => (
+        {[["campaigns", t("email.tabCampaigns")], ["contacts", t("email.tabContacts")], ["suppressions", t("email.tabSuppressions")], ["leads", t("email.tabLeads")]].map(([id, lbl]) => (
           <button key={id} onClick={() => setTab(id)} className={`btn ${tab === id ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 13 }}>{lbl}</button>
         ))}
       </div>
@@ -16820,12 +17108,36 @@ const EmailMarketingPage = ({ workspaceId }) => {
             </select>
             <button className="btn btn-primary" onClick={() => { setShowImport(true); setErr(""); setImportFile(null); }}><Plus size={14} /> {t("email.import")}</button>
           </div>
+
+          {!!contactTags.length && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button onClick={() => setTagFilter("")} className={`btn ${!tagFilter ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 11, padding: "3px 8px" }}>
+                  {t("email.allLists")}
+                </button>
+                {contactTags.map(({ tag, count }) => (
+                  <button key={tag} onClick={() => setTagFilter(tag)} className={`btn ${tagFilter === tag ? "btn-primary" : "btn-ghost"}`} style={{ fontSize: 11, padding: "3px 8px" }}>
+                    {tag} ({count})
+                  </button>
+                ))}
+              </div>
+              {tagFilter && (
+                segmentForTag(tagFilter)
+                  ? <span style={{ fontSize: 11, color: "var(--tx3)" }}>✓ {t("email.segmentReady")}</span>
+                  : <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} disabled={busy} onClick={doCreateSegmentFromTag}>
+                      <Plus size={12} /> {t("email.createSegmentFromList")}
+                    </button>
+              )}
+            </div>
+          )}
+
           <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead><tr style={{ background: "var(--s2)", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
                 <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colEmail")}</th>
                 <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colName")}</th>
                 <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colStatus")}</th>
+                <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colLists")}</th>
                 <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.colConsent")}</th>
               </tr></thead>
               <tbody>
@@ -16834,10 +17146,11 @@ const EmailMarketingPage = ({ workspaceId }) => {
                     <td style={{ padding: "10px 14px", fontFamily: "var(--mono)", fontSize: 12 }}>{c.email}</td>
                     <td style={{ padding: "10px 14px" }}>{[c.first_name, c.last_name].filter(Boolean).join(" ") || "—"}</td>
                     <td style={{ padding: "10px 14px" }}>{statusBadge(c.status)}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 11, color: "var(--tx3)" }}>{c.tags?.length ? c.tags.join(", ") : "—"}</td>
                     <td style={{ padding: "10px 14px", fontSize: 11, color: "var(--tx3)" }}>{c.consent_source || "—"}</td>
                   </tr>
                 ))}
-                {!contacts.length && <tr><td colSpan={4} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noContacts")}</td></tr>}
+                {!contacts.length && <tr><td colSpan={5} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noContacts")}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -16864,6 +17177,140 @@ const EmailMarketingPage = ({ workspaceId }) => {
               {!suppressions.length && <tr><td colSpan={3} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noSuppressions")}</td></tr>}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* ── Leads (Lead Finder) ── */}
+      {tab === "leads" && (
+        <div>
+          <div style={{ background: "rgba(245,158,11,.1)", color: "var(--amb, #b45309)", padding: "8px 12px", borderRadius: 8, fontSize: 12, marginBottom: 14 }}>
+            {t("email.leadsConsentNote")}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            <input value={leadRegion} onChange={e => setLeadRegion(e.target.value)} disabled={leadScraping || leadCountrySearchRun?.status === "running"} placeholder={t("email.leadsRegionLabel")} style={{ fontSize: 13, flex: "1 1 180px" }} />
+            <input value={leadQuery} onChange={e => setLeadQuery(e.target.value)} disabled={leadScraping || leadCountrySearchRun?.status === "running"} placeholder={t("email.leadsQueryLabel")} style={{ fontSize: 13, flex: "1 1 220px" }} />
+            <button className="btn btn-primary" disabled={leadSearching || leadScraping || leadCountrySearchRun?.status === "running"} onClick={doLeadSearch}>
+              <Search size={14} /> {leadSearching ? t("email.leadsSearching") : t("email.leadsSearchBtn")}
+            </button>
+          </div>
+
+          {!!leadSearches.length && (
+            <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+              {leadSearches.map(s => (
+                <button key={s.id} onClick={() => openLeadSearch(s)} disabled={leadScraping || leadCountrySearchRun?.status === "running"}
+                  className={`btn ${leadSearchId === s.id ? "btn-primary" : "btn-ghost"}`}
+                  style={{ fontSize: 11, padding: "3px 8px", display: "flex", alignItems: "center", gap: 5,
+                    opacity: (leadScraping || leadCountrySearchRun?.status === "running") && leadSearchId !== s.id ? 0.5 : 1 }}>
+                  {s.status === "running" && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--amb, #f59e0b)", animation: "pulse 1.2s infinite" }} />}
+                  {s.region_query} · {s.business_query} ({s.result_count})
+                </button>
+              ))}
+            </div>
+          )}
+
+          {leadSearchId && (
+            <>
+              {leadCountrySearchRun?.status === "running" && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "var(--tx3)", marginBottom: 4 }}>
+                    <span>{t("email.leadsCountrySearchProgress", {
+                      done: leadCountrySearchRun.tilesDone, total: leadCountrySearchRun.tilesTotal, found: leadCountrySearchRun.resultCount,
+                    })}</span>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: "1px 8px" }} onClick={doCancelCountrySearch}>{t("email.leadsCancelSearch")}</button>
+                  </div>
+                  <div style={{ height: 6, background: "var(--b2)", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 4,
+                      background: "linear-gradient(90deg, var(--ac), var(--ac2))",
+                      width: `${Math.min(100, Math.round((leadCountrySearchRun.tilesDone / leadCountrySearchRun.tilesTotal) * 100))}%`,
+                      transition: "width .3s ease",
+                    }} />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, color: "var(--tx3)" }}>
+                  {!leadScraping && leadScrapeProgress && t("email.leadsScrapeProgress", {
+                    found: leadScrapeProgress.found, attempted: leadScrapeProgress.attempted, remaining: leadScrapeProgress.remaining_pending,
+                  })}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn btn-ghost" style={{ fontSize: 12 }} disabled={leadScraping || leadCountrySearchRun?.status === "running" || !leadPendingCount} onClick={doScrapeLeadEmails}>
+                    {leadScraping ? t("email.leadsScraping") : t("email.leadsScrapeBtn", { n: leadPendingCount })}
+                  </button>
+                  <button className="btn btn-primary" style={{ fontSize: 12 }} disabled={!leadFoundCount} onClick={() => setShowLeadTagModal(true)}>
+                    {t("email.leadsAddToContacts", { n: leadFoundCount })}
+                  </button>
+                </div>
+              </div>
+
+              {leadScraping && leadScrapeRun && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "var(--tx3)", marginBottom: 4 }}>
+                    <span>{t("email.leadsScrapeLive", { done: leadScrapeRun.done, total: leadScrapeRun.total, found: leadScrapeRun.found })}</span>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: "1px 8px" }} onClick={stopLeadScrape}>{t("email.leadsScrapeStop")}</button>
+                  </div>
+                  <div style={{ height: 6, background: "var(--b2)", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 4,
+                      background: "linear-gradient(90deg, var(--ac), var(--ac2))",
+                      width: `${Math.min(100, Math.round((leadScrapeRun.done / leadScrapeRun.total) * 100))}%`,
+                      transition: "width .3s ease",
+                    }} />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ background: "var(--s1)", border: "1px solid var(--b1)", borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead><tr style={{ background: "var(--s2)", color: "var(--tx3)", fontSize: 11, textTransform: "uppercase" }}>
+                    <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.leadsColName")}</th>
+                    <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.leadsColCategory")}</th>
+                    <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.leadsColAddress")}</th>
+                    <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.leadsColWebsite")}</th>
+                    <th style={{ textAlign: "left", padding: "10px 14px" }}>{t("email.leadsColEmail")}</th>
+                  </tr></thead>
+                  <tbody>
+                    {leadResults.map(r => (
+                      <tr key={r.id} style={{ borderTop: "1px solid var(--b1)" }}>
+                        <td style={{ padding: "10px 14px", fontWeight: 500, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>{r.name}</td>
+                        <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--tx3)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.category || ""}>{r.category || "—"}</td>
+                        <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--tx3)", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.address || ""}>{r.address || "—"}</td>
+                        <td style={{ padding: "10px 14px", fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {r.website ? <a href={r.website.startsWith("http") ? r.website : `https://${r.website}`} target="_blank" rel="noreferrer" title={r.website}>{r.website}</a> : "—"}
+                        </td>
+                        <td style={{ padding: "10px 14px", fontSize: 12, fontFamily: "var(--mono)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.emails?.join(", ") || ""}>
+                          {r.emails?.length ? r.emails.join(", ") : (r.scrape_status === "pending" ? "…" : "—")}
+                        </td>
+                      </tr>
+                    ))}
+                    {!leadResults.length && <tr><td colSpan={5} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.leadsNoResults")}</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Lead Finder: add-to-contacts tag modal ── */}
+      {showLeadTagModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowLeadTagModal(false)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 420, maxWidth: "92vw" }}>
+            <h3 style={{ margin: "0 0 6px", fontSize: 17 }}>{t("email.leadsAddToContacts", { n: leadFoundCount })}</h3>
+            <p style={{ fontSize: 12, color: "var(--tx3)", margin: "0 0 14px" }}>{t("email.leadsConsentNote")}</p>
+            <label style={{ fontSize: 12, color: "var(--tx2)" }}>{t("email.leadsTagLabel")}</label>
+            <input value={leadTag} onChange={e => setLeadTag(e.target.value)} style={{ width: "100%", margin: "5px 0 14px" }}
+                   placeholder={`lead:${leadRegion.toLowerCase()}-${leadQuery.toLowerCase()}`.replace(/[^a-z0-9:-]+/g, "-")} />
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setShowLeadTagModal(false)}>{t("common.cancel") || "Cancel"}</button>
+              <button className="btn btn-primary" disabled={busy} onClick={doAddLeadsToContacts}>{t("email.leadsAddToContacts", { n: leadFoundCount })}</button>
+            </div>
+          </div>
         </div>
       )}
 

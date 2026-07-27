@@ -25,7 +25,9 @@ function computeListingIssues({ title, bulletPoints = [], description, images = 
   }
 
   const hasDescription = !!(description && description.trim().length > 0);
-  if (!hasDescription) {
+  // A+ content supersedes the plain product-description section on the Amazon listing
+  // page, so a missing description is only a real gap when there is ALSO no A+ content.
+  if (!hasDescription && !hasAplus) {
     issues.push({ code: "description" });
   }
 
