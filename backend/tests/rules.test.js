@@ -61,9 +61,11 @@ jest.mock("../src/routes/audit", () => ({
   updateAuditStatus: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock("../src/services/amazon/writeback", () => ({
-  pushNegativeKeyword: jest.fn().mockResolvedValue({}),
-  pushNegativeAsin:    jest.fn().mockResolvedValue({}),
-  pushKeywordUpdates:  jest.fn().mockResolvedValue({}),
+  pushNegativeKeyword:    jest.fn().mockResolvedValue({}),
+  pushNegativeAsin:       jest.fn().mockResolvedValue({}),
+  pushKeywordUpdates:     jest.fn().mockResolvedValue({}),
+  archiveNegativeKeyword: jest.fn().mockResolvedValue({ ok: true }),
+  archiveNegativeTarget:  jest.fn().mockResolvedValue({ ok: true }),
 }));
 jest.mock("../src/services/amazon/adsClient", () => ({
   put: jest.fn().mockResolvedValue({}),
@@ -93,8 +95,8 @@ jest.mock("../src/middleware/auth", () => ({
 
 const { query: dbQuery } = require("../src/db/pool");
 const { writeAudit }         = require("../src/routes/audit");
-const { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin } =
-  require("../src/services/amazon/writeback");
+const { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin,
+        archiveNegativeKeyword } = require("../src/services/amazon/writeback");
 const { put: apiPut } = require("../src/services/amazon/adsClient");
 
 const rulesRouter = require("../src/routes/rules");
@@ -1099,11 +1101,23 @@ describe("Action: add_negative_keyword", () => {
   it("dry-run: already exists in negative_keywords → already_negative skip", async () => {
     const kw = makeKeyword({ state: "enabled", acos: "80" });
     mockKeywordRun(negRule("exact"), [kw], [
-      { rows: [{ id: "neg-001" }] }, // dedup → found → skip
+      { rows: [{ id: "neg-001", state: "enabled" }] }, // dedup → found ENABLED → skip
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(0);
     expect(res.body.skipped[0].reason).toBe("already_negative");
+  });
+
+  it("dry-run: an ARCHIVED row for the same negative does not count as already_negative", async () => {
+    // An archived row means the negative is inactive on Amazon — the rule must be free to
+    // re-apply it (by re-owning that row), not skip as though it were still in place.
+    const kw = makeKeyword({ state: "enabled", acos: "80" });
+    mockKeywordRun(negRule("exact"), [kw], [
+      { rows: [{ id: "neg-001", state: "archived" }] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.applied_count).toBe(1);
+    expect(res.body.skipped).toHaveLength(0);
   });
 
   it("dry-run: paused keyword → not_enabled skip", async () => {
@@ -1164,7 +1178,7 @@ describe("Action: add_negative_keyword — ASIN auto-routing", () => {
   it("ASIN already in negative_targets → already_negative skip", async () => {
     mockSearchTermRun(asinRule(), [asinSearchTerm()], [
       { rows: [] },                      // activeTgt check → not an active target
-      { rows: [{ id: "nt-existing" }] }, // dedup → found
+      { rows: [{ id: "nt-existing", state: "enabled" }] }, // dedup → found ENABLED
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(0);
@@ -1221,7 +1235,7 @@ describe("Action: add_negative_target", () => {
 
   it("dry-run: already in negative_targets → already_negative skip", async () => {
     mockTargetRun(negTargetRule(), [makeTarget({ state: "enabled", acos: "80" })], [
-      { rows: [{ id: "nt-001" }] }, // dedup → found
+      { rows: [{ id: "nt-001", state: "enabled" }] }, // dedup → found ENABLED
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(0);
@@ -1413,5 +1427,624 @@ describe("Result shape — totals and metadata", () => {
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.status).toBe(500); // executeRule throws, caught by error middleware
     expect(res.body.error).toMatch(/condition/i);
+  });
+});
+
+// ─── Reconciliation: un-negating previously negated search terms ──────────────
+//
+// Regression cover for a live oscillation: the add path grouped search terms by
+// (query, campaign, ad_group, match_type) while reconciliation re-aggregated the whole
+// campaign, so the two paths judged the same term differently and the rule removed on one
+// run exactly what it re-added on the next — every day, indefinitely. Observed on prod:
+// "outdoor fussmatte wetterfest" was added and removed 30 times in 30 days.
+describe("Reconciliation — negative keywords", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  // Conditions taken from the live rule that oscillated: [ST]-12cl-1or-60d (neg key)
+  const stRule = makeRule({
+    actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+    scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+    conditions: JSON.stringify([
+      { metric: "clicks", op: "gte", value: "12" },
+      { metric: "orders", op: "eq",  value: "1"  },
+      { metric: "acos",   op: "gte", value: "25" },
+    ]),
+  });
+
+  const negKwRow = (overrides = {}) => ({
+    id: "negkw-001",
+    keyword_text: "campingstuhl 150 kg",
+    campaign_id: CAMP_ID,
+    ad_group_id: AG_ID,
+    amazon_neg_keyword_id: "AZ_NEG_001",
+    match_type: "negative_exact",
+    level: "ad_group",
+    source_entity_type: "search_term",
+    amazon_profile_id: "123456789",
+    connection_id: "conn-001",
+    marketplace_id: "ATVPDKIKX0DER",
+    campaign_type: "sponsoredProducts",
+    campaign_name: "Campaign A",
+    ...overrides,
+  });
+
+  // Rule run that fetches no entities but has one existing negative to reconcile.
+  function mockReconcileRun(rule, negKws, sliceRows) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })          // campaign_exemptions
+      .mockResolvedValueOnce({ rows: [] });         // search_term entities → none matched
+    dbQuery.mockResolvedValueOnce({ rows: negKws }); // reconcile: negative_keywords
+    negKws.forEach(() => dbQuery.mockResolvedValueOnce({ rows: sliceRows }));
+    dbQuery
+      .mockResolvedValueOnce({ rows: [] })          // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });         // UPDATE rules
+  }
+
+  it("keeps the negative when one ad-group/match-type slice still qualifies", async () => {
+    // Live numbers for "campingstuhl 150 kg": the BROAD slice the add path saw still
+    // matches (25 clicks / 1 order / ACOS 88.5), while the campaign-wide aggregate the old
+    // code used — 29 clicks / 2 orders — fails `orders = 1` and would have removed it.
+    mockReconcileRun(stRule, [negKwRow()], [
+      { clicks: "25", spend: "88.50", orders: "1", sales: "100.00", impressions: "900" },
+      { clicks: "4",  spend: "3.10",  orders: "1", sales: "17.60",  impressions: "120" },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.removed_count).toBe(0);
+  });
+
+  it("removes the negative only when no slice qualifies any more", async () => {
+    // Both slices now convert well below the ACOS threshold → nothing justifies the negative.
+    mockReconcileRun(stRule, [negKwRow()], [
+      { clicks: "25", spend: "10.00", orders: "1", sales: "500.00", impressions: "900" },
+      { clicks: "4",  spend: "1.00",  orders: "1", sales: "80.00",  impressions: "120" },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.removed_count).toBe(1);
+    expect(res.body.removed[0].action).toBe("remove_negative_reconcile");
+  });
+
+  it("removes the negative when the term has no metrics left at all", async () => {
+    mockReconcileRun(stRule, [negKwRow()], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.removed_count).toBe(1);
+  });
+
+  it("re-evaluates at the add path's granularity, scoped to the negative's ad group", async () => {
+    mockReconcileRun(stRule, [negKwRow()], [
+      { clicks: "25", spend: "88.50", orders: "1", sales: "100.00", impressions: "900" },
+    ]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    const sliceCall = dbQuery.mock.calls.find(c =>
+      /FROM search_term_metrics/.test(c[0]) && /GROUP BY ad_group_id, match_type/.test(c[0]));
+    expect(sliceCall).toBeDefined();
+    expect(sliceCall[0]).toMatch(/ad_group_id = \$6/);
+    expect(sliceCall[1]).toContain(AG_ID);
+  });
+
+  it("matches the stored (normalized) negative against Amazon's raw report text", async () => {
+    // negative_keywords holds normalized text; search_term_metrics.query keeps Amazon's
+    // original U+00A0. Without normalizing both sides the lookup finds nothing and the
+    // negative is dropped as though the term had stopped receiving traffic.
+    mockReconcileRun(stRule, [negKwRow()], [
+      { clicks: "25", spend: "88.50", orders: "1", sales: "100.00", impressions: "900" },
+    ]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    const sliceCall = dbQuery.mock.calls.find(c =>
+      /FROM search_term_metrics/.test(c[0]) && /GROUP BY ad_group_id, match_type/.test(c[0]));
+    expect(sliceCall[0]).toMatch(/regexp_replace/);
+    expect(sliceCall[0]).toContain("\\u00A0");
+  });
+
+  it("does not remove a negative whose ad group is unknown but whose metrics still qualify", async () => {
+    mockReconcileRun(stRule, [negKwRow({ ad_group_id: null })], [
+      { clicks: "25", spend: "88.50", orders: "1", sales: "100.00", impressions: "900" },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.removed_count).toBe(0);
+    const sliceCall = dbQuery.mock.calls.find(c =>
+      /FROM search_term_metrics/.test(c[0]) && /GROUP BY ad_group_id, match_type/.test(c[0]));
+    expect(sliceCall[0]).not.toMatch(/ad_group_id = \$6/);
+  });
+});
+
+// ─── Amazon write-back failures must surface in the run result ────────────────
+//
+// Write-backs are deliberately non-fatal: the local DB is updated regardless, so a
+// rejection never reaches `errors` and the run used to report "completed / 0 failures".
+// On prod that hid a keyword Amazon rejected on every single run for 10 days straight.
+describe("Write-back failures in the run result", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  const pauseRule = makeRule({ actions: JSON.stringify([{ type: "pause_keyword" }]) });
+
+  it("counts an Amazon rejection and names the entity that failed", async () => {
+    pushKeywordUpdates.mockResolvedValueOnce({ ok: false, error: "PATTERN_NOT_MATCHED" });
+    mockKeywordRun(pauseRule, [makeKeyword({ acos: "80", state: "enabled" })], [
+      { rows: [] },  // UPDATE keywords
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.writeback_error_count).toBe(1);
+    expect(res.body.writeback_errors[0]).toMatchObject({
+      action: "pause_keyword",
+      entity_id: "kw-001",
+      stage: "amazon_writeback",
+    });
+    expect(res.body.writeback_errors[0].error).toMatch(/PATTERN_NOT_MATCHED/);
+  });
+
+  it("counts a write-back that rejects outright", async () => {
+    pushKeywordUpdates.mockRejectedValueOnce(new Error("connection reset"));
+    mockKeywordRun(pauseRule, [makeKeyword({ acos: "80", state: "enabled" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.writeback_error_count).toBe(1);
+    expect(res.body.writeback_errors[0].error).toMatch(/connection reset/);
+  });
+
+  it("reports no write-back errors when Amazon accepts the change", async () => {
+    pushKeywordUpdates.mockResolvedValueOnce({ ok: true });
+    mockKeywordRun(pauseRule, [makeKeyword({ acos: "80", state: "enabled" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.writeback_error_count).toBe(0);
+    expect(res.body.writeback_errors).toHaveLength(0);
+  });
+
+  it("still applies the change locally — a rejection stays non-fatal", async () => {
+    pushKeywordUpdates.mockResolvedValueOnce({ ok: false, error: "rejected" });
+    mockKeywordRun(pauseRule, [makeKeyword({ acos: "80", state: "enabled" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.status).toBe(200);
+    expect(res.body.applied_count).toBe(1);
+  });
+});
+
+// ─── runStatusFromResult / rule_executions bookkeeping ────────────────────────
+describe("Run status derivation", () => {
+  const { __test } = require("../src/routes/rules");
+
+  it("marks a run partial when Amazon rejected a write-back", () => {
+    expect(__test.runStatusFromResult({ errors: [], writeback_error_count: 1 })).toBe("partial");
+  });
+
+  it("marks a run partial when an action threw locally", () => {
+    expect(__test.runStatusFromResult({ errors: [{ error: "x" }], writeback_error_count: 0 })).toBe("partial");
+  });
+
+  it("marks a clean run completed", () => {
+    expect(__test.runStatusFromResult({ errors: [], writeback_error_count: 0 })).toBe("completed");
+  });
+
+  it("treats a result without the write-back field as completed", () => {
+    expect(__test.runStatusFromResult({ errors: [] })).toBe("completed");
+  });
+});
+
+// ─── add_negative_keyword: text normalization and row re-use ──────────────────
+describe("add_negative_keyword — normalization and archived-row re-use", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  const stRule = makeRule({
+    actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+    scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+    conditions: JSON.stringify([{ metric: "acos", op: "gte", value: "25" }]),
+  });
+
+  // Exactly the text Amazon's report returns for the term that failed daily on prod:
+  // U+00A0 between "150" and "kg".
+  const NBSP_TERM = "campingstuhl 150 kg";
+  const CLEAN_TERM = "campingstuhl 150 kg";
+
+  function mockAddRun(stRows, dedupRows, writeRow) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [makeRule(stRule)] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })            // campaign_exemptions
+      .mockResolvedValueOnce({ rows: stRows })        // search_term entities
+      .mockResolvedValueOnce({ rows: dedupRows })     // dedup SELECT
+      .mockResolvedValueOnce({ rows: writeRow })      // INSERT ... RETURNING id / UPDATE
+      .mockResolvedValueOnce({ rows: [] })            // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })            // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });           // UPDATE rules
+  }
+
+  it("sends Amazon the normalized text, not the raw report text", async () => {
+    mockAddRun([makeSearchTerm({ keyword_text: NBSP_TERM, acos: "80" })], [], [{ id: "neg-new" }]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(pushNegativeKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ keywordText: CLEAN_TERM }));
+  });
+
+  it("stores the normalized text so later runs recognise the same negative", async () => {
+    mockAddRun([makeSearchTerm({ keyword_text: NBSP_TERM, acos: "80" })], [], [{ id: "neg-new" }]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    const insert = dbQuery.mock.calls.find(c => /INSERT INTO negative_keywords/.test(c[0]));
+    expect(insert[1]).toContain(CLEAN_TERM);
+    expect(insert[1]).not.toContain(NBSP_TERM);
+  });
+
+  it("looks the negative up on normalized text on both sides", async () => {
+    mockAddRun([makeSearchTerm({ keyword_text: NBSP_TERM, acos: "80" })], [], [{ id: "neg-new" }]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    const dedup = dbQuery.mock.calls.find(c => /FROM negative_keywords/.test(c[0]) && /SELECT id, state, ad_group_id/.test(c[0]));
+    expect(dedup[0]).toMatch(/regexp_replace/);
+    expect(dedup[1]).toContain(CLEAN_TERM);
+  });
+
+  it("re-activates and re-owns an archived row instead of inserting a second one", async () => {
+    // This is what stops the daily add/remove loop: the row moves to the rule that now
+    // justifies the negative, so the rule that archived it no longer sees it next run.
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-old", state: "archived", ad_group_id: AG_ID,
+         amazon_neg_keyword_id: "archived-1750000000000-neg-old" }],
+      [],
+    );
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+
+    const update = dbQuery.mock.calls.find(c => /UPDATE negative_keywords/.test(c[0]) && /state='enabled'/.test(c[0]));
+    expect(update).toBeDefined();
+    expect(update[0]).toMatch(/source_rule_id=\$1/);
+    expect(update[1].slice(0, 4)).toEqual([RULE_ID, "search_term", CLEAN_TERM, "neg-old"]);
+    expect(dbQuery.mock.calls.some(c => /INSERT INTO negative_keywords/.test(c[0]))).toBe(false);
+  });
+
+  it("resets a re-used row's synthetic id to a fresh placeholder keyed on its own uuid", async () => {
+    // "archived-…" must not survive re-activation: reconciliation would later treat it as a
+    // real Amazon id and try to archive a record that does not exist there.
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-old", state: "archived", ad_group_id: AG_ID,
+         amazon_neg_keyword_id: "archived-1750000000000-neg-old" }],
+      [],
+    );
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    const update = dbQuery.mock.calls.find(c => /UPDATE negative_keywords/.test(c[0]) && /state='enabled'/.test(c[0]));
+    expect(update[0]).toMatch(/amazon_neg_keyword_id=\$5/);
+    expect(update[1][4]).toBe("rule-neg-old-negativeExact");
+  });
+
+  it("leaves a real Amazon id untouched when re-using a row", async () => {
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-old", state: "archived", ad_group_id: AG_ID,
+         amazon_neg_keyword_id: "146042279233035" }],
+      [],
+    );
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    const update = dbQuery.mock.calls.find(c => /UPDATE negative_keywords/.test(c[0]) && /state='enabled'/.test(c[0]));
+    expect(update[0]).not.toMatch(/amazon_neg_keyword_id/);
+    expect(update[1]).toHaveLength(4);
+  });
+
+  it("pushes the re-used row's id to Amazon so the write-back updates the right record", async () => {
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-old", state: "archived", ad_group_id: AG_ID,
+         amazon_neg_keyword_id: "archived-1750000000000-neg-old" }],
+      [],
+    );
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(pushNegativeKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ localId: "neg-old" }));
+  });
+
+  it("re-uses a PAUSED row too — archiving deactivates via state=PAUSED on Amazon", async () => {
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-paused", state: "paused", ad_group_id: AG_ID }],
+      [],
+    );
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+    expect(pushNegativeKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ localId: "neg-paused" }));
+  });
+
+  it("keeps 'already negative' campaign-wide — an enabled row in another ad group still skips", async () => {
+    // Re-use is ad-group scoped, but the already_negative check must stay campaign-wide as
+    // it always was; narrowing it would make rules create a burst of extra negatives.
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-other-ag", state: "enabled", ad_group_id: "ag---9999" }],
+      [],
+    );
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("already_negative");
+  });
+
+  it("does not re-use an inactive row belonging to a different ad group", async () => {
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-other-ag", state: "archived", ad_group_id: "ag---9999" }],
+      [{ id: "neg-new" }],
+    );
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(dbQuery.mock.calls.some(c => /INSERT INTO negative_keywords/.test(c[0]))).toBe(true);
+    expect(pushNegativeKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ localId: "neg-new" }));
+  });
+
+  it("skips a search term whose text normalizes away to nothing", async () => {
+    mockAddRun([makeSearchTerm({ keyword_text: "​  ", acos: "80" })], [], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("empty_keyword_text");
+  });
+});
+
+// ─── Synthetic negative ids must never be sent to Amazon ─────────────────────
+//
+// A negative that has no Amazon id yet carries a locally-invented one: "rule-…" before the
+// write-back lands, "archived-…" once reconciliation frees the placeholder for re-use.
+// The keyword branch only recognised the "rule-" form, so a re-archived negative could be
+// handed an "archived-…" string as though it were an Amazon entity id.
+describe("Synthetic negative ids", () => {
+  const { __test } = require("../src/routes/rules");
+
+  it("treats rule- and archived- placeholders as synthetic", () => {
+    expect(__test.isSyntheticNegId("rule-abc-negativeExact")).toBe(true);
+    expect(__test.isSyntheticNegId("archived-1750000000000-uuid")).toBe(true);
+  });
+
+  it("treats a missing id as synthetic", () => {
+    expect(__test.isSyntheticNegId(null)).toBe(true);
+    expect(__test.isSyntheticNegId(undefined)).toBe(true);
+    expect(__test.isSyntheticNegId("")).toBe(true);
+  });
+
+  it("treats a real Amazon id as genuine", () => {
+    expect(__test.isSyntheticNegId("146042279233035")).toBe(false);
+  });
+});
+
+describe("Reconciliation — synthetic ids are not archived on Amazon", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  const stRule = makeRule({
+    actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+    scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+    conditions: JSON.stringify([{ metric: "acos", op: "gte", value: "25" }]),
+  });
+
+  function mockReconcile(negKwRow) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [stRule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })            // no entities
+      .mockResolvedValueOnce({ rows: [negKwRow] })    // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })            // slices → none → remove
+      .mockResolvedValueOnce({ rows: [] })            // UPDATE negative_keywords
+      .mockResolvedValueOnce({ rows: [] })            // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });           // UPDATE rules
+  }
+
+  const baseRow = {
+    id: "negkw-001", keyword_text: "campingstuhl 150 kg",
+    campaign_id: CAMP_ID, ad_group_id: AG_ID, match_type: "negative_exact",
+    level: "ad_group", source_entity_type: "search_term",
+    amazon_profile_id: "123456789", connection_id: "conn-001",
+    marketplace_id: "ATVPDKIKX0DER", campaign_type: "sponsoredProducts",
+    campaign_name: "Campaign A",
+  };
+
+  it("does not call Amazon for a negative whose id is an archived- placeholder", async () => {
+    mockReconcile({ ...baseRow, amazon_neg_keyword_id: "archived-1750000000000-negkw-001" });
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(1);
+    expect(archiveNegativeKeyword).not.toHaveBeenCalled();
+  });
+
+  it("does call Amazon for a negative that has a real id", async () => {
+    mockReconcile({ ...baseRow, amazon_neg_keyword_id: "146042279233035" });
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(archiveNegativeKeyword).toHaveBeenCalledWith(
+      expect.objectContaining({ amazonNegKeywordId: "146042279233035" }));
+  });
+});
+
+// A masked ASIN carrying an invisible character must still auto-route to a negative
+// TARGET — negating it as a keyword would not exclude the product on Amazon.
+describe("ASIN auto-routing is normalization-aware", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  it("routes a zero-width-padded ASIN query to add_negative_target", async () => {
+    const rule = makeRule({
+      actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+      scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+      conditions: JSON.stringify([{ metric: "acos", op: "gte", value: "25" }]),
+    });
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [makeSearchTerm({ keyword_text: "​b076j8j3w5", acos: "80" })] })
+      .mockResolvedValueOnce({ rows: [] })   // active positive target lookup
+      .mockResolvedValueOnce({ rows: [] })   // negative_targets dedup
+      .mockResolvedValueOnce({ rows: [] })   // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })   // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });  // UPDATE rules
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.applied[0].action).toBe("add_negative_target");
+    expect(res.body.applied[0].auto_routed).toBe(true);
+    expect(res.body.applied[0].expression[0].value).toBe("B076J8J3W5");
+  });
+});
+
+// ─── The add path and reconciliation must judge a term identically ───────────
+//
+// Live regression (2026-08-03, caught on prod after the first fix): reconciliation matched
+// negatives on NORMALIZED text while the entity query still grouped by the RAW query, so
+// Amazon's two spellings of "campingstuhl 150 kg" (U+00A0 vs plain space) were one entity
+// for reconciliation and two for the add path. Add scored the U+00A0 spelling alone
+// (25 clicks / 1 order → matched) while reconcile scored the merged total
+// (36 clicks / 2 orders → failed `orders = 1`), so the rule added and removed it in the
+// same run. Both paths must normalize, or the oscillation returns in a new disguise.
+describe("Add path and reconciliation agree on term identity", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  const stRule = makeRule({
+    actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+    scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+    conditions: JSON.stringify([{ metric: "acos", op: "gte", value: "25" }]),
+  });
+
+  function runQueries() {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [stRule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })   // entities
+      .mockResolvedValueOnce({ rows: [] })   // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })   // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });  // UPDATE rules
+  }
+
+  it("groups search-term entities by normalized query, not raw text", async () => {
+    runQueries();
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    const entityQuery = dbQuery.mock.calls.find(c => /FROM search_term_metrics stm/.test(c[0]));
+    expect(entityQuery[0]).toMatch(/GROUP BY btrim\(regexp_replace/);
+    expect(entityQuery[0]).not.toMatch(/GROUP BY stm\.query/);
+  });
+
+  it("selects the normalized query as keyword_text so negatives are stored normalized", async () => {
+    runQueries();
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    const entityQuery = dbQuery.mock.calls.find(c => /FROM search_term_metrics stm/.test(c[0]));
+    expect(entityQuery[0]).toMatch(/regexp_replace[\s\S]*AS keyword_text/);
+  });
+
+  it("uses the identical normalization expression in both the entity and reconcile queries", async () => {
+    // Stronger than checking each side separately: if the two ever drift apart, the add and
+    // remove decisions can disagree again even though both "normalize".
+    const { sqlNormalizeKeywordText } = require("../src/services/amazon/keywordText");
+    const expected = sqlNormalizeKeywordText("stm.query");
+    const reconcileForm = sqlNormalizeKeywordText("query");
+
+    dbQuery
+      .mockResolvedValueOnce({ rows: [stRule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        id: "negkw-1", keyword_text: "campingstuhl 150 kg", campaign_id: CAMP_ID,
+        ad_group_id: AG_ID, amazon_neg_keyword_id: "AZ1", match_type: "negative_exact",
+        level: "ad_group", source_entity_type: "search_term", amazon_profile_id: "1",
+        connection_id: "c1", marketplace_id: "m1", campaign_type: "sponsoredProducts",
+        campaign_name: "A",
+      }] })
+      .mockResolvedValueOnce({ rows: [{ clicks: "25", spend: "88.5", orders: "1", sales: "100", impressions: "900" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+
+    const entityQuery   = dbQuery.mock.calls.find(c => /FROM search_term_metrics stm/.test(c[0]));
+    const reconcileQuery = dbQuery.mock.calls.find(c =>
+      /FROM search_term_metrics/.test(c[0]) && /GROUP BY ad_group_id, match_type/.test(c[0]));
+
+    expect(entityQuery[0]).toContain(expected);
+    expect(reconcileQuery[0]).toContain(reconcileForm);
+    // Same normalizer, differing only in the column reference it wraps.
+    expect(expected.replace(/stm\.query/g, "query")).toBe(reconcileForm);
+  });
+});
+
+// ─── negative_targets get the same re-ownership treatment as keywords ────────
+//
+// Without it the target path kept inserting a second row, whose placeholder the write-back's
+// duplicate-recovery then deleted on the unique-index conflict — leaving the archived row
+// owned by the rule that removed it, which is the same loop the keyword path had.
+describe("add_negative_target — archived-row re-use", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  const asinRule = makeRule({
+    actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+    scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+    conditions: JSON.stringify([{ metric: "acos", op: "gte", value: "25" }]),
+  });
+  const asinST = () => makeSearchTerm({ keyword_text: "b076j8j3w5", acos: "80" });
+
+  function mockRun(dedupRows, insertRows) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [asinRule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [asinST()] })
+      .mockResolvedValueOnce({ rows: [] })            // activeTgt → none
+      .mockResolvedValueOnce({ rows: dedupRows })     // negative_targets dedup
+      .mockResolvedValueOnce({ rows: insertRows })    // UPDATE (re-use) or INSERT
+      .mockResolvedValueOnce({ rows: [] })            // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })            // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });           // UPDATE rules
+  }
+
+  it("re-activates and re-owns an archived target row instead of inserting", async () => {
+    mockRun([{ id: "nt-old", state: "archived", ad_group_id: AG_ID,
+               amazon_neg_target_id: "archived-1750000000000-nt-old" }], []);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+
+    const update = dbQuery.mock.calls.find(c => /UPDATE negative_targets/.test(c[0]) && /state='enabled'/.test(c[0]));
+    expect(update).toBeDefined();
+    expect(update[1].slice(0, 3)).toEqual([RULE_ID, "search_term", "nt-old"]);
+    expect(dbQuery.mock.calls.some(c => /INSERT INTO negative_targets/.test(c[0]))).toBe(false);
+    expect(pushNegativeAsin).toHaveBeenCalledWith(expect.objectContaining({ localId: "nt-old" }));
+  });
+
+  it("resets a synthetic target id to a placeholder keyed on the row's own uuid", async () => {
+    mockRun([{ id: "nt-old", state: "archived", ad_group_id: AG_ID,
+               amazon_neg_target_id: "archived-1750000000000-nt-old" }], []);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    const update = dbQuery.mock.calls.find(c => /UPDATE negative_targets/.test(c[0]) && /state='enabled'/.test(c[0]));
+    expect(update[0]).toMatch(/amazon_neg_target_id=\$4/);
+    expect(update[1][3]).toBe("rule-neg-nt-old");
+  });
+
+  it("leaves a real Amazon target id untouched on re-use", async () => {
+    mockRun([{ id: "nt-old", state: "archived", ad_group_id: AG_ID,
+               amazon_neg_target_id: "229495617374260" }], []);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    const update = dbQuery.mock.calls.find(c => /UPDATE negative_targets/.test(c[0]) && /state='enabled'/.test(c[0]));
+    expect(update[0]).not.toMatch(/amazon_neg_target_id/);
+    expect(update[1]).toHaveLength(3);
+  });
+
+  it("inserts when the only inactive row belongs to a different ad group", async () => {
+    mockRun([{ id: "nt-other", state: "archived", ad_group_id: "ag---9999",
+               amazon_neg_target_id: "archived-1-x" }], [{ id: "nt-new" }]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(dbQuery.mock.calls.some(c => /INSERT INTO negative_targets/.test(c[0]))).toBe(true);
+    expect(pushNegativeAsin).toHaveBeenCalledWith(expect.objectContaining({ localId: "nt-new" }));
+  });
+
+  it("still skips campaign-wide when an enabled target row exists in another ad group", async () => {
+    mockRun([{ id: "nt-other", state: "enabled", ad_group_id: "ag---9999" }], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("already_negative");
   });
 });

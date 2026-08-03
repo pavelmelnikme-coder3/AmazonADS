@@ -77,7 +77,44 @@ BullMQ rule-engine worker:
        - add_negative_keyword: POST /keywords (negative)
     3. Log execution to audit_log
     4. If dry_run=true: log only, no API calls
+    5. Reconciliation pass: re-evaluate the negatives this rule created
+       (source_rule_id = rule.id, state = enabled) and un-negate any whose
+       conditions no longer hold
 ```
+
+### The add/reconcile symmetry invariant *(2026-08-03)*
+
+`executeRule()` decides the same thing twice — once when adding a negative, once when
+reconciling it — and **those two decisions must be made on identical terms**. If they diverge,
+the rule adds on one run exactly what it removes on the next, forever. Both sides must agree on:
+
+| dimension | rule |
+|---|---|
+| **granularity** | per `(query, campaign, ad_group, match_type)` slice. A negative is kept if **any** slice still matches — i.e. reconciliation never removes what the add path would immediately re-add. An ad-group-level negative only blocks its own ad group, so that is also the correct scope. |
+| **term identity** | both sides group/compare on `sqlNormalizeKeywordText(...)`. Amazon returns the same shopper term in several typographic spellings (U+00A0 vs a plain space); they are one negative keyword on Amazon and must be one entity here. |
+| **row ownership** | re-negating re-activates and **re-owns** an existing inactive row for that ad group instead of inserting a new one, so the rule that now justifies the negative becomes its `source_rule_id`. Otherwise the row stays owned by the rule that archived it, that rule keeps re-archiving it, and the sync keeps flipping it back. |
+
+This was violated in production for ~2.5 months (reconciliation aggregated campaign-wide while
+the add path sliced per ad group), causing 6–9 negatives per day to be added and removed in the
+same run. Fixing granularity alone then exposed the identity half of the same trap. See
+`backend/tests/rules.test.js` → "Add path and reconciliation agree on term identity", which
+asserts both queries use the *same* normalization expression rather than merely that each
+normalizes.
+
+**Health check:** a second rule run immediately after the first must be a no-op —
+`applied = 0`, `removed = 0`, zero audit writes. Any churn there means the invariant is broken.
+
+### Negative state on Amazon
+
+Amazon rejects `state: ARCHIVED` on the negative-keyword/target endpoints, so "archiving" a
+negative sets **`PAUSED`** there while the local row is marked `archived`. The entity sync must
+therefore include `PAUSED` in its `stateFilter`, or paused negatives silently vanish from the
+sync and local state drifts from Amazon.
+
+Batch endpoints answer **207 Multi-Status**: a 2xx HTTP status with per-item rejections in
+`<dataKey>.error[]`. `adsClient` returns any 2xx body without throwing, so every write-back
+helper must inspect that array (`partialError()` in `services/amazon/writeback.js`) — otherwise
+a refused write is recorded as a success.
 
 ---
 

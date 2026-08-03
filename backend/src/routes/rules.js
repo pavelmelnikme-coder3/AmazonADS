@@ -17,10 +17,28 @@ const { query } = require("../db/pool");
 const { writeAudit, updateAuditStatus } = require("./audit");
 const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget } = require("../services/amazon/writeback");
 const { put, post } = require("../services/amazon/adsClient");
+const { normalizeKeywordText, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
 const logger  = require("../config/logger");
 const { getRedis } = require("../config/redis");
 
 router.use(requireAuth, requireWorkspace);
+
+// Ids the rule engine invents locally for a negative that has no Amazon id yet:
+// "rule-…" before the write-back lands, "archived-…" once reconciliation frees a
+// placeholder for re-use. Neither may be sent to Amazon as an entity id.
+function isSyntheticNegId(id) {
+  return !id || id.startsWith("rule-") || id.startsWith("archived-");
+}
+
+// Fill in the ratio metrics the rule conditions can reference. Mutates and returns `m`
+// so it works both standalone and as a .map() callback over query rows.
+function withDerivedMetrics(m) {
+  if (parseFloat(m.sales) > 0)       m.acos = parseFloat(m.spend) / parseFloat(m.sales) * 100;
+  if (parseFloat(m.spend) > 0)       m.roas = parseFloat(m.sales) / parseFloat(m.spend);
+  if (parseFloat(m.impressions) > 0) m.ctr  = parseFloat(m.clicks) / parseFloat(m.impressions) * 100;
+  if (parseFloat(m.clicks) > 0)      m.cpc  = parseFloat(m.spend) / parseFloat(m.clicks);
+  return m;
+}
 
 // ── Condition operators ───────────────────────────────────────────────────────
 function evaluate(conditions, metrics) {
@@ -97,11 +115,28 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   // *after* it's already been re-read and archived by the reconciliation pass later in this same
   // function, silently discarding that archive's intent. Awaiting pendingWritebacks before
   // reconciliation starts (below) closes that race.
+  //
+  // A rejected write-back is also recorded in writebackErrors so the run result reports it.
+  // Without this the run reports "completed / 0 failures" while Amazon rejected the change —
+  // the local DB was updated either way, so nothing else in executeRule notices. Only the
+  // audit row carried the failure, which meant recurring rejections stayed invisible for weeks.
   const pendingWritebacks = [];
-  const trackWriteback = (auditId, promise, warnMsg) => {
+  const writebackErrors   = [];
+  const trackWriteback = (auditId, promise, warnMsg, ctx = {}) => {
+    const record = (error) => {
+      writebackErrors.push({ ...ctx, stage: "amazon_writeback", error: String(error) });
+    };
     const tracked = promise
-      .then(r => updateAuditStatus(auditId, r && r.ok === false ? "error" : "success", r && r.error))
-      .catch(e => { logger.warn(warnMsg, { error: e.message }); return updateAuditStatus(auditId, "error", e.message); });
+      .then(r => {
+        const failed = r && r.ok === false;
+        if (failed) record(r.error || "Amazon rejected the write-back");
+        return updateAuditStatus(auditId, failed ? "error" : "success", r && r.error);
+      })
+      .catch(e => {
+        logger.warn(warnMsg, { error: e.message });
+        record(e.message);
+        return updateAuditStatus(auditId, "error", e.message);
+      });
     pendingWritebacks.push(tracked);
     return tracked;
   };
@@ -337,7 +372,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     const { rows } = await query(
       `SELECT
          MIN(stm.id::text) AS id,
-         stm.query AS keyword_text,
+         -- Group on the NORMALIZED query. Amazon's reports return the same shopper term in
+         -- several typographic spellings ("150 kg" with U+00A0 vs a plain space); they are one
+         -- and the same negative keyword on Amazon, so they must be one entity here too.
+         -- Reconciliation matches negatives on normalized text, and if this path grouped on the
+         -- raw text the two would disagree — the add path scoring one spelling in isolation,
+         -- reconciliation scoring the merged total — which is exactly the add/remove oscillation
+         -- this grouping exists to prevent.
+         ${sqlNormalizeKeywordText("stm.query")} AS keyword_text,
          stm.campaign_id, stm.ad_group_id,
          stm.match_type AS source_match_type,
          c.name  AS campaign_name, c.campaign_type, c.amazon_campaign_id, c.state AS campaign_state,
@@ -365,7 +407,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
        JOIN ad_groups ag       ON ag.id = stm.ad_group_id
        JOIN amazon_profiles p  ON p.id  = stm.profile_id
        WHERE ${sConds.join(" AND ")}
-       GROUP BY stm.query, stm.campaign_id, stm.ad_group_id, stm.match_type,
+       GROUP BY ${sqlNormalizeKeywordText("stm.query")}, stm.campaign_id, stm.ad_group_id, stm.match_type,
                 c.name, c.campaign_type, c.amazon_campaign_id, c.state,
                 ag.name, ag.amazon_ag_id,
                 p.id, p.profile_id, p.connection_id, p.marketplace_id`,
@@ -532,6 +574,35 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     });
   };
 
+  // Claim the negative_target row for an expression the rule wants negated.
+  //
+  // `existing` is every row matching the call site's dedup predicate, in ANY state. If one is
+  // already enabled the caller skips as `already_negative` (unchanged, campaign-wide behaviour).
+  // Otherwise an inactive row for the same ad group is re-activated and re-owned rather than
+  // inserting a second row — same reasoning as the negative-keyword path: leaving the row owned
+  // by the rule that archived it is what let one rule undo another's work on every run.
+  // Returns the local row id to hand to the Amazon write-back, or null if nothing was written.
+  const claimNegTargetRow = async (existing, { adGroupId, sourceEntityType, insert }) => {
+    const prior = existing.find(r =>
+      String(r.ad_group_id ?? "") === String(adGroupId ?? "")) || null;
+    if (prior) {
+      // A freed placeholder ("archived-…"/"rule-…") must not be mistaken for an Amazon id;
+      // key the fresh placeholder on the row's own uuid so it stays unique.
+      const synthetic = isSyntheticNegId(prior.amazon_neg_target_id);
+      await query(
+        `UPDATE negative_targets
+            SET state='enabled', source_rule_id=$1, source_entity_type=$2, updated_at=NOW()${synthetic ? ", amazon_neg_target_id=$4" : ""}
+          WHERE id=$3`,
+        synthetic
+          ? [rule.id, sourceEntityType, prior.id, `rule-neg-${prior.id}`]
+          : [rule.id, sourceEntityType, prior.id]
+      );
+      return prior.id;
+    }
+    const { rows } = await query(insert.sql, insert.params);
+    return rows[0]?.id || null;
+  };
+
   // Split matched into exempted (skipped entirely) and processable
   let exemptedCount = 0;
   if (exemptedCampaignIds.size > 0) {
@@ -574,7 +645,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 profileId: String(entity.amazon_profile_id),
                 marketplaceId: entity.marketplace_id,
                 state: "paused",
-              }]), "Rule keyword pause write-back failed");
+              }]), "Rule keyword pause write-back failed",
+                { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "pause_keyword" });
             }
           }
           applied.push({
@@ -604,7 +676,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 profileId: String(entity.amazon_profile_id),
                 marketplaceId: entity.marketplace_id,
                 state: "enabled",
-              }]), "Rule keyword enable write-back failed");
+              }]), "Rule keyword enable write-back failed",
+                { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "enable_keyword" });
             }
           }
           applied.push({
@@ -798,13 +871,18 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           const negMatchTypes = action.value === "phrase" ? ["negativePhrase"]
             : action.value === "both" ? ["negativeExact", "negativePhrase"] : ["negativeExact"];
 
+          // Amazon's report text can carry stray zero-width/no-break characters, so normalize
+          // before any inspection of it — otherwise a masked ASIN with an invisible character
+          // fails the shape test below and is wrongly negated as a keyword.
+          const negKeywordText = normalizeKeywordText(entity.keyword_text);
+
           // ASIN-shaped search terms (e.g. "b076j8j3w5") are masked ASIN queries.
           // Amazon matches these as products, not keywords — a negative KEYWORD
           // wouldn't actually exclude them. Auto-route to add_negative_target
           // (ASIN-level exclusion) which is what Amazon actually honours.
-          const isAsinShaped = /^b0[a-z0-9]{8}$/i.test(entity.keyword_text || "");
+          const isAsinShaped = /^b0[a-z0-9]{8}$/i.test(negKeywordText || "");
           if (isAsinShaped && entity.entity_type === "search_term") {
-            const asinUpper = entity.keyword_text.toUpperCase();
+            const asinUpper = negKeywordText.toUpperCase();
             const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
 
             // Skip if ASIN is already an active positive target in the same ad group —
@@ -822,29 +900,32 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             // campaign (any ad group, or campaign-level), skip — it's already
             // excluded effectively.
             const { rows: dupTgt } = await query(
-              `SELECT id FROM negative_targets
+              `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets
                WHERE workspace_id=$1 AND campaign_id=$2
-                 AND expression @> $3::jsonb AND state = 'enabled'`,
+                 AND expression @> $3::jsonb`,
               [workspaceId, entity.campaign_id, exprUpperJson]
             );
-            if (dupTgt.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+            if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
 
             let insertedNtId = null;
             if (!dryRun) {
-              const { rows: ntRows } = await query(
-                `INSERT INTO negative_targets
-                   (workspace_id, profile_id, campaign_id, ad_group_id,
-                    amazon_neg_target_id, expression, expression_type, level,
-                    source_rule_id, source_entity_type)
-                 VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
-                 ON CONFLICT DO NOTHING
-                 RETURNING id`,
-                [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
-                  `rule-neg-asin-${entity.id}`,
-                  exprUpperJson, "asinSameAs", "ad_group",
-                  rule.id, entity.entity_type]
-              );
-              insertedNtId = ntRows[0]?.id || null;
+              insertedNtId = await claimNegTargetRow(dupTgt, {
+                adGroupId: entity.ad_group_id,
+                sourceEntityType: entity.entity_type,
+                insert: {
+                  sql: `INSERT INTO negative_targets
+                          (workspace_id, profile_id, campaign_id, ad_group_id,
+                           amazon_neg_target_id, expression, expression_type, level,
+                           source_rule_id, source_entity_type)
+                        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+                        ON CONFLICT DO NOTHING
+                        RETURNING id`,
+                  params: [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
+                    `rule-neg-asin-${entity.id}`,
+                    exprUpperJson, "asinSameAs", "ad_group",
+                    rule.id, entity.entity_type],
+                },
+              });
 
               const autoRouteAudit = await writeRuleAudit({
                 orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
@@ -869,7 +950,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   amazonAdGroupId: entity.amazon_ad_group_id || null,
                   asinValue: asinUpper,
                   level: "ad_group",
-                }), "Rule auto-route negative_target write-back failed");
+                }), "Rule auto-route negative_target write-back failed",
+                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" });
               }
             }
 
@@ -884,35 +966,79 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             continue;
           }
 
+          // Amazon rejects raw report whitespace (U+00A0 between a number and its unit is
+          // common in German queries) with PATTERN_NOT_MATCHED. Negate the normalized text —
+          // it targets the same traffic and is the only form Amazon accepts.
+          if (!negKeywordText) { recordSkip(entity, action, "empty_keyword_text"); continue; }
+
           for (const matchType of negMatchTypes) {
             // Normalize match_type: Amazon sync stores "negative_exact"/"negative_phrase" (snake_case)
-            // but rule engine uses "negativeExact"/"negativePhrase" (camelCase) — match both
+            // but rule engine uses "negativeExact"/"negativePhrase" (camelCase) — match both.
+            // Rows are matched on normalized text so a negative added before this normalization
+            // (raw U+00A0 text) is still recognised as the same keyword.
             const { rows: existing } = await query(
-              `SELECT id FROM negative_keywords
+              `SELECT id, state, ad_group_id, amazon_neg_keyword_id FROM negative_keywords
                WHERE workspace_id=$1 AND campaign_id=$2
-               AND LOWER(keyword_text)=LOWER($3)
-               AND REPLACE(LOWER(match_type),'_','') = REPLACE(LOWER($4),'_','')
-               AND state = 'enabled'`,
-              [workspaceId, entity.campaign_id, entity.keyword_text, matchType]
+               AND LOWER(${sqlNormalizeKeywordText("keyword_text")})=LOWER($3)
+               AND REPLACE(LOWER(match_type),'_','') = REPLACE(LOWER($4),'_','')`,
+              [workspaceId, entity.campaign_id, negKeywordText, matchType]
             );
-            if (existing.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+            // "Already negative" stays campaign-wide, as before — an enabled negative anywhere
+            // in the campaign means the term is handled.
+            if (existing.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+            // Re-use is deliberately narrower: only a row for this same ad group describes the
+            // same negative, since these are written at ad-group level.
+            const priorRow = existing.find(r =>
+              String(r.ad_group_id ?? "") === String(entity.ad_group_id ?? "")) || null;
 
             let insertedId = null;
             if (!dryRun) {
-              const { rows: insRows } = await query(
-                `INSERT INTO negative_keywords
-                   (workspace_id, profile_id, campaign_id, ad_group_id,
-                    amazon_neg_keyword_id, keyword_text, match_type, level,
-                    source_rule_id, source_entity_type)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'ad_group', $8, $9)
-                 ON CONFLICT (profile_id, amazon_neg_keyword_id) DO NOTHING
-                 RETURNING id`,
-                [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
-                  `rule-${entity.id}-${matchType}`,
-                  entity.keyword_text, matchType.replace(/([A-Z])/g, '_$1').toLowerCase(),
-                  rule.id, entity.entity_type]
-              );
-              insertedId = insRows[0]?.id || null;
+              if (priorRow) {
+                // An inactive row for this exact negative already exists — typically one this
+                // or another rule archived earlier. Re-activate and re-own it instead of
+                // inserting a second row.
+                //
+                // Inserting a new row here is what kept negatives oscillating forever: the
+                // write-back's duplicate-recovery re-enables the keyword on Amazon and then
+                // deletes its own placeholder row on the unique-index conflict, leaving the
+                // *archived* row owned by the rule that removed it. The next sync saw the
+                // keyword ENABLED on Amazon and flipped that row back to enabled, so the
+                // owning rule archived it again the following day — every day, indefinitely.
+                // Re-owning transfers the row to the rule that now justifies the negative, so
+                // the removing rule no longer sees it and the loop settles after one cycle.
+                //
+                // A row archived earlier carries a synthetic id ("archived-…", or "rule-…" if
+                // its Amazon write never landed). Reset it to a fresh placeholder keyed on the
+                // row's own uuid: it stays unique under (profile_id, amazon_neg_keyword_id),
+                // it is correctly recognised as "no Amazon id yet", and the write-back
+                // overwrites it with the real id once Amazon accepts the negative.
+                const synthetic = isSyntheticNegId(priorRow.amazon_neg_keyword_id);
+                await query(
+                  `UPDATE negative_keywords
+                      SET state='enabled', source_rule_id=$1, source_entity_type=$2,
+                          keyword_text=$3, updated_at=NOW()${synthetic ? ", amazon_neg_keyword_id=$5" : ""}
+                    WHERE id=$4`,
+                  synthetic
+                    ? [rule.id, entity.entity_type, negKeywordText, priorRow.id, `rule-${priorRow.id}-${matchType}`]
+                    : [rule.id, entity.entity_type, negKeywordText, priorRow.id]
+                );
+                insertedId = priorRow.id;
+              } else {
+                const { rows: insRows } = await query(
+                  `INSERT INTO negative_keywords
+                     (workspace_id, profile_id, campaign_id, ad_group_id,
+                      amazon_neg_keyword_id, keyword_text, match_type, level,
+                      source_rule_id, source_entity_type)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, 'ad_group', $8, $9)
+                   ON CONFLICT (profile_id, amazon_neg_keyword_id) DO NOTHING
+                   RETURNING id`,
+                  [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
+                    `rule-${entity.id}-${matchType}`,
+                    negKeywordText, matchType.replace(/([A-Z])/g, '_$1').toLowerCase(),
+                    rule.id, entity.entity_type]
+                );
+                insertedId = insRows[0]?.id || null;
+              }
 
               const addNegKwAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
@@ -931,10 +1057,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   campaignType: entity.campaign_type,
                   amazonCampaignId: entity.amazon_campaign_id,
                   amazonAdGroupId: entity.amazon_ad_group_id || null,
-                  keywordText: entity.keyword_text,
+                  keywordText: negKeywordText,
                   matchType,
                   level: "ad_group",
-                }), "Rule add_negative_keyword write-back failed");
+                }), "Rule add_negative_keyword write-back failed",
+                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: negKeywordText, action: "add_negative_keyword" });
               }
             }
             applied.push({
@@ -958,24 +1085,27 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             const asinUpper    = entity.keyword_text.toUpperCase();
             const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
             const { rows: dupTgt } = await query(
-              `SELECT id FROM negative_targets WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb AND state = 'enabled'`,
+              `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
               [workspaceId, entity.campaign_id, exprUpperJson]
             );
-            if (dupTgt.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+            if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
             let insertedNtId = null;
             if (!dryRun) {
-              const { rows: ntRows } = await query(
-                `INSERT INTO negative_targets
-                   (workspace_id, profile_id, campaign_id, ad_group_id,
-                    amazon_neg_target_id, expression, expression_type, level,
-                    source_rule_id, source_entity_type)
-                 VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10)
-                 ON CONFLICT DO NOTHING RETURNING id`,
-                [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
-                  `rule-neg-asin-st-${entity.id}`, exprUpperJson, "asinSameAs", "ad_group",
-                  rule.id, entity.entity_type]
-              );
-              insertedNtId = ntRows[0]?.id || null;
+              insertedNtId = await claimNegTargetRow(dupTgt, {
+                adGroupId: entity.ad_group_id,
+                sourceEntityType: entity.entity_type,
+                insert: {
+                  sql: `INSERT INTO negative_targets
+                          (workspace_id, profile_id, campaign_id, ad_group_id,
+                           amazon_neg_target_id, expression, expression_type, level,
+                           source_rule_id, source_entity_type)
+                        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10)
+                        ON CONFLICT DO NOTHING RETURNING id`,
+                  params: [workspaceId, entity.profile_db_id, entity.campaign_id, entity.ad_group_id,
+                    `rule-neg-asin-st-${entity.id}`, exprUpperJson, "asinSameAs", "ad_group",
+                    rule.id, entity.entity_type],
+                },
+              });
               const addNegTgtStAudit = await writeRuleAudit({
                 orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "search_term.add_negative_target", entityType: "search_term",
@@ -990,7 +1120,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   campaignType: entity.campaign_type, amazonCampaignId: entity.amazon_campaign_id,
                   amazonAdGroupId: entity.amazon_ad_group_id || null,
                   asinValue: asinUpper, level: "ad_group",
-                }), "Rule add_neg_target ST write-back failed");
+                }), "Rule add_neg_target ST write-back failed",
+                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" });
               }
             }
             applied.push({
@@ -1050,30 +1181,33 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const asinUpper = asinRow.asin;
               const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
               const { rows: dupTgt } = await query(
-                `SELECT id FROM negative_targets
-                 WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb AND state = 'enabled'`,
+                `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets
+                 WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
                 [workspaceId, entity.campaign_id, exprUpperJson]
               );
-              if (dupTgt.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+              if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
 
               let insertedNtId = null;
               if (!dryRun) {
-                const { rows: ntRows } = await query(
-                  `INSERT INTO negative_targets
-                     (workspace_id, profile_id, campaign_id, ad_group_id,
-                      amazon_neg_target_id, expression, expression_type, level,
-                      source_rule_id, source_entity_type)
-                   VALUES ($1,
-                     (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
-                     $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
-                   ON CONFLICT DO NOTHING
-                   RETURNING id`,
-                  [workspaceId, entity.campaign_id, entity.ad_group_id,
-                    `rule-neg-asin-qt-${entity.id}-${asinUpper}`,
-                    exprUpperJson, "asinSameAs", "ad_group",
-                    rule.id, entity.entity_type]
-                );
-                insertedNtId = ntRows[0]?.id || null;
+                insertedNtId = await claimNegTargetRow(dupTgt, {
+                  adGroupId: entity.ad_group_id,
+                  sourceEntityType: entity.entity_type,
+                  insert: {
+                    sql: `INSERT INTO negative_targets
+                            (workspace_id, profile_id, campaign_id, ad_group_id,
+                             amazon_neg_target_id, expression, expression_type, level,
+                             source_rule_id, source_entity_type)
+                          VALUES ($1,
+                            (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
+                            $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
+                          ON CONFLICT DO NOTHING
+                          RETURNING id`,
+                    params: [workspaceId, entity.campaign_id, entity.ad_group_id,
+                      `rule-neg-asin-qt-${entity.id}-${asinUpper}`,
+                      exprUpperJson, "asinSameAs", "ad_group",
+                      rule.id, entity.entity_type],
+                  },
+                });
 
                 const addNegQtAudit = await writeRuleAudit({
                   orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
@@ -1094,7 +1228,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                     amazonAdGroupId: entity.amazon_ad_group_id || null,
                     asinValue: asinUpper,
                     level: "ad_group",
-                  }), "Rule query-type neg_target write-back failed");
+                  }), "Rule query-type neg_target write-back failed",
+                    { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" });
                 }
               }
               applied.push({
@@ -1121,30 +1256,33 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             ? entity.expression : JSON.stringify(entity.expression);
 
           const { rows: existing } = await query(
-            `SELECT id FROM negative_targets
-             WHERE workspace_id=$1 AND campaign_id=$2 AND ad_group_id=$3 AND expression=$4::jsonb AND state = 'enabled'`,
+            `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets
+             WHERE workspace_id=$1 AND campaign_id=$2 AND ad_group_id=$3 AND expression=$4::jsonb`,
             [workspaceId, entity.campaign_id, entity.ad_group_id, exprJson]
           );
-          if (existing.length > 0) { recordSkip(entity, action, "already_negative"); continue; }
+          if (existing.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
 
           let insertedNtId = null;
           if (!dryRun) {
-            const { rows: ntRows } = await query(
-              `INSERT INTO negative_targets
-                 (workspace_id, profile_id, campaign_id, ad_group_id,
-                  amazon_neg_target_id, expression, expression_type, level,
-                  source_rule_id, source_entity_type)
-               VALUES ($1,
-                 (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
-                 $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
-               ON CONFLICT DO NOTHING
-               RETURNING id`,
-              [workspaceId, entity.campaign_id, entity.ad_group_id,
-                `rule-neg-${entity.id}`,
-                exprJson, entity.expression_type || "asinSameAs", "ad_group",
-                rule.id, entity.entity_type]
-            );
-            insertedNtId = ntRows[0]?.id || null;
+            insertedNtId = await claimNegTargetRow(existing, {
+              adGroupId: entity.ad_group_id,
+              sourceEntityType: entity.entity_type,
+              insert: {
+                sql: `INSERT INTO negative_targets
+                        (workspace_id, profile_id, campaign_id, ad_group_id,
+                         amazon_neg_target_id, expression, expression_type, level,
+                         source_rule_id, source_entity_type)
+                      VALUES ($1,
+                        (SELECT profile_id FROM campaigns WHERE id=$2 LIMIT 1),
+                        $2, $3, $4, $5::jsonb, $6, $7, $8, $9)
+                      ON CONFLICT DO NOTHING
+                      RETURNING id`,
+                params: [workspaceId, entity.campaign_id, entity.ad_group_id,
+                  `rule-neg-${entity.id}`,
+                  exprJson, entity.expression_type || "asinSameAs", "ad_group",
+                  rule.id, entity.entity_type],
+              },
+            });
 
             const addNegTgtAudit = await writeRuleAudit({
               orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
@@ -1405,7 +1543,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               trackWriteback(adjustBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
                 data: budgetData, group: "campaigns",
-              }), "Rule campaign budget write-back failed");
+              }), "Rule campaign budget write-back failed",
+                { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.campaign_name, action: "adjust_budget_pct" });
             }
           }
           applied.push({ entity_type: "campaign", entity_id: entity.id, keyword_text: entity.campaign_name,
@@ -1442,7 +1581,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               trackWriteback(setBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
                 marketplace: entity.marketplace_id, path: campPath,
                 data: budgetData, group: "campaigns",
-              }), "Rule campaign set_budget write-back failed");
+              }), "Rule campaign set_budget write-back failed",
+                { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.campaign_name, action: "set_budget" });
             }
           }
           applied.push({ entity_type: "campaign", entity_id: entity.id, keyword_text: entity.campaign_name,
@@ -1482,19 +1622,51 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
     for (const nk of prevNegKws) {
       let m = { clicks: 0, spend: 0, orders: 0, sales: 0, impressions: 0 };
+      // Slices evaluated at the add path's granularity; a negative survives if ANY of them
+      // still satisfies the rule (see the search_term branch below). Null means "not sliced"
+      // — the single aggregate in `m` decides, as before.
+      let slices = null;
       if (nk.source_entity_type === "search_term") {
-        // Campaign-level lookup — a search term that converts in ANY ad_group of this campaign
-        // should not be removed, even if the original ad_group saw 0 orders.
+        // Re-evaluate at exactly the granularity the add path used — per (ad_group, match_type)
+        // slice of this ad group — and keep the negative if ANY slice still qualifies.
+        //
+        // This previously aggregated campaign-wide, across every ad group and match type. The
+        // add path groups by (query, campaign, ad_group, match_type), so the two routinely
+        // disagreed and the rule removed on one run what it had added on the one before. Live
+        // example: "campingstuhl 150 kg" scored 25 clicks / 1 order on the BROAD slice the add
+        // path saw (rule matched), but 29 clicks / 2 orders campaign-wide, which failed the
+        // `orders = 1` condition — so every run added it and then immediately removed it again.
+        // An ad-group-level negative only blocks its own ad group, so the ad-group view is also
+        // the one that reflects what the negative actually does.
+        //
+        // Text is compared normalized on both sides: negatives are stored normalized (Amazon
+        // rejects the raw text) while search_term_metrics.query keeps Amazon's original
+        // typographic whitespace.
+        const stParams = [workspaceId, nk.campaign_id, nk.keyword_text, startDate, endDate];
+        let agClause = "";
+        if (nk.ad_group_id) { stParams.push(nk.ad_group_id); agClause = ` AND ad_group_id = $${stParams.length}`; }
         const { rows } = await query(
           `SELECT COALESCE(SUM(clicks),0) AS clicks, COALESCE(SUM(spend),0) AS spend,
                   COALESCE(SUM(orders),0) AS orders, COALESCE(SUM(sales),0) AS sales,
                   COALESCE(SUM(impressions),0) AS impressions
            FROM search_term_metrics
            WHERE workspace_id=$1 AND campaign_id=$2
-             AND LOWER(query)=LOWER($3) AND date_start>=$4 AND date_end<=$5`,
-          [workspaceId, nk.campaign_id, nk.keyword_text, startDate, endDate]
+             AND LOWER(${sqlNormalizeKeywordText("query")})=LOWER(${sqlNormalizeKeywordText("$3")})
+             AND date_start>=$4 AND date_end<=$5${agClause}
+           GROUP BY ad_group_id, match_type`,
+          stParams
         );
-        if (rows[0]) m = rows[0];
+        slices = rows.map(withDerivedMetrics);
+        // Keep the aggregate for reporting even when slices decide the outcome.
+        m = slices.length
+          ? slices.reduce((acc, s) => ({
+              clicks:      Number(acc.clicks)      + Number(s.clicks),
+              spend:       Number(acc.spend)       + Number(s.spend),
+              orders:      Number(acc.orders)      + Number(s.orders),
+              sales:       Number(acc.sales)       + Number(s.sales),
+              impressions: Number(acc.impressions) + Number(s.impressions),
+            }), m)
+          : m;
       } else {
         const { rows } = await query(
           `SELECT COALESCE(SUM(m.clicks),0) AS clicks, COALESCE(SUM(m.cost),0) AS spend,
@@ -1508,12 +1680,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         );
         if (rows[0]) m = rows[0];
       }
-      if (parseFloat(m.sales) > 0) m.acos = parseFloat(m.spend) / parseFloat(m.sales) * 100;
-      if (parseFloat(m.spend) > 0) m.roas = parseFloat(m.sales) / parseFloat(m.spend);
-      if (parseFloat(m.impressions) > 0) m.ctr = parseFloat(m.clicks) / parseFloat(m.impressions) * 100;
-      if (parseFloat(m.clicks) > 0) m.cpc = parseFloat(m.spend) / parseFloat(m.clicks);
+      withDerivedMetrics(m);
 
-      if (!evaluate(metricConditions, m)) {
+      // A negative is only removed when nothing still justifies it. With slices that means
+      // no slice matches; without them, the single aggregate decides.
+      const stillJustified = slices
+        ? slices.some(s => evaluate(metricConditions, s))
+        : evaluate(metricConditions, m);
+
+      if (!stillJustified) {
         removed.push({
           type: "keyword", id: nk.id, keyword_text: nk.keyword_text,
           campaign_name: nk.campaign_name, action: "remove_negative_reconcile",
@@ -1521,7 +1696,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         });
         if (!dryRun) {
           // Free the placeholder ID so the rule can re-negate later if needed
-          const newAmazonId = nk.amazon_neg_keyword_id?.startsWith("rule-")
+          const newAmazonId = isSyntheticNegId(nk.amazon_neg_keyword_id)
             ? `archived-${Date.now()}-${nk.id}` : nk.amazon_neg_keyword_id;
           await query(
             "UPDATE negative_keywords SET state='archived', amazon_neg_keyword_id=$1 WHERE id=$2",
@@ -1535,13 +1710,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             afterData: { state: "archived", reason: "conditions_no_longer_met", metrics: m },
             source: "rule",
           });
-          const hasRealId = nk.amazon_neg_keyword_id && !nk.amazon_neg_keyword_id.startsWith("rule-");
+          // "archived-…" ids are synthetic too — sending one to Amazon as an entity id fails.
+          const hasRealId = !isSyntheticNegId(nk.amazon_neg_keyword_id);
           if (hasRealId && nk.connection_id) {
             trackWriteback(reconcileNegKwAudit, archiveNegativeKeyword({
               connectionId: nk.connection_id, profileId: String(nk.amazon_profile_id),
               marketplaceId: nk.marketplace_id, campaignType: nk.campaign_type,
               level: nk.level, amazonNegKeywordId: nk.amazon_neg_keyword_id,
-            }), "Reconcile archive neg_kw failed");
+            }), "Reconcile archive neg_kw failed",
+              { entity_id: nk.id, entity_type: "negative_keyword", keyword_text: nk.keyword_text, action: "remove_negative_reconcile" });
           }
         }
       }
@@ -1561,6 +1738,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
 
     for (const nt of prevNegTgts) {
       let m = { clicks: 0, spend: 0, orders: 0, sales: 0, impressions: 0 };
+      let slices = null;
       const exprArr = typeof nt.expression === "string"
         ? JSON.parse(nt.expression || "[]") : (nt.expression || []);
       const asinValue = exprArr.find(e =>
@@ -1568,29 +1746,44 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       )?.value;
 
       if (asinValue) {
-        // For ALL ASIN negatives (regardless of source_entity_type): look up search_term_metrics
-        // at campaign level. If this ASIN converts anywhere in the campaign → keep negative.
+        // Same granularity alignment as the negative-keyword branch above: the add path
+        // groups masked-ASIN search terms by (query, campaign, ad_group, match_type), so
+        // reconciliation has to as well, or it removes what the next run re-adds.
+        const stParams = [workspaceId, nt.campaign_id, asinValue, startDate, endDate];
+        let agClause = "";
+        if (nt.ad_group_id) { stParams.push(nt.ad_group_id); agClause = ` AND ad_group_id = $${stParams.length}`; }
         const { rows } = await query(
           `SELECT COALESCE(SUM(clicks),0) AS clicks, COALESCE(SUM(spend),0) AS spend,
                   COALESCE(SUM(orders),0) AS orders, COALESCE(SUM(sales),0) AS sales,
                   COALESCE(SUM(impressions),0) AS impressions
            FROM search_term_metrics
            WHERE workspace_id=$1 AND campaign_id=$2
-             AND UPPER(query)=UPPER($3) AND date_start>=$4 AND date_end<=$5`,
-          [workspaceId, nt.campaign_id, asinValue, startDate, endDate]
+             AND UPPER(query)=UPPER($3) AND date_start>=$4 AND date_end<=$5${agClause}
+           GROUP BY ad_group_id, match_type`,
+          stParams
         );
-        if (rows[0]) m = rows[0];
+        slices = rows.map(withDerivedMetrics);
+        m = slices.length
+          ? slices.reduce((acc, s) => ({
+              clicks:      Number(acc.clicks)      + Number(s.clicks),
+              spend:       Number(acc.spend)       + Number(s.spend),
+              orders:      Number(acc.orders)      + Number(s.orders),
+              sales:       Number(acc.sales)       + Number(s.sales),
+              impressions: Number(acc.impressions) + Number(s.impressions),
+            }), m)
+          : m;
       } else {
         // Non-ASIN negative (category, audience) — no query-level metrics available.
         // Skip reconciliation: leave these negatives in place rather than risk false removal.
         continue;
       }
-      if (parseFloat(m.sales) > 0) m.acos = parseFloat(m.spend) / parseFloat(m.sales) * 100;
-      if (parseFloat(m.spend) > 0) m.roas = parseFloat(m.sales) / parseFloat(m.spend);
-      if (parseFloat(m.impressions) > 0) m.ctr = parseFloat(m.clicks) / parseFloat(m.impressions) * 100;
-      if (parseFloat(m.clicks) > 0) m.cpc = parseFloat(m.spend) / parseFloat(m.clicks);
+      withDerivedMetrics(m);
 
-      if (!evaluate(metricConditions, m)) {
+      const stillJustified = slices
+        ? slices.some(s => evaluate(metricConditions, s))
+        : evaluate(metricConditions, m);
+
+      if (!stillJustified) {
         removed.push({
           type: "target", id: nt.id,
           keyword_text: asinValue || JSON.stringify(exprArr),
@@ -1599,7 +1792,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           metrics: { clicks: m.clicks, orders: m.orders, spend: m.spend, acos: m.acos },
         });
         if (!dryRun) {
-          const newAmazonId = nt.amazon_neg_target_id?.startsWith("rule-")
+          const newAmazonId = isSyntheticNegId(nt.amazon_neg_target_id)
             ? `archived-${Date.now()}-${nt.id}` : nt.amazon_neg_target_id;
           await query(
             "UPDATE negative_targets SET state='archived', amazon_neg_target_id=$1 WHERE id=$2",
@@ -1613,13 +1806,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             afterData: { state: "archived", reason: "conditions_no_longer_met", metrics: m },
             source: "rule",
           });
-          const hasRealId = nt.amazon_neg_target_id && !nt.amazon_neg_target_id.startsWith("rule-") && !nt.amazon_neg_target_id.startsWith("archived-");
+          const hasRealId = !isSyntheticNegId(nt.amazon_neg_target_id);
           if (hasRealId && nt.connection_id) {
             trackWriteback(reconcileNegTgtAudit, archiveNegativeTarget({
               connectionId: nt.connection_id, profileId: String(nt.amazon_profile_id),
               marketplaceId: nt.marketplace_id, campaignType: nt.campaign_type,
               amazonNegTargetId: nt.amazon_neg_target_id,
-            }), "Reconcile archive neg_tgt failed");
+            }), "Reconcile archive neg_tgt failed",
+              { entity_id: nt.id, entity_type: "negative_target", keyword_text: null, action: "remove_negative_reconcile" });
           }
         }
       }
@@ -1645,6 +1839,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     skipped,
     removed,
     errors,
+    // Amazon rejections are non-fatal (the local DB is updated regardless), so they never
+    // reach `errors`. Reporting them separately is what makes a run whose changes Amazon
+    // refused show up as "partial" instead of a clean "completed".
+    writeback_errors:      writebackErrors,
+    writeback_error_count: writebackErrors.length,
   };
 }
 
@@ -2043,9 +2242,10 @@ function computeNextRun(scheduleType, runHour) {
 }
 
 // Derive a run-level status from the executeRule result summary.
-// "partial" when any action errored, otherwise "completed".
+// "partial" when any action errored locally OR Amazon rejected a write-back, otherwise "completed".
 function runStatusFromResult(result) {
-  return result?.errors?.length ? "partial" : "completed";
+  const failed = (result?.errors?.length || 0) + (result?.writeback_error_count || 0);
+  return failed ? "partial" : "completed";
 }
 
 // Persist a row into rule_executions so /rules/:id/runs has real history.
@@ -2062,7 +2262,7 @@ async function insertRuleExecution(ruleId, workspaceId, result, dryRun) {
         result?.total_evaluated || 0,
         result?.matched_count || 0,
         (result?.applied_count || 0) + (result?.removed_count || 0),
-        result?.errors?.length || 0,
+        (result?.errors?.length || 0) + (result?.writeback_error_count || 0),
         JSON.stringify(result?.applied || []),
       ]
     );
@@ -2107,3 +2307,5 @@ async function executeAllDueRules(workspaceId) {
 
 module.exports = router;
 module.exports.executeAllDueRules = executeAllDueRules;
+// Internals exposed for unit tests only — not part of the route contract.
+module.exports.__test = { runStatusFromResult, withDerivedMetrics, isSyntheticNegId };

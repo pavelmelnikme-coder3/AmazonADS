@@ -932,7 +932,11 @@ async function fetchNegativeKeywords(profile) {
     let page = 0;
     do {
       const body = {
-        stateFilter: { include: ["ENABLED", "ARCHIVED"] },
+        // PAUSED must be included: archiving a negative deactivates it on Amazon by setting
+        // state=PAUSED (ARCHIVED is rejected on this endpoint). Omitting PAUSED made those
+        // negatives vanish from the sync, so the local row kept whatever state it had and
+        // silently drifted from Amazon.
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
         maxResults: 500,
       };
       if (nextToken) body.nextToken = nextToken;
@@ -1043,7 +1047,7 @@ async function fetchNegativeTargets(profile, adType = "SP") {
     return getAll({
       ...base,
       path: "/sd/negativeTargets",
-      params: { stateFilter: "enabled,archived" },
+      params: { stateFilter: "enabled,paused,archived" },
       group: "ad_groups",
       responseKey: null,
     }).catch(err => {
@@ -1069,7 +1073,9 @@ async function fetchNegativeTargets(profile, adType = "SP") {
     let page = 0;
     do {
       const body = {
-        stateFilter: { include: ["ENABLED", "ARCHIVED"] },
+        // PAUSED included for the same reason as negative keywords above — archiving sets
+        // state=PAUSED on Amazon.
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
         maxResults: 500,
       };
       if (nextToken) body.nextToken = nextToken;

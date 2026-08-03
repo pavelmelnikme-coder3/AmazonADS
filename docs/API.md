@@ -233,15 +233,35 @@ Response shape:
   "skipped_count":   8,
   "applied_count":   34,
   "total_evaluated": 7343,
+  "removed_count":   3,
   "applied":         [{ "entity_id": "...", "keyword_text": "...", "action": "...", "metrics": {...} }],
   "skipped":         [{ "entity_id": "...", "reason": "already_negative", "action": "...", "metrics": {...} }],
-  "errors":          []
+  "removed":         [{ "id": "...", "keyword_text": "...", "action": "remove_negative_reconcile", "metrics": {...} }],
+  "errors":          [],
+  "writeback_errors":      [],
+  "writeback_error_count": 0
 }
 ```
 
 `scope.entity_type` accepts: `keyword` (default), `product_target`, `search_term` (new).
 
-`skipped[*].reason` is one of: `already_paused`, `already_enabled`, `not_enabled`, `already_negative`, `wrong_entity_type`.
+`skipped[*].reason` is one of: `already_paused`, `already_enabled`, `not_enabled`, `already_negative`,
+`wrong_entity_type`, `campaign_not_enabled`, `is_active_target`, `not_asin_query`, `empty_keyword_text`.
+
+#### `errors` vs `writeback_errors` *(2026-08-03)*
+
+Two different failure classes — check **both** before calling a run clean:
+
+| field | means |
+|---|---|
+| `errors` | an action threw locally; nothing was applied for that entity |
+| `writeback_errors` | the local DB was updated but **Amazon rejected the change** |
+
+Amazon write-backs are deliberately non-fatal, so a rejection never lands in `errors`. Until
+2026-08-03 it was not reported at all and runs showed `completed / 0 failures` while Amazon had
+refused the change on every run for days. Each entry is
+`{ entity_id, entity_type, keyword_text, action, stage: "amazon_writeback", error }`.
+`rule_executions.actions_failed` counts both, and a run with either is stored as `status: "partial"`.
 
 Validation: 400 if `conditions` or `actions` arrays are missing/empty.
 

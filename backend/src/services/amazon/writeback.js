@@ -28,6 +28,21 @@ function isDuplicateError(msg) {
 }
 
 /**
+ * Extract a per-item rejection from an Amazon Ads v3 batch response.
+ *
+ * These endpoints answer 207 Multi-Status: the HTTP status is 2xx (adsClient returns the
+ * body rather than throwing) while individual items are reported in `<dataKey>.error[]`.
+ * Callers that only catch thrown errors therefore treat a refused write as a success.
+ * Returns a message string when the batch reported an error, otherwise null.
+ */
+function partialError(result, dataKey) {
+  const errors = result?.[dataKey]?.error;
+  if (!Array.isArray(errors) || errors.length === 0) return null;
+  const first = errors[0];
+  return first?.description || first?.message || JSON.stringify(first);
+}
+
+/**
  * Recover the real Amazon id of a negative keyword after a "duplicate" rejection —
  * the earlier negative was PAUSED (not deleted) by archiveNegativeKeyword, so Amazon
  * still holds it under its original id and rejects a fresh create as a dupe. Without
@@ -552,10 +567,19 @@ async function archiveNegativeKeyword({ localId, connectionId, profileId, market
     // traffic), matching how negative *targets* are deactivated. Local row is still marked
     // 'archived' below for our own bookkeeping.
     const idKey   = "keywordId";
-    await put({
+    const result = await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
       path, data: { [dataKey]: [{ [idKey]: amazonNegKeywordId, state: "PAUSED" }] }, group: "keywords",
     });
+    // Amazon's batch endpoints answer 207 Multi-Status: the HTTP call succeeds while individual
+    // items are rejected in the body. adsClient treats every 2xx as success, so without this
+    // check a refused archive was reported as `ok` and the audit trail recorded "success"
+    // for a change that never happened.
+    const err = partialError(result, dataKey);
+    if (err) {
+      logger.warn("Negative keyword archive rejected by Amazon", { profileId, path, amazonNegKeywordId, amazonError: err });
+      return { ok: false, error: err };
+    }
     if (localId) {
       await query("UPDATE negative_keywords SET state='archived' WHERE id=$1", [localId]);
     }
@@ -578,11 +602,17 @@ async function archiveNegativeTarget({ localId, connectionId, profileId, marketp
   try {
     const path = campaignType === "sponsoredDisplay" || campaignType === "SD"
       ? "/sd/negativeTargets" : "/sp/negativeTargets";
-    await put({
+    const result = await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
       path, data: { negativeTargetingClauses: [{ targetId: amazonNegTargetId, state: "PAUSED" }] },
       group: "keywords",
     });
+    // See archiveNegativeKeyword — 207 Multi-Status hides per-item rejections behind a 2xx.
+    const err = partialError(result, "negativeTargetingClauses");
+    if (err) {
+      logger.warn("Negative target archive rejected by Amazon", { profileId, path, amazonNegTargetId, amazonError: err });
+      return { ok: false, error: err };
+    }
     if (localId) {
       await query("UPDATE negative_targets SET state='archived' WHERE id=$1", [localId]);
     }
