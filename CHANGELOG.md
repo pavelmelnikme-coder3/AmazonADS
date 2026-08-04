@@ -6,6 +6,96 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-04 — Rules: negatives are released only on conversion evidence
+
+The first scheduled run on the previous day's fixes was clean — all 8 rules `completed`, every
+write-back `success`, and the first day since 2026-07-25 with zero Amazon rejections. Reviewing
+it surfaced a separate, older gap: reconciliation had no hysteresis.
+
+### Changed
+- **A negative is now released only when the term actually converts** (`negativeStillJustified()`).
+  Zero orders keeps it in place, whatever the click count has decayed to. One threshold used to
+  govern both negate and un-negate with no deadband, and the feedback loop did the rest: a negated
+  term stops receiving traffic, so its clicks age out of the rolling window and the count shrinks
+  on its own — the negative suppresses the very data used to judge it. `footrest under desk` was
+  negated at 8 clicks and released at 7, over and over (2026-06-22/23, 07-25/28, 08-02/04).
+  Across 30 days, 216 of 438 releases (49%) freed terms that had never produced a single order, at
+  an average 6.6 clicks against thresholds of 6 and 8 — roughly 7 wasteful terms a day put back
+  into circulation.
+
+  A term with no traffic at all also stays negated now: absent data is the negative doing its job,
+  not evidence it should come off. **By design this makes negatives sticky** — a term blocked in an
+  ad group cannot easily earn orders there, so most negatives will stay until removed by hand.
+  That matches normal PPC practice and is the intended trade-off.
+
+### Fixed
+- **Audit `entity_name` case mismatch on ASIN negatives.** `search_term.add_negative_target_auto`
+  recorded the raw (lower-case) search term while `target.remove_negative_reconcile` recorded the
+  upper-case ASIN, so add/remove pairs for one ASIN looked unrelated and any churn check without
+  `LOWER()` returned a false zero. Both now record the upper-case ASIN.
+
+---
+
+## [Unreleased] — 2026-08-03 — Rules: add/remove oscillation, un-negatable terms, hidden Amazon rejections
+
+A 7-day audit of rule runs showed a flawless record — 8 daily rules × 7 days, every run
+`completed`, `actions_failed = 0`. That clean status was itself the bug: underneath it, 6–9
+negatives per day were being added and removed **in the same run**, and one search term had
+failed to negate on every run for 10 days straight without the status ever showing it.
+
+### Fixed
+- **Add/remove oscillation.** Reconciliation aggregated `search_term_metrics` **campaign-wide**
+  while the add path grouped per `(query, campaign, ad_group, match_type)`, so the two judged the
+  same term differently and each run undid the previous one. Live case: `campingstuhl 150 kg`
+  scored 25 clicks / 1 order / ACOS 88.5 on the ad-group slice the rule matched, but 29 clicks /
+  2 orders campaign-wide, failing the rule's `orders = 1`. Reconciliation now re-evaluates at the
+  add path's granularity, scoped to the negative's own ad group, and removes a negative only when
+  **no** slice still justifies it. Applied to negative keywords and negative targets alike.
+  `outdoor fussmatte wetterfest` had been added and removed 30 times in 30 days.
+- **Negatives never changed owner.** Rule A archived its row, rule B inserted a *new* one, the
+  write-back's duplicate-recovery re-enabled the keyword on Amazon and deleted its own placeholder
+  on the unique-index conflict — leaving the archived row still owned by A, which the 10:00 sync
+  flipped back to `enabled` so A archived it again the next day, indefinitely. Re-negating now
+  **re-activates and re-owns** an inactive row for the same ad group instead of inserting, across
+  the negative-keyword path and all four negative-target write sites (shared `claimNegTargetRow`).
+  `already_negative` remains campaign-wide; only re-use is ad-group scoped.
+- **Search terms Amazon would never accept.** Amazon's own reports return German queries carrying
+  U+00A0 / U+202F / U+200B; sending that text back to the write API fails with
+  `malformedValueError / PATTERN_NOT_MATCHED "Keyword is invalid"`. 44 such terms are in the
+  database; one had crossed a rule threshold and failed daily from 2026-07-25. New
+  `services/amazon/keywordText.js` normalizes typographic whitespace, and **both** the entity
+  query and reconciliation group/compare on the normalized form — Amazon treats the spellings as
+  one negative keyword, so the engine must too. The ASIN-shape test also runs on normalized text.
+- **Amazon rejections were invisible.** Write-backs are non-fatal, so a rejection never reached
+  `errors` and the run reported `completed / 0 failures` while the audit log carried a daily
+  `amazon_status = 'error'`. Runs now report `writeback_errors` / `writeback_error_count`,
+  `rule_executions.actions_failed` counts them, and such a run is stored as `partial`.
+- **207 Multi-Status treated as success.** `archiveNegativeKeyword` / `archiveNegativeTarget`
+  never inspected the response body, so per-item rejections were reported as `{ ok: true }`
+  (`pushNegativeKeyword` already checked its `error[]` — that asymmetry is why adds surfaced
+  errors and archives never did). Shared `partialError()` now checks both.
+- **`PAUSED` negatives dropped out of sync.** Archiving a negative sets `PAUSED` on Amazon
+  (`ARCHIVED` is rejected there) while `stateFilter` only requested `ENABLED, ARCHIVED`, so those
+  rows silently disappeared from the sync and local state drifted. Now includes `PAUSED`.
+- **`archived-…` ids sent to Amazon as real entity ids** in the negative-**keyword** reconcile
+  branch (the target branch already guarded against it) — unified in `isSyntheticNegId()`.
+
+### Notes
+- The oscillation was structural, not a regression: the campaign-wide reconcile lookup shipped in
+  `166da1f` (2026-05-15) and became reachable when the paired boundary rules (`orders = 0` /
+  `orders = 1`) were created on 2026-05-20. Isolated churn from 2026-05-12, persistent from
+  2026-06-22, growing 2/day → 7–8/day as more terms accumulated clicks and landed on the boundary.
+- Measured cost was modest: of 62 churning terms, 33 spent **€98.58 with zero orders** (the real
+  leak); the other 29 spent €654.59 and returned €4941.70 at 13.2% ACOS, so un-negating *those*
+  was correct. The damage was instability and a permanently un-negatable class of terms.
+- Verified on production by four consecutive runs: 15 adds / 8 removes / 7 same-run churn →
+  **0 / 0 / 0 with zero audit writes** on an immediate re-run of the finished code. A second run
+  being a true no-op is the standing health check for this invariant.
+- 1089 tests / 47 suites. The key regression test was confirmed to fail against the old logic on
+  the real `campingstuhl 150 kg` numbers before the fix was accepted.
+
+---
+
 ## [Unreleased] — 2026-08-03 — Rules: add/remove oscillation, un-negatable terms, hidden Amazon rejections
 
 A 7-day audit of rule runs showed a flawless record — 8 daily rules × 7 days, every run

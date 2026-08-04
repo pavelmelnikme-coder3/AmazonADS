@@ -30,6 +30,26 @@ function isSyntheticNegId(id) {
   return !id || id.startsWith("rule-") || id.startsWith("archived-");
 }
 
+// Decide whether a negative this rule created should stay in place.
+//
+// A negative is released ONLY on evidence the term actually converts. Falling short of the
+// rule's own threshold is deliberately NOT such evidence: a negated term stops receiving
+// traffic, so its clicks age out of the rolling window and the count shrinks on its own.
+// Releasing on that shrinking count is circular — the negative suppresses the very data used
+// to judge it — and it made terms flip-flop across the threshold indefinitely. Measured over
+// 30 days before this rule existed, 216 of 438 releases (49%) freed terms that had never
+// produced a single order, at an average 6.6 clicks against thresholds of 6 and 8.
+//
+// So: zero orders → keep the negative, whatever the click count has decayed to. Once the term
+// does convert, the rule's own conditions decide as before (a `orders = 0` rule stops matching,
+// an `orders = 1` rule stops matching at 2, and so on).
+function negativeStillJustified(metricConditions, aggregate, slices) {
+  if (Number(aggregate.orders || 0) === 0) return true;
+  return slices
+    ? slices.some(s => evaluate(metricConditions, s))
+    : evaluate(metricConditions, aggregate);
+}
+
 // Fill in the ratio metrics the rule conditions can reference. Mutates and returns `m`
 // so it works both standalone and as a .map() callback over query rows.
 function withDerivedMetrics(m) {
@@ -930,7 +950,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const autoRouteAudit = await writeRuleAudit({
                 orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "search_term.add_negative_target_auto", entityType: "search_term",
-                entityId: entity.id, entityName: entity.keyword_text,
+                // Record the ASIN in the same upper case the matching
+                // target.remove_negative_reconcile event uses, so the two correlate. The raw
+                // search term arrives lower-cased, which made add/remove pairs for the same
+                // ASIN look unrelated in the audit trail.
+                entityId: entity.id, entityName: asinUpper,
                 beforeData: {},
                 afterData: { added_as_negative_target: true, asin: asinUpper, level: "ad_group" },
                 source: "rule",
@@ -1109,7 +1133,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const addNegTgtStAudit = await writeRuleAudit({
                 orgId, workspaceId, actorId, actorName, actorType: actorId ? "user" : "system",
                 action: "search_term.add_negative_target", entityType: "search_term",
-                entityId: entity.id, entityName: entity.keyword_text,
+                entityId: entity.id, entityName: asinUpper,   // upper case — see auto_route above
                 beforeData: {}, afterData: { added_as_negative_target: true, asin: asinUpper },
                 source: "rule",
               });
@@ -1682,13 +1706,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       }
       withDerivedMetrics(m);
 
-      // A negative is only removed when nothing still justifies it. With slices that means
-      // no slice matches; without them, the single aggregate decides.
-      const stillJustified = slices
-        ? slices.some(s => evaluate(metricConditions, s))
-        : evaluate(metricConditions, m);
-
-      if (!stillJustified) {
+      if (!negativeStillJustified(metricConditions, m, slices)) {
         removed.push({
           type: "keyword", id: nk.id, keyword_text: nk.keyword_text,
           campaign_name: nk.campaign_name, action: "remove_negative_reconcile",
@@ -1779,11 +1797,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       }
       withDerivedMetrics(m);
 
-      const stillJustified = slices
-        ? slices.some(s => evaluate(metricConditions, s))
-        : evaluate(metricConditions, m);
-
-      if (!stillJustified) {
+      if (!negativeStillJustified(metricConditions, m, slices)) {
         removed.push({
           type: "target", id: nt.id,
           keyword_text: asinValue || JSON.stringify(exprArr),
@@ -2308,4 +2322,4 @@ async function executeAllDueRules(workspaceId) {
 module.exports = router;
 module.exports.executeAllDueRules = executeAllDueRules;
 // Internals exposed for unit tests only — not part of the route contract.
-module.exports.__test = { runStatusFromResult, withDerivedMetrics, isSyntheticNegId };
+module.exports.__test = { runStatusFromResult, withDerivedMetrics, isSyntheticNegId, negativeStillJustified };

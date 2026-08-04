@@ -1507,10 +1507,12 @@ describe("Reconciliation — negative keywords", () => {
     expect(res.body.removed[0].action).toBe("remove_negative_reconcile");
   });
 
-  it("removes the negative when the term has no metrics left at all", async () => {
+  it("KEEPS the negative when the term has no metrics left at all", async () => {
+    // No rows means the term stopped receiving traffic — which is what the negative is for.
+    // Releasing on absent data is circular: the negative suppresses the very data being read.
     mockReconcileRun(stRule, [negKwRow()], []);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
-    expect(res.body.removed_count).toBe(1);
+    expect(res.body.removed_count).toBe(0);
   });
 
   it("re-evaluates at the add path's granularity, scoped to the negative's ad group", async () => {
@@ -1830,7 +1832,9 @@ describe("Reconciliation — synthetic ids are not archived on Amazon", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })            // no entities
       .mockResolvedValueOnce({ rows: [negKwRow] })    // reconcile: negative_keywords
-      .mockResolvedValueOnce({ rows: [] })            // slices → none → remove
+      // The term now converts (2 orders) and its ACOS is far under the rule's 25 threshold,
+      // so the conditions genuinely no longer hold → removal, which is what these tests need.
+      .mockResolvedValueOnce({ rows: [{ clicks: "30", spend: "10", orders: "2", sales: "500", impressions: "900" }] })
       .mockResolvedValueOnce({ rows: [] })            // UPDATE negative_keywords
       .mockResolvedValueOnce({ rows: [] })            // reconcile: negative_targets
       .mockResolvedValueOnce({ rows: [] });           // UPDATE rules
@@ -2046,5 +2050,118 @@ describe("add_negative_target — archived-row re-use", () => {
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
     expect(res.body.applied_count).toBe(0);
     expect(res.body.skipped[0].reason).toBe("already_negative");
+  });
+});
+
+// ─── A negative is released only on evidence the term converts ───────────────
+//
+// The threshold that creates a negative used to release it too, with no deadband. A negated
+// term stops receiving traffic, so its clicks age out of the rolling window and the count
+// shrinks on its own — the negative suppresses the very data used to judge it. Live case:
+// "footrest under desk" was negated at 8 clicks and released at 7, repeatedly (2026-06-22/23,
+// 07-25/28, 08-02/04). Across 30 days, 216 of 438 releases (49%) freed terms that had never
+// produced a single order, at an average 6.6 clicks against thresholds of 6 and 8.
+describe("negativeStillJustified — conversion evidence required to release", () => {
+  const { __test } = require("../src/routes/rules");
+  const { negativeStillJustified } = __test;
+
+  // [ST]-8cl-0or-60d (neg key)
+  const zeroOrderRule = [
+    { metric: "clicks", op: "gte", value: "8" },
+    { metric: "orders", op: "eq",  value: "0" },
+  ];
+  const agg = (clicks, orders) => ({ clicks, orders, spend: "5", sales: orders > 0 ? "50" : "0", impressions: "100" });
+
+  it("keeps a zero-order negative whose clicks decayed below the threshold", () => {
+    // The exact live case: negated at 8 clicks, measured at 7 on the next run.
+    expect(negativeStillJustified(zeroOrderRule, agg("7", "0"), null)).toBe(true);
+  });
+
+  it("keeps a zero-order negative that has no traffic left at all", () => {
+    expect(negativeStillJustified(zeroOrderRule, agg("0", "0"), null)).toBe(true);
+  });
+
+  it("keeps a zero-order negative that still meets the threshold", () => {
+    expect(negativeStillJustified(zeroOrderRule, agg("12", "0"), null)).toBe(true);
+  });
+
+  it("releases once the term actually converts", () => {
+    // orders > 0 → the rule's own `orders = 0` condition fails → release. This is the only
+    // way a negative comes off, and it is real conversion evidence rather than data decay.
+    expect(negativeStillJustified(zeroOrderRule, agg("20", "3"), null)).toBe(false);
+  });
+
+  it("respects the rule's conditions once orders exist — an orders=1 rule holds at exactly 1", () => {
+    const oneOrderRule = [
+      { metric: "clicks", op: "gte", value: "12" },
+      { metric: "orders", op: "eq",  value: "1"  },
+      { metric: "acos",   op: "gte", value: "25" },
+    ];
+    const stillBad = { clicks: "25", orders: "1", spend: "88.5", sales: "100", impressions: "900" };
+    withDerived(stillBad);
+    expect(negativeStillJustified(oneOrderRule, stillBad, null)).toBe(true);
+
+    const nowGood = { clicks: "25", orders: "4", spend: "10", sales: "500", impressions: "900" };
+    withDerived(nowGood);
+    expect(negativeStillJustified(oneOrderRule, nowGood, null)).toBe(false);
+  });
+
+  it("with slices, zero total orders keeps the negative even if no slice matches", () => {
+    const slices = [
+      { clicks: "3", orders: "0", spend: "2", sales: "0", impressions: "50" },
+      { clicks: "4", orders: "0", spend: "3", sales: "0", impressions: "60" },
+    ];
+    expect(negativeStillJustified(zeroOrderRule, agg("7", "0"), slices)).toBe(true);
+  });
+
+  it("with slices and orders present, a single still-qualifying slice holds the negative", () => {
+    const slices = [
+      { clicks: "12", orders: "0", spend: "9", sales: "0", impressions: "200" }, // matches
+      { clicks: "2",  orders: "2", spend: "1", sales: "40", impressions: "30" }, // does not
+    ];
+    expect(negativeStillJustified(zeroOrderRule, agg("14", "2"), slices)).toBe(true);
+  });
+
+  it("with slices and orders present, releases when no slice qualifies", () => {
+    const slices = [
+      { clicks: "3", orders: "1", spend: "1", sales: "40", impressions: "30" },
+      { clicks: "4", orders: "1", spend: "1", sales: "50", impressions: "40" },
+    ];
+    expect(negativeStillJustified(zeroOrderRule, agg("7", "2"), slices)).toBe(false);
+  });
+
+  function withDerived(m) { return __test.withDerivedMetrics(m); }
+});
+
+// Audit correlation: an ASIN negated and later released must carry the SAME entity_name, or
+// add/remove pairs for one ASIN look unrelated. The raw search term arrives lower-cased while
+// the reconcile event records the upper-case ASIN — a churn check without LOWER() then reports
+// a false zero, which is exactly what happened while reviewing the 2026-08-04 run.
+describe("ASIN audit events use a consistent entity name", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  it("records the upper-case ASIN when auto-routing a lower-case search term", async () => {
+    const rule = makeRule({
+      actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+      scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+      conditions: JSON.stringify([{ metric: "acos", op: "gte", value: "25" }]),
+    });
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [makeSearchTerm({ keyword_text: "b09zpwbxj2", acos: "80" })] })
+      .mockResolvedValueOnce({ rows: [] })          // activeTgt
+      .mockResolvedValueOnce({ rows: [] })          // negative_targets dedup
+      .mockResolvedValueOnce({ rows: [{ id: "nt-1" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+
+    const audit = writeAudit.mock.calls.find(c => c[0].action === "search_term.add_negative_target_auto");
+    expect(audit[0].entityName).toBe("B09ZPWBXJ2");
   });
 });

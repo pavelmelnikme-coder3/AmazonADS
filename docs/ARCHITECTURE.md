@@ -93,6 +93,32 @@ the rule adds on one run exactly what it removes on the next, forever. Both side
 | **granularity** | per `(query, campaign, ad_group, match_type)` slice. A negative is kept if **any** slice still matches — i.e. reconciliation never removes what the add path would immediately re-add. An ad-group-level negative only blocks its own ad group, so that is also the correct scope. |
 | **term identity** | both sides group/compare on `sqlNormalizeKeywordText(...)`. Amazon returns the same shopper term in several typographic spellings (U+00A0 vs a plain space); they are one negative keyword on Amazon and must be one entity here. |
 | **row ownership** | re-negating re-activates and **re-owns** an existing inactive row for that ad group instead of inserting a new one, so the rule that now justifies the negative becomes its `source_rule_id`. Otherwise the row stays owned by the rule that archived it, that rule keeps re-archiving it, and the sync keeps flipping it back. |
+| **release requires conversion** | `negativeStillJustified()` — a negative comes off **only** when the term has orders. Zero orders keeps it, whatever the click count has decayed to. |
+
+### Why release requires conversion evidence *(2026-08-04)*
+
+Even with add and reconcile measuring identically, one threshold governing both directions has
+no deadband, so a term sitting on the boundary flip-flops forever. The feedback loop is the
+problem: **a negated term stops receiving traffic, so its clicks age out of the rolling window
+and the count shrinks on its own** — the negative suppresses the very data used to judge it, and
+releasing on that shrinking count is circular. `footrest under desk` was negated at 8 clicks and
+released at 7, repeatedly (2026-06-22/23, 07-25/28, 08-02/04).
+
+Measured over 30 days, of 438 releases:
+
+| | count | avg clicks | verdict |
+|---|---|---|---|
+| term had orders | 222 (51%) | 22.2 | correct — it started converting |
+| term had **zero** orders | 216 (49%) | 6.6 | released purely by click decay |
+
+So ~7 negatives a day were un-blocking terms that had never produced a single order, against
+thresholds of 6 and 8. Requiring orders means a release is always backed by real evidence that
+the term earns its traffic; a term with no traffic at all also stays negated, since absent data
+is the negative working, not proof it should go.
+
+**Consequence, by design:** negatives are now effectively sticky. A term blocked in an ad group
+cannot easily gain orders there, so most negatives stay until someone removes them by hand. That
+matches how negatives are normally treated in PPC and is the intended trade-off.
 
 This was violated in production for ~2.5 months (reconciliation aggregated campaign-wide while
 the add path sliced per ad group), causing 6–9 negatives per day to be added and removed in the
