@@ -69,9 +69,25 @@ async function queueEntitySync(profileId, entityTypes = ["campaigns", "ad_groups
   return queue.add("sync", { profileId, entityTypes }, { priority });
 }
 
+// Amazon's report-creation throttle is a burst window that can stay closed for many
+// minutes — SB especially. createReportRequest already retries in-request (15→30→60→120s,
+// honouring Retry-After), but the shared 5s/10s job backoff lands every job-level retry
+// inside that same window, so all attempts burn out together and the day's report is lost.
+// A lost report is a real data gap: 2026-08-05 ended up with no SB data at all and only
+// 1 of 3 SD campaigns. Retry on a scale that outlasts the window instead — ~10, 30 and
+// 70 minutes after the first failure, still finishing well within the day.
+const REPORT_JOB_OPTIONS = {
+  attempts: 4,
+  backoff: { type: "exponential", delay: 10 * 60 * 1000 },
+};
+
 async function queueReportPipeline(profileId, campaignType, reportLevel, startDate, endDate) {
   const queue = getQueue(QUEUES.REPORT);
-  return queue.add("run", { profileId, campaignType, reportLevel, startDate, endDate });
+  return queue.add(
+    "run",
+    { profileId, campaignType, reportLevel, startDate, endDate },
+    REPORT_JOB_OPTIONS
+  );
 }
 
 async function queueMetricsBackfill(workspaceId, dateFrom, dateTo) {
@@ -166,7 +182,32 @@ async function queueEmailCampaign(campaignId) {
 // ─── Workers ──────────────────────────────────────────────────────────────────
 let workers = [];
 
+// A sweep whose worker died — process restart, container kill, BullMQ giving up after
+// repeated stalls — leaves its sp_sync_log row 'running' with no completed_at, forever.
+// Nothing ever reconciles them: 22 such rows had accumulated between 2026-04-27 and
+// 2026-07-31. They are mostly cosmetic, but any UI or endpoint that keys off "is a sync
+// running" reads them as live work and can latch on a dead row. A worker start is exactly
+// the moment the previous process's in-flight rows are known to be dead.
+async function closeAbandonedSyncRuns() {
+  try {
+    const { rows } = await query(
+      `UPDATE sp_sync_log
+          SET status='failed', completed_at=NOW(),
+              error_message=COALESCE(error_message, 'worker did not finish; closed on startup')
+        WHERE status='running' AND started_at < NOW() - INTERVAL '6 hours'
+        RETURNING id`
+    );
+    if (rows.length) {
+      logger.warn("Closed abandoned sp_sync_log runs on startup", { count: rows.length });
+    }
+  } catch (err) {
+    // Never block worker startup on housekeeping.
+    logger.warn("Could not close abandoned sync runs", { error: err.message });
+  }
+}
+
 async function startWorkers() {
+  await closeAbandonedSyncRuns();
   // ─── Entity Sync Worker ────────────────────────────────────────────────────
   const syncWorker = new Worker(
     QUEUES.ENTITY_SYNC,
@@ -756,5 +797,8 @@ module.exports = {
   queueLeadFinderSearch,
   startWorkers,
   stopWorkers,
+  closeAbandonedSyncRuns,
   QUEUES,
+  // Exposed for tests — the report backoff must stay on a throttle-window scale.
+  REPORT_JOB_OPTIONS,
 };

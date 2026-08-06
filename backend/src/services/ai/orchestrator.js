@@ -7,6 +7,7 @@ const Anthropic = require("@anthropic-ai/sdk");
 const { v4: uuidv4 } = require("uuid");
 const { query } = require("../../db/pool");
 const logger = require("../../config/logger");
+const { MODEL, extractText } = require("./claudeClient");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -183,13 +184,15 @@ Use the exact "id" values from the data as entity_id. Return ONLY the JSON array
 
   try {
     const message = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
+      model: MODEL,
+      // Thinking is on by default on current models and shares this budget with the
+      // answer, so a limit sized for the answer alone truncates it mid-JSON.
+      max_tokens: 16000,
       messages: [{ role: "user", content: userPrompt }],
       system: buildSystemPrompt(locale),
     });
 
-    const content = message.content[0]?.text || "";
+    const content = extractText(message);
     logger.info("AI Orchestrator: Claude response received", { inputTokens: message.usage?.input_tokens, outputTokens: message.usage?.output_tokens });
 
     // Strip any accidental markdown fences

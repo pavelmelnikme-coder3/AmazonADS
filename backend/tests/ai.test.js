@@ -104,11 +104,17 @@ function buildApp() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Return a mock axios.post response that wraps JSON in Claude's content format */
+/** Return a mock axios.post response that wraps JSON in Claude's content format.
+ *  Mirrors the real shape: thinking is on by default, so a thinking block precedes the
+ *  text block and every block carries an explicit `type`. Reading content[0].text here
+ *  is exactly the bug that would have silently emptied every AI feature. */
 function claudeResponse(payload) {
   return {
     data: {
-      content: [{ text: JSON.stringify(payload) }],
+      content: [
+        { type: "thinking", thinking: "" },
+        { type: "text", text: JSON.stringify(payload) },
+      ],
     },
   };
 }
@@ -375,7 +381,10 @@ describe("POST /ai/analyze", () => {
     dbQuery.mockResolvedValueOnce({ rows: [] });    // keywords
 
     axios.post.mockResolvedValueOnce({
-      data: { content: [{ text: "Sorry, I cannot help with that." }] },
+      data: { content: [
+        { type: "thinking", thinking: "" },
+        { type: "text", text: "Sorry, I cannot help with that." },
+      ] },
     });
 
     const res = await request(buildApp()).post("/ai/analyze").send({});

@@ -13,7 +13,7 @@ const Anthropic = require("@anthropic-ai/sdk");
 const logger = require("../../config/logger");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
+const { MODEL, extractText } = require("./claudeClient");
 
 const LOCALE_NAMES = {
   en: "English", de: "German", fr: "French", es: "Spanish",
@@ -96,11 +96,12 @@ relevance: 90-100=critical for title, 75-89=important for bullets/backend, 60-74
   try {
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 2000,
+      // Thinking shares this budget with the answer on current models.
+      max_tokens: 8000,
       messages: [{ role: "user", content: prompt }],
     });
 
-    const text = response.content[0]?.text?.trim() || "{}";
+    const text = extractText(response) || "{}";
     // Strip markdown code fences if model wrapped it
     const jsonText = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
     const parsed = JSON.parse(jsonText);
@@ -165,11 +166,12 @@ Respond ONLY with valid JSON:
     try {
       const response = await client.messages.create({
         model: MODEL,
-        max_tokens: 3000,
+        // Thinking shares this budget with the answer on current models.
+        max_tokens: 12000,
         messages: [{ role: "user", content: prompt }],
       });
 
-      const text = response.content[0]?.text?.trim() || "{}";
+      const text = extractText(response) || "{}";
       const jsonText = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
       const parsed = JSON.parse(jsonText);
 

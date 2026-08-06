@@ -20,10 +20,12 @@ const logger = require("../config/logger");
 router.use(requireAuth, requireWorkspace);
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
+const { MODEL, extractText } = require("../services/ai/claudeClient");
 
 // ── Helper: call Claude API ──────────────────────────────────────────────────
-async function callClaude(systemPrompt, userMessage, maxTokens = 4000) {
+// maxTokens covers thinking AND the answer on current models — a budget sized for
+// the answer alone truncates it. Callers that pass a value should size it the same way.
+async function callClaude(systemPrompt, userMessage, maxTokens = 16000) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured in .env");
 
@@ -41,11 +43,12 @@ async function callClaude(systemPrompt, userMessage, maxTokens = 4000) {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
       },
-      timeout: 60000,
+      // Thinking makes turns longer than the pre-migration 60s allowed.
+      timeout: 180000,
     }
   );
 
-  return response.data.content[0].text;
+  return extractText(response.data);
 }
 
 // ── Helper: build system prompt with business context ───────────────────────

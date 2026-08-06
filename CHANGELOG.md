@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-06 — AI features restored, report-throttle data gaps, abandoned sync runs
+
+### Fixed
+- **Every AI feature had been dead since 2026-06-15.** `claude-sonnet-4-20250514` was pinned in
+  three places; Anthropic retired it on that date, so every call returned `404 not_found_error`.
+  Nothing surfaced it — each call site catches and returns an empty result, so the 07:00
+  AI-analysis cron failed silently for weeks. Migrated to `claude-opus-5` behind a shared
+  `services/ai/claudeClient.js` (`MODEL`, `extractText`, `parseJsonResponse`); `ANTHROPIC_MODEL`
+  still overrides it.
+- **The response-parsing trap a bare model swap would have hit.** On current models thinking is
+  on by default, so `content[0]` is a `thinking` block — it carries `.thinking`, never `.text`.
+  All four extraction sites read `content[0].text`, which yields `undefined`, and each falls back
+  to `""` / `"{}"`. The features would have gone from loudly 404-ing to **silently returning
+  empty results**, and only intermittently: verified against the live API, a trivial prompt
+  returns `[text]` (so the old accessor worked by luck) while a real analytical prompt returns
+  `[thinking, text]` (so it returned `undefined`). Text is now selected by block type and joined.
+- **`max_tokens` raised** (4096→16000, 2000→8000, 3000→12000, default 4000→16000) and the
+  raw-HTTP timeout 60s→180s: thinking shares the token budget with the answer. Not precautionary
+  — a live orchestrator run emitted 6579 output tokens, which the old 4096 limit would have
+  truncated mid-JSON.
+- **Report throttling left real data gaps.** `createReportRequest` already retried in-request
+  (15→30→60→120s, honouring `Retry-After`), but the shared job backoff of 5s/10s put every
+  job-level retry inside the same burst window, so all attempts burned out together and the
+  report was lost — 2026-08-05 ended up with no SB rows at all and only 1 of 3 SD campaigns.
+  Report jobs now use `REPORT_JOB_OPTIONS`: 4 attempts, exponential backoff from 10 minutes
+  (≈10/30/70 min), outlasting the window while finishing well within the day.
+- **Abandoned `sp_sync_log` runs.** A sweep whose worker died left its row `running` with no
+  `completed_at` forever; 22 had accumulated between 2026-04-27 and 2026-07-31 because nothing
+  reconciled them. `closeAbandonedSyncRuns()` now runs at worker startup — the moment the
+  previous process's in-flight rows are known dead — closing `running` rows older than 6 hours,
+  preserving any existing `error_message`, and never blocking startup on failure.
+
+---
+
 ## [Unreleased] — 2026-08-04 — Rules: negatives are released only on conversion evidence
 
 The first scheduled run on the previous day's fixes was clean — all 8 rules `completed`, every
