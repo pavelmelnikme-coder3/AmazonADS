@@ -1557,7 +1557,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           if (entity.entity_type !== "campaign") { recordSkip(entity, action, "wrong_entity_type"); continue; }
           if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
           const pct           = parseFloat(action.value || 0) / 100;
-          const currentBudget = parseFloat(entity.daily_budget || 10);
+          // An unknown budget must never be assumed. This used to read
+          // `entity.daily_budget || 10`, so a campaign whose budget the sync had not
+          // stored was treated as €10 and "raised by 20%" to €12 — a campaign really
+          // running on €50 would have been cut by 76% while the journal recorded a
+          // raise. NULL budgets are not hypothetical: the SB/SD parse bug fixed in
+          // entities.js left 221 campaigns without one. Skip instead of guessing;
+          // the next sync fills the budget in and the rule picks it up.
+          const currentBudget = parseFloat(entity.daily_budget);
+          if (!Number.isFinite(currentBudget) || currentBudget <= 0) {
+            recordSkip(entity, action, "unknown_budget"); continue;
+          }
           const maxBudget     = safety?.max_budget ? parseFloat(safety.max_budget) : null;
           // max_budget caps GROWTH — it must never pull a budget down. A plain
           // Math.min(raised, cap) would cut a campaign already above the cap on the very first
@@ -1599,7 +1609,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         } else if (action.type === "set_budget") {
           if (entity.entity_type !== "campaign") { recordSkip(entity, action, "wrong_entity_type"); continue; }
           if (entity.state !== "enabled") { recordSkip(entity, action, "not_enabled"); continue; }
-          const currentBudget = parseFloat(entity.daily_budget || 0);
+          // set_budget writes an absolute value, so an unknown current budget is not a
+          // hazard the way it is for the percentage action — it only affects what the
+          // journal records as the "before". Keep it null rather than inventing a 0,
+          // so a rollback can tell "was 0" from "we never knew".
+          const currentBudget = Number.isFinite(parseFloat(entity.daily_budget)) ? parseFloat(entity.daily_budget) : null;
           const maxBudget     = safety?.max_budget ? parseFloat(safety.max_budget) : null;
           const newBudget     = Math.round(Math.min(Math.max(1, parseFloat(action.value || 10)), maxBudget ?? Infinity) * 100) / 100;
           if (!dryRun) {

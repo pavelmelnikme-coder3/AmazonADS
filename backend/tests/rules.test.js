@@ -1674,6 +1674,37 @@ describe("adjust_budget_pct", () => {
     }]);
   });
 
+  // A NULL budget is not hypothetical: the SB/SD ingest bug fixed on 2026-08-14 left
+  // 221 campaigns without one. The old `daily_budget || 10` treated those as €10 and
+  // wrote €12 — a silent 76% cut for a campaign really running on €50, journalled as
+  // a "+20% raise". Never guess a budget; skip and wait for the sync.
+  it("skips a campaign whose budget is unknown instead of assuming one", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: null })]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped_count).toBe(1);
+    expect(res.body.skipped[0]).toMatchObject({ reason: "unknown_budget" });
+    expect(pushCampaignUpdates).not.toHaveBeenCalled();
+  });
+
+  it("skips rather than raising a budget of 0 to the €1 floor", async () => {
+    // 0 would pass a plain null-check but multiplying it yields the Math.max(1, …)
+    // floor, i.e. a rule-invented budget for a campaign we know nothing useful about.
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "0" })]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.skipped[0].reason).toBe("unknown_budget");
+    expect(pushCampaignUpdates).not.toHaveBeenCalled();
+  });
+
+  it("still raises normally once the budget is known", async () => {
+    // Guard against the skip being too eager — the SD shape now lands as a real number.
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "10.00", campaign_type: "sponsoredDisplay" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied[0]).toMatchObject({ previous_budget: 10, new_budget: 12 });
+  });
+
   it("counts an Amazon rejection of the budget change as a write-back error", async () => {
     pushCampaignUpdates.mockResolvedValueOnce({ ok: false, error: "BUDGET_BELOW_MINIMUM" });
     mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [

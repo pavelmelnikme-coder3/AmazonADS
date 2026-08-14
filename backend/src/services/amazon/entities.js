@@ -268,6 +268,23 @@ async function fetchCampaigns(profile) {
   return all;
 }
 
+// Amazon reports a campaign's daily budget in two different shapes and the type
+// decides which: SP (v3) nests it — `budget: { budget: 24, budgetType: "DAILY" }` —
+// while SB and SD (v2-style) return a plain number, `budget: 10`. Reading only
+// `c.budget?.budget` therefore resolved to undefined for every SB and SD campaign
+// and stored NULL, which is how all 62 SB and 159 SD campaigns ended up with no
+// budget on record. `dailyBudget` is checked first for completeness but no live
+// campaign type actually returns it (see the 2026-08-10 SP write-back finding).
+function parseDailyBudget(c) {
+  if (typeof c.dailyBudget === "number") return c.dailyBudget;
+  if (typeof c.budget === "number")      return c.budget;
+  if (typeof c.budget?.budget === "number") return c.budget.budget;
+  // Strings are accepted defensively — some v2 endpoints quote numerics.
+  const raw = c.dailyBudget ?? (typeof c.budget === "object" ? c.budget?.budget : c.budget);
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function syncCampaigns(profileDbRecord, amazonCampaigns) {
   if (!amazonCampaigns.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
@@ -286,7 +303,7 @@ async function syncCampaigns(profileDbRecord, amazonCampaigns) {
         String(c.campaignId), c.name, c.campaignType,
         c.targetingType || null,
         (c.state || "ENABLED").toLowerCase(),
-        c.dailyBudget ?? c.budget?.budget ?? null,
+        parseDailyBudget(c),
         c.startDate || null, c.endDate || null,
         c.bidding?.strategy || null,
         JSON.stringify(c),
@@ -1175,6 +1192,7 @@ async function syncNegativeTargets(profileDbRecord, amazonNegTargets, adType = "
 }
 
 module.exports = {
+  parseDailyBudget,
   fetchProfiles,
   upsertProfiles,
   attachProfileToWorkspace,

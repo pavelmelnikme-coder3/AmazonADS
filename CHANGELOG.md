@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-14 — Rules: SB/SD budgets were never stored, and the rule guessed
+
+Found while auditing a clean rule run. The eight daily rules were healthy — all `completed`,
+every write-back `success`, no oscillation, and each of the eleven negative releases since the
+2026-08-04 hysteresis fix backed by a real order. The budget rule was healthy too: 28 of its 29
+raises on 08-12 are confirmed applied on Amazon, checked against the entity sync that re-read
+the campaigns a day later. The 29th was an SD campaign, and it was the thread worth pulling.
+
+### Fixed
+- **Every SB and SD campaign was stored with no budget.** Amazon returns the daily budget in
+  two shapes and the campaign type decides which: SP (v3) nests it as
+  `budget: { budget: 24, budgetType: "DAILY" }`, while SB and SD (v2-style) return a plain
+  number, `budget: 10`. `syncCampaigns` read `c.dailyBudget ?? c.budget?.budget`, and optional
+  chaining on a number yields `undefined`, so all **221** SB and SD campaigns landed with
+  `daily_budget = NULL` while all 950 SP campaigns were fine. Extracted as `parseDailyBudget()`,
+  which accepts both shapes, preserves a real `0`, and still returns null rather than a guess
+  when there is genuinely no budget. (No campaign type actually returns `dailyBudget` — it is
+  checked first only for completeness; see the 2026-08-10 write-back finding.)
+- **The budget rule invented a budget for those campaigns.** `adjust_budget_pct` read
+  `parseFloat(entity.daily_budget || 10)`, so a campaign with no stored budget was treated as
+  running on €10 and "raised by 20%" to €12. On 08-12 that hit one SD campaign whose real budget
+  happened to be €10, so nothing was lost — but 13 enabled SB/SD campaigns carry real budgets
+  above €12, up to €50, and the next match would have cut one by 76% while the journal recorded
+  a raise. An unknown budget is now a skip (`unknown_budget`), never an assumption; the value
+  arrives with the next sync and the rule picks it up then. `set_budget` keeps a null "before"
+  in the audit rather than inventing a `0`, so a rollback can tell "was zero" from "never knew".
+- **Two skip reasons rendered as raw i18n keys.** `at_max_budget` had no translation at all and
+  showed as `rules.skipReason_at_max_budget` in the run report; added it alongside the new
+  `unknown_budget` in all three locales.
+
+### Data
+- Backfilled the 221 NULL budgets from each campaign's last synced Amazon payload (SB €15–50,
+  SD €10–100). Zero rows left without a budget, and the deployed parser was replayed against all
+  1171 stored payloads: every campaign resolves a budget, none null, none disagreeing with the
+  healed value — so the next sync keeps them rather than nulling them again.
+
+Verified with a dry run of the live budget rule: 31 matched, 30 would apply, 1 skipped at the
+cap, and **zero** entries starting from the old €10 fallback — every "before" is now a real
+synced budget (12, 15, 18, 24, 48, 72…). 1180 backend tests.
+
+---
+
 ## [Unreleased] — 2026-08-14 — Products: order & revenue integrity
 
 Prompted by two figures on the same listing card disagreeing — "Заказы (период) 180" next to
