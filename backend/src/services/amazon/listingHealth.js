@@ -60,4 +60,69 @@ function computeListingIssues({ title, bulletPoints = [], description, images = 
   };
 }
 
-module.exports = { computeListingIssues, TITLE_MIN, TITLE_MAX, MIN_IMAGES, MIN_ZOOM_PX, MIN_BULLETS };
+// ─── Cross-country checks ────────────────────────────────────────────────────
+// Run on top of the six single-listing checks above when the same ASIN is
+// compared across marketplaces. These catch the failure modes that only exist
+// once a listing is expanded abroad: it was never created, or it was created by
+// copying the home marketplace verbatim and never localized.
+//
+// `reference` is the listing in the product's home marketplace (DE here). The
+// reference listing itself gets no cross-country issues — it is what everything
+// else is measured against.
+
+// Titles/bullets are compared case- and whitespace-insensitively: Amazon's own
+// EU listing-copy tooling reproduces the source text exactly, so an exact match
+// after normalization is what "never translated" actually looks like. Anything
+// looser would flag genuinely-translated NL/DE or BE/FR pairs that share brand
+// names and units.
+function _norm(s) {
+  return (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function computeCrossCountryIssues({ target, reference, existsInCatalog }) {
+  // Not listed at all — every content check below would be meaningless noise,
+  // so this one issue replaces them entirely.
+  if (!existsInCatalog) return { issues: [{ code: "not_listed" }], replacesBase: true };
+
+  const issues = [];
+  if (!reference) return { issues, replacesBase: false };
+
+  const drop = new Set();
+
+  const tNorm = _norm(target.title);
+  if (tNorm && tNorm === _norm(reference.title)) {
+    issues.push({ code: "title_not_localized" });
+  }
+
+  const tBullets = (target.bulletPoints || []).map(_norm).filter(Boolean);
+  const rBullets = (reference.bulletPoints || []).map(_norm).filter(Boolean);
+  if (tBullets.length && tBullets.length === rBullets.length && tBullets.every((b, i) => b === rBullets[i])) {
+    issues.push({ code: "bullets_not_localized" });
+  }
+
+  if (reference.hasAplus && !target.hasAplus) {
+    issues.push({ code: "aplus_missing_vs_ref" });
+    // Strictly stronger than the plain "no A+ content" check — showing both
+    // would list the same gap twice in the UI.
+    drop.add("aplus");
+  }
+
+  if (reference.imageCount > 0 && target.imageCount < reference.imageCount) {
+    issues.push({ code: "fewer_images_vs_ref", value: target.imageCount, reference: reference.imageCount });
+  }
+
+  // Listed, but Amazon assigns no sales rank — in practice no sales history in
+  // that store. Distinct from "not listed": the listing exists and can be fixed
+  // with traffic rather than created from scratch.
+  if (target.bestRank == null) {
+    issues.push({ code: "no_bsr" });
+  }
+
+  return { issues, replacesBase: false, drop };
+}
+
+module.exports = {
+  computeListingIssues,
+  computeCrossCountryIssues,
+  TITLE_MIN, TITLE_MAX, MIN_IMAGES, MIN_ZOOM_PX, MIN_BULLETS,
+};

@@ -35,7 +35,12 @@ router.get("/summary", async (req, res, next) => {
          CASE WHEN SUM(impressions)>0 THEN SUM(clicks)::numeric/SUM(impressions)*100 END as ctr,
          CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) END as cpc,
          CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 END as acos,
-         CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas
+         CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas,
+         -- Ad conversion rate: ad orders per ad click. Both sides come from the same
+         -- 14-day attribution window as every other figure here, so it is consistent with
+         -- ACOS/ROAS above. NULL (not 0) when there were no clicks — the frontend renders
+         -- an em dash rather than implying a real 0%.
+         CASE WHEN SUM(clicks)>0 THEN SUM(orders_14d)::numeric/SUM(clicks)*100 END as cvr
        FROM fact_metrics_daily
        WHERE ${where} AND entity_type = 'campaign'`,
       params
@@ -66,6 +71,7 @@ router.get("/summary", async (req, res, next) => {
          CASE WHEN SUM(clicks)>0 THEN SUM(cost)/SUM(clicks) ELSE 0 END as cpc,
          CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 ELSE 0 END as acos,
          CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) ELSE 0 END as roas,
+         CASE WHEN SUM(clicks)>0 THEN SUM(orders_14d)::numeric/SUM(clicks)*100 ELSE 0 END as cvr,
          dr.revenue AS total_revenue,
          CASE WHEN dr.revenue > 0 THEN SUM(cost)/dr.revenue*100 END as tacos
        FROM fact_metrics_daily
@@ -85,8 +91,10 @@ router.get("/summary", async (req, res, next) => {
 
     const { rows: [prev] } = await query(
       `SELECT SUM(cost) as spend, SUM(sales_14d) as sales,
+              SUM(clicks) as clicks, SUM(orders_14d) as orders,
               CASE WHEN SUM(sales_14d)>0 THEN SUM(cost)/SUM(sales_14d)*100 END as acos,
-              CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas
+              CASE WHEN SUM(cost)>0 THEN SUM(sales_14d)/SUM(cost) END as roas,
+              CASE WHEN SUM(clicks)>0 THEN SUM(orders_14d)::numeric/SUM(clicks)*100 END as cvr
        FROM fact_metrics_daily
        WHERE workspace_id = $1 AND date BETWEEN $2 AND $3 AND entity_type = 'campaign'`,
       [req.workspaceId, prevStart.toISOString().split("T")[0], prevEnd.toISOString().split("T")[0]]
@@ -172,6 +180,10 @@ router.get("/summary", async (req, res, next) => {
         cpc: parseFloat(totals?.cpc || 0).toFixed(4),
         acos: parseFloat(totals?.acos || 0).toFixed(2),
         roas: parseFloat(totals?.roas || 0).toFixed(2),
+        // Ad conversion rate (ad orders ÷ ad clicks). null when the period had no clicks —
+        // unlike the fields above it is not coerced to "0.00", because 0% conversion and
+        // "no traffic to convert" are different states and the UI shows them differently.
+        cvr: totals?.cvr != null ? parseFloat(totals.cvr).toFixed(2) : null,
         tacos,
         tacosSource,
         tacosPeriod,
@@ -185,6 +197,7 @@ router.get("/summary", async (req, res, next) => {
         sales: calcDelta(totals?.sales, prev?.sales),
         acos: calcDelta(totals?.acos, prev?.acos),
         roas: calcDelta(totals?.roas, prev?.roas),
+        cvr: calcDelta(totals?.cvr, prev?.cvr),
       },
       trend,
     });

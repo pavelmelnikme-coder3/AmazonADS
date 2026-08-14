@@ -10,7 +10,9 @@ const SP_API_URLS = {
 const MARKETPLACE_REGION = {
   ATVPDKIKX0DER: "NA", A2EUQ1WTGCTBG2: "NA", A1AM78C64UM0Y8: "NA",
   A1F83G8C2ARO7P: "EU", A1PA6795UKMFR9: "EU", APJ6JRA9NG5V4: "EU",
-  A13V1IB3VIYZZH: "EU", A1RKKUPIHCS9HS: "EU", A1805IZSGTT6HW: "EU",
+  A13V1IB3VIYZZH: "EU", A1RKKUPIHCS9HS: "EU", A1805IZSGTT6HS: "EU",
+  AMEN7PMS3EDWL:  "EU", A1C3SOZRARQ6R3: "EU", A2NODRKZP88ZB9: "EU",
+  A28R8C7NBKEWEA: "EU", A33AVAJ2PDY3EV: "EU",
   A39IBJ37TRP1C6: "FE", A1VC38T7YXB528: "FE", A21TJRUUN4KGV: "FE",
 };
 
@@ -67,7 +69,12 @@ async function _spRequest(region, path, params, refreshToken, attempt = 1) {
       e.retryAfter = retryAfter;
       throw e;
     }
-    throw new Error(`SP-API ${status} ${spCode || ""}: ${spMsg || err.message}`);
+    // Carry status/code on the error so callers can tell "this ASIN is not
+    // listed in that marketplace" (404 NOT_FOUND) apart from a real failure.
+    const e = new Error(`SP-API ${status} ${spCode || ""}: ${spMsg || err.message}`);
+    e.status = status;
+    e.spCode = spCode || null;
+    throw e;
   }
 }
 
@@ -113,15 +120,18 @@ async function getListingContent(asin, marketplaceId, refreshToken) {
   const token = refreshToken || process.env.SP_API_REFRESH_TOKEN;
   if (!token) throw new Error("SP_API_REFRESH_TOKEN not configured");
   const region = MARKETPLACE_REGION[marketplaceId] || "EU";
+  // salesRanks rides along at no extra cost and lets the cross-country check
+  // flag "listed but ranking nowhere" without a second Catalog Items call.
   const data = await _spRequest(region, `/catalog/2022-04-01/items/${asin}`, {
     marketplaceIds: marketplaceId,
-    includedData: "attributes,images,summaries",
+    includedData: "attributes,images,summaries,salesRanks",
   }, token);
 
   const attrs       = data.attributes || {};
   const summaryList = (data.summaries || []).find(s => s.marketplaceId === marketplaceId) || {};
   const imageList    = (data.images   || []).find(i => i.marketplaceId === marketplaceId) || {};
   const images        = imageList.images || [];
+  const salesRanks    = (data.salesRanks || []).find(r => r.marketplaceId === marketplaceId) || {};
 
   const title = summaryList.itemName || null;
   const bulletPoints = (attrs.bullet_point || [])
@@ -131,7 +141,12 @@ async function getListingContent(asin, marketplaceId, refreshToken) {
   const description = (attrs.product_description || [])
     .find(d => d.marketplace_id === marketplaceId)?.value || null;
 
-  return { asin, title, bulletPoints, description, images, rawData: data };
+  return {
+    asin, title, bulletPoints, description, images,
+    classificationRanks: salesRanks.classificationRanks || [],
+    displayGroupRanks:   salesRanks.displayGroupRanks   || [],
+    rawData: data,
+  };
 }
 
 // ─── A+ Content — published status per ASIN ──────────────────────────────────

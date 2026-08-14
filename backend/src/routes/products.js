@@ -4,7 +4,8 @@ const ExcelJS = require("exceljs");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { getCatalogItem } = require("../services/amazon/spClient");
-const { queueProductMetaSync } = require("../jobs/workers");
+const { EU_MARKETPLACES, EU_MARKETPLACE_IDS, listingUrl } = require("../services/amazon/marketplaces");
+const { queueProductMetaSync, queueSpSync } = require("../jobs/workers");
 const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
@@ -66,15 +67,18 @@ router.get("/", async (req, res, next) => {
          COALESCE(orders.revenue_7d, 0)        AS revenue_7d,
          COALESCE(orders.qty_yesterday, 0)     AS qty_yesterday,
          COALESCE(orders.qty_7d, 0)            AS qty_7d,
-         -- net profit (revenue after Amazon fee minus COGS minus per-ASIN ad spend)
+         -- Net profit (revenue after Amazon fee minus COGS minus per-ASIN ad spend).
+         -- COGS uses the PRICED quantity, not the full one: a freshly-placed order has
+         -- its quantity but no ItemPrice yet, so charging its COGS against revenue that
+         -- has not landed would show a phantom loss on the current day.
          ROUND((
            COALESCE(orders.revenue_yesterday, 0) * (1 + COALESCE(sm.amazon_fee_pct, -0.15))
-           - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_yesterday, 0)
+           - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_yesterday_priced, 0)
            - COALESCE(adp.ad_spend_yesterday, 0)
          )::numeric, 2) AS profit_yesterday,
          ROUND((
            COALESCE(orders.revenue_7d, 0) * (1 + COALESCE(sm.amazon_fee_pct, -0.15))
-           - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_7d, 0)
+           - COALESCE(sm.cogs_per_unit, 0) * COALESCE(orders.qty_7d_priced, 0)
            - COALESCE(adp.ad_spend_7d, 0)
          )::numeric, 2) AS profit_7d
        FROM products p
@@ -132,25 +136,43 @@ router.get("/", async (req, res, next) => {
            AND UPPER(m.amazon_id) = p.asin
            AND m.date >= CURRENT_DATE - 7
        ) adp ON true
-       -- Orders revenue from SP Orders API
+       -- Orders revenue from SP Orders API.
+       -- item_price_amount is Amazon's ItemPrice = the EXTENDED price of the line
+       -- (unit price x quantity), never the unit price — verified against raw_data
+       -- (quantity 2 -> {"Amount": "71.98"} = 2 x 35.99). Multiplying it by
+       -- quantity_ordered again inflated revenue on every multi-unit line, which in
+       -- turn deflated TACOS and profit.
        LEFT JOIN LATERAL (
          SELECT
            COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') = CURRENT_DATE - 1
-                             THEN oi.item_price_amount * oi.quantity_ordered ELSE 0 END), 0) AS revenue_yesterday,
+                             THEN oi.item_price_amount ELSE 0 END), 0) AS revenue_yesterday,
            COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') >= CURRENT_DATE - 7
                               AND DATE(o.purchase_date AT TIME ZONE 'UTC') <= CURRENT_DATE - 1
-                             THEN oi.item_price_amount * oi.quantity_ordered ELSE 0 END), 0) AS revenue_7d,
+                             THEN oi.item_price_amount ELSE 0 END), 0) AS revenue_7d,
            COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') = CURRENT_DATE - 1
                              THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_yesterday,
            COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') >= CURRENT_DATE - 7
                               AND DATE(o.purchase_date AT TIME ZONE 'UTC') <= CURRENT_DATE - 1
-                             THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_7d
+                             THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_7d,
+           -- Quantities restricted to lines that already carry a price, so the profit
+           -- calculation pairs COGS with revenue from the very same lines.
+           COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') = CURRENT_DATE - 1
+                              AND oi.item_price_amount IS NOT NULL
+                             THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_yesterday_priced,
+           COALESCE(SUM(CASE WHEN DATE(o.purchase_date AT TIME ZONE 'UTC') >= CURRENT_DATE - 7
+                              AND DATE(o.purchase_date AT TIME ZONE 'UTC') <= CURRENT_DATE - 1
+                              AND oi.item_price_amount IS NOT NULL
+                             THEN oi.quantity_ordered ELSE 0 END), 0) AS qty_7d_priced
          FROM sp_order_items oi
          JOIN sp_orders o ON o.id = oi.order_id
          WHERE oi.workspace_id = p.workspace_id
            AND oi.asin = p.asin
            AND o.purchase_date >= NOW() - INTERVAL '8 days'
-           AND o.order_status NOT IN ('Cancelled', 'Pending')
+           -- Amazon spells it "Canceled" (one l); the old "Cancelled" matched nothing,
+           -- so every cancelled line passed the filter. Pending is a real order that
+           -- flips to Unshipped within hours — excluding it under-counted the last day
+           -- and disagreed with /period-orders, alerts and metrics, which all keep it.
+           AND o.order_status NOT IN ('Canceled', 'Unfulfillable')
        ) orders ON true
        WHERE p.workspace_id = $1 AND p.is_active = true
          ${availFilter}
@@ -422,7 +444,7 @@ router.get("/timeseries", async (req, res, next) => {
     const prevDates = compare ? spine(prevStart, prevEnd) : [];
     const qStart = compare ? prevStart : start;   // widen the queried range to cover both windows
 
-    const [bsr, ad, price, ord] = await Promise.all([
+    const [bsr, ad, price, ord, ordAgg] = await Promise.all([
       query(`SELECT UPPER(p.asin) AS asin, bs.captured_at::date::text AS d, MIN(bs.best_rank) AS bsr
                FROM products p JOIN bsr_snapshots bs ON bs.product_id = p.id
               WHERE p.workspace_id=$1 AND UPPER(p.asin)=ANY($2::text[]) AND bs.best_rank IS NOT NULL
@@ -444,9 +466,19 @@ router.get("/timeseries", async (req, res, next) => {
                 COUNT(DISTINCT o.id) AS orders, COALESCE(SUM(oi.quantity_ordered),0) AS units,
                 COALESCE(SUM(oi.item_price_amount),0) AS revenue
                FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
-              WHERE oi.workspace_id=$1 AND UPPER(oi.asin)=ANY($2::text[]) AND o.order_status <> 'Canceled'
+              WHERE oi.workspace_id=$1 AND UPPER(oi.asin)=ANY($2::text[])
+                AND o.order_status NOT IN ('Canceled', 'Unfulfillable')
                 AND o.purchase_date::date BETWEEN $3 AND $4
               GROUP BY 1,2`, [ws, asins, qStart, end]),
+      // Listing-level order count per day. One order that contains two variations is
+      // ONE order for the listing — summing the per-ASIN counts above would count it
+      // twice, so the aggregate series takes its `orders` from here.
+      query(`SELECT o.purchase_date::date::text AS d, COUNT(DISTINCT o.id) AS orders
+               FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
+              WHERE oi.workspace_id=$1 AND UPPER(oi.asin)=ANY($2::text[])
+                AND o.order_status NOT IN ('Canceled', 'Unfulfillable')
+                AND o.purchase_date::date BETWEEN $3 AND $4
+              GROUP BY 1`, [ws, asins, qStart, end]),
     ]);
 
     const key = (asin, d) => `${asin}|${d}`;
@@ -454,6 +486,7 @@ router.get("/timeseries", async (req, res, next) => {
     const adM = new Map(ad.rows.map((r) => [key(r.asin, r.d), r]));
     const priceM = new Map(price.rows.map((r) => [key(r.asin, r.d), r.price != null ? Number(r.price) : null]));
     const ordM = new Map(ord.rows.map((r) => [key(r.asin, r.d), r]));
+    const ordAggM = new Map(ordAgg.rows.map((r) => [r.d, Number(r.orders)]));
     const r2 = (v) => Math.round(v * 100) / 100;
     const r1 = (v) => Math.round(v * 10) / 10;
     // ACOS = spend/adSales; TACOS = spend/totalRevenue; ROAS = adSales/spend.
@@ -474,14 +507,15 @@ router.get("/timeseries", async (req, res, next) => {
       });
     });
     const aggregateOf = (seriesByAsin, len) => Array.from({ length: len }, (_, i) => {
-      let bsr = null, cost = 0, adSales = 0, revenue = 0, orders = 0, units = 0, pSum = 0, pN = 0, date = null;
+      let bsr = null, cost = 0, adSales = 0, revenue = 0, units = 0, pSum = 0, pN = 0, date = null;
       for (const asin of asins) {
         const pt = seriesByAsin[asin][i]; if (!pt) continue; date = pt.date;
         if (pt.bsr != null) bsr = bsr == null ? pt.bsr : Math.min(bsr, pt.bsr);
         if (pt.price != null) { pSum += pt.price; pN++; }
-        cost += pt.ad_spend; adSales += pt.ad_sales; revenue += pt.revenue; orders += pt.orders; units += pt.units;
+        cost += pt.ad_spend; adSales += pt.ad_sales; revenue += pt.revenue; units += pt.units;
       }
-      return mkPoint(date, { bsr, cost, adSales, price: pN ? pSum / pN : null, orders, units, revenue });
+      // Orders are deduplicated across the listing, not summed (see ordAgg above).
+      return mkPoint(date, { bsr, cost, adSales, price: pN ? pSum / pN : null, orders: ordAggM.get(date) || 0, units, revenue });
     });
 
     const by_asin = {}; const prev_by_asin = {};
@@ -501,25 +535,58 @@ router.get("/timeseries", async (req, res, next) => {
 // GET /products/period-orders?start=&end= — total orders/units/revenue per ASIN over a
 // date range (default last 30d). Lightweight: powers "sort by orders for the period" so
 // the user can surface the top revenue-driving listings without loading every chart.
+//
+// Returns two aggregations of the same rows:
+//   by_asin    — per ASIN, for the flat product list
+//   by_listing — per variation family (parent ASIN), where `orders` is a TRUE
+//                COUNT(DISTINCT order). Summing the per-ASIN counts client-side
+//                counted one order once per variation it touched, so a listing with
+//                many variations over-reported its order count.
 router.get("/period-orders", async (req, res, next) => {
   try {
     const end   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
     const start = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start) ? req.query.start
       : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
-    const { rows } = await query(
-      `SELECT UPPER(oi.asin) AS asin,
-         COUNT(DISTINCT o.id) AS orders,
-         COALESCE(SUM(oi.quantity_ordered),0) AS units,
-         COALESCE(SUM(oi.item_price_amount),0) AS revenue
-       FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
-       WHERE oi.workspace_id=$1 AND o.order_status <> 'Canceled'
-         AND o.purchase_date::date BETWEEN $2 AND $3 AND oi.asin IS NOT NULL
-       GROUP BY UPPER(oi.asin)`,
-      [req.workspaceId, start, end]
-    );
+    // Same status rule as the product list above: drop only what Amazon itself
+    // no longer counts as a sale.
+    const [{ rows }, { rows: listingRows }] = await Promise.all([
+      query(
+        `SELECT UPPER(oi.asin) AS asin,
+           COUNT(DISTINCT o.id) AS orders,
+           COALESCE(SUM(oi.quantity_ordered),0) AS units,
+           COALESCE(SUM(oi.item_price_amount),0) AS revenue
+         FROM sp_order_items oi JOIN sp_orders o ON o.id = oi.order_id
+         WHERE oi.workspace_id=$1 AND o.order_status NOT IN ('Canceled', 'Unfulfillable')
+           AND o.purchase_date::date BETWEEN $2 AND $3 AND oi.asin IS NOT NULL
+         GROUP BY UPPER(oi.asin)`,
+        [req.workspaceId, start, end]
+      ),
+      query(
+        // Listing key mirrors the frontend grouping: parent_asin when known, else the
+        // ASIN itself. The join is restricted to active products because the page only
+        // ever renders those — an archived variation must not fold its orders into a
+        // listing whose visible children exclude it; it falls back to standing alone
+        // under its own ASIN, where nothing renders it.
+        `SELECT COALESCE(p.parent_asin, UPPER(oi.asin)) AS listing_id,
+           COUNT(DISTINCT o.id) AS orders,
+           COALESCE(SUM(oi.quantity_ordered),0) AS units,
+           COALESCE(SUM(oi.item_price_amount),0) AS revenue
+         FROM sp_order_items oi
+         JOIN sp_orders o ON o.id = oi.order_id
+         LEFT JOIN products p
+           ON p.workspace_id = oi.workspace_id AND p.asin = UPPER(oi.asin) AND p.is_active
+         WHERE oi.workspace_id=$1 AND o.order_status NOT IN ('Canceled', 'Unfulfillable')
+           AND o.purchase_date::date BETWEEN $2 AND $3 AND oi.asin IS NOT NULL
+         GROUP BY 1`,
+        [req.workspaceId, start, end]
+      ),
+    ]);
+    const shape = (r) => ({ orders: Number(r.orders), units: Number(r.units), revenue: Math.round(Number(r.revenue) * 100) / 100 });
     const by_asin = {};
-    for (const r of rows) by_asin[r.asin] = { orders: Number(r.orders), units: Number(r.units), revenue: Math.round(Number(r.revenue) * 100) / 100 };
-    res.json({ start, end, by_asin });
+    for (const r of rows) by_asin[r.asin] = shape(r);
+    const by_listing = {};
+    for (const r of listingRows) by_listing[r.listing_id] = shape(r);
+    res.json({ start, end, by_asin, by_listing });
   } catch (err) { next(err); }
 });
 
@@ -768,6 +835,374 @@ router.post("/export", async (req, res, next) => {
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(Buffer.from(buffer));
     logger.info("Products report exported", { wid, start, end, rows: rows.length, cols: cols.length, includeHistory });
+  } catch (err) { next(err); }
+});
+
+// ─── Cross-country listings ──────────────────────────────────────────────────
+
+// GET /products/marketplaces — the ASIN × country matrix.
+// filter: all | issues (only ASINs with at least one finding abroad) | missing
+// (only ASINs not listed in at least one country).
+// includeDead=1 also returns ASINs absent from *every* checked country — half
+// the tracked catalog is long-dead listings, and because the default sort ranks
+// by "missing in most countries" they otherwise bury every actionable row.
+// The test is "missing everywhere", not "missing at home", so an ASIN that is
+// dead in the home marketplace but still live abroad — the interesting case —
+// stays visible.
+// country=IT narrows to ASINs with something to fix in that one country. It
+// takes over from the cross-country `filter`, which then says *which* kind of
+// problem counts there — otherwise the two would compound into "has an issue
+// somewhere AND in Italy", which is not what clicking Italy means.
+// Further narrowing, all optional and all combinable:
+//   issue=<code>    only ASINs carrying that finding (in `country` if one is set)
+//   brand=<name>    exact brand match
+//   ads=advertised|not_advertised
+//   coverage=single|partial|full   how many countries the ASIN is actually live in
+//   sort=missing|issues|coverage|asin|title
+const MKT_ISSUE_CODES = [
+  "not_listed", "title_not_localized", "bullets_not_localized",
+  "aplus_missing_vs_ref", "fewer_images_vs_ref", "no_bsr",
+  "title", "bullets", "description", "images_count", "images_zoom", "aplus",
+];
+const MKT_SORTS = ["missing", "issues", "coverage", "asin", "title"];
+// Whitelisted ORDER BY fragments — `sort` is validated against the keys, so no
+// user text ever reaches the SQL. Every one ends in p.asin for a stable order.
+const MKT_SORT_SQL = {
+  missing:  "COALESCE(m.countries_missing, 0) DESC, COALESCE(m.total_issues, 0) DESC, p.asin",
+  issues:   "COALESCE(m.total_issues, 0) DESC, COALESCE(m.countries_missing, 0) DESC, p.asin",
+  coverage: "(COALESCE(m.countries_checked, 0) - COALESCE(m.countries_missing, 0)) ASC, p.asin",
+  asin:     "p.asin",
+  title:    "COALESCE(NULLIF(p.title, ''), m.any_title, p.asin), p.asin",
+};
+
+router.get("/marketplaces", async (req, res, next) => {
+  try {
+    const filter = ["issues", "missing"].includes(req.query.filter) ? req.query.filter : "all";
+    const includeDead = req.query.includeDead === "1" || req.query.includeDead === "true";
+    const search = (req.query.q || "").trim().toUpperCase();
+    const country = EU_MARKETPLACES.some(m => m.countryCode === req.query.country)
+      ? req.query.country
+      : null;
+    const issue = MKT_ISSUE_CODES.includes(req.query.issue) ? req.query.issue : null;
+    const brand = (req.query.brand || "").trim() || null;
+    const ads = ["advertised", "not_advertised"].includes(req.query.ads) ? req.query.ads : null;
+    const coverage = ["single", "partial", "full"].includes(req.query.coverage) ? req.query.coverage : null;
+    const sort = MKT_SORTS.includes(req.query.sort) ? req.query.sort : "missing";
+
+    const params = [req.workspaceId];
+    let searchFilter = "";
+    if (search) {
+      params.push(`%${search}%`);
+      searchFilter = ` AND (UPPER(p.asin) LIKE $${params.length} OR UPPER(COALESCE(p.title,'')) LIKE $${params.length})`;
+    }
+
+    let brandFilter = "";
+    if (brand) {
+      params.push(brand);
+      brandFilter = ` AND p.brand = $${params.length}`;
+    }
+
+    // Same advertised test the main products list uses, so the two agree.
+    const advExistsMkt = `EXISTS (
+      SELECT 1 FROM product_ads pa JOIN campaigns c ON c.id = pa.campaign_id
+       WHERE pa.workspace_id = p.workspace_id AND UPPER(pa.asin) = p.asin
+         AND pa.state = 'enabled' AND c.state = 'enabled'
+    )`;
+    const adsFilter = ads === "advertised" ? ` AND ${advExistsMkt}`
+                    : ads === "not_advertised" ? ` AND NOT ${advExistsMkt}`
+                    : "";
+
+    // Live-country count drives the coverage buckets: "single" is the strongest
+    // expansion signal (sells in one country only), "full" needs no expansion.
+    const coverageFilter = coverage === "single"
+        ? " AND (m.countries_checked - m.countries_missing) = 1"
+      : coverage === "partial"
+        ? " AND (m.countries_checked - m.countries_missing) BETWEEN 2 AND m.countries_checked - 1"
+      : coverage === "full"
+        ? " AND m.countries_checked > 0 AND m.countries_missing = 0"
+      : "";
+    const deadFilter = includeDead
+      ? ""
+      : " AND NOT (COALESCE(m.countries_checked, 0) > 0 AND m.countries_missing = m.countries_checked)";
+
+    // Country-scoped view. `not_listed` is itself a finding, so the unfiltered
+    // "issue_count > 0" already covers both a missing listing and a flawed one.
+    let countryFilter = "";
+    let countrySeverity = "NULL";
+    if (country) {
+      params.push(country);
+      const ci = `$${params.length}`;
+      const cond = filter === "missing" ? "NOT lc.exists_in_catalog"
+                 : filter === "issues"  ? "lc.exists_in_catalog AND lc.issue_count > 0"
+                 : "lc.issue_count > 0";
+      countryFilter = ` AND EXISTS (SELECT 1 FROM product_marketplace_listings lc
+                                     WHERE lc.product_id = p.id AND lc.country_code = ${ci} AND ${cond})`;
+      // Rank by how bad that one country is: absent listings first, then by
+      // number of findings. 1000 is simply above any achievable issue count.
+      countrySeverity = `MAX(CASE WHEN l.country_code = ${ci}
+                                  THEN CASE WHEN NOT l.exists_in_catalog THEN 1000 ELSE l.issue_count END
+                             END)`;
+    }
+
+    // Issue-type filter. Scoped to the selected country when there is one —
+    // "missing A+ in Italy" is a different question from "missing A+ anywhere".
+    let issueFilter = "";
+    if (issue) {
+      params.push(JSON.stringify([{ code: issue }]));
+      const ii = `$${params.length}`;
+      let scope = "";
+      if (country) {
+        params.push(country);
+        scope = ` AND li.country_code = $${params.length}`;
+      }
+      issueFilter = ` AND EXISTS (SELECT 1 FROM product_marketplace_listings li
+                                   WHERE li.product_id = p.id${scope}
+                                     AND li.issues @> ${ii}::jsonb)`;
+    }
+
+    const { rows } = await query(
+      `SELECT p.id, p.asin, p.marketplace_id AS reference_marketplace_id,
+              -- products.title/image_url only ever hold the home-marketplace copy
+              -- and are empty for every ASIN dead at home — half the catalogue.
+              -- Those rows still have live listings abroad, so fall back to any
+              -- country that has one (preferring the home marketplace).
+              COALESCE(NULLIF(p.title, ''), m.any_title)   AS title,
+              COALESCE(p.image_url, m.any_image)           AS image_url,
+              COALESCE(m.cells, '[]'::json) AS cells,
+              COALESCE(m.countries_checked, 0)  AS countries_checked,
+              COALESCE(m.countries_missing, 0)  AS countries_missing,
+              COALESCE(m.total_issues, 0)       AS total_issues,
+              m.checked_at
+         FROM products p
+         LEFT JOIN LATERAL (
+           SELECT json_agg(json_build_object(
+                    'marketplaceId',   l.marketplace_id,
+                    'countryCode',     l.country_code,
+                    'isReference',     l.is_reference,
+                    'existsInCatalog', l.exists_in_catalog,
+                    'title',           l.title,
+                    'titleLen',        l.title_len,
+                    'bulletCount',     l.bullet_count,
+                    'imageCount',      l.image_count,
+                    'hasAplus',        l.has_aplus,
+                    'bestRank',        l.best_rank,
+                    'issues',          l.issues,
+                    'issueCount',      l.issue_count,
+                    'errorMessage',    l.error_message
+                  ) ORDER BY l.is_reference DESC, l.country_code)      AS cells,
+                  COUNT(*)                                             AS countries_checked,
+                  COUNT(*) FILTER (WHERE NOT l.exists_in_catalog)      AS countries_missing,
+                  SUM(l.issue_count)                                   AS total_issues,
+                  MAX(l.checked_at)                                    AS checked_at,
+                  (array_agg(l.title ORDER BY l.is_reference DESC, l.country_code)
+                     FILTER (WHERE NULLIF(l.title, '') IS NOT NULL))[1]     AS any_title,
+                  (array_agg(l.image_url ORDER BY l.is_reference DESC, l.country_code)
+                     FILTER (WHERE l.image_url IS NOT NULL))[1]            AS any_image,
+                  ${countrySeverity}                                       AS country_severity
+             FROM product_marketplace_listings l
+            WHERE l.product_id = p.id
+         ) m ON true
+        WHERE p.workspace_id = $1 AND p.is_active = true${searchFilter}${deadFilter}${countryFilter}${issueFilter}${brandFilter}${adsFilter}${coverageFilter}
+          ${!country && filter === "issues"  ? "AND COALESCE(m.total_issues, 0) > 0" : ""}
+          ${!country && filter === "missing" ? "AND COALESCE(m.countries_missing, 0) > 0" : ""}
+        ORDER BY ${country ? "COALESCE(m.country_severity, -1) DESC," : ""}
+                 ${MKT_SORT_SQL[sort]}`,
+      params
+    );
+
+    // How many rows the dead-everywhere filter is holding back, so the UI can
+    // say so instead of silently showing a shorter list.
+    const { rows: [deadRow] } = await query(
+      `SELECT COUNT(*)::int AS n FROM products p
+         JOIN LATERAL (
+           SELECT COUNT(*) AS checked, COUNT(*) FILTER (WHERE NOT l.exists_in_catalog) AS missing
+             FROM product_marketplace_listings l WHERE l.product_id = p.id
+         ) m ON true
+        WHERE p.workspace_id = $1 AND p.is_active = true
+          AND m.checked > 0 AND m.missing = m.checked`,
+      [req.workspaceId]
+    );
+
+    // Per-country rollup for the summary strip above the matrix. It must honour
+    // the same dead-everywhere exclusion as the list below it — otherwise the
+    // card promises "185 not listed in IT" and clicking it returns 26, because
+    // the other 159 are ASINs hidden as dead in every country.
+    const { rows: byCountry } = await query(
+      `SELECT l.country_code, l.marketplace_id,
+              COUNT(*)                                        AS products,
+              COUNT(*) FILTER (WHERE NOT l.exists_in_catalog) AS missing,
+              -- Excludes the not-listed rows: "not listed" is itself a finding,
+              -- so counting them here too made the strip read as 65 missing +
+              -- 67 with findings out of 76 — the same ASINs counted twice.
+              COUNT(*) FILTER (WHERE l.exists_in_catalog AND l.issue_count > 0) AS with_issues,
+              SUM(l.issue_count) FILTER (WHERE l.exists_in_catalog)             AS issues
+         FROM product_marketplace_listings l
+         JOIN products p ON p.id = l.product_id
+         JOIN LATERAL (
+           SELECT COUNT(*) AS checked, COUNT(*) FILTER (WHERE NOT l2.exists_in_catalog) AS missing
+             FROM product_marketplace_listings l2 WHERE l2.product_id = p.id
+         ) d ON true
+        WHERE p.workspace_id = $1 AND p.is_active = true
+          ${includeDead ? "" : "AND NOT (d.checked > 0 AND d.missing = d.checked)"}
+        GROUP BY l.country_code, l.marketplace_id
+        ORDER BY l.country_code`,
+      [req.workspaceId]
+    );
+
+    // Brand list for the picker — only brands that actually have checked rows,
+    // so the dropdown can never offer an option that returns nothing.
+    const { rows: brands } = await query(
+      `SELECT DISTINCT p.brand
+         FROM products p
+        WHERE p.workspace_id = $1 AND p.is_active = true
+          AND NULLIF(p.brand, '') IS NOT NULL
+          AND EXISTS (SELECT 1 FROM product_marketplace_listings l WHERE l.product_id = p.id)
+        ORDER BY p.brand`,
+      [req.workspaceId]
+    );
+
+    res.json({
+      marketplaces: EU_MARKETPLACES, items: rows, byCountry, filter, country,
+      includeDead, deadCount: deadRow?.n || 0,
+      issue, brand, ads, coverage, sort,
+      brands: brands.map(b => b.brand),
+      issueCodes: MKT_ISSUE_CODES,
+    });
+  } catch (err) { next(err); }
+});
+
+// POST /products/marketplaces/check — run the cross-country sweep now.
+// Optional body: { asins: [...], marketplaceIds: [...] } to narrow the scope —
+// a full sweep is 2 SP-API calls per (ASIN, country) and runs for hours.
+router.post("/marketplaces/check", async (req, res, next) => {
+  try {
+    if (!process.env.SP_API_REFRESH_TOKEN) {
+      return res.status(503).json({ error: "SP-API not configured" });
+    }
+    const asins = Array.isArray(req.body?.asins)
+      ? req.body.asins.filter(a => /^[A-Za-z0-9]{10}$/.test(String(a).trim()))
+      : [];
+    const marketplaceIds = Array.isArray(req.body?.marketplaceIds)
+      ? req.body.marketplaceIds.filter(m => EU_MARKETPLACE_IDS.includes(m))
+      : [];
+    // Resume rather than restart. A sweep runs for hours, so anything that stops the worker
+    // mid-way (deploy, restart, BullMQ giving up after repeated stalls) leaves a partly-checked
+    // catalogue; re-running from zero spends the whole SP-API quota again on rows that are
+    // already fresh. staleHours > 0 skips products whose entire country set was checked that
+    // recently. 0 (the default) keeps the plain "check everything now" behaviour.
+    const staleHours = Number.isFinite(Number(req.body?.staleHours))
+      ? Math.max(0, Math.min(168, Number(req.body.staleHours)))
+      : 0;
+
+    const { rows: [product] } = await query(
+      `SELECT marketplace_id FROM products
+        WHERE workspace_id=$1 AND is_active=true LIMIT 1`,
+      [req.workspaceId]
+    );
+    if (!product) return res.status(400).json({ error: "No active products to check" });
+
+    const job = await queueSpSync(
+      req.workspaceId, product.marketplace_id, ["marketplace_listings"], 3,
+      { asins, marketplaceIds, staleHours }
+    );
+    res.json({
+      jobId: job.id, asins: asins.length || "all",
+      countries: marketplaceIds.length || EU_MARKETPLACE_IDS.length, staleHours,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /products/marketplaces/status — is a cross-country sweep running, and how far along?
+//
+// A sweep is queued, not run inline, so POST /marketplaces/check returns long before any work
+// happens. Without this the UI could only report "queued" and had to re-enable its button
+// immediately, while the sweep itself ran for another couple of hours.
+//
+// Declared before "/:id/marketplaces" so Express does not match "marketplaces" as an :id.
+router.get("/marketplaces/status", async (req, res, next) => {
+  try {
+    // A sweep whose worker died (backend restart, container kill) leaves its log row
+    // 'running' forever — nothing ever writes completed_at. Without an age cut-off the
+    // button that keys off this endpoint would stay disabled permanently. A full sweep is
+    // ~2.5h, so anything older than STALE_RUN_HOURS is treated as dead, not running.
+    const STALE_RUN_HOURS = 6;
+    const { rows: [run] } = await query(
+      `SELECT id, started_at, progress_done, progress_total
+         FROM sp_sync_log
+        WHERE workspace_id=$1 AND sync_type='marketplace_listings' AND status='running'
+          AND started_at > NOW() - make_interval(hours => $2::int)
+        ORDER BY started_at DESC LIMIT 1`,
+      [req.workspaceId, STALE_RUN_HOURS]
+    );
+
+    if (!run) {
+      // Report the last finish too, so the page can tell "never run" from "done a while ago".
+      const { rows: [last] } = await query(
+        `SELECT status, completed_at, records_upserted
+           FROM sp_sync_log
+          WHERE workspace_id=$1 AND sync_type='marketplace_listings'
+            AND (status <> 'running' OR started_at <= NOW() - make_interval(hours => $2::int))
+          ORDER BY started_at DESC LIMIT 1`,
+        [req.workspaceId, STALE_RUN_HOURS]
+      );
+      return res.json({
+        running: false,
+        lastStatus:      last?.status || null,
+        lastCompletedAt: last?.completed_at || null,
+        lastUpserted:    last?.records_upserted ?? null,
+      });
+    }
+
+    // A sweep started before progress tracking existed has no counters. Fall back to counting
+    // the rows it has written so far — same number, just costlier to obtain.
+    let done  = run.progress_done;
+    let total = run.progress_total;
+    if (done == null) {
+      const { rows: [c] } = await query(
+        `SELECT COUNT(*)::int AS n
+           FROM product_marketplace_listings l
+           JOIN products p ON p.id = l.product_id
+          WHERE p.workspace_id=$1 AND l.checked_at >= $2`,
+        [req.workspaceId, run.started_at]
+      );
+      done = c?.n ?? 0;
+    }
+
+    res.json({
+      running: true,
+      startedAt: run.started_at,
+      done,
+      total: total ?? null,
+      pct: total ? Math.min(100, Math.round((done / total) * 100)) : null,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /products/:id/marketplaces — full per-country detail for one ASIN.
+router.get("/:id/marketplaces", async (req, res, next) => {
+  try {
+    const { rows: [product] } = await query(
+      `SELECT id, asin, title, image_url, marketplace_id FROM products
+        WHERE id=$1 AND workspace_id=$2`,
+      [req.params.id, req.workspaceId]
+    );
+    if (!product) return res.status(404).json({ error: "Product not found" });
+
+    const { rows } = await query(
+      `SELECT marketplace_id, country_code, is_reference, exists_in_catalog, title,
+              title_len, bullet_count, image_count, has_zoomable_image, has_description,
+              has_aplus, best_rank, best_category, issues, issue_count, error_message, checked_at
+         FROM product_marketplace_listings
+        WHERE product_id=$1
+        ORDER BY is_reference DESC, country_code`,
+      [product.id]
+    );
+
+    res.json({
+      product,
+      marketplaces: EU_MARKETPLACES,
+      listings: rows.map(r => ({ ...r, url: listingUrl(product.asin, r.marketplace_id) })),
+    });
   } catch (err) { next(err); }
 });
 

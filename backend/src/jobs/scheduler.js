@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueAiAnalysis, queueSpSync, queueRankCheck, queueProductMetaSync, queueWawiSync, queueEmailCampaign } = require("./workers");
+const { queueEntitySync, queueReportPipeline, queueRuleExecution, queueMetricsBackfill, queueSpSync, queueRankCheck, queueProductMetaSync, queueWawiSync, queueEmailCampaign } = require("./workers");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 const { evaluateWorkspaceAlerts } = require("../services/alerts/evaluate");
@@ -147,27 +147,14 @@ async function startScheduler() {
     null, true, "UTC"
   );
 
-  // ─── Daily AI analysis: every day at 07:00 UTC ────────────────────────────
-  const aiAnalysisJob = new CronJob(
-    "0 7 * * *",
-    async () => {
-      logger.info("Cron: Queuing AI analysis for all active workspaces");
-      try {
-        const { rows } = await query(
-          `SELECT DISTINCT p.workspace_id FROM amazon_profiles p
-           JOIN amazon_connections c ON c.id = p.connection_id
-           WHERE p.is_attached = TRUE AND c.status = 'active' AND p.workspace_id IS NOT NULL`
-        );
-        for (const { workspace_id } of rows) {
-          await queueAiAnalysis(workspace_id);
-        }
-        logger.info(`Cron: Queued AI analysis for ${rows.length} workspaces`);
-      } catch (err) {
-        logger.error("Cron AI analysis failed", { error: err.message });
-      }
-    },
-    null, true, "UTC"
-  );
+  // ─── AI analysis: NO cron — user-initiated only ────────────────────────────
+  // There used to be a daily 07:00 UTC job here that queued an AI analysis for every
+  // workspace with an attached profile. It had no on/off switch anywhere (ai_workspace_settings
+  // holds business context only), so it billed a paid Claude call per workspace per day
+  // regardless of whether anyone read the output — over 2026-08-06..09 it produced 59
+  // near-identical recommendations, 0 of which were applied or dismissed.
+  // AI analysis now runs only via POST /ai/analyze, i.e. when a user asks for it.
+  // Do not reintroduce a schedule here without a per-workspace opt-in.
 
   // ─── SP-API sync: every 4 hours (BSR + inventory + pricing) ─────────────────
   const spSyncJob = new CronJob("0 */4 * * *", async () => {
@@ -200,6 +187,30 @@ async function startScheduler() {
       logger.info("Cron: Listing health sync queued", { pairs: rows.length });
     } catch (err) {
       logger.error("Cron listing health sync failed", { error: err.message });
+    }
+  }, null, true, "UTC");
+
+  // ─── Cross-country listings: weekly, Sunday 03:00 UTC ───────────────────────
+  // 2 SP-API calls per (ASIN, country) across 9 EU marketplaces — a full sweep
+  // runs for hours at the Catalog Items 5 rps limit, and listing content abroad
+  // changes on the order of weeks, so this is weekly rather than daily. Queued
+  // once per workspace (not per marketplace): the sync fans out to the
+  // marketplaces itself.
+  const marketplaceListingsJob = new CronJob("0 3 * * 0", async () => {
+    if (!process.env.SP_API_REFRESH_TOKEN) return;
+    try {
+      const { rows } = await query(
+        "SELECT DISTINCT workspace_id, marketplace_id FROM products WHERE is_active = true"
+      );
+      const seen = new Set();
+      for (const { workspace_id, marketplace_id } of rows) {
+        if (seen.has(workspace_id)) continue;
+        seen.add(workspace_id);
+        await queueSpSync(workspace_id, marketplace_id, ["marketplace_listings"], 5);
+      }
+      logger.info("Cron: cross-country listing sync queued", { workspaces: seen.size });
+    } catch (err) {
+      logger.error("Cron marketplace listings sync failed", { error: err.message });
     }
   }, null, true, "UTC");
 
@@ -333,7 +344,7 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, aiAnalysisJob, spSyncJob, listingHealthJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob, emailDripJob];
+  jobs = [entitySyncJob, reportSyncJob, ruleEngineJob, metricsBackfillJob, spSyncJob, listingHealthJob, marketplaceListingsJob, spDailyJob, reportCleanupJob, rankCheckJob, productMetaJob, alertCheckJob, wawiSyncJob, emailScheduleJob, emailDripJob];
   logger.info("Scheduler started with smart sync scheduling");
 }
 

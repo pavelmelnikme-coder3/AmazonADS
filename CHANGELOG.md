@@ -6,6 +6,69 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-14 — Products: order & revenue integrity
+
+Prompted by two figures on the same listing card disagreeing — "Заказы (период) 180" next to
+"Заказы 7д 204". Both numbers were reproducible from the database, which is what made the audit
+worth doing: nothing was broken loudly, the page simply measured four different things and called
+two of them the same name.
+
+### Fixed
+- **Revenue was multiplied by quantity twice.** `sp_order_items.item_price_amount` is Amazon's
+  `ItemPrice`, which is the **extended** price of the line (unit price × quantity), not the unit
+  price — verified against `raw_data`, where a quantity of 2 carries `{"Amount": "71.98"}` = 2 ×
+  35.99. The product list computed `item_price_amount * quantity_ordered`, so every multi-unit line
+  counted its money twice: `revenue_7d` for B0G53M8LLH read €5524.70 against a true €3384.97
+  (**+64%**). Because that figure is the TACOS denominator and the profit base, TACOS was reported
+  low and profit high on exactly the listings that sell in multipacks. Every other code path
+  (`alerts/evaluate.js`, `/products/timeseries`, `/products/period-orders`) already summed it
+  plainly, so the product list was the lone outlier.
+- **The cancelled-order filter never matched anything.** Amazon's `OrderStatus` is `Canceled`
+  with one `l`; the query filtered `NOT IN ('Cancelled', 'Pending')`. All 174 cancelled orders of
+  the last 30 days passed straight through, and `Pending` — a real order that flips to `Unshipped`
+  within hours — was discarded instead. Harmless only by luck: cancelled lines carry
+  `quantity_ordered = 0`, so the double-multiplication zeroed them. Fixing the revenue formula
+  would have started admitting cancelled revenue on the next deploy. Now
+  `NOT IN ('Canceled', 'Unfulfillable')`, matching `routes/metrics.js`, and `Pending` is kept —
+  which also removes the reason the two order figures could never agree.
+- **A listing's order count double-counted shared orders.** `/products/period-orders` returned a
+  per-ASIN `COUNT(DISTINCT o.id)` and the frontend added those up per variation family, so one
+  order containing two variations was counted once per variation (180 against a true 179; 128
+  against 126 for B0G53M8LLH). The endpoint now also returns `by_listing`, grouped on
+  `COALESCE(p.parent_asin, UPPER(oi.asin))`, with the `products` join restricted to `is_active` so
+  an archived variation cannot fold its orders into a listing whose rendered children exclude it.
+  `/products/timeseries` gained the same treatment (a listing-level daily count; the aggregate
+  series no longer sums per-ASIN orders). Units and revenue stay additive and keep following the
+  visible children; when a filter splits a family the frontend falls back to the per-ASIN sum,
+  since `by_listing` covers the whole family.
+- **Profit charged COGS against revenue that had not arrived yet.** A just-placed order reports its
+  quantity before Amazon reports an `ItemPrice`, so full quantity × COGS was subtracted from
+  partial revenue, showing a phantom loss on the current day. `profit_*` now uses
+  `qty_*_priced` — the quantity of lines that already carry a price — pairing COGS with the very
+  revenue it belongs to. Same reasoning as the 2026-06-19 `item_price_amount IS NOT NULL` fix in
+  the movers alert.
+- **Period totals froze while the date pickers kept moving.** The fetch was gated on
+  `sortBy === "orders"`, so sorting by anything else left the previously fetched numbers on screen
+  under a newly chosen range. It now keeps following the pickers once the chip is visible, and
+  discards superseded responses so the slowest request cannot overwrite the range the user settled
+  on.
+
+### Changed
+- **Two different metrics were both labelled "Заказы".** `qty_7d` is `SUM(quantity_ordered)` —
+  units, over a fixed `CURRENT_DATE-7 .. -1` window — while the period chip counts orders over the
+  date picker's range. The KPI is now "Штуки / Units / Einheiten" (`products.trendUnits`), and the
+  hardcoded `"7д"` on the units/PPC/ACOS/TACOS labels became `products.d7`, so those stop showing
+  Russian in the English and German UI. Tooltips spell out both windows: the chip reports its
+  actual date range plus the unit count, and the 7-day KPIs say they ignore the picker above.
+
+Verified on production, where the two endpoints now agree exactly: 179 orders / 181 units /
+€12928.70 for B0C823KN2M over 08.08–13.08, with the timeseries aggregate showing 38 orders on
+08-09 where the naive per-ASIN sum gives 39. Worth remembering when reading a range that ends
+today: the current day holds almost no orders at any given moment (3 line items by 09:30 against
+~230/day), so it always looks short. 1171 backend tests.
+
+---
+
 ## [Unreleased] — 2026-08-06 — AI features restored, report-throttle data gaps, abandoned sync runs
 
 ### Fixed
@@ -130,63 +193,120 @@ failed to negate on every run for 10 days straight without the status ever showi
 
 ---
 
-## [Unreleased] — 2026-08-03 — Rules: add/remove oscillation, un-negatable terms, hidden Amazon rejections
+## [Unreleased] — 2026-07-31 — Products: cross-country listing check ("Countries" tab)
 
-A 7-day audit of rule runs showed a flawless record — 8 daily rules × 7 days, every run
-`completed`, `actions_failed = 0`. That clean status was itself the bug: underneath it, 6–9
-negatives per day were being added and removed **in the same run**, and one search term had
-failed to negate on every run for 10 days straight without the status ever showing it.
+### Added
+- **"Countries" tab on the Products page** — the same ASIN checked in all **nine EU marketplaces** the seller
+  participates in (DE, FR, IT, ES, NL, BE, PL, SE, GB). Matrix of ASIN × country: red = no listing at all,
+  amber = N findings, green = clean; expanding a row lists every finding per country with a deep link to that
+  country's product page. Per-country rollup strip above the matrix, filters (all / with findings / not listed)
+  and server-side ASIN/title search.
+- **Cross-country recommendations** on top of the existing six listing-health criteria, scored against the
+  listing in the seller's **home marketplace**: `not_listed`, `title_not_localized`, `bullets_not_localized`,
+  `aplus_missing_vs_ref`, `fewer_images_vs_ref`, `no_bsr`. `not_listed` suppresses the content checks (they
+  would all fire meaninglessly on an absent listing) and `aplus_missing_vs_ref` supersedes the plain `aplus`
+  finding so the same gap is never listed twice.
+- New table `product_marketplace_listings` (migration `044_marketplace_listings.sql`), one row per
+  (product, marketplace). Kept separate from `product_listing_health` so `products` does not grow 9× — a
+  products row per country would break every per-ASIN aggregate joining on
+  `(workspace_id, asin, marketplace_id)`.
+- `syncMarketplaceListings()` in `services/amazon/spSync.js` + `marketplace_listings` sync type on the
+  `sp-sync` queue, `POST /products/marketplaces/check` (optional `asins` / `marketplaceIds` to narrow scope),
+  `GET /products/marketplaces` (matrix + per-country rollup), `GET /products/:id/marketplaces` (per-ASIN detail).
+- **Live progress while a sweep runs** — `GET /products/marketplaces/status` plus `progress_done` /
+  `progress_total` on `sp_sync_log` (migration `047`), polled every 5s by the Countries tab. The
+  check is *queued*, not run inline, so `POST /marketplaces/check` returned in milliseconds while
+  the sweep itself walked ~5k (ASIN, country) pairs for a couple of hours: the button re-enabled
+  immediately, invited a second pointless sweep, and gave no sign anything was happening. The
+  button is now disabled for the whole sweep (including the gap before a worker picks the job up)
+  and a bar shows `done / total · %`. A run whose worker died — a backend restart leaves its log
+  row `running` with no `completed_at` — is treated as finished after 6 hours, so the button can
+  never latch disabled forever.
+- Weekly cron, Sunday 03:00 UTC. Weekly rather than daily: 2 SP-API calls per (ASIN, country) is ~10k calls
+  for 553 ASINs at the Catalog Items 5 rps limit, and listing content abroad changes on the order of weeks.
+- `services/amazon/marketplaces.js` — the EU marketplace catalogue, verified 2026-07-31 against
+  `GET /sellers/v1/marketplaceParticipations` on the live account.
+- **Click a country to scope the list** — country cards and column headers act as a filter for that one
+  country (`?country=IT`). It *replaces* the cross-country `filter`, which then says which kind of problem
+  counts there; compounding the two would mean "has an issue somewhere AND in Italy", which is not what
+  clicking Italy means. Rows are then ranked worst-in-that-country first.
+- **Dead-ASIN suppression** — ASINs absent from *every* checked country are hidden by default
+  (`?includeDead=1` to show them), with a checkbox stating how many. Half the tracked catalogue (276 of 551)
+  is long-dead listings, and since the default sort ranks by "missing in most countries" they otherwise
+  filled the first screens. The test is "missing everywhere", not "missing at home", so an ASIN dead in the
+  home marketplace but still live abroad — the interesting case — stays visible.
+- **Per-country thumbnails** (`image_url`, migrations `045` / `046`) with a title/image fallback to any
+  country that has one. `products.image_url` and `products.title` only ever hold the home-marketplace copy
+  and are empty for every ASIN dead at home, so the matrix showed blank rows for products that do have a
+  photo and a name abroad. Backfilled from the catalog payload already stored on each row — no extra
+  SP-API calls.
+- **Adaptive throttling** for the sweep: 700 ms base pace (~1.1 rps against a documented 5 rps), widening
+  ×1.5 per 429 up to 10 s and easing back only after 25 clean calls, plus a `staleHours` option so an
+  interrupted sweep resumes instead of re-spending the quota on rows it already has.
+- **The Products page remembers where you were across a reload** — active tab, and each tab's filters
+  (country, findings chip, show-dead, search; brand / availability / advertising / recommendations / sort /
+  grouping / new-arrivals window). New `usePersistedState` helper following the existing `af_page` /
+  `af_theme` / `af_sidebar` convention. Restored values are validated, so a stale tab name or a corrupt
+  entry falls back to the default instead of throwing on mount, and writes are wrapped so a private-mode or
+  quota failure cannot take the page down. A restored country the server no longer accepts clears itself
+  from the `country` it echoes back. The top-level page already persisted via `af_page`; only the in-page
+  state was being lost.
 
 ### Fixed
-- **Add/remove oscillation.** Reconciliation aggregated `search_term_metrics` **campaign-wide**
-  while the add path grouped per `(query, campaign, ad_group, match_type)`, so the two judged the
-  same term differently and each run undid the previous one. Live case: `campingstuhl 150 kg`
-  scored 25 clicks / 1 order / ACOS 88.5 on the ad-group slice the rule matched, but 29 clicks /
-  2 orders campaign-wide, failing the rule's `orders = 1`. Reconciliation now re-evaluates at the
-  add path's granularity, scoped to the negative's own ad group, and removes a negative only when
-  **no** slice still justifies it. Applied to negative keywords and negative targets alike.
-  `outdoor fussmatte wetterfest` had been added and removed 30 times in 30 days.
-- **Negatives never changed owner.** Rule A archived its row, rule B inserted a *new* one, the
-  write-back's duplicate-recovery re-enabled the keyword on Amazon and deleted its own placeholder
-  on the unique-index conflict — leaving the archived row still owned by A, which the 10:00 sync
-  flipped back to `enabled` so A archived it again the next day, indefinitely. Re-negating now
-  **re-activates and re-owns** an inactive row for the same ad group instead of inserting, across
-  the negative-keyword path and all four negative-target write sites (shared `claimNegTargetRow`).
-  `already_negative` remains campaign-wide; only re-use is ad-group scoped.
-- **Search terms Amazon would never accept.** Amazon's own reports return German queries carrying
-  U+00A0 / U+202F / U+200B; sending that text back to the write API fails with
-  `malformedValueError / PATTERN_NOT_MATCHED "Keyword is invalid"`. 44 such terms are in the
-  database; one had crossed a rule threshold and failed daily from 2026-07-25. New
-  `services/amazon/keywordText.js` normalizes typographic whitespace, and **both** the entity
-  query and reconciliation group/compare on the normalized form — Amazon treats the spellings as
-  one negative keyword, so the engine must too. The ASIN-shape test also runs on normalized text.
-- **Amazon rejections were invisible.** Write-backs are non-fatal, so a rejection never reached
-  `errors` and the run reported `completed / 0 failures` while the audit log carried a daily
-  `amazon_status = 'error'`. Runs now report `writeback_errors` / `writeback_error_count`,
-  `rule_executions.actions_failed` counts them, and such a run is stored as `partial`.
-- **207 Multi-Status treated as success.** `archiveNegativeKeyword` / `archiveNegativeTarget`
-  never inspected the response body, so per-item rejections were reported as `{ ok: true }`
-  (`pushNegativeKeyword` already checked its `error[]` — that asymmetry is why adds surfaced
-  errors and archives never did). Shared `partialError()` now checks both.
-- **`PAUSED` negatives dropped out of sync.** Archiving a negative sets `PAUSED` on Amazon
-  (`ARCHIVED` is rejected there) while `stateFilter` only requested `ENABLED, ARCHIVED`, so those
-  rows silently disappeared from the sync and local state drifted. Now includes `PAUSED`.
-- **`archived-…` ids sent to Amazon as real entity ids** in the negative-**keyword** reconcile
-  branch (the target branch already guarded against it) — unified in `isSyntheticNegId()`.
+- **Wrong NL marketplace ID** in `spClient.js`'s `MARKETPLACE_REGION` map: `A1805IZSGTT6HW` → `A1805IZSGTT6HS`.
+  Harmless in practice (unknown IDs already fell through to the EU endpoint) but it made the map wrong for
+  any future region routing. Added the missing BE/PL/SE/IE/TR entries at the same time.
+- **Missing home-marketplace listing reported as clean.** The cross-country checks are skipped for the
+  reference country and `not_listed` lives in them, so an absent home listing was written with zero
+  findings: the cell rendered red while the detail panel underneath claimed the listing was fine (64 rows
+  on prod). `not_listed` now applies on absence regardless of country.
+- **Double-counted summary strip.** "Not listed" is itself a finding, so the per-country rollup counted
+  those ASINs twice — BE read "65 not listed + 67 with findings out of 76". "With findings" now counts only
+  countries where the listing exists. The rollup also honours the dead-ASIN suppression, so a card's number
+  equals what clicking it returns (verified across all nine countries).
+- **Blank thumbnail when a listing has no `MAIN` image.** Amazon does not guarantee one: `B099ZVM384`
+  returns 24 images in BE and SE across `PT01`–`PT08` with no `MAIN` at all. Falls back to the
+  lowest-numbered supplementary photo.
+- **Country filter cleared itself the instant it was applied.** The self-heal for an unsupported country
+  compared against the `country` the server echoes back, but `useAsync` keeps the previous response while
+  the next is in flight — so it read the *stale* response (`country: null`), cleared the selection and left
+  two requests racing, with the card never highlighting. Now checked against the marketplace list in the
+  response instead, which cannot go stale in a way that matters. Caught by driving the real UI in a browser.
+
+- **Stale responses could win the render.** `useAsync` had no request-sequence guard, so the *last to
+  return* won rather than the last requested — changing several filters in quick succession left an older
+  result on screen looking authoritative (reproduced: a six-filter burst rendered 68 rows where the correct
+  answer was 6). Superseded responses are now discarded. Fixed in the shared hook, so every page benefits.
+
+### Changed
+- Country names are shown in full (localized in en/ru/de) on the summary cards, column headers, the expanded
+  per-country panel and the active-filter banner. The column headers opt out of the global `th` rule
+  (uppercase monospace, wide letter-spacing) — fine for two-letter codes but ~30% wider for full Cyrillic
+  names, which pushed the last column out of view.
+- **Full filter bar on the Countries tab**, grouped by the question each control answers: what to look at
+  (search + all / with-findings / not-listed chips), which finding (`issue`, split into cross-country vs
+  listing-quality groups), which products (`brand`, `ads`, `coverage`), then ordering (`sort`) — plus a live
+  result count and a reset that only appears once something is set. All are combinable, all persist across a
+  reload, and a persisted brand that no longer exists clears itself.
+  `coverage` buckets products by how many countries they are actually live in (one country / partial / all),
+  which is the expansion signal: 25 of 336 ASINs are advertised yet live in a single country.
 
 ### Notes
-- The oscillation was structural, not a regression: the campaign-wide reconcile lookup shipped in
-  `166da1f` (2026-05-15) and became reachable when the paired boundary rules (`orders = 0` /
-  `orders = 1`) were created on 2026-05-20. Isolated churn from 2026-05-12, persistent from
-  2026-06-22, growing 2/day → 7–8/day as more terms accumulated clicks and landed on the boundary.
-- Measured cost was modest: of 62 churning terms, 33 spent **€98.58 with zero orders** (the real
-  leak); the other 29 spent €654.59 and returned €4941.70 at 13.2% ACOS, so un-negating *those*
-  was correct. The damage was instability and a permanently un-negatable class of terms.
-- Verified on production by four consecutive runs: 15 adds / 8 removes / 7 same-run churn →
-  **0 / 0 / 0 with zero audit writes** on an immediate re-run of the finished code. A second run
-  being a true no-op is the standing health check for this invariant.
-- 1089 tests / 47 suites. The key regression test was confirmed to fail against the old logic on
-  the real `campingstuhl 150 kg` numbers before the fix was accepted.
+- `getCatalogItem` accepts a comma-separated `marketplaceIds` list, but verified 2026-07-31 that it is
+  **all-or-nothing**: if the ASIN is absent from a single requested marketplace the whole request 404s —
+  exactly the case the check most needs data for. Hence one call per (ASIN, marketplace).
+- IE, TR, AE and SA are excluded on purpose: TR reports `hasSuspendedListings=true`, and IE/AE/SA have no
+  Amazon Ads profile. US/CA/MX and JP would need a **separate** SP-API authorization — a refresh token is
+  bound to one region.
+- SP-API errors now carry `.status` / `.spCode` so callers can tell a genuine 404 ("not listed here") from a
+  real failure.
+- Half the tracked catalogue is ASINs that are dead everywhere, which is why the dead-ASIN suppression above
+  exists. Their "missing" rows are correct data, not a defect — every one of them has an empty
+  `products.title`, the same signal the "unavailable" filter on the All-products tab already uses.
+- **Pre-existing test flakiness, unrelated to this change**: the full backend suite fails roughly one run in
+  six under parallel load, with a supertest `socket hang up` that makes the next test read the previous
+  test's response. Reproduced on a baseline without the new suite (`audit.test.js`), and `auth.test.js` in
+  isolation passed 20/20. Not addressed here — flagged as its own task.
 
 ---
 

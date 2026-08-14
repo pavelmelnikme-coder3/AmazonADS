@@ -8,15 +8,17 @@ const USER_ID = "user-0001-0000-0000-000000000001";
 
 const SAMPLE_TOTALS = {
   impressions: "50000", clicks: "1000", spend: "500.00",
-  sales_14d: "2000.00", orders_14d: "80",
-  ctr: "0.02", cpc: "0.50", acos_14d: "25.00", roas_14d: "4.00",
+  sales_14d: "2000.00", orders: "80",
+  // 80 ad orders / 1000 ad clicks = 8%
+  ctr: "0.02", cpc: "0.50", acos_14d: "25.00", roas_14d: "4.00", cvr: "8.00",
 };
 const SAMPLE_TREND = [
   { date: "2026-04-20", impressions: "7000", clicks: "140", spend: "70.00",
     sales_14d: "280.00", orders_14d: "12", ctr: "0.02", cpc: "0.50", acos: "25.00", roas: "4.00",
-    total_revenue: null, tacos: null },
+    cvr: "8.57", total_revenue: null, tacos: null },
 ];
-const SAMPLE_PREV = { spend: "450.00", sales_14d: "1800.00", acos_14d: "25.00", roas_14d: "4.00" };
+const SAMPLE_PREV = { spend: "450.00", sales_14d: "1800.00", acos_14d: "25.00", roas_14d: "4.00",
+                      clicks: "900", orders: "63", cvr: "7.00" };
 
 jest.mock("../src/db/pool", () => ({ query: jest.fn() }));
 jest.mock("../src/config/logger", () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -101,6 +103,53 @@ describe("GET /metrics/summary", () => {
     const res = await request(app).get("/metrics/summary");
     expect(res.status).toBe(200);
     expect(parseFloat(res.body.totals.spend)).toBe(0);
+  });
+
+  // Ad conversion rate — ad orders per ad click, on the same 14-day attribution window
+  // as ACOS/ROAS so the dashboard tiles stay mutually consistent.
+  describe("ad conversion rate (cvr)", () => {
+    it("returns cvr in totals", async () => {
+      mockSummaryQueries();
+      const res = await request(app).get("/metrics/summary");
+      expect(res.body.totals.cvr).toBe("8.00");
+    });
+
+    it("computes the delta against the previous period", async () => {
+      mockSummaryQueries();
+      const res = await request(app).get("/metrics/summary");
+      // 8.00 vs 7.00 → +14.3%
+      expect(res.body.deltas.cvr).toBe("14.3");
+    });
+
+    it("carries cvr through the daily trend for the sparkline", async () => {
+      mockSummaryQueries();
+      const res = await request(app).get("/metrics/summary");
+      expect(res.body.trend[0].cvr).toBe("8.57");
+    });
+
+    // A period with no clicks has no conversion rate — that is different from 0%, and the
+    // dashboard renders an em dash for it. Every other total is coerced to "0.00"; cvr is
+    // deliberately not, so the distinction survives to the UI.
+    it("is null when the period had no clicks", async () => {
+      dbQuery
+        .mockResolvedValueOnce({ rows: [{ impressions: "0", clicks: "0", spend: null, cvr: null }] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{}] })
+        .mockResolvedValueOnce({ rows: [{ total_revenue: null }] });
+      const res = await request(app).get("/metrics/summary");
+      expect(res.body.totals.cvr).toBeNull();
+      expect(res.body.totals.acos).toBe("0.00"); // the others still coerce
+    });
+
+    it("has no delta when the previous period had no clicks", async () => {
+      dbQuery
+        .mockResolvedValueOnce({ rows: [SAMPLE_TOTALS] })
+        .mockResolvedValueOnce({ rows: SAMPLE_TREND })
+        .mockResolvedValueOnce({ rows: [{ spend: "0", cvr: null }] })
+        .mockResolvedValueOnce({ rows: [{ total_revenue: null }] });
+      const res = await request(app).get("/metrics/summary");
+      expect(res.body.deltas.cvr).toBeNull();
+    });
   });
 });
 

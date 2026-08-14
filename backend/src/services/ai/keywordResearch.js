@@ -15,6 +15,22 @@ const logger = require("../../config/logger");
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const { MODEL, extractText } = require("./claudeClient");
 
+/**
+ * Record what a paid Claude call cost. There is no usage table — these log lines are the
+ * only record of token spend, and keyword research (which fans out one call per 50-keyword
+ * batch) had none at all, so a research run's cost was entirely invisible.
+ */
+function logUsage(fn, message, extra = {}) {
+  logger.info("Claude response received", {
+    route: "keywordResearch",
+    fn,
+    model: MODEL,
+    inputTokens:  message?.usage?.input_tokens,
+    outputTokens: message?.usage?.output_tokens,
+    ...extra,
+  });
+}
+
 const LOCALE_NAMES = {
   en: "English", de: "German", fr: "French", es: "Spanish",
   it: "Italian", ja: "Japanese", zh: "Chinese (Simplified)", pt: "Portuguese",
@@ -100,6 +116,7 @@ relevance: 90-100=critical for title, 75-89=important for bullets/backend, 60-74
       max_tokens: 8000,
       messages: [{ role: "user", content: prompt }],
     });
+    logUsage("generateKeywords", response, { locale });
 
     const text = extractText(response) || "{}";
     // Strip markdown code fences if model wrapped it
@@ -170,6 +187,7 @@ Respond ONLY with valid JSON:
         max_tokens: 12000,
         messages: [{ role: "user", content: prompt }],
       });
+      logUsage("scoreAndFilterKeywords", response, { batchSize: batch.length });
 
       const text = extractText(response) || "{}";
       const jsonText = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");

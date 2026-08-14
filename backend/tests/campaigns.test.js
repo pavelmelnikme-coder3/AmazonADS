@@ -661,14 +661,17 @@ describe("PATCH /campaigns/:id", () => {
     expect(payload.state).toBe("PAUSED");
   });
 
-  it("updates dailyBudget — SP uses flat dailyBudget field", async () => {
+  // Regression: this used to assert the v2-style flat `dailyBudget`, which is not part of the
+  // SP v3 campaign schema. Amazon ignores the unknown field and still answers 207 success, so
+  // the budget silently never changed — both here and in the rule engine. SP nests it like SB.
+  it("updates dailyBudget — SP uses the nested v3 budget object", async () => {
     mockPatch();
     const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ dailyBudget: 75 });
     expect(res.status).toBe(200);
     expect(res.body.after.dailyBudget).toBe(75);
     const payload = putPayload();
-    expect(payload.dailyBudget).toBe(75);
-    expect(payload.budget).toBeUndefined();
+    expect(payload.budget).toEqual({ budget: 75, budgetType: "DAILY" });
+    expect(payload.dailyBudget).toBeUndefined();
   });
 
   it("SB campaign — budget uses nested budget object", async () => {

@@ -374,3 +374,189 @@ describe("DELETE /products/notes/:noteId", () => {
     expect(params).toContain(WS_ID);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Order-data integrity — regressions fixed 2026-08-14
+//
+//  Three separate defects made the Products page disagree with itself:
+//    1. revenue_* multiplied Amazon's ItemPrice (already the extended line total)
+//       by quantity_ordered, inflating revenue and deflating TACOS/profit.
+//    2. The status filter said 'Cancelled'; Amazon spells it 'Canceled', so every
+//       cancelled line passed, while Pending (a real order) was dropped — and
+//       /period-orders kept Pending, so the two numbers could never agree.
+//    3. Listing-level order counts summed the per-ASIN COUNT(DISTINCT order),
+//       counting one order once per variation it touched.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("order metrics — revenue formula and status filter", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  const listSql = async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    await request(app).get("/products");
+    return dbQuery.mock.calls[0][0];
+  };
+
+  it("sums ItemPrice as-is — never multiplied by quantity_ordered", async () => {
+    const sql = await listSql();
+    expect(sql).not.toMatch(/item_price_amount\s*\*\s*oi\.quantity_ordered/);
+    expect(sql).toMatch(/THEN oi\.item_price_amount ELSE 0 END\), 0\) AS revenue_7d/);
+    expect(sql).toMatch(/THEN oi\.item_price_amount ELSE 0 END\), 0\) AS revenue_yesterday/);
+  });
+
+  it("filters cancelled orders using Amazon's spelling and keeps Pending", async () => {
+    const sql = await listSql();
+    expect(sql).not.toMatch(/'Cancelled'/);
+    expect(sql).toMatch(/order_status NOT IN \('Canceled', 'Unfulfillable'\)/);
+    expect(sql).not.toMatch(/NOT IN \([^)]*'Pending'/);
+  });
+
+  it("still counts units from quantity_ordered", async () => {
+    const sql = await listSql();
+    expect(sql).toMatch(/THEN oi\.quantity_ordered ELSE 0 END\), 0\) AS qty_7d,/);
+  });
+
+  it("charges COGS only against quantities whose revenue has landed", async () => {
+    const sql = await listSql();
+    // A just-placed order carries its quantity before Amazon reports an ItemPrice;
+    // pairing full quantity with partial revenue invented a loss.
+    expect(sql).toMatch(/AS qty_7d_priced/);
+    expect(sql).toMatch(/AS qty_yesterday_priced/);
+    expect(sql).toMatch(/cogs_per_unit, 0\) \* COALESCE\(orders\.qty_7d_priced, 0\)/);
+    expect(sql).toMatch(/cogs_per_unit, 0\) \* COALESCE\(orders\.qty_yesterday_priced, 0\)/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GET /products/period-orders
+// ─────────────────────────────────────────────────────────────────────────────
+describe("GET /products/period-orders", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  // One order (#1) contains two variations of the same listing; a second order (#2)
+  // contains only one of them. Per ASIN that reads as 1 + 2 orders; for the listing
+  // the truth is 2.
+  const byAsinRows = [
+    { asin: "B00AAAAAA1", orders: "1", units: "1", revenue: "10.00" },
+    { asin: "B00AAAAAA2", orders: "2", units: "3", revenue: "65.00" },
+  ];
+  const byListingRows = [
+    { listing_id: "B00PARENT1", orders: "2", units: "4", revenue: "75.00" },
+  ];
+  const mockBoth = () => {
+    dbQuery.mockResolvedValueOnce({ rows: byAsinRows });
+    dbQuery.mockResolvedValueOnce({ rows: byListingRows });
+  };
+
+  it("returns both per-ASIN and listing-deduplicated aggregations", async () => {
+    mockBoth();
+    const res = await request(app).get("/products/period-orders?start=2026-08-08&end=2026-08-14");
+
+    expect(res.status).toBe(200);
+    expect(res.body.start).toBe("2026-08-08");
+    expect(res.body.end).toBe("2026-08-14");
+    expect(res.body.by_asin.B00AAAAAA2).toEqual({ orders: 2, units: 3, revenue: 65 });
+    // The listing total is NOT the sum of its ASINs (1 + 2 = 3) — the shared order
+    // counts once.
+    expect(res.body.by_listing.B00PARENT1.orders).toBe(2);
+    expect(res.body.by_listing.B00PARENT1.units).toBe(4);
+    expect(res.body.by_listing.B00PARENT1.revenue).toBe(75);
+  });
+
+  it("groups the listing aggregation by parent ASIN, falling back to the ASIN", async () => {
+    mockBoth();
+    await request(app).get("/products/period-orders");
+
+    const listingSql = dbQuery.mock.calls[1][0];
+    expect(listingSql).toMatch(/COALESCE\(p\.parent_asin, UPPER\(oi\.asin\)\) AS listing_id/);
+    expect(listingSql).toMatch(/LEFT JOIN products p/);
+    expect(listingSql).toMatch(/COUNT\(DISTINCT o\.id\) AS orders/);
+  });
+
+  it("only folds ACTIVE variations into a listing bucket", async () => {
+    mockBoth();
+    await request(app).get("/products/period-orders");
+
+    // An archived variation would otherwise contribute orders to a listing whose
+    // rendered children no longer include it.
+    expect(dbQuery.mock.calls[1][0]).toMatch(/p\.asin = UPPER\(oi\.asin\) AND p\.is_active/);
+  });
+
+  it("uses the same status rule as the product list", async () => {
+    mockBoth();
+    await request(app).get("/products/period-orders");
+
+    for (const call of dbQuery.mock.calls) {
+      expect(call[0]).toMatch(/order_status NOT IN \('Canceled', 'Unfulfillable'\)/);
+    }
+  });
+
+  it("defaults to the last 30 days when no range is given", async () => {
+    mockBoth();
+    const res = await request(app).get("/products/period-orders");
+
+    expect(res.status).toBe(200);
+    expect(res.body.start).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(res.body.end).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const days = (new Date(res.body.end) - new Date(res.body.start)) / 86400000;
+    expect(days).toBe(29);
+  });
+
+  it("ignores a malformed date range instead of injecting it", async () => {
+    mockBoth();
+    const res = await request(app).get("/products/period-orders?start=yesterday&end=2026-13-99");
+
+    expect(res.status).toBe(200);
+    expect(res.body.start).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(res.body.end).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GET /products/timeseries — listing aggregate
+// ─────────────────────────────────────────────────────────────────────────────
+describe("GET /products/timeseries", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  it("takes aggregate orders from the deduplicated listing query, not the ASIN sum", async () => {
+    const d = "2026-08-10";
+    dbQuery.mockResolvedValueOnce({ rows: [] });                                   // bsr
+    dbQuery.mockResolvedValueOnce({ rows: [] });                                   // ad
+    dbQuery.mockResolvedValueOnce({ rows: [] });                                   // price
+    dbQuery.mockResolvedValueOnce({ rows: [                                        // per-ASIN orders
+      { asin: "B00AAAAAA1", d, orders: "1", units: "1", revenue: "10.00" },
+      { asin: "B00AAAAAA2", d, orders: "1", units: "2", revenue: "40.00" },
+    ] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ d, orders: "1" }] });                  // listing orders
+
+    const res = await request(app)
+      .get(`/products/timeseries?asins=B00AAAAAA1,B00AAAAAA2&start=${d}&end=${d}`);
+
+    expect(res.status).toBe(200);
+    const point = res.body.aggregate[0];
+    // Both ASINs report 1 order on this day, but it is the same order.
+    expect(point.orders).toBe(1);
+    // Units and revenue are genuinely additive across variations.
+    expect(point.units).toBe(3);
+    expect(point.revenue).toBe(50);
+    // Per-ASIN series keep their own counts.
+    expect(res.body.by_asin.B00AAAAAA1[0].orders).toBe(1);
+  });
+
+  it("reports zero orders for a day the listing query has no row for", async () => {
+    const d = "2026-08-10";
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .get(`/products/timeseries?asins=B00AAAAAA1&start=${d}&end=${d}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.aggregate[0].orders).toBe(0);
+  });
+});

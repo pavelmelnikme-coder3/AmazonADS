@@ -64,8 +64,16 @@ jest.mock("../src/services/amazon/writeback", () => ({
   pushNegativeKeyword:    jest.fn().mockResolvedValue({}),
   pushNegativeAsin:       jest.fn().mockResolvedValue({}),
   pushKeywordUpdates:     jest.fn().mockResolvedValue({}),
+  pushCampaignUpdates:    jest.fn().mockResolvedValue({ ok: true }),
   archiveNegativeKeyword: jest.fn().mockResolvedValue({ ok: true }),
   archiveNegativeTarget:  jest.fn().mockResolvedValue({ ok: true }),
+  // Real implementation — trackWriteback calls it on every resolved write-back to spot a
+  // 207 partial rejection, so a jest.fn() returning undefined would throw inside the .then().
+  partialError: (result, dataKey) => {
+    const errors = result?.[dataKey]?.error;
+    if (!Array.isArray(errors) || errors.length === 0) return null;
+    return errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
+  },
 }));
 jest.mock("../src/services/amazon/adsClient", () => ({
   put: jest.fn().mockResolvedValue({}),
@@ -96,7 +104,7 @@ jest.mock("../src/middleware/auth", () => ({
 const { query: dbQuery } = require("../src/db/pool");
 const { writeAudit }         = require("../src/routes/audit");
 const { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin,
-        archiveNegativeKeyword } = require("../src/services/amazon/writeback");
+        archiveNegativeKeyword, pushCampaignUpdates } = require("../src/services/amazon/writeback");
 const { put: apiPut } = require("../src/services/amazon/adsClient");
 
 const rulesRouter = require("../src/routes/rules");
@@ -1558,6 +1566,142 @@ describe("Reconciliation — negative keywords", () => {
 // Write-backs are deliberately non-fatal: the local DB is updated regardless, so a
 // rejection never reaches `errors` and the run used to report "completed / 0 failures".
 // On prod that hid a keyword Amazon rejected on every single run for 10 days straight.
+// ═════════════════════════════════════════════════════════════════════════════
+//  adjust_budget_pct — cap semantics and the Amazon write-back
+//
+//  This action had no test coverage at all, which is how the SP budget payload stayed
+//  wrong for a month: the rule reported 29 consecutive successful +20% raises while the
+//  budget on Amazon never moved (Amazon ignores the v2 `dailyBudget` field and still
+//  answers 207 success). See tests/writebackCampaign.test.js for the payload shape.
+// ═════════════════════════════════════════════════════════════════════════════
+describe("adjust_budget_pct", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  function makeCampaign(overrides = {}) {
+    return {
+      id: CAMP_ID, amazon_campaign_id: "AZ_CAMP_001", campaign_name: "Campaign A",
+      state: "enabled", campaign_state: "enabled", daily_budget: "50.00",
+      campaign_type: "sponsoredProducts", targeting_type: "MANUAL",
+      profile_db_id: "prof-001", amazon_profile_id: "123456789",
+      connection_id: "conn-001", marketplace_id: "ATVPDKIKX0DER",
+      clicks: 100, spend: "10.00", sales: "200", orders: 5, impressions: 5000,
+      acos: "5", roas: "20", ctr: "2", cpc: "0.10",
+      ...overrides,
+    };
+  }
+
+  function budgetRule(safety) {
+    return makeRule({
+      conditions: JSON.stringify([{ metric: "acos", op: "lte", value: 15 }]),
+      actions:    JSON.stringify([{ type: "adjust_budget_pct", value: "20" }]),
+      scope:      JSON.stringify({ entity_type: "campaign", period_days: 60 }),
+      safety:     JSON.stringify(safety),
+    });
+  }
+
+  // Same shape as mockKeywordRun, but the campaign branch fetches campaigns.
+  function mockCampaignRun(rule, campRows, extraMocks = []) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })           // campaign_exemptions
+      .mockResolvedValueOnce({ rows: campRows });    // campaigns
+    extraMocks.forEach(m => dbQuery.mockResolvedValueOnce(m));
+    dbQuery
+      .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });          // UPDATE rules SET last_run_result
+  }
+
+  it("raises the budget by the configured percentage", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [
+      { rows: [] },  // UPDATE campaigns
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+    expect(res.body.applied[0]).toMatchObject({ previous_budget: 50, new_budget: 60 });
+  });
+
+  it("clamps growth at max_budget", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "90.00" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    // 90 * 1.2 = 108 → capped at 100, not 108
+    expect(res.body.applied[0].new_budget).toBe(100);
+  });
+
+  // The cap must never pull a budget DOWN. Math.min(raised, cap) alone would cut the
+  // account's biggest spender from 350 to 100 on the first run of a "+20%" rule.
+  it("never reduces a campaign already above max_budget", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "350.00" })]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped_count).toBe(1);
+    expect(res.body.skipped[0]).toMatchObject({ reason: "at_max_budget" });
+    expect(pushCampaignUpdates).not.toHaveBeenCalled();
+  });
+
+  it("skips a campaign sitting exactly at the cap", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "100.00" })]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("at_max_budget");
+  });
+
+  it("grows without limit when no max_budget is configured", async () => {
+    mockCampaignRun(budgetRule({ min_bid: 0.02, max_bid: 50 }), [makeCampaign({ daily_budget: "350.00" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied[0].new_budget).toBe(420);
+  });
+
+  it("pushes the new budget to Amazon with the campaign's identifiers", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [
+      { rows: [] },
+    ]);
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(pushCampaignUpdates).toHaveBeenCalledWith([{
+      amazonCampaignId: "AZ_CAMP_001",
+      campaignType:     "sponsoredProducts",
+      connectionId:     "conn-001",
+      profileId:        "123456789",
+      marketplaceId:    "ATVPDKIKX0DER",
+      dailyBudget:      60,
+    }]);
+  });
+
+  it("counts an Amazon rejection of the budget change as a write-back error", async () => {
+    pushCampaignUpdates.mockResolvedValueOnce({ ok: false, error: "BUDGET_BELOW_MINIMUM" });
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [
+      { rows: [] },
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.writeback_error_count).toBe(1);
+    expect(res.body.writeback_errors[0]).toMatchObject({ action: "adjust_budget_pct" });
+    expect(res.body.writeback_errors[0].error).toMatch(/BUDGET_BELOW_MINIMUM/);
+  });
+
+  it("touches nothing on a dry run", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.applied[0].new_budget).toBe(60);
+    expect(pushCampaignUpdates).not.toHaveBeenCalled();
+    const updateCall = dbQuery.mock.calls.find(([sql]) => sql.includes("UPDATE campaigns SET daily_budget"));
+    expect(updateCall).toBeUndefined();
+  });
+
+  it("skips a paused campaign", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ state: "paused" })]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("not_enabled");
+  });
+});
+
 describe("Write-back failures in the run result", () => {
   let app;
   beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });

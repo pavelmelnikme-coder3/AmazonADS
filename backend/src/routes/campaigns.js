@@ -3,6 +3,7 @@ const { query, withTransaction } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit } = require("./audit");
 const { post: apiPost, put: apiPut } = require("../services/amazon/adsClient");
+const { campaignBudgetFields, wrapCampaigns, partialError } = require("../services/amazon/writeback");
 const logger = require("../config/logger");
 
 const router = express.Router();
@@ -178,24 +179,15 @@ router.patch("/:id", async (req, res, next) => {
     const before = { state: campaign.state, dailyBudget: campaign.daily_budget };
 
     // Build Amazon API payload — all APIs require uppercase state
-    const isSB = campaign.campaign_type === "sponsoredBrands";
     const isSD = campaign.campaign_type === "sponsoredDisplay";
     const amazonPayload = { campaignId: campaign.amazon_campaign_id };
     // SP/SB expect uppercase state (ENABLED); SD (v2-style) expects lowercase (enabled).
     if (state) amazonPayload.state = isSD ? state.toLowerCase() : state.toUpperCase();
+    // SP/SB nest the budget object; SD (v2-style PUT) takes a flat budget + lowercase
+    // budgetType. See campaignBudgetFields — sending SP the v2 `dailyBudget` is silently
+    // ignored by Amazon (207 success, budget unchanged).
     if (dailyBudget !== undefined) {
-      const budget = parseFloat(dailyBudget);
-      if (isSD) {
-        // SD update (PUT) is v2-style: flat budget + lowercase budgetType, sent as a bare
-        // top-level array (see campaignsData below). Nesting/wrapping it → Amazon 422.
-        amazonPayload.budget = budget;
-        amazonPayload.budgetType = "daily";
-      } else if (isSB) {
-        // SB uses nested budget object with budgetType
-        amazonPayload.budget = { budget, budgetType: "DAILY" };
-      } else {
-        amazonPayload.dailyBudget = budget;
-      }
+      Object.assign(amazonPayload, campaignBudgetFields(campaign.campaign_type, dailyBudget));
     }
     if (biddingStrategy && !placements) amazonPayload.bidding = { strategy: biddingStrategy };
     if (placements) {
@@ -216,9 +208,10 @@ router.patch("/:id", async (req, res, next) => {
     }[campaign.campaign_type];
 
     // SP/SB campaign mutations are wrapped in { campaigns: [...] }; SD (PUT) takes a bare array.
-    const campaignsData = isSD ? [amazonPayload] : { campaigns: [amazonPayload] };
+    const campaignsData = wrapCampaigns(campaign.campaign_type, [amazonPayload]);
 
     // Apply to Amazon — all three APIs use PUT for campaign mutations
+    let amazonError = null;
     if (endpoint) {
       if (placements && !state && dailyBudget === undefined && !biddingStrategy) {
         // Placement-only update: non-fatal (SP-only feature)
@@ -236,7 +229,7 @@ router.patch("/:id", async (req, res, next) => {
         // Amazon token) straight to the client, and the frontend can't tell that apart from
         // the user's own AdsFlow session being invalid — it would log them out of the app.
         try {
-          await apiPut({
+          const result = await apiPut({
             connectionId: campaign.connection_id,
             profileId: String(campaign.amazon_profile_id),
             marketplace: campaign.marketplace_id,
@@ -244,7 +237,15 @@ router.patch("/:id", async (req, res, next) => {
             data: campaignsData,
             group: "campaigns",
           });
+          // 207 Multi-Status: HTTP is 2xx while the item is rejected inside campaigns.error[].
+          // Without this check a refused edit looks identical to an applied one in the logs.
+          const partial = partialError(result, "campaigns");
+          if (partial) {
+            amazonError = partial;
+            logger.warn("Campaign write-back rejected by Amazon", { id: req.params.id, error: partial });
+          }
         } catch (e) {
+          amazonError = e.message;
           logger.warn("Campaign write-back failed (non-fatal)", { id: req.params.id, error: e.message });
         }
       }
@@ -277,9 +278,13 @@ router.patch("/:id", async (req, res, next) => {
       beforeData: before,
       afterData: after,
       source: "ui",
+      amazonStatus: endpoint ? (amazonError ? "error" : "success") : null,
     });
 
-    res.json({ message: "Campaign updated", before, after });
+    // Surface an Amazon-side rejection without failing the request: the local DB is updated
+    // either way, but the caller must be able to tell "saved everywhere" from "saved locally,
+    // Amazon refused" — the latter gets reverted by the next entity sync.
+    res.json({ message: "Campaign updated", before, after, amazonError });
   } catch (err) {
     next(err);
   }

@@ -28,7 +28,7 @@ import {
   LineChart as LineChartIcon,
   FlaskConical, Briefcase, GripVertical, ExternalLink,
   Folder, Users, ShieldOff,
-  Mail, Send,
+  Mail, Send, Globe,
 } from 'lucide-react';
 
 import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -401,12 +401,20 @@ const del = (p) => apiFetch(p, { method: "DELETE" });
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 function useAsync(fn, deps = []) {
   const [state, setState] = useState({ data: null, loading: true, error: null });
+  // Ignore responses from superseded requests. Without this the *last to
+  // return* wins rather than the last requested, so changing two filters in
+  // quick succession can leave an older result on screen looking authoritative
+  // — observed on the cross-country matrix, where six filters each refetch.
+  const runId = useRef(0);
   const load = useCallback(async () => {
+    const id = ++runId.current;
     setState(s => ({ ...s, loading: true, error: null }));
     try {
       const data = await fn();
+      if (id !== runId.current) return;
       setState({ data, loading: false, error: null });
     } catch (e) {
+      if (id !== runId.current) return;
       setState({ data: null, loading: false, error: e.message });
     }
   }, deps);
@@ -415,6 +423,30 @@ function useAsync(fn, deps = []) {
     setState(s => ({ ...s, data: typeof updater === "function" ? updater(s.data) : updater }));
   }, []);
   return { ...state, reload: load, mutate };
+}
+
+// UI state that survives a reload, following the `af_page` / `af_theme` /
+// `af_sidebar` convention already used for the active page and the sidebar.
+//
+// `validate` guards against a stale or hand-edited value putting the page into a
+// state it can no longer render — e.g. a tab name that no longer exists. It runs
+// on the restored value only; anything it rejects falls back to `initial`.
+function usePersistedState(key, initial, validate) {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return initial;
+      const parsed = JSON.parse(raw);
+      return (!validate || validate(parsed)) ? parsed : initial;
+    } catch {
+      return initial;   // corrupt entry — start clean rather than crash on mount
+    }
+  });
+  useEffect(() => {
+    // Private-mode / quota failures must not take the page down.
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* non-fatal */ }
+  }, [key, value]);
+  return [value, setValue];
 }
 
 // ─── Micro-chart ──────────────────────────────────────────────────────────────
@@ -554,7 +586,10 @@ const Spark = ({ data = [], dates = [], format, color = "#3B82F6", h = 36 }) => 
 };
 
 // ─── KPI Card ─────────────────────────────────────────────────────────────────
-const KPICard = ({ label, value, delta, color, spark, sparkDates, sparkFormat, prefix = "", suffix = "", loading, extra, tooltip }) => (
+// `wide` is set when the tile spans the full grid width. The sparkline gets taller to keep
+// its aspect ratio readable — stretched to ~2x the width at a fixed 48px it reads as a flat
+// thread, which is the same reason the spend chart is 64px tall at full width.
+const KPICard = ({ label, value, delta, color, spark, sparkDates, sparkFormat, prefix = "", suffix = "", loading, extra, tooltip, wide = false }) => (
   <div className="card fade" style={{ padding: "18px 20px" }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
       <span title={tooltip || undefined} style={{ fontSize: 10, fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--tx3)", fontFamily: "var(--mono)", cursor: tooltip ? "help" : "default" }}>{label}</span>
@@ -573,7 +608,7 @@ const KPICard = ({ label, value, delta, color, spark, sparkDates, sparkFormat, p
           {prefix}{value}{suffix}
         </div>
     }
-    <Spark data={spark || []} dates={sparkDates} format={sparkFormat} color={color} h={48} />
+    <Spark data={spark || []} dates={sparkDates} format={sparkFormat} color={color} h={wide ? 72 : 48} />
     {extra}
   </div>
 );
@@ -1596,6 +1631,7 @@ const WIDGET_DEFS = [
   { id: "kpi_orders",      label: "Orders",           group: "kpi",   defaultSize: "half", desc: "Order count" },
   { id: "kpi_ctr",         label: "CTR",              group: "kpi",   defaultSize: "half", desc: "Click-through rate" },
   { id: "kpi_cpc",         label: "CPC",              group: "kpi",   defaultSize: "half", desc: "Cost per click" },
+  { id: "kpi_cvr",         label: "CVR",              group: "kpi",   defaultSize: "half", desc: "Ad conversion rate — orders per click" },
   { id: "chart_spend",     label: "Spend Trend",      group: "chart", defaultSize: "full", desc: "Daily spend bar chart" },
   { id: "chart_trend",     label: "Multi-trend",      group: "chart", defaultSize: "full", desc: "Clicks & sales by day" },
   { id: "table_campaigns", label: "Top Campaigns",    group: "table", defaultSize: "full", desc: "Best campaigns by spend" },
@@ -1611,9 +1647,40 @@ const DEFAULT_LAYOUT = [
   { id: "kpi_roas",        size: "half" },
   { id: "kpi_clicks",      size: "half" },
   { id: "kpi_impressions", size: "half" },
+  { id: "kpi_cvr",         size: "half" },
   { id: "chart_spend",     size: "full" },
   { id: "table_campaigns", size: "full" },
 ];
+
+// Widgets added to DEFAULT_LAYOUT after users already had a saved dashboardLayout.
+// A saved layout wins over DEFAULT_LAYOUT, so without this a new default widget is
+// invisible to every existing user until they add it by hand from the widget picker.
+// Each id here is appended once to a saved layout that doesn't mention it; removing
+// the widget afterwards sticks, because the id is recorded in `dashboardWidgetsSeen`.
+const LAYOUT_ADDITIONS = [{ id: "kpi_cvr", size: "half" }];
+
+/**
+ * Fold newly-introduced default widgets into a saved layout.
+ *
+ * Each one is placed after the last widget of its own group rather than appended to the end:
+ * a KPI tile pushed past the charts and tables lands below the fold, where the user has to
+ * scroll past everything to find it — which reads as "the widget was never added".
+ * Falls back to appending when the layout has no widget of that group.
+ */
+function applyLayoutAdditions(savedLayout, seen = []) {
+  const missing = LAYOUT_ADDITIONS.filter(w => !seen.includes(w.id) && !savedLayout.some(l => l.id === w.id));
+  if (!missing.length) return null;
+
+  const groupOf = id => WIDGET_DEFS.find(d => d.id === id)?.group;
+  const layout = [...savedLayout];
+  for (const w of missing) {
+    const group = groupOf(w.id);
+    let lastOfGroup = -1;
+    layout.forEach((l, i) => { if (groupOf(l.id) === group) lastOfGroup = i; });
+    layout.splice(lastOfGroup >= 0 ? lastOfGroup + 1 : layout.length, 0, w);
+  }
+  return { layout, seen: [...seen, ...missing.map(w => w.id)] };
+}
 
 // ─── Overview Page (real data) ────────────────────────────────────────────────
 // ─── Rank Tracker Page ────────────────────────────────────────────────────────
@@ -4550,12 +4617,25 @@ const LISTING_ISSUE_LABEL_KEYS = {
   images_count: "products.recImagesCount",
   images_zoom:  "products.recImagesZoom",
   aplus:        "products.recAplus",
+  // Cross-country codes — only produced by the per-marketplace check, where the
+  // home marketplace's listing is the reference every other country is scored
+  // against (backend/src/services/amazon/listingHealth.js).
+  not_listed:            "products.mktNotListed",
+  title_not_localized:   "products.mktTitleNotLocalized",
+  bullets_not_localized: "products.mktBulletsNotLocalized",
+  aplus_missing_vs_ref:  "products.mktAplusMissing",
+  fewer_images_vs_ref:   "products.mktFewerImages",
+  no_bsr:                "products.mktNoBsr",
 };
 
 const ListingIssueRow = ({ issue, tr }) => (
   <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", fontSize: 12 }}>
-    <span style={{ color: "var(--amb)", flexShrink: 0, marginTop: 1 }}>⚠</span>
-    <span style={{ color: "var(--tx2)" }}>{tr(LISTING_ISSUE_LABEL_KEYS[issue.code] || issue.code)}</span>
+    <span style={{ color: issue.code === "not_listed" ? "var(--red)" : "var(--amb)", flexShrink: 0, marginTop: 1 }}>
+      {issue.code === "not_listed" ? "✕" : "⚠"}
+    </span>
+    <span style={{ color: "var(--tx2)" }}>
+      {tr(LISTING_ISSUE_LABEL_KEYS[issue.code] || issue.code, { value: issue.value, reference: issue.reference })}
+    </span>
   </div>
 );
 
@@ -4575,6 +4655,517 @@ const ListingRecommendationsPanel = ({ issues, checkedAt, tr }) => {
   return (
     <div>
       {issues.map((issue, i) => <ListingIssueRow key={issue.code || i} issue={issue} tr={tr} />)}
+    </div>
+  );
+};
+
+// ─── Cross-country listing matrix ───────────────────────────────────────────
+// One row per ASIN, one column per EU marketplace the seller sells in. A cell is
+// the health of that ASIN's listing in that country: missing, N findings, or
+// clean. Expanding a row lists the findings per country.
+
+// Cell colour encodes severity at a glance so a 500-row matrix stays scannable:
+// red = no listing at all, amber = listed with findings, green = clean.
+const mktCellStyle = (cell) => {
+  if (!cell)                    return { bg: "transparent",            fg: "var(--tx3)", bd: "var(--b2)" };
+  if (!cell.existsInCatalog)    return { bg: "rgba(239,68,68,.14)",    fg: "var(--red)", bd: "rgba(239,68,68,.35)" };
+  if (cell.issueCount > 0)      return { bg: "rgba(245,158,11,.13)",   fg: "var(--amb)", bd: "rgba(245,158,11,.32)" };
+  return                               { bg: "rgba(34,197,94,.12)",    fg: "var(--grn)", bd: "rgba(34,197,94,.3)" };
+};
+
+const MKT_FILTERS = ["all", "issues", "missing"];
+// Split for the picker's two optgroups: findings that only exist when comparing
+// countries, vs the six single-listing quality checks.
+const MKT_CROSS_CODES = ["not_listed", "no_bsr", "aplus_missing_vs_ref", "fewer_images_vs_ref",
+                         "title_not_localized", "bullets_not_localized"];
+const MKT_OWN_CODES = ["title", "bullets", "description", "images_count", "images_zoom", "aplus"];
+const MKT_ALL_CODES = [...MKT_CROSS_CODES, ...MKT_OWN_CODES];
+const MKT_ADS = ["advertised", "not_advertised"];
+const MKT_COVERAGE = ["single", "partial", "full"];
+const MKT_SORTS = ["missing", "issues", "coverage", "asin", "title"];
+
+const mktSelStyle = {
+  padding: "6px 9px", borderRadius: 7, fontSize: 12, background: "var(--s1)",
+  border: "1px solid var(--b2)", color: "var(--tx)", outline: "none", cursor: "pointer",
+  maxWidth: 190,
+};
+
+// Localized country name, falling back to the ISO code if a marketplace is added
+// to the backend catalogue before its name reaches the locale files.
+const ccName = (tr, code) => {
+  const name = tr(`products.cc.${code}`);
+  return name === `products.cc.${code}` ? code : name;
+};
+
+const MarketplaceMatrix = ({ workspaceId, tr }) => {
+  const [filter, setFilter] = usePersistedState("af_mkt_filter", "all", v => MKT_FILTERS.includes(v));
+  const [search, setSearch] = usePersistedState("af_mkt_search", "", v => typeof v === "string");
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [checking, setChecking] = useState(false);
+  const [notice, setNotice] = useState(null);
+  // Half the tracked catalogue is long-dead ASINs that are absent from every
+  // country. They sort to the top (missing in the most countries) and bury the
+  // rows worth acting on, so they are hidden until asked for.
+  const [includeDead, setIncludeDead] = usePersistedState("af_mkt_dead", false, v => typeof v === "boolean");
+  // Country card click → scope the list to that one country. null = all countries.
+  const [country, setCountry] = usePersistedState("af_mkt_country", null,
+    v => v === null || (typeof v === "string" && /^[A-Z]{2}$/.test(v)));
+  const [issue, setIssue] = usePersistedState("af_mkt_issue", null,
+    v => v === null || MKT_ALL_CODES.includes(v));
+  const [brand, setBrand] = usePersistedState("af_mkt_brand", null,
+    v => v === null || typeof v === "string");
+  const [ads, setAds] = usePersistedState("af_mkt_ads", null,
+    v => v === null || MKT_ADS.includes(v));
+  const [coverage, setCoverage] = usePersistedState("af_mkt_coverage", null,
+    v => v === null || MKT_COVERAGE.includes(v));
+  const [sort, setSort] = usePersistedState("af_mkt_sort", "missing", v => MKT_SORTS.includes(v));
+
+  const { data, loading, reload } = useAsync(
+    () => {
+      if (!workspaceId) return Promise.resolve(null);
+      const qs = new URLSearchParams({ filter, sort });
+      if (includeDead)   qs.set("includeDead", "1");
+      if (country)       qs.set("country", country);
+      if (issue)         qs.set("issue", issue);
+      if (brand)         qs.set("brand", brand);
+      if (ads)           qs.set("ads", ads);
+      if (coverage)      qs.set("coverage", coverage);
+      if (search.trim()) qs.set("q", search.trim());
+      return get(`/products/marketplaces?${qs.toString()}`);
+    },
+    [workspaceId, filter, search, includeDead, country, issue, brand, ads, coverage, sort]
+  );
+
+  const anyFilterOn = filter !== "all" || !!country || !!issue || !!brand || !!ads
+    || !!coverage || sort !== "missing" || includeDead || !!search.trim();
+
+  const resetFilters = () => {
+    setFilter("all"); setSearch(""); setCountry(null); setIssue(null);
+    setBrand(null); setAds(null); setCoverage(null); setSort("missing");
+    setIncludeDead(false);
+  };
+
+  const marketplaces = data?.marketplaces || [];
+  const items = data?.items || [];
+  const byCountry = data?.byCountry || [];
+
+  // Self-heal a restored country that is no longer covered (a marketplace
+  // dropped from the backend catalogue).
+  //
+  // Checked against the marketplace list, NOT against the `country` the server
+  // echoes back: useAsync keeps the previous response while the next one is in
+  // flight, so comparing with the echo made this fire on the *stale* response
+  // — it cleared the filter the moment it was applied, leaving two requests
+  // racing and the card un-highlighted.
+  useEffect(() => {
+    if (country && marketplaces.length && !marketplaces.some(m => m.countryCode === country)) {
+      setCountry(null);
+    }
+  }, [marketplaces, country, setCountry]);
+
+  // Same for a persisted brand that no longer has any checked product — the
+  // picker would show a value it cannot offer, and the list would be empty with
+  // no visible reason. `brands` is only trustworthy once a response has landed.
+  useEffect(() => {
+    if (brand && data?.brands && !data.brands.includes(brand)) setBrand(null);
+  }, [data, brand, setBrand]);
+
+  const toggle = (id) => setExpanded(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  // ── Live sweep progress ────────────────────────────────────────────────────
+  // A check is queued, not run inline: POST returns in milliseconds while the
+  // sweep itself walks ~5k (ASIN, country) pairs over a couple of hours. The
+  // button used to re-enable the instant the job was queued, so it invited a
+  // second (pointless) sweep and gave no sign anything was happening.
+  const [sync, setSync]     = useState(null);
+  const [queued, setQueued] = useState(false);
+
+  // Refs, not state, drive the poll loop: the effect must not re-subscribe every
+  // time progress ticks, and `reload` changes identity whenever a filter does.
+  const busyRef   = useRef(false);
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
+  useEffect(() => {
+    if (!workspaceId) return undefined;
+    let alive = true;
+    let timer = null;
+
+    const tick = async () => {
+      try {
+        const next = await get("/products/marketplaces/status");
+        if (!alive) return;
+        const wasRunning = busyRef.current;
+        setSync(next);
+        if (next.running) setQueued(false);
+        busyRef.current = !!next.running;
+        // The sweep just finished — the matrix on screen is now stale.
+        if (wasRunning && !next.running) reloadRef.current?.();
+      } catch {
+        // Transient failure: keep polling rather than freezing the button on.
+      }
+      if (!alive) return;
+      timer = setTimeout(tick, busyRef.current ? 5000 : 30000);
+    };
+
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [workspaceId]);
+
+  // Queued but not yet picked up by the worker still counts as busy, otherwise
+  // the button flickers back to enabled in the gap before the sweep starts.
+  const sweepBusy = !!sync?.running || queued;
+
+  const runCheck = async () => {
+    setChecking(true);
+    setNotice(null);
+    try {
+      const r = await post("/products/marketplaces/check", {});
+      setQueued(true);
+      busyRef.current = true;
+      setNotice(tr("products.mktCheckQueued", { countries: r.countries }));
+    } catch (e) {
+      setNotice(e.message || tr("products.mktCheckFailed"));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const neverChecked = !loading && items.length > 0 && items.every(i => !i.checked_at);
+
+  return (
+    <div className="fade">
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, color: "var(--tx3)", flex: "1 1 300px" }}>
+          {tr("products.mktSubtitle")}
+        </div>
+        <button onClick={runCheck} disabled={checking || sweepBusy} className="btn btn-ghost"
+          title={sweepBusy ? tr("products.mktSweepBusyHint") : undefined}
+          style={{ fontSize: 12, padding: "6px 12px", display: "flex", alignItems: "center", gap: 6,
+            opacity: (checking || sweepBusy) ? .55 : 1,
+            cursor: (checking || sweepBusy) ? "not-allowed" : "pointer" }}>
+          <RefreshCw size={13} strokeWidth={1.75}
+            style={{ animation: sweepBusy ? "spin 1.4s linear infinite" : "none" }} />
+          {sweepBusy ? tr("products.mktChecking") : tr("products.mktCheckNow")}
+        </button>
+      </div>
+
+      {/* Sweep progress. Shown only while one is actually running; a queued-but-not-started
+          sweep gets the indeterminate treatment (no counts yet) so the bar never sits at a
+          misleading 0%. */}
+      {sweepBusy && (
+        <div style={{ marginBottom: 12, padding: "10px 12px", borderRadius: 10,
+          background: "var(--s2)", border: "1px solid var(--b2)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+            fontSize: 12, color: "var(--tx2)", marginBottom: 6, gap: 10, flexWrap: "wrap" }}>
+            <span>{sync?.running ? tr("products.mktSweepRunning") : tr("products.mktSweepQueued")}</span>
+            {sync?.running && sync.total ? (
+              <span style={{ color: "var(--tx3)", fontVariantNumeric: "tabular-nums" }}>
+                {tr("products.mktSweepProgress", { done: Number(sync.done).toLocaleString(), total: Number(sync.total).toLocaleString(), pct: sync.pct })}
+              </span>
+            ) : null}
+          </div>
+          <div style={{ height: 4, background: "var(--b2)", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{
+              height: "100%", borderRadius: 4,
+              background: "linear-gradient(90deg, var(--ac), var(--ac2))",
+              width: sync?.running && sync.pct != null ? `${sync.pct}%` : "40%",
+              transition: "width .5s ease",
+              animation: (sync?.running && sync.pct != null) ? "none" : "shimmer 1.5s infinite",
+            }} />
+          </div>
+          {sync?.running && sync.pct != null && (
+            <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 4 }}>
+              {tr("products.mktSweepEta")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Filter bar. Grouped left-to-right by what the question is: what to look
+          at (search + scope chips), then which finding, then which products,
+          then ordering — with the reset only appearing once something is set. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap",
+        padding: "10px 12px", borderRadius: 10, background: "var(--s2)", border: "1px solid var(--b2)" }}>
+        <div style={{ position: "relative", flex: "0 1 200px", minWidth: 150 }}>
+          <Search size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--tx3)", pointerEvents: "none" }} />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder={tr("products.mktSearch")}
+            style={{ width: "100%", boxSizing: "border-box", padding: "6px 12px 6px 30px", borderRadius: 7,
+              fontSize: 12, background: "var(--s1)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: 4 }}>
+          {[["all", "mktFilterAll"], ["issues", "mktFilterIssues"], ["missing", "mktFilterMissing"]].map(([v, key]) => (
+            <button key={v} onClick={() => setFilter(v)} className={`btn ${filter === v ? "btn-primary" : "btn-ghost"}`}
+              style={{ fontSize: 12, padding: "6px 11px" }}>
+              {tr(`products.${key}`)}
+            </button>
+          ))}
+        </div>
+
+        <select value={issue || ""} onChange={e => setIssue(e.target.value || null)}
+          title={tr("products.mktLabelIssue")} style={mktSelStyle}>
+          <option value="">{tr("products.mktAnyIssue")}</option>
+          <optgroup label={tr("products.mktIssueGroupCross")}>
+            {MKT_CROSS_CODES.map(c => <option key={c} value={c}>{tr(`products.issueShort.${c}`)}</option>)}
+          </optgroup>
+          <optgroup label={tr("products.mktIssueGroupOwn")}>
+            {MKT_OWN_CODES.map(c => <option key={c} value={c}>{tr(`products.issueShort.${c}`)}</option>)}
+          </optgroup>
+        </select>
+
+        <select value={brand || ""} onChange={e => setBrand(e.target.value || null)}
+          title={tr("products.mktLabelBrand")} style={mktSelStyle}>
+          <option value="">{tr("products.mktAllBrands")}</option>
+          {(data?.brands || []).map(b => <option key={b} value={b}>{b}</option>)}
+        </select>
+
+        <select value={ads || ""} onChange={e => setAds(e.target.value || null)}
+          title={tr("products.mktLabelAds")} style={mktSelStyle}>
+          <option value="">{tr("products.mktAdsAll")}</option>
+          <option value="advertised">{tr("products.mktAdsOn")}</option>
+          <option value="not_advertised">{tr("products.mktAdsOff")}</option>
+        </select>
+
+        <select value={coverage || ""} onChange={e => setCoverage(e.target.value || null)}
+          title={tr("products.mktLabelCoverage")} style={mktSelStyle}>
+          <option value="">{tr("products.mktCovAll")}</option>
+          <option value="single">{tr("products.mktCovSingle")}</option>
+          <option value="partial">{tr("products.mktCovPartial")}</option>
+          <option value="full">{tr("products.mktCovFull")}</option>
+        </select>
+
+        <select value={sort} onChange={e => setSort(e.target.value)}
+          title={tr("products.mktLabelSort")} style={mktSelStyle}>
+          <option value="missing">{tr("products.mktSortMissing")}</option>
+          <option value="issues">{tr("products.mktSortIssues")}</option>
+          <option value="coverage">{tr("products.mktSortCoverage")}</option>
+          <option value="asin">{tr("products.mktSortAsin")}</option>
+          <option value="title">{tr("products.mktSortTitle")}</option>
+        </select>
+
+        {(data?.deadCount > 0 || includeDead) && (
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--tx3)", cursor: "pointer" }}>
+            <input type="checkbox" checked={includeDead} onChange={e => setIncludeDead(e.target.checked)}
+              style={{ cursor: "pointer" }} />
+            {tr("products.mktIncludeDead", { n: data?.deadCount || 0 })}
+          </label>
+        )}
+
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          {!loading && (
+            <span style={{ fontSize: 12, color: "var(--tx3)", whiteSpace: "nowrap" }}>
+              {tr("products.mktResultCount", { n: items.length })}
+            </span>
+          )}
+          {anyFilterOn && (
+            <button onClick={resetFilters} className="btn btn-ghost" style={{ fontSize: 11, padding: "5px 10px" }}>
+              {tr("products.mktReset")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {notice && (
+        <div style={{ background: "rgba(99,102,241,.1)", border: "1px solid rgba(99,102,241,.3)", borderRadius: 8,
+          padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "var(--ac2)" }}>
+          {notice}
+        </div>
+      )}
+
+      {/* Per-country rollup — each card is a filter for its own country */}
+      {byCountry.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+          {byCountry.map(c => {
+            const on = country === c.country_code;
+            return (
+              <button key={c.country_code} type="button"
+                onClick={() => setCountry(on ? null : c.country_code)}
+                title={on ? tr("products.mktCountryClear") : tr("products.mktCountryFilter", { cc: ccName(tr, c.country_code) })}
+                className="card"
+                style={{
+                  padding: "10px 14px", minWidth: 128, flex: "0 0 auto", cursor: "pointer",
+                  textAlign: "left", font: "inherit",
+                  borderColor: on ? "var(--ac2)" : undefined,
+                  background: on ? "rgba(99,102,241,.12)" : undefined,
+                  boxShadow: on ? "0 0 0 1px var(--ac2) inset" : undefined,
+                }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: on ? "var(--ac2)" : "var(--tx)", whiteSpace: "nowrap" }}>
+                    {ccName(tr, c.country_code)}
+                  </span>
+                  {on && <X size={11} strokeWidth={2.25} style={{ color: "var(--ac2)" }} />}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--red)" }}>
+                  {tr("products.mktStatMissing", { n: Number(c.missing) })}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--amb)" }}>
+                  {tr("products.mktStatIssues", { n: Number(c.with_issues) })}
+                </div>
+                <div style={{ fontSize: 10, color: "var(--tx3)", marginTop: 2 }}>
+                  {tr("products.mktStatOf", { n: Number(c.products) })}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {country && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, fontSize: 12, color: "var(--ac2)" }}>
+          <span>{tr("products.mktCountryActive", { cc: ccName(tr, country), n: items.length })}</span>
+          <button onClick={() => setCountry(null)} className="btn btn-ghost"
+            style={{ fontSize: 11, padding: "3px 9px" }}>
+            {tr("products.mktCountryClear")}
+          </button>
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ color: "var(--tx3)", fontSize: 13 }}>{tr("products.loading")}</div>
+      ) : items.length === 0 ? (
+        <div className="card" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          padding: "60px 32px", gap: 16, textAlign: "center" }}>
+          <Ic icon={Globe} size={48} style={{ color: "var(--ac2)", opacity: 0.5 }} />
+          <div style={{ fontSize: 14, color: "var(--tx2)", maxWidth: 460 }}>{tr("products.mktEmpty")}</div>
+        </div>
+      ) : (
+        <>
+          {neverChecked && (
+            <div style={{ background: "rgba(245,158,11,.1)", border: "1px solid rgba(245,158,11,.3)", borderRadius: 8,
+              padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "var(--amb)" }}>
+              {tr("products.mktNeverChecked")}
+            </div>
+          )}
+          <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+            {/* Full country names need far more room than the ISO codes did;
+                the card already scrolls horizontally rather than squeezing. */}
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 1080 }}>
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--b1)" }}>
+                  <th style={{ padding: "10px 14px", textAlign: "left", color: "var(--tx3)", fontWeight: 600, position: "sticky", left: 0, background: "var(--s1)" }}>
+                    {tr("products.mktColProduct")}
+                  </th>
+                  {marketplaces.map(m => {
+                    const on = country === m.countryCode;
+                    return (
+                      <th key={m.marketplaceId} title={m.domain}
+                        onClick={() => setCountry(on ? null : m.countryCode)}
+                        // The global `th` rule is uppercase monospace with wide
+                        // letter-spacing — fine for 2-letter codes, but it makes
+                        // full Cyrillic names (ВЕЛИКОБРИТАНИЯ) ~30% wider and
+                        // pushes the last column out of view. Full names read
+                        // better in normal case anyway.
+                        style={{ padding: "10px 8px", textAlign: "center", fontWeight: on ? 700 : 600,
+                          whiteSpace: "nowrap", cursor: "pointer",
+                          fontFamily: "var(--ui)", textTransform: "none", letterSpacing: ".01em",
+                          color: on ? "var(--ac2)" : "var(--tx3)",
+                          background: on ? "rgba(99,102,241,.1)" : undefined }}>
+                        {ccName(tr, m.countryCode)}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {items.map(it => {
+                  const cellByMkt = new Map((it.cells || []).map(c => [c.marketplaceId, c]));
+                  const isOpen = expanded.has(it.id);
+                  return (
+                    <React.Fragment key={it.id}>
+                      <tr onClick={() => toggle(it.id)}
+                        style={{ borderBottom: "1px solid var(--b2)", cursor: "pointer",
+                          background: isOpen ? "var(--s2)" : "transparent" }}>
+                        <td style={{ padding: "8px 14px", position: "sticky", left: 0,
+                          background: isOpen ? "var(--s2)" : "var(--s1)", minWidth: 260 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            {isOpen ? <ChevronDown size={13} strokeWidth={1.75} style={{ color: "var(--tx3)", flexShrink: 0 }} />
+                                    : <ChevronRight size={13} strokeWidth={1.75} style={{ color: "var(--tx3)", flexShrink: 0 }} />}
+                            {it.image_url && (
+                              <img src={it.image_url} alt="" style={{ width: 26, height: 26, objectFit: "contain", borderRadius: 4, flexShrink: 0 }} />
+                            )}
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--ac2)" }}>{it.asin}</div>
+                              <div style={{ color: "var(--tx3)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis",
+                                whiteSpace: "nowrap", maxWidth: 240 }}>{it.title || "—"}</div>
+                            </div>
+                          </div>
+                        </td>
+                        {marketplaces.map(m => {
+                          const cell = cellByMkt.get(m.marketplaceId);
+                          const st = mktCellStyle(cell);
+                          const label = !cell ? "—"
+                            : !cell.existsInCatalog ? "✕"
+                            : cell.issueCount > 0 ? String(cell.issueCount)
+                            : "✓";
+                          return (
+                            <td key={m.marketplaceId}
+                              style={{ padding: "8px 6px", textAlign: "center",
+                                background: country === m.countryCode ? "rgba(99,102,241,.07)" : undefined }}>
+                              <span title={cell?.isReference ? tr("products.mktReference") : undefined}
+                                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                  minWidth: 26, height: 22, borderRadius: 5, fontSize: 11, fontWeight: 700,
+                                  background: st.bg, color: st.fg, border: `1px solid ${st.bd}`,
+                                  outline: cell?.isReference ? "1px dashed var(--ac2)" : "none", outlineOffset: 1 }}>
+                                {label}
+                              </span>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      {isOpen && (
+                        <tr style={{ borderBottom: "1px solid var(--b2)", background: "var(--s2)" }}>
+                          <td colSpan={marketplaces.length + 1} style={{ padding: "12px 18px" }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12 }}>
+                              {marketplaces.map(m => {
+                                const cell = cellByMkt.get(m.marketplaceId);
+                                return (
+                                  <div key={m.marketplaceId} style={{ border: "1px solid var(--b2)", borderRadius: 8, padding: "10px 12px" }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                      <a href={`https://www.${m.domain}/dp/${it.asin}`} target="_blank" rel="noopener noreferrer"
+                                        style={{ fontSize: 12, fontWeight: 700, color: "var(--ac2)", textDecoration: "none" }}>
+                                        {ccName(tr, m.countryCode)}
+                                      </a>
+                                      <ExternalLink size={10} strokeWidth={1.75} style={{ color: "var(--tx3)" }} />
+                                      {cell?.isReference && (
+                                        <span className="badge" style={{ fontSize: 9 }}>{tr("products.mktReference")}</span>
+                                      )}
+                                      {cell?.existsInCatalog && cell.bestRank != null && (
+                                        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--tx3)", fontFamily: "var(--mono)" }}>
+                                          #{Number(cell.bestRank).toLocaleString()}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {!cell ? (
+                                      <div style={{ fontSize: 11, color: "var(--tx3)" }}>{tr("products.recNotChecked")}</div>
+                                    ) : cell.errorMessage ? (
+                                      <div style={{ fontSize: 11, color: "var(--amb)" }}>{cell.errorMessage}</div>
+                                    ) : (
+                                      <ListingRecommendationsPanel issues={cell.issues} checkedAt={it.checked_at} tr={tr} />
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 };
@@ -4646,26 +5237,37 @@ const ProductsPage = ({ workspaceId }) => {
   const [savingNote, setSavingNote] = useState(false);
   const [error, setError] = useState(null);
   const [tick, setTick] = useState(0);
-  const [search, setSearch] = useState("");
-  const [filterBrand, setFilterBrand] = useState("all");
-  const [filterAvail, setFilterAvail] = useState("all"); // all | available | unavailable
-  const [filterAds, setFilterAds]     = useState("all"); // all | advertised | not_advertised
+  // Tab and filters persist across a reload, matching the active page itself
+  // (`af_page`). Landing back on "All products" unfiltered after every refresh
+  // loses whatever the user had narrowed down to.
+  const [search, setSearch] = usePersistedState("af_products_search", "", v => typeof v === "string");
+  const [filterBrand, setFilterBrand] = usePersistedState("af_products_brand", "all", v => typeof v === "string");
+  const [filterAvail, setFilterAvail] = usePersistedState("af_products_avail", "all",
+    v => ["all", "available", "unavailable"].includes(v));
+  const [filterAds, setFilterAds] = usePersistedState("af_products_ads", "all",
+    v => ["all", "advertised", "not_advertised"].includes(v));
   // Page view tab: "all" (the full products table) | "new" (Wawi new arrivals not yet advertised)
-  const [view, setView] = useState("all");
-  const [newDays, setNewDays] = useState(90);
+  // | "countries" (the cross-country listing matrix)
+  const [view, setView] = usePersistedState("af_products_tab", "all",
+    v => ["all", "new", "countries"].includes(v));
+  const [newDays, setNewDays] = usePersistedState("af_products_new_days", 90,
+    v => [30, 60, 90, 180].includes(v));
   // all | any | none | title | bullets | description | images | aplus
-  const [filterRec, setFilterRec]     = useState("all");
-  const [sortBy, setSortBy] = useState("bsr");
+  const [filterRec, setFilterRec] = usePersistedState("af_products_rec", "all",
+    v => ["all", "any", "none", "title", "bullets", "description", "images", "aplus"].includes(v));
+  const [sortBy, setSortBy] = usePersistedState("af_products_sort", "bsr", v => typeof v === "string");
   // Listing grouping (parent ASIN → variation family) + lazy trend charts.
-  // Default to the per-ASIN view on load / first entry; user can switch to
-  // listing grouping via the toggle.
-  const [groupByListing, setGroupByListing] = useState(false);
+  const [groupByListing, setGroupByListing] = usePersistedState("af_products_group", false,
+    v => typeof v === "boolean");
   const [expandedListings, setExpandedListings] = useState(() => new Set());      // listing rows showing their child ASINs
   const [listingChartsOpen, setListingChartsOpen] = useState(() => new Set());    // listing IDs showing the aggregate charts
   const [childChartsOpen, setChildChartsOpen] = useState(() => new Set());        // child ASINs showing per-ASIN charts
   const [tsData, setTsData] = useState({});       // listingId → { aggregate, by_asin, prev }
   const [tsLoading, setTsLoading] = useState(() => new Set());
-  const [periodOrders, setPeriodOrders] = useState(null); // UPPER(asin) → { orders, units, revenue } over the selected range
+  // { by_asin, by_listing } → { orders, units, revenue } over the selected range.
+  // by_listing is deduplicated across a variation family (one order that spans two
+  // variations is one order), so listing rows must never sum the per-ASIN counts.
+  const [periodOrders, setPeriodOrders] = useState(null);
   const [compareMode, setCompareMode] = useState(false);  // overlay previous period on the trend charts
 
   const { data: products, loading, mutate } = useAsync(
@@ -4757,8 +5359,8 @@ const ProductsPage = ({ workspaceId }) => {
         return ar - br;
       }
       if (sortBy === "orders") {
-        const oa = (periodOrders?.[a.asin]?.orders) || 0;
-        const ob = (periodOrders?.[b.asin]?.orders) || 0;
+        const oa = (periodOrders?.by_asin?.[a.asin]?.orders) || 0;
+        const ob = (periodOrders?.by_asin?.[b.asin]?.orders) || 0;
         return ob - oa; // most orders first
       }
       if (sortBy === "asin") return a.asin.localeCompare(b.asin);
@@ -4778,6 +5380,15 @@ const ProductsPage = ({ workspaceId }) => {
       const lid = p.parent_asin || p.asin;
       if (!map.has(lid)) map.set(lid, []);
       map.get(lid).push(p);
+    }
+    // Full family size, before filtering. The backend's deduplicated order count covers
+    // the whole family, so it only applies when the filters left the family intact —
+    // otherwise fall back to summing the visible children (which can double-count an
+    // order spanning two of them, but at least matches the rows on screen).
+    const familySize = new Map();
+    for (const p of (products || [])) {
+      const lid = p.parent_asin || p.asin;
+      familySize.set(lid, (familySize.get(lid) || 0) + 1);
     }
     const num = v => Number(v) || 0;
     const out = [...map.entries()].map(([lid, ch]) => {
@@ -4799,13 +5410,19 @@ const ProductsPage = ({ workspaceId }) => {
         // 0 in the sum above and get mistaken for a clean listing.
         all_checked: ch.every(c => c.lh_checked_at),
         ad_spend_7d: adSpend7,
-        orders_7d: ch.reduce((s, c) => s + num(c.qty_7d), 0),
+        units_7d: ch.reduce((s, c) => s + num(c.qty_7d), 0), // qty_7d is quantity_ordered — units, not orders
         acos_7d: adSales7 > 0 ? (adSpend7 / adSales7) * 100 : null,
         tacos_7d: revenue7 > 0 ? (adSpend7 / revenue7) * 100 : null,
         price_min: prices.length ? Math.min(...prices) : null,
         price_max: prices.length ? Math.max(...prices) : null,
-        period_orders: ch.reduce((s, c) => s + ((periodOrders?.[c.asin]?.orders) || 0), 0),
-        period_revenue: ch.reduce((s, c) => s + ((periodOrders?.[c.asin]?.revenue) || 0), 0),
+        // Orders come pre-deduplicated from the backend; summing the children would
+        // count a two-variation order twice. Units and revenue are genuinely additive,
+        // so they always follow the visible children.
+        period_orders: ch.length === (familySize.get(lid) || ch.length)
+          ? (periodOrders?.by_listing?.[lid]?.orders || 0)
+          : ch.reduce((s, c) => s + ((periodOrders?.by_asin?.[c.asin]?.orders) || 0), 0),
+        period_units: ch.reduce((s, c) => s + ((periodOrders?.by_asin?.[c.asin]?.units) || 0), 0),
+        period_revenue: ch.reduce((s, c) => s + ((periodOrders?.by_asin?.[c.asin]?.revenue) || 0), 0),
       };
     });
     if (sortBy === "orders") out.sort((a, b) => b.period_orders - a.period_orders || (a.best_rank ?? Infinity) - (b.best_rank ?? Infinity));
@@ -4818,7 +5435,7 @@ const ProductsPage = ({ workspaceId }) => {
     }
     else out.sort((a, b) => (a.best_rank ?? Infinity) - (b.best_rank ?? Infinity));
     return out;
-  }, [filteredProducts, sortBy, periodOrders]);
+  }, [filteredProducts, products, sortBy, periodOrders]);
 
   // Ensure every open chart (aggregate or per-child) has its series loaded; also
   // re-runs after a date-range change (which clears tsData) to refetch them.
@@ -4835,16 +5452,26 @@ const ProductsPage = ({ workspaceId }) => {
     }
   }, [listingChartsOpen, childChartsOpen, histStart, histEnd, groupByListing, listings, compareMode]); // eslint-disable-line
 
-  // Load per-ASIN order totals over the selected range when sorting by orders.
+  // Order totals over the selected range. Sorting by orders is what first pulls them in,
+  // but once the chip is on screen it must keep following the date pickers: sorting away
+  // used to freeze the fetch while leaving the old numbers rendered under a new range.
+  const [wantPeriodOrders, setWantPeriodOrders] = useState(false);
+  useEffect(() => { if (sortBy === "orders") setWantPeriodOrders(true); }, [sortBy]);
   useEffect(() => {
-    if (sortBy !== "orders" || !workspaceId) return;
+    if (!wantPeriodOrders || !workspaceId) return;
     const qs = new URLSearchParams();
     if (histStart) qs.set("start", histStart);
     if (histEnd)   qs.set("end", histEnd);
+    // Drop a superseded response: nudging the date pickers fires several requests and
+    // the slowest one must not overwrite the range the user actually settled on.
+    let live = true;
     get(`/products/period-orders${qs.toString() ? "?" + qs : ""}`)
-      .then(d => setPeriodOrders(d.by_asin || {}))
-      .catch(() => setPeriodOrders({}));
-  }, [sortBy, histStart, histEnd, workspaceId]);
+      // Keep the range the backend actually used — it falls back to the last 30 days
+      // when the pickers are empty, and the tooltip must not claim a different window.
+      .then(d => { if (live) setPeriodOrders({ by_asin: d.by_asin || {}, by_listing: d.by_listing || {}, start: d.start, end: d.end }); })
+      .catch(() => { if (live) setPeriodOrders({ by_asin: {}, by_listing: {}, start: null, end: null }); });
+    return () => { live = false; };
+  }, [wantPeriodOrders, histStart, histEnd, workspaceId, tick]);
 
   const handleAdd = async () => {
     if (!newAsin.trim()) return;
@@ -5160,7 +5787,7 @@ const ProductsPage = ({ workspaceId }) => {
 
       {/* View tabs: full products table vs. Wawi new-arrivals-not-advertised */}
       <div style={{ display: "flex", gap: 4, marginBottom: 18, borderBottom: "1px solid var(--b2)" }}>
-        {[["all", tr("products.tabAll")], ["new", tr("products.tabNew")]].map(([v, label]) => (
+        {[["all", tr("products.tabAll")], ["new", tr("products.tabNew")], ["countries", tr("products.tabCountries")]].map(([v, label]) => (
           <button
             key={v}
             onClick={() => setView(v)}
@@ -5448,8 +6075,8 @@ const ProductsPage = ({ workspaceId }) => {
               setChildChartsOpen(s => { const n = new Set(s); childAsins.forEach(a => n.delete(a)); return n; });
             }
           };
-          const Kpi = ({ label, value, color }) => (
-            <span style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline" }}>
+          const Kpi = ({ label, value, color, title }) => (
+            <span style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline" }} title={title}>
               <span style={{ color: "var(--tx3)" }}>{label}</span>
               <span style={{ fontWeight: 700, color: color || "var(--tx)", fontFamily: "var(--mono)" }}>{value}</span>
             </span>
@@ -5498,17 +6125,21 @@ const ProductsPage = ({ workspaceId }) => {
                         {L.title && <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{L.title}</div>}
                         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
                           {periodOrders && (
-                            <span style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline", padding: "1px 8px", borderRadius: 5, background: sortBy === "orders" ? "rgba(236,72,153,.14)" : "transparent", border: sortBy === "orders" ? "1px solid rgba(236,72,153,.35)" : "none" }}>
+                            <span title={tr("products.ordersPeriodHint", { start: periodOrders.start || "—", end: periodOrders.end || "—", units: Math.round(L.period_units).toLocaleString() })}
+                              style={{ fontSize: 11, display: "inline-flex", gap: 5, alignItems: "baseline", padding: "1px 8px", borderRadius: 5, background: sortBy === "orders" ? "rgba(236,72,153,.14)" : "transparent", border: sortBy === "orders" ? "1px solid rgba(236,72,153,.35)" : "none" }}>
                               <span style={{ color: "var(--tx3)" }}>{tr("products.ordersPeriod")}</span>
                               <span style={{ fontWeight: 700, color: "#ec4899", fontFamily: "var(--mono)" }}>{Math.round(L.period_orders).toLocaleString()}</span>
                               <span style={{ color: "var(--tx3)", fontFamily: "var(--mono)" }}>· €{Number(L.period_revenue).toFixed(0)}</span>
                             </span>
                           )}
                           <Kpi label={tr("products.trendBsr")} value={L.best_rank != null ? "#" + L.best_rank.toLocaleString() : "—"} color="var(--ac2)" />
-                          <Kpi label={tr("products.trendOrders") + " 7д"} value={Math.round(L.orders_7d).toLocaleString()} />
-                          <Kpi label="PPC 7д" value={money(L.ad_spend_7d)} color="var(--amb)" />
-                          <Kpi label="ACOS 7д" value={pctOrDash(L.acos_7d)} color="#ef4444" />
-                          <Kpi label="TACOS 7д" value={pctOrDash(L.tacos_7d)} color="#f97316" />
+                          {/* qty_7d is a SUM of quantity_ordered — units, not orders. The
+                              window is fixed (yesterday back 7 days) and independent of the
+                              date picker that drives the "period" chip above. */}
+                          <Kpi label={`${tr("products.trendUnits")} ${tr("products.d7")}`} value={Math.round(L.units_7d).toLocaleString()} title={tr("products.fixed7dHint")} />
+                          <Kpi label={`PPC ${tr("products.d7")}`} value={money(L.ad_spend_7d)} color="var(--amb)" title={tr("products.fixed7dHint")} />
+                          <Kpi label={`ACOS ${tr("products.d7")}`} value={pctOrDash(L.acos_7d)} color="#ef4444" title={tr("products.fixed7dHint")} />
+                          <Kpi label={`TACOS ${tr("products.d7")}`} value={pctOrDash(L.tacos_7d)} color="#f97316" title={tr("products.fixed7dHint")} />
                           <Kpi label={tr("products.trendPrice")} value={L.price_min == null ? "—" : (L.price_min === L.price_max ? money(L.price_min) : `${money(L.price_min)}–${money(L.price_max)}`)} color="var(--grn)" />
                         </div>
                       </div>
@@ -5589,9 +6220,9 @@ const ProductsPage = ({ workspaceId }) => {
                                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                                     <a href={amazonProductUrl(c.asin, c.marketplace_id)} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "var(--mono)", fontSize: 12, fontWeight: 600, color: "var(--ac2)", textDecoration: "none" }}>{c.asin}</a>
                                     <Kpi label={tr("products.trendBsr")} value={c.best_rank != null ? "#" + Number(c.best_rank).toLocaleString() : "—"} />
-                                    <Kpi label={tr("products.trendOrders") + " 7д"} value={Math.round(Number(c.qty_7d) || 0).toLocaleString()} />
-                                    <Kpi label="PPC 7д" value={money(c.ad_spend_7d)} color="var(--amb)" />
-                                    <Kpi label="ACOS 7д" value={pctOrDash(Number(c.ad_sales_7d) > 0 ? (Number(c.ad_spend_7d) / Number(c.ad_sales_7d)) * 100 : null)} color="#ef4444" />
+                                    <Kpi label={`${tr("products.trendUnits")} ${tr("products.d7")}`} value={Math.round(Number(c.qty_7d) || 0).toLocaleString()} title={tr("products.fixed7dHint")} />
+                                    <Kpi label={`PPC ${tr("products.d7")}`} value={money(c.ad_spend_7d)} color="var(--amb)" title={tr("products.fixed7dHint")} />
+                                    <Kpi label={`ACOS ${tr("products.d7")}`} value={pctOrDash(Number(c.ad_sales_7d) > 0 ? (Number(c.ad_spend_7d) / Number(c.ad_sales_7d)) * 100 : null)} color="#ef4444" title={tr("products.fixed7dHint")} />
                                     {c.sell_price && <Kpi label={tr("products.trendPrice")} value={money(c.sell_price)} color="var(--grn)" />}
                                   </div>
                                   {c.title && <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</div>}
@@ -6021,6 +6652,8 @@ const ProductsPage = ({ workspaceId }) => {
           </div>
         )
       )}
+
+      {view === "countries" && <MarketplaceMatrix workspaceId={workspaceId} tr={tr} />}
 
       {/* ── Export Report Modal ── */}
       {exportOpen && createPortal(
@@ -6508,11 +7141,18 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     { key: "R", handler: () => { reloadSummary(); reloadTopCampaigns(); reloadProfiles(); } },
   ]);
 
-  // Update layout when user settings load
+  // Update layout when user settings load, folding in any widget that became a default
+  // after this user's layout was saved (see LAYOUT_ADDITIONS). Persisting `seen` means the
+  // append happens exactly once — if the user then removes the widget, it stays removed.
   useEffect(() => {
-    if (user?.settings?.dashboardLayout) {
-      setLayout(user.settings.dashboardLayout);
-    }
+    const saved = user?.settings?.dashboardLayout;
+    if (!saved) return;
+    const added = applyLayoutAdditions(saved, user?.settings?.dashboardWidgetsSeen || []);
+    if (!added) { setLayout(saved); return; }
+    setLayout(added.layout);
+    patch("/auth/me", { settings: { dashboardLayout: added.layout, dashboardWidgetsSeen: added.seen } })
+      .then(() => onSettingsUpdate && onSettingsUpdate({ dashboardLayout: added.layout, dashboardWidgetsSeen: added.seen }))
+      .catch(() => {});
   }, [user?.settings?.dashboardLayout]);
 
   async function handleSync() {
@@ -6597,6 +7237,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     orders:      trend.map(r => parseFloat(r.orders || 0)),
     ctr:         trend.map(r => parseFloat(r.ctr || 0)),
     cpc:         trend.map(r => parseFloat(r.cpc || 0)),
+    cvr:         trend.map(r => parseFloat(r.cvr || 0)),
   };
 
   const CUR = curSym(totals.currency);
@@ -6614,6 +7255,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     orders:      v => parseInt(v||0).toLocaleString(),
     ctr:         v => `${parseFloat(v||0).toFixed(2)}%`,
     cpc:         v => `${CUR}${parseFloat(v||0).toFixed(2)}`,
+    cvr:         v => `${parseFloat(v||0).toFixed(2)}%`,
   };
 
   // Show real total revenue from SP-API when available; otherwise fall back to
@@ -6644,6 +7286,13 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     kpi_orders:      { label: ordersLabel,                  value: hasData ? fmtN(ordersValue)        : "—", delta: null, color: "#34D399", spark: sparkData.orders, sparkFormat: sparkFmt.orders },
     kpi_ctr:         { label: "CTR",                         value: hasData ? `${parseFloat(totals.ctr || 0).toFixed(2)}%` : "—", delta: null, color: "#FBBF24", spark: sparkData.ctr, sparkFormat: sparkFmt.ctr },
     kpi_cpc:         { label: "CPC",                         value: hasData ? `${CUR}${parseFloat(totals.cpc || 0).toFixed(2)}` : "—", delta: null, color: "#F87171", spark: sparkData.cpc, sparkFormat: sparkFmt.cpc },
+    // Ad conversion: ad orders ÷ ad clicks. `cvr` is null (not 0) when the period had no
+    // clicks, so check for null rather than falling back to 0 — "0%" would claim traffic
+    // that converted nothing, which is a different thing from having had no traffic.
+    kpi_cvr:         { label: t("overview.kpiCvr"),
+                       value: hasData && totals.cvr != null ? `${parseFloat(totals.cvr).toFixed(2)}%` : "—",
+                       delta: deltas.cvr, color: "#818CF8", spark: sparkData.cvr,
+                       tooltip: t("overview.kpiCvrTooltip"), sparkFormat: sparkFmt.cvr },
   };
 
   const typeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || (ct || "").slice(0, 3).toUpperCase();
@@ -6726,7 +7375,7 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
           </div>
         );
       }
-      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} sparkDates={sparkDates} sparkFormat={kpi.sparkFormat} loading={sl} extra={extra} tooltip={kpi.tooltip} />;
+      return <KPICard key={item.id} label={kpi.label} value={kpi.value} delta={kpi.delta} color={kpi.color} spark={kpi.spark} sparkDates={sparkDates} sparkFormat={kpi.sparkFormat} loading={sl} extra={extra} tooltip={kpi.tooltip} wide={item.size === "full"} />;
     }
 
     if (item.id === "chart_spend") {
@@ -7153,13 +7802,15 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
                     disabled={idx === layout.length - 1}
                     style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: idx === layout.length - 1 ? "not-allowed" : "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center", opacity: idx === layout.length - 1 ? .4 : 1 }}
                   ><ArrowDown size={10} strokeWidth={1.75} /></button>
-                  {!item.id.startsWith("kpi_") && (
-                    <button
-                      onClick={() => toggleSize(idx)}
-                      title={item.size === "full" ? "Make narrow" : "Make wide"}
-                      style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center" }}
-                    ><ArrowUpDown size={10} strokeWidth={1.75} /></button>
-                  )}
+                  {/* Width toggle — available on every widget, KPI tiles included. It used to be
+                      hidden for `kpi_*`, which left those tiles permanently half-width with no
+                      way to widen them. KPICard has no fixed width and Spark scales via viewBox,
+                      so a KPI tile renders correctly at full width. */}
+                  <button
+                    onClick={() => toggleSize(idx)}
+                    title={item.size === "full" ? t("overview.makeNarrow") : t("overview.makeWide")}
+                    style={{ width: 24, height: 24, background: "var(--s3)", border: "1px solid var(--b2)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--tx2)", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  ><ArrowUpDown size={10} strokeWidth={1.75} /></button>
                   <button
                     onClick={() => toggleWidget(item.id)}
                     style={{ width: 24, height: 24, background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 4, fontSize: 10, cursor: "pointer", color: "var(--red)", display: "flex", alignItems: "center", justifyContent: "center" }}

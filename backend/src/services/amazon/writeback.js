@@ -354,6 +354,162 @@ async function loadKeywordContext(workspaceId, keywordIds) {
   return rows;
 }
 
+/**
+ * Build the campaign-mutation fields for a daily budget, per campaign type.
+ *
+ * SP and SB v3 both model the budget as a nested object; there is no `dailyBudget`
+ * field in the v3 campaign schema (a GET returns `budget: {budget, budgetType}`).
+ * Sending the v2-style flat `dailyBudget` is not rejected — Amazon ignores the unknown
+ * field and still answers 207 with the campaign in `success[]`, so the caller records a
+ * successful write while the budget on Amazon never changes. That silently no-op'd every
+ * SP budget write-back (rules and the campaign edit form alike) until 2026-08-10.
+ * SD is the exception: its PUT is still v2-style (flat budget, lowercase budgetType).
+ *
+ * Returns a fragment to merge into the campaign object — never a whole payload.
+ */
+function campaignBudgetFields(campaignType, dailyBudget) {
+  const budget = parseFloat(dailyBudget);
+  if (!Number.isFinite(budget)) return {};
+  return campaignType === "sponsoredDisplay"
+    ? { budget, budgetType: "daily" }
+    : { budget: { budget, budgetType: "DAILY" } };
+}
+
+/**
+ * SP/SB wrap campaign mutations in `{campaigns: [...]}`; SD (v2-style PUT) takes a bare array.
+ */
+function wrapCampaigns(campaignType, items) {
+  return campaignType === "sponsoredDisplay" ? items : { campaigns: items };
+}
+
+/**
+ * Push campaign state and/or daily-budget changes to Amazon.
+ *
+ * Mirrors pushKeywordUpdates: non-fatal, batched per profile, and resolves to
+ * `{ok:false, error}` on a 207 partial rejection rather than throwing.
+ *
+ * @param {Array<object>} updates - {amazonCampaignId, campaignType, connectionId,
+ *   profileId, marketplaceId, state?, dailyBudget?}
+ */
+async function pushCampaignUpdates(updates) {
+  if (!updates?.length) return { ok: true };
+
+  let anyError = null;
+  const PATHS = {
+    sponsoredProducts: "/sp/campaigns",
+    sponsoredBrands:   "/sb/campaigns",
+    sponsoredDisplay:  "/sd/campaigns",
+  };
+
+  for (const [campaignType, byType] of groupBy(updates, "campaignType")) {
+    const path = PATHS[campaignType];
+    if (!path) {
+      anyError = `Unsupported campaign type: ${campaignType}`;
+      logger.warn("Campaign write-back skipped: unknown type", { campaignType });
+      continue;
+    }
+    const isSD = campaignType === "sponsoredDisplay";
+
+    for (const [profileId, group] of groupBy(byType, "profileId")) {
+      const first = group[0];
+      if (!first.connectionId || !first.profileId) continue;
+
+      for (let i = 0; i < group.length; i += BATCH_SIZE) {
+        const batch = group.slice(i, i + BATCH_SIZE);
+        const items = batch.map(u => {
+          const c = { campaignId: u.amazonCampaignId };
+          // SP/SB expect uppercase state (ENABLED); SD (v2-style) expects lowercase.
+          if (u.state !== undefined) c.state = isSD ? u.state.toLowerCase() : u.state.toUpperCase();
+          if (u.dailyBudget !== undefined) Object.assign(c, campaignBudgetFields(campaignType, u.dailyBudget));
+          return c;
+        });
+        try {
+          const result = await put({
+            connectionId: first.connectionId,
+            profileId:    String(first.profileId),
+            marketplace:  first.marketplaceId,
+            path,
+            data:         wrapCampaigns(campaignType, items),
+            group:        "campaigns",
+          });
+          const err = partialError(result, "campaigns");
+          if (err) {
+            logger.warn("Campaign write-back partial errors", { profileId, campaignType, error: err });
+            anyError = err;
+          } else {
+            logger.info("Campaign write-back ok", { profileId, campaignType, count: batch.length });
+          }
+        } catch (e) {
+          logger.warn("Campaign write-back failed (non-fatal)", { profileId, campaignType, error: e.message });
+          anyError = e.message;
+        }
+      }
+    }
+  }
+  return anyError ? { ok: false, error: anyError } : { ok: true };
+}
+
+/**
+ * Push ad-group state and/or default-bid changes to Amazon.
+ * Same contract as pushCampaignUpdates: non-fatal, 207-aware, resolves to {ok,error}.
+ *
+ * @param {Array<object>} updates - {amazonAdGroupId, campaignType, connectionId,
+ *   profileId, marketplaceId, state?, defaultBid?}
+ */
+async function pushAdGroupUpdates(updates) {
+  if (!updates?.length) return { ok: true };
+
+  let anyError = null;
+  const PATHS = {
+    sponsoredProducts: "/sp/adGroups",
+    sponsoredBrands:   "/sb/adGroups",
+    sponsoredDisplay:  "/sd/adGroups",
+  };
+
+  for (const [campaignType, byType] of groupBy(updates, "campaignType")) {
+    const path = PATHS[campaignType];
+    if (!path) {
+      anyError = `Unsupported campaign type: ${campaignType}`;
+      continue;
+    }
+    for (const [profileId, group] of groupBy(byType, "profileId")) {
+      const first = group[0];
+      if (!first.connectionId || !first.profileId) continue;
+
+      for (let i = 0; i < group.length; i += BATCH_SIZE) {
+        const batch = group.slice(i, i + BATCH_SIZE);
+        const items = batch.map(u => {
+          const ag = { adGroupId: u.amazonAdGroupId };
+          if (u.state !== undefined)      ag.state      = u.state.toUpperCase();
+          if (u.defaultBid !== undefined) ag.defaultBid = parseFloat(u.defaultBid);
+          return ag;
+        });
+        try {
+          const result = await put({
+            connectionId: first.connectionId,
+            profileId:    String(first.profileId),
+            marketplace:  first.marketplaceId,
+            path,
+            data:         { adGroups: items },
+            group:        "ad_groups",
+          });
+          const err = partialError(result, "adGroups");
+          if (err) {
+            logger.warn("Ad group write-back partial errors", { profileId, campaignType, error: err });
+            anyError = err;
+          } else {
+            logger.info("Ad group write-back ok", { profileId, campaignType, count: batch.length });
+          }
+        } catch (e) {
+          logger.warn("Ad group write-back failed (non-fatal)", { profileId, campaignType, error: e.message });
+          anyError = e.message;
+        }
+      }
+    }
+  }
+  return anyError ? { ok: false, error: anyError } : { ok: true };
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function groupBy(arr, key) {
   const map = new Map();
@@ -624,4 +780,8 @@ async function archiveNegativeTarget({ localId, connectionId, profileId, marketp
   }
 }
 
-module.exports = { pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext, pushNewKeywords, archiveNegativeKeyword, archiveNegativeTarget };
+module.exports = {
+  pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext,
+  pushNewKeywords, archiveNegativeKeyword, archiveNegativeTarget,
+  pushCampaignUpdates, pushAdGroupUpdates, campaignBudgetFields, wrapCampaigns, partialError,
+};

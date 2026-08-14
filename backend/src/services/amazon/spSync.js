@@ -11,7 +11,8 @@ const {
   getFinancialEvents,
   getCompetitivePricing,
 } = require("./spClient");
-const { computeListingIssues } = require("./listingHealth");
+const { computeListingIssues, computeCrossCountryIssues } = require("./listingHealth");
+const { EU_MARKETPLACES } = require("./marketplaces");
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function _startLog(workspaceId, marketplaceId, syncType) {
@@ -21,6 +22,19 @@ async function _startLog(workspaceId, marketplaceId, syncType) {
     [workspaceId, marketplaceId, syncType]
   );
   return rows[0].id;
+}
+
+// Progress for sweeps long enough that the UI needs to show one. Best-effort:
+// a failed progress write must never abort the sweep it is only reporting on.
+async function _setProgress(logId, done, total) {
+  try {
+    await pool.query(
+      "UPDATE sp_sync_log SET progress_done=$1, progress_total=$2 WHERE id=$3",
+      [done, total, logId]
+    );
+  } catch (err) {
+    logger.warn("Failed to update sync progress", { logId, error: err.message });
+  }
 }
 
 async function _finishLog(logId, status, counts, extra = {}) {
@@ -412,6 +426,299 @@ async function syncPricing(workspaceId, marketplaceId, refreshToken) {
   }
 }
 
+// ─── Cross-country listing sync ───────────────────────────────────────────────
+// Checks the same ASIN in every EU marketplace the seller participates in, so
+// the Products page can answer "where is this listing missing or unlocalized?".
+//
+// Deliberately per-marketplace calls rather than one batched request: verified
+// 2026-07-31 that getCatalogItem accepts a comma-separated marketplaceIds list
+// but is all-or-nothing — if the ASIN is absent from a single marketplace the
+// whole request 404s, which is exactly the case we most need data for.
+//
+// Cost is 2 SP-API calls per (ASIN, country) — Catalog Items + A+ Content — so
+// ~10k calls for 553 ASINs across 9 countries. Catalog Items documents 5 rps,
+// but a probe on 2026-07-31 drew a 429 QuotaExceeded at roughly 3 rps sustained,
+// so the default pace below deliberately sits far under the documented ceiling
+// and backs off further whenever Amazon does push back. A full sweep is a
+// multi-hour background job by design — see `_Throttle`.
+const LISTING_PACE_MS = Number(process.env.SP_LISTING_PACE_MS || 700);
+
+// Adaptive pacing: widens the gap between calls on every 429 and only walks it
+// back after a run of clean responses. Being throttled is a signal that the
+// account's real quota is below the documented one, so the sweep should slow
+// down and stay slow rather than immediately re-provoking the limit.
+class _Throttle {
+  constructor(baseMs) {
+    this.base = baseMs;
+    this.current = baseMs;
+    this.clean = 0;
+    this.throttled = 0;
+  }
+  async wait() { await _sleep(this.current); }
+  penalise() {
+    this.throttled++;
+    this.clean = 0;
+    this.current = Math.min(Math.round(this.current * 1.5), 10000);
+  }
+  reward() {
+    // 25 clean calls before easing off — fast enough to recover on a one-off
+    // blip, slow enough not to oscillate around a genuinely lower quota.
+    if (this.current === this.base) return;
+    if (++this.clean >= 25) {
+      this.clean = 0;
+      this.current = Math.max(this.base, Math.round(this.current / 1.5));
+    }
+  }
+}
+
+async function syncMarketplaceListings(workspaceId, refreshToken, options = {}) {
+  const targets = (options.marketplaceIds && options.marketplaceIds.length)
+    ? EU_MARKETPLACES.filter(m => options.marketplaceIds.includes(m.marketplaceId))
+    : EU_MARKETPLACES;
+
+  // Skip products whose whole country set was already checked this recently, so
+  // an interrupted sweep can be re-run to pick up only what it never reached
+  // instead of spending the entire quota again on rows it already has.
+  const staleHours = Number.isFinite(options.staleHours) ? Number(options.staleHours) : 0;
+  const limit = Number.isFinite(options.limit) ? Number(options.limit) : 0;
+  const throttle = new _Throttle(Number(options.paceMs) || LISTING_PACE_MS);
+
+  const logId = await _startLog(workspaceId, targets.map(m => m.countryCode).join(","), "marketplace_listings");
+  let fetched = 0, upserted = 0;
+  try {
+    const params = [workspaceId];
+    let sql = `SELECT p.id, p.asin, p.marketplace_id FROM products p
+                WHERE p.workspace_id=$1 AND p.is_active=true`;
+    if (options.asins && options.asins.length) {
+      params.push(options.asins.map(a => a.toUpperCase()));
+      sql += ` AND UPPER(p.asin) = ANY($${params.length})`;
+    }
+    if (staleHours > 0) {
+      // Array.push returns the new length, which is exactly the 1-based
+      // placeholder index for the value just added.
+      const iMkts  = params.push(targets.map(m => m.marketplaceId));
+      const iHours = params.push(staleHours);
+      const iCount = params.push(targets.length);
+      sql += ` AND (
+        SELECT COUNT(*) FROM product_marketplace_listings l
+         WHERE l.product_id = p.id
+           AND l.marketplace_id = ANY($${iMkts})
+           AND l.checked_at > NOW() - make_interval(hours => $${iHours}::int)
+      ) < $${iCount}::int`;
+    }
+    sql += " ORDER BY p.asin";
+    if (limit > 0) {
+      params.push(limit);
+      sql += ` LIMIT $${params.length}`;
+    }
+    const { rows: products } = await pool.query(sql, params);
+
+    logger.info("Cross-country listing sync started", {
+      workspaceId, products: products.length, countries: targets.length,
+      paceMs: throttle.base, staleHours,
+    });
+
+    // Publish the size of the sweep up front so the UI can show a real progress
+    // bar from the first poll rather than an indeterminate spinner for hours.
+    const progressTotal = products.length * targets.length;
+    await _setProgress(logId, 0, progressTotal);
+
+    for (const product of products) {
+      // Gather every marketplace first, then score — the cross-country checks
+      // need the home-marketplace listing as their reference, and it is not
+      // guaranteed to be the first one fetched.
+      const perMarket = [];
+      for (const mkt of targets) {
+        const row = await _fetchOneMarketplaceListing(product, mkt, refreshToken, throttle);
+        perMarket.push(row);
+        if (row.existsInCatalog) fetched++;
+      }
+
+      const reference = perMarket.find(r => r.marketplaceId === product.marketplace_id && r.existsInCatalog) || null;
+
+      for (const row of perMarket) {
+        const isReference = row.marketplaceId === product.marketplace_id;
+        let issues = row.base ? [...row.base.issues] : [];
+
+        if (!row.existsInCatalog) {
+          // "Not listed" applies to the home marketplace too. Without this the
+          // reference row would carry zero findings while its cell renders red,
+          // and the detail panel would claim the listing is clean.
+          issues = [{ code: "not_listed" }];
+        } else if (!isReference) {
+          const cross = computeCrossCountryIssues({
+            target: {
+              title: row.title,
+              bulletPoints: row.bulletPoints,
+              hasAplus: row.base?.hasAplus || false,
+              imageCount: row.base?.imageCount || 0,
+              bestRank: row.bestRank,
+            },
+            reference: reference && {
+              title: reference.title,
+              bulletPoints: reference.bulletPoints,
+              hasAplus: reference.base?.hasAplus || false,
+              imageCount: reference.base?.imageCount || 0,
+            },
+            existsInCatalog: row.existsInCatalog,
+          });
+          issues = cross.replacesBase
+            ? cross.issues
+            : [...issues.filter(i => !cross.drop?.has(i.code)), ...cross.issues];
+        }
+
+        await pool.query(
+          `INSERT INTO product_marketplace_listings
+             (product_id, marketplace_id, country_code, is_reference, exists_in_catalog,
+              title, title_len, bullet_count, image_count, has_zoomable_image,
+              has_description, has_aplus, best_rank, best_category,
+              issues, issue_count, raw_data, error_message, image_url, checked_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())
+           ON CONFLICT (product_id, marketplace_id) DO UPDATE SET
+             country_code=$3, is_reference=$4, exists_in_catalog=$5, title=$6, title_len=$7,
+             bullet_count=$8, image_count=$9, has_zoomable_image=$10, has_description=$11,
+             has_aplus=$12, best_rank=$13, best_category=$14, issues=$15, issue_count=$16,
+             raw_data=$17, error_message=$18, image_url=$19, checked_at=NOW()`,
+          [
+            product.id, row.marketplaceId, row.countryCode, isReference, row.existsInCatalog,
+            row.title, row.base?.titleLen ?? null, row.base?.bulletCount ?? null,
+            row.base?.imageCount ?? null, row.base?.hasZoomableImage ?? null,
+            row.base?.hasDescription ?? null, row.base?.hasAplus ?? null,
+            row.bestRank, row.bestCategory,
+            JSON.stringify(issues), issues.length,
+            JSON.stringify(row.rawData || {}), row.errorMessage, row.imageUrl ?? null,
+          ]
+        );
+        upserted++;
+      }
+
+      // One update per product, not per country — the sweep spends ~6s per
+      // product, so this is a negligible write while keeping the bar moving.
+      await _setProgress(logId, upserted, progressTotal);
+    }
+    await _finishLog(logId, "success", { fetched, upserted });
+    logger.info("Cross-country listing sync finished", {
+      workspaceId, products: products.length, fetched, upserted,
+      throttled: throttle.throttled, finalPaceMs: throttle.current,
+    });
+    return {
+      fetched, upserted, products: products.length,
+      countries: targets.length, throttled: throttle.throttled,
+    };
+  } catch (err) {
+    await _finishLog(logId, "failed", { fetched, upserted }, { error: err.message });
+    throw err;
+  }
+}
+
+// Fetches one (ASIN, marketplace) pair. Never throws: a 404 is a real finding
+// ("not listed here") and any other failure is recorded on the row so a single
+// flaky country cannot abort a multi-hour sweep.
+async function _fetchOneMarketplaceListing(product, mkt, refreshToken, throttle) {
+  const base = {
+    marketplaceId: mkt.marketplaceId,
+    countryCode: mkt.countryCode,
+    existsInCatalog: false,
+    title: null,
+    bulletPoints: [],
+    bestRank: null,
+    bestCategory: null,
+    base: null,
+    imageUrl: null,
+    rawData: null,
+    errorMessage: null,
+  };
+
+  const wasThrottled = (err) => err.status === 429 || /rate limit|QuotaExceeded/i.test(err.message || "");
+
+  let content;
+  try {
+    content = await getListingContent(product.asin, mkt.marketplaceId, refreshToken);
+    throttle.reward();
+  } catch (err) {
+    // 404 NOT_FOUND is the "no listing in this country" signal, not an error —
+    // and it still counts as a healthy response for pacing purposes.
+    if (err.status === 404) {
+      throttle.reward();
+      await throttle.wait();
+      return base;
+    }
+    base.errorMessage = err.message;
+    if (wasThrottled(err)) {
+      throttle.penalise();
+      logger.warn("Cross-country sync throttled — slowing down", {
+        asin: product.asin, country: mkt.countryCode, paceMs: throttle.current,
+      });
+      // _spRequest already retried with Amazon's Retry-After; an extra pause on
+      // top lets the token bucket refill before the sweep resumes.
+      await _sleep(15000);
+    }
+    await throttle.wait();
+    return base;
+  }
+  await throttle.wait();
+
+  let hasAplus = false;
+  try {
+    hasAplus = (await getAplusStatus(product.asin, mkt.marketplaceId, refreshToken)).hasAplus;
+    throttle.reward();
+  } catch (err) {
+    // A+ is one signal among six — degrade to "unknown, treated as absent" and
+    // note it rather than discarding an otherwise complete listing check.
+    base.errorMessage = `aplus: ${err.message}`;
+    if (wasThrottled(err)) {
+      throttle.penalise();
+      await _sleep(15000);
+    }
+    logger.warn("Marketplace listing A+ check failed", { asin: product.asin, country: mkt.countryCode, error: err.message });
+  }
+  await throttle.wait();
+
+  const rank = _bestRank(content.classificationRanks, content.displayGroupRanks);
+  return {
+    ...base,
+    existsInCatalog: true,
+    imageUrl: _listingThumbnail(content.images),
+    title: content.title,
+    bulletPoints: content.bulletPoints,
+    bestRank: rank?.rank ?? null,
+    bestCategory: rank?.category ?? null,
+    base: computeListingIssues({
+      title: content.title,
+      bulletPoints: content.bulletPoints,
+      description: content.description,
+      images: content.images,
+      hasAplus,
+    }),
+    rawData: content.rawData,
+    errorMessage: base.errorMessage,
+  };
+}
+
+// Amazon returns each photo at several sizes (typically 75 / 500 / 2208 px).
+// The matrix renders it at ~26 px, so the smallest is both sharp enough and the
+// cheapest to load across a several-hundred-row table.
+//
+// MAIN is preferred but is NOT guaranteed: verified on the live account that
+// B099ZVM384 carries only PT01–PT08 in BE and SE — 24 images, no MAIN at all.
+// Requiring MAIN left those listings with a blank thumbnail, so fall back to the
+// lowest-numbered supplementary photo, which is the one Amazon shows first.
+function _listingThumbnail(images) {
+  const usable = (images || []).filter(i => i.link && Number(i.width) > 0);
+  if (!usable.length) return null;
+  // "" sorts before "PT01"; the ￿ guard keeps unlabelled variants last.
+  const rank = (v) => (v === "MAIN" ? "" : (v || "￿"));
+  return usable.slice().sort((a, b) => {
+    const ra = rank(a.variant), rb = rank(b.variant);
+    if (ra !== rb) return ra < rb ? -1 : 1;
+    return Number(a.width) - Number(b.width);
+  })[0].link;
+}
+
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing, syncListingHealth };
+module.exports = {
+  syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing,
+  syncListingHealth, syncMarketplaceListings,
+  _listingThumbnail,
+};

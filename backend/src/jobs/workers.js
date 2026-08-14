@@ -95,9 +95,9 @@ async function queueMetricsBackfill(workspaceId, dateFrom, dateTo) {
   return queue.add("backfill", { workspaceId, dateFrom, dateTo }, { priority: 3 });
 }
 
-async function queueSpSync(workspaceId, marketplaceId, syncTypes = ["bsr", "inventory", "pricing"], priority = 5) {
+async function queueSpSync(workspaceId, marketplaceId, syncTypes = ["bsr", "inventory", "pricing"], priority = 5, options = {}) {
   const queue = getQueue(QUEUES.SP_SYNC);
-  return queue.add("sync", { workspaceId, marketplaceId, syncTypes }, { priority });
+  return queue.add("sync", { workspaceId, marketplaceId, syncTypes, options }, { priority });
 }
 
 async function queueAiAnalysis(workspaceId, locale = "en") {
@@ -504,12 +504,12 @@ async function startWorkers() {
     logger.error("AI analysis worker failed", { jobId: job?.id, error: err.message });
   });
 
-  const { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing, syncListingHealth } = require("../services/amazon/spSync");
+  const { syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing, syncListingHealth, syncMarketplaceListings } = require("../services/amazon/spSync");
   const { decrypt } = require("../config/encryption");
   const spSyncWorker = new Worker(
     QUEUES.SP_SYNC,
     async (job) => {
-      const { workspaceId, marketplaceId, syncTypes } = job.data;
+      const { workspaceId, marketplaceId, syncTypes, options = {} } = job.data;
       // Resolve refresh token: env var fallback
       const refreshToken = process.env.SP_API_REFRESH_TOKEN || null;
       if (!refreshToken) {
@@ -527,6 +527,9 @@ async function startWorkers() {
           if (type === "financials") results.financials = await syncFinancials(workspaceId, marketplaceId, refreshToken);
           if (type === "pricing")    results.pricing    = await syncPricing(workspaceId, marketplaceId, refreshToken);
           if (type === "listing_health") results.listing_health = await syncListingHealth(workspaceId, marketplaceId, refreshToken);
+          // Cross-country: iterates every EU marketplace itself, so it ignores
+          // the job's single marketplaceId and takes its scope from `options`.
+          if (type === "marketplace_listings") results.marketplace_listings = await syncMarketplaceListings(workspaceId, refreshToken, options);
         } catch (err) {
           logger.warn(`SP_SYNC: ${type} failed`, { workspaceId, error: err.message });
           results[type] = { error: err.message };

@@ -70,6 +70,14 @@ jest.mock("../src/config/logger", () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 jest.mock("axios", () => ({ post: jest.fn() }));
+// Applying a recommendation must reach Amazon, not just Postgres — these let the tests assert
+// the push happened (and with what) without making a network call.
+jest.mock("../src/services/amazon/writeback", () => ({
+  pushCampaignUpdates: jest.fn().mockResolvedValue({ ok: true }),
+  pushKeywordUpdates:  jest.fn().mockResolvedValue({ ok: true }),
+  pushAdGroupUpdates:  jest.fn().mockResolvedValue({ ok: true }),
+  loadKeywordContext:  jest.fn().mockResolvedValue([]),
+}));
 jest.mock("../src/middleware/auth", () => ({
   requireAuth: (req, _res, next) => {
     req.user  = { id: USER_ID, name: "Test User", role: "owner", org_id: ORG_ID };
@@ -89,6 +97,18 @@ process.env.ANTHROPIC_API_KEY = "test-key-xxx";
 const { query: dbQuery } = require("../src/db/pool");
 const { writeAudit }     = require("../src/routes/audit");
 const axios              = require("axios");
+const {
+  pushCampaignUpdates, pushKeywordUpdates, pushAdGroupUpdates, loadKeywordContext,
+} = require("../src/services/amazon/writeback");
+
+// Amazon identifiers returned by the campaignContext lookup inside the apply handler.
+const CAMPAIGN_AMAZON_CTX = {
+  amazon_campaign_id: "amzn-camp-1",
+  campaign_type:      "sponsoredProducts",
+  connection_id:      "conn-1",
+  amazon_profile_id:  "3504248839830151",
+  marketplace_id:     "A1PA6795UKMFR9",
+};
 
 const aiRouter = require("../src/routes/ai");
 
@@ -142,6 +162,12 @@ beforeEach(() => {
   jest.resetAllMocks();
   // Re-apply any default mock implementations cleared by resetAllMocks
   writeAudit.mockResolvedValue("audit-id-001");
+  // The apply handler always awaits all three pushes and reads `.ok` off each result,
+  // so these must resolve to a result object even when a test doesn't exercise them.
+  pushCampaignUpdates.mockResolvedValue({ ok: true });
+  pushKeywordUpdates.mockResolvedValue({ ok: true });
+  pushAdGroupUpdates.mockResolvedValue({ ok: true });
+  loadKeywordContext.mockResolvedValue([]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -586,9 +612,10 @@ describe("POST /ai/recommendations/:id/apply", () => {
       ]),
     };
     dbQuery
-      .mockResolvedValueOnce({ rows: [rec] })   // fetch rec
-      .mockResolvedValueOnce({ rowCount: 1 })   // UPDATE campaigns SET state
-      .mockResolvedValueOnce({ rowCount: 1 })   // UPDATE ai_recommendations SET status='applied'
+      .mockResolvedValueOnce({ rows: [rec] })                    // fetch rec
+      .mockResolvedValueOnce({ rowCount: 1 })                    // UPDATE campaigns SET state
+      .mockResolvedValueOnce({ rows: [CAMPAIGN_AMAZON_CTX] })    // campaignContext lookup
+      .mockResolvedValueOnce({ rowCount: 1 })                    // UPDATE ai_recommendations
 
     const res = await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
     expect(res.status).toBe(200);
@@ -600,6 +627,89 @@ describe("POST /ai/recommendations/:id/apply", () => {
         entityId: REC_ID,
       })
     );
+  });
+
+  // The apply path used to write to Postgres only, so every "applied" change was silently
+  // reverted by the next entity sync. The state must actually reach Amazon.
+  test("pushes an applied campaign state change to Amazon", async () => {
+    const rec = {
+      ...SAVED_REC,
+      actions: JSON.stringify([
+        { action_type: "pause_campaign", entity_type: "campaign", entity_id: CAMP_ID, params: { state: "paused" } },
+      ]),
+    };
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rec] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [CAMPAIGN_AMAZON_CTX] })
+      .mockResolvedValueOnce({ rowCount: 1 });
+
+    const res = await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
+    expect(res.status).toBe(200);
+    expect(res.body.amazonError).toBeNull();
+    expect(pushCampaignUpdates).toHaveBeenCalledWith([
+      expect.objectContaining({ amazonCampaignId: "amzn-camp-1", state: "paused" }),
+    ]);
+  });
+
+  test("pushes an applied campaign budget change to Amazon", async () => {
+    const rec = {
+      ...SAVED_REC,
+      actions: JSON.stringify([
+        { action_type: "adjust_budget", entity_type: "campaign", entity_id: CAMP_ID, params: { daily_budget: 42 } },
+      ]),
+    };
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rec] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [CAMPAIGN_AMAZON_CTX] })
+      .mockResolvedValueOnce({ rowCount: 1 });
+
+    await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
+    expect(pushCampaignUpdates).toHaveBeenCalledWith([
+      expect.objectContaining({ amazonCampaignId: "amzn-camp-1", dailyBudget: 42 }),
+    ]);
+  });
+
+  test("reports an Amazon rejection without failing the request", async () => {
+    pushCampaignUpdates.mockResolvedValueOnce({ ok: false, error: "ENTITY_NOT_FOUND" });
+    const rec = {
+      ...SAVED_REC,
+      actions: JSON.stringify([
+        { action_type: "pause_campaign", entity_type: "campaign", entity_id: CAMP_ID, params: { state: "paused" } },
+      ]),
+    };
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rec] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [CAMPAIGN_AMAZON_CTX] })
+      .mockResolvedValueOnce({ rowCount: 1 });
+
+    const res = await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toBe(true);
+    expect(res.body.amazonError).toBe("ENTITY_NOT_FOUND");
+    expect(writeAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ amazonStatus: "error" })
+    );
+  });
+
+  test("skips the Amazon push for a campaign with no live connection", async () => {
+    const rec = {
+      ...SAVED_REC,
+      actions: JSON.stringify([
+        { action_type: "pause_campaign", entity_type: "campaign", entity_id: CAMP_ID, params: { state: "paused" } },
+      ]),
+    };
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rec] })
+      .mockResolvedValueOnce({ rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] })      // campaignContext → no Amazon link
+      .mockResolvedValueOnce({ rowCount: 1 });
+
+    const res = await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
+    expect(res.status).toBe(200);
+    expect(pushCampaignUpdates).toHaveBeenCalledWith([]);
   });
 
   test("applies keyword bid change", async () => {
@@ -614,6 +724,10 @@ describe("POST /ai/recommendations/:id/apply", () => {
         },
       ]),
     };
+    loadKeywordContext.mockResolvedValueOnce([{
+      id: KW_ID, amazon_keyword_id: "amzn-kw-1", campaign_type: "sponsoredProducts",
+      connection_id: "conn-1", amazon_profile_id: "3504248839830151", marketplace_id: "A1PA6795UKMFR9",
+    }]);
     dbQuery
       .mockResolvedValueOnce({ rows: [rec] })   // fetch rec
       .mockResolvedValueOnce({ rowCount: 1 })   // UPDATE keywords SET bid
@@ -626,7 +740,11 @@ describe("POST /ai/recommendations/:id/apply", () => {
       sql.includes("UPDATE keywords") && sql.includes("bid =")
     );
     expect(kwUpdateCall).toBeDefined();
-    expect(kwUpdateCall[1][0]).toBe(0.45);
+    // params are [entityId, workspaceId, ...setValues]
+    expect(kwUpdateCall[1][2]).toBe(0.45);
+    expect(pushKeywordUpdates).toHaveBeenCalledWith([
+      expect.objectContaining({ amazonKeywordId: "amzn-kw-1", bid: 0.45 }),
+    ]);
   });
 
   test("applies keyword state change", async () => {
@@ -641,6 +759,10 @@ describe("POST /ai/recommendations/:id/apply", () => {
         },
       ]),
     };
+    loadKeywordContext.mockResolvedValueOnce([{
+      id: KW_ID, amazon_keyword_id: "amzn-kw-1", campaign_type: "sponsoredProducts",
+      connection_id: "conn-1", amazon_profile_id: "3504248839830151", marketplace_id: "A1PA6795UKMFR9",
+    }]);
     dbQuery
       .mockResolvedValueOnce({ rows: [rec] })
       .mockResolvedValueOnce({ rowCount: 1 })   // UPDATE keywords SET state
@@ -652,7 +774,11 @@ describe("POST /ai/recommendations/:id/apply", () => {
       sql.includes("UPDATE keywords") && sql.includes("state =")
     );
     expect(stateUpdateCall).toBeDefined();
-    expect(stateUpdateCall[1][0]).toBe("paused");
+    // params are [entityId, workspaceId, ...setValues]
+    expect(stateUpdateCall[1][2]).toBe("paused");
+    expect(pushKeywordUpdates).toHaveBeenCalledWith([
+      expect.objectContaining({ amazonKeywordId: "amzn-kw-1", state: "paused" }),
+    ]);
   });
 
   test("applies bid_adjustment_pct via keyword UPDATE", async () => {
@@ -667,9 +793,14 @@ describe("POST /ai/recommendations/:id/apply", () => {
         },
       ]),
     };
+    loadKeywordContext.mockResolvedValueOnce([{
+      id: KW_ID, amazon_keyword_id: "amzn-kw-1", campaign_type: "sponsoredProducts",
+      connection_id: "conn-1", amazon_profile_id: "3504248839830151", marketplace_id: "A1PA6795UKMFR9",
+    }]);
     dbQuery
       .mockResolvedValueOnce({ rows: [rec] })
-      .mockResolvedValueOnce({ rowCount: 3 })   // UPDATE keywords (bid * multiplier)
+      // RETURNING gives the post-update bids — Amazon takes absolute values, not a percentage
+      .mockResolvedValueOnce({ rows: [{ id: KW_ID, bid: 0.69 }] })
       .mockResolvedValueOnce({ rowCount: 1 });   // UPDATE ai_recommendations
 
     const res = await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
@@ -680,6 +811,9 @@ describe("POST /ai/recommendations/:id/apply", () => {
     expect(bidAdjCall).toBeDefined();
     // multiplier = 1 + 15/100 = 1.15
     expect(bidAdjCall[1][0]).toBeCloseTo(1.15, 5);
+    expect(pushKeywordUpdates).toHaveBeenCalledWith([
+      expect.objectContaining({ amazonKeywordId: "amzn-kw-1", bid: 0.69 }),
+    ]);
   });
 
   test("falls back to ad_group default_bid update when no keywords matched", async () => {
@@ -696,8 +830,11 @@ describe("POST /ai/recommendations/:id/apply", () => {
     };
     dbQuery
       .mockResolvedValueOnce({ rows: [rec] })
-      .mockResolvedValueOnce({ rowCount: 0 })   // UPDATE keywords → 0 rows matched
-      .mockResolvedValueOnce({ rowCount: 2 })   // UPDATE ad_groups
+      .mockResolvedValueOnce({ rows: [] })      // UPDATE keywords → 0 rows matched
+      .mockResolvedValueOnce({ rows: [{        // UPDATE ad_groups ... RETURNING
+        amazon_ag_id: "amzn-ag-1", default_bid: 0.36, campaign_type: "sponsoredProducts",
+        connection_id: "conn-1", amazon_profile_id: "3504248839830151", marketplace_id: "A1PA6795UKMFR9",
+      }] })
       .mockResolvedValueOnce({ rowCount: 1 });  // UPDATE ai_recommendations
 
     const res = await request(buildApp()).post(`/ai/recommendations/${REC_ID}/apply`);
@@ -706,6 +843,9 @@ describe("POST /ai/recommendations/:id/apply", () => {
       sql.includes("UPDATE ad_groups") && sql.includes("default_bid")
     );
     expect(agCall).toBeDefined();
+    expect(pushAdGroupUpdates).toHaveBeenCalledWith([
+      expect.objectContaining({ amazonAdGroupId: "amzn-ag-1", defaultBid: 0.36 }),
+    ]);
   });
 
   test("writeAudit is called with correct payload", async () => {

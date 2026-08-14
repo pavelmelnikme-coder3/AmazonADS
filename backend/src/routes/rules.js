@@ -15,7 +15,7 @@ const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { writeAudit, updateAuditStatus } = require("./audit");
-const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget } = require("../services/amazon/writeback");
+const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget, pushCampaignUpdates, partialError } = require("../services/amazon/writeback");
 const { put, post } = require("../services/amazon/adsClient");
 const { normalizeKeywordText, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
 const logger  = require("../config/logger");
@@ -142,15 +142,31 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   // audit row carried the failure, which meant recurring rejections stayed invisible for weeks.
   const pendingWritebacks = [];
   const writebackErrors   = [];
+  // Amazon's v3 batch endpoints answer 207 Multi-Status: a per-item rejection rides in
+  // `<dataKey>.error[]` while the HTTP status stays 2xx, so a raw put() resolves normally and
+  // `r.ok` is undefined. Checking only `r.ok === false` therefore reads every partial rejection
+  // from a raw put() as a success. Inspect both shapes: the {ok,error} contract returned by the
+  // writeback helpers, and a raw response body carrying a 207 error list.
+  const RESPONSE_KEYS = ["campaigns", "keywords", "negativeKeywords", "negativeTargetingClauses", "targets", "adGroups"];
+  const writebackFailure = (r) => {
+    if (!r || typeof r !== "object") return null;
+    if (r.ok === false) return r.error || "Amazon rejected the write-back";
+    for (const key of RESPONSE_KEYS) {
+      const err = partialError(r, key);
+      if (err) return err;
+    }
+    return null;
+  };
+
   const trackWriteback = (auditId, promise, warnMsg, ctx = {}) => {
     const record = (error) => {
       writebackErrors.push({ ...ctx, stage: "amazon_writeback", error: String(error) });
     };
     const tracked = promise
       .then(r => {
-        const failed = r && r.ok === false;
-        if (failed) record(r.error || "Amazon rejected the write-back");
-        return updateAuditStatus(auditId, failed ? "error" : "success", r && r.error);
+        const failure = writebackFailure(r);
+        if (failure) record(failure);
+        return updateAuditStatus(auditId, failure ? "error" : "success", failure);
       })
       .catch(e => {
         logger.warn(warnMsg, { error: e.message });
@@ -1543,7 +1559,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           const pct           = parseFloat(action.value || 0) / 100;
           const currentBudget = parseFloat(entity.daily_budget || 10);
           const maxBudget     = safety?.max_budget ? parseFloat(safety.max_budget) : null;
-          const newBudget     = Math.round(Math.min(Math.max(1, currentBudget * (1 + pct)), maxBudget ?? Infinity) * 100) / 100;
+          // max_budget caps GROWTH — it must never pull a budget down. A plain
+          // Math.min(raised, cap) would cut a campaign already above the cap on the very first
+          // run (e.g. 350 → 100 under a cap of 100), turning a "+20%" rule into a 71% cut of the
+          // account's biggest spender. Clamping back to currentBudget keeps an over-cap campaign
+          // exactly where it is; use set_budget when a deliberate reduction is the intent.
+          const raised        = Math.max(1, currentBudget * (1 + pct));
+          const capped        = Math.min(raised, maxBudget ?? Infinity);
+          const newBudget     = Math.round(Math.max(capped, currentBudget) * 100) / 100;
+          // Already at or over the cap: nothing to change. Writing anyway would put a 350 → 350
+          // no-op in the audit journal every run and spend an Amazon call on it.
+          if (newBudget === currentBudget) { recordSkip(entity, action, "at_max_budget"); continue; }
           if (!dryRun) {
             await query("UPDATE campaigns SET daily_budget = $1, updated_at = NOW() WHERE id = $2", [newBudget, entity.id]);
             const adjustBudgetAudit = await writeRuleAudit({
@@ -1553,21 +1579,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               beforeData: { daily_budget: currentBudget }, afterData: { daily_budget: newBudget }, source: "rule",
             });
             if (entity.amazon_campaign_id && entity.connection_id) {
-              const isSB = entity.campaign_type === "sponsoredBrands";
-              const isSD = entity.campaign_type === "sponsoredDisplay";
-              const campPath = isSD ? "/sd/campaigns" : isSB ? "/sb/campaigns" : "/sp/campaigns";
-              // SD requires a bare top-level array with a flat budget + lowercase budgetType
-              // (v2-style); SB uses the nested budget object; SP uses dailyBudget.
-              // (Wrapping SD in {campaigns:[…]} or nesting its budget → Amazon 422.)
-              const budgetData = isSD
-                ? [{ campaignId: entity.amazon_campaign_id, budget: newBudget, budgetType: "daily" }]
-                : { campaigns: [ isSB
-                    ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
-                    : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget } ] };
-              trackWriteback(adjustBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
-                marketplace: entity.marketplace_id, path: campPath,
-                data: budgetData, group: "campaigns",
-              }), "Rule campaign budget write-back failed",
+              trackWriteback(adjustBudgetAudit, pushCampaignUpdates([{
+                amazonCampaignId: entity.amazon_campaign_id,
+                campaignType:     entity.campaign_type,
+                connectionId:     entity.connection_id,
+                profileId:        String(entity.amazon_profile_id),
+                marketplaceId:    entity.marketplace_id,
+                dailyBudget:      newBudget,
+              }]), "Rule campaign budget write-back failed",
                 { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.campaign_name, action: "adjust_budget_pct" });
             }
           }
@@ -1592,20 +1611,14 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               beforeData: { daily_budget: currentBudget }, afterData: { daily_budget: newBudget }, source: "rule",
             });
             if (entity.amazon_campaign_id && entity.connection_id) {
-              const isSB = entity.campaign_type === "sponsoredBrands";
-              const isSD = entity.campaign_type === "sponsoredDisplay";
-              const campPath = isSD ? "/sd/campaigns" : isSB ? "/sb/campaigns" : "/sp/campaigns";
-              // SD requires a bare top-level array with a flat budget + lowercase budgetType
-              // (v2-style); SB uses the nested budget object; SP uses dailyBudget.
-              const budgetData = isSD
-                ? [{ campaignId: entity.amazon_campaign_id, budget: newBudget, budgetType: "daily" }]
-                : { campaigns: [ isSB
-                    ? { campaignId: entity.amazon_campaign_id, budget: { budget: newBudget, budgetType: "DAILY" } }
-                    : { campaignId: entity.amazon_campaign_id, dailyBudget: newBudget } ] };
-              trackWriteback(setBudgetAudit, put({ connectionId: entity.connection_id, profileId: String(entity.amazon_profile_id),
-                marketplace: entity.marketplace_id, path: campPath,
-                data: budgetData, group: "campaigns",
-              }), "Rule campaign set_budget write-back failed",
+              trackWriteback(setBudgetAudit, pushCampaignUpdates([{
+                amazonCampaignId: entity.amazon_campaign_id,
+                campaignType:     entity.campaign_type,
+                connectionId:     entity.connection_id,
+                profileId:        String(entity.amazon_profile_id),
+                marketplaceId:    entity.marketplace_id,
+                dailyBudget:      newBudget,
+              }]), "Rule campaign set_budget write-back failed",
                 { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.campaign_name, action: "set_budget" });
             }
           }
@@ -2200,6 +2213,7 @@ router.post("/:id/run", async (req, res, next) => {
     }
 
     let result;
+    const startedAt = new Date();
     try {
       result = await executeRule(rule, req.workspaceId, effectiveDryRun, req.user.id, req.user.name);
     } finally {
@@ -2220,7 +2234,7 @@ router.post("/:id/run", async (req, res, next) => {
         ? [JSON.stringify(result), req.params.id]
         : [JSON.stringify(result), req.params.id, nextRunAt, runStatusFromResult(result)]
     );
-    if (!effectiveDryRun) await insertRuleExecution(req.params.id, req.workspaceId, result, false);
+    if (!effectiveDryRun) await insertRuleExecution(req.params.id, req.workspaceId, result, false, startedAt);
 
     logger.info("Rule executed", { ruleId: rule.id, ruleName: rule.name, ...result });
     res.json(result);
@@ -2264,15 +2278,19 @@ function runStatusFromResult(result) {
 
 // Persist a row into rule_executions so /rules/:id/runs has real history.
 // Best-effort: a failed insert must never break rule execution.
-async function insertRuleExecution(ruleId, workspaceId, result, dryRun) {
+//
+// `startedAt` must be captured before executeRule runs. The row is only written once, at the
+// end, so letting started_at default to NOW() made it equal completed_at — every run showed a
+// zero duration, which hid how long a rule actually took (some evaluate 68k entities).
+async function insertRuleExecution(ruleId, workspaceId, result, dryRun, startedAt = null) {
   try {
     await query(
       `INSERT INTO rule_executions
-         (rule_id, workspace_id, completed_at, dry_run, status,
+         (rule_id, workspace_id, started_at, completed_at, dry_run, status,
           entities_evaluated, entities_matched, actions_taken, actions_failed, summary)
-       VALUES ($1,$2,NOW(),$3,$4,$5,$6,$7,$8,$9)`,
+       VALUES ($1,$2,COALESCE($3, NOW()),NOW(),$4,$5,$6,$7,$8,$9,$10)`,
       [
-        ruleId, workspaceId, !!dryRun, runStatusFromResult(result),
+        ruleId, workspaceId, startedAt, !!dryRun, runStatusFromResult(result),
         result?.total_evaluated || 0,
         result?.matched_count || 0,
         (result?.applied_count || 0) + (result?.removed_count || 0),
@@ -2299,6 +2317,7 @@ async function executeAllDueRules(workspaceId) {
   const results = [];
   for (const rule of rules) {
     try {
+      const startedAt = new Date();
       const result = await executeRule(rule, workspaceId, rule.dry_run, null, "Rule Engine");
       const nextRunAt = computeNextRun(rule.schedule_type, rule.run_hour);
       await query(
@@ -2310,7 +2329,7 @@ async function executeAllDueRules(workspaceId) {
           ? [JSON.stringify(result), nextRunAt, rule.id]
           : [JSON.stringify(result), nextRunAt, rule.id, runStatusFromResult(result)]
       );
-      await insertRuleExecution(rule.id, workspaceId, result, rule.dry_run);
+      await insertRuleExecution(rule.id, workspaceId, result, rule.dry_run, startedAt);
       results.push({ ruleId: rule.id, ruleName: rule.name, ...result });
     } catch (e) {
       logger.error("executeAllDueRules: rule failed", { ruleId: rule.id, error: e.message });

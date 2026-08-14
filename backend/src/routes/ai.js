@@ -16,6 +16,32 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { writeAudit } = require("./audit");
 const logger = require("../config/logger");
+const {
+  pushCampaignUpdates, pushKeywordUpdates, pushAdGroupUpdates, loadKeywordContext,
+} = require("../services/amazon/writeback");
+
+/**
+ * Amazon identifiers needed to push a campaign change, or null when the campaign
+ * isn't linked to a live Amazon connection (nothing to write back to).
+ */
+async function campaignContext(campaignId, workspaceId) {
+  const { rows: [row] } = await query(
+    `SELECT c.amazon_campaign_id, c.campaign_type,
+            p.connection_id, p.profile_id AS amazon_profile_id, p.marketplace_id
+     FROM campaigns c
+     JOIN amazon_profiles p ON p.id = c.profile_id
+     WHERE c.id = $1 AND c.workspace_id = $2`,
+    [campaignId, workspaceId]
+  );
+  if (!row?.amazon_campaign_id || !row.connection_id) return null;
+  return {
+    amazonCampaignId: row.amazon_campaign_id,
+    campaignType:     row.campaign_type,
+    connectionId:     row.connection_id,
+    profileId:        String(row.amazon_profile_id),
+    marketplaceId:    row.marketplace_id,
+  };
+}
 
 router.use(requireAuth, requireWorkspace);
 
@@ -47,6 +73,16 @@ async function callClaude(systemPrompt, userMessage, maxTokens = 16000) {
       timeout: 180000,
     }
   );
+
+  // Log usage on every paid call. Only the orchestrator used to do this, so token spend from
+  // the assistant routes (analyze / preview) was invisible — there is no usage table, the log
+  // is the only record of what a call cost.
+  logger.info("Claude response received", {
+    route: "ai",
+    model: MODEL,
+    inputTokens:  response.data?.usage?.input_tokens,
+    outputTokens: response.data?.usage?.output_tokens,
+  });
 
   return extractText(response.data);
 }
@@ -554,6 +590,14 @@ router.post("/recommendations/:id/apply", async (req, res, next) => {
     const actions = typeof rec.actions === "string" ? JSON.parse(rec.actions) : rec.actions;
     const applied = [];
 
+    // Amazon write-back payloads, collected while applying locally and flushed once at the end.
+    // Applying a recommendation used to touch Postgres only — no call reached Amazon at all, so
+    // every "applied" change was reverted by the next entity sync. Local-first then push mirrors
+    // how the rule engine writes back (routes/rules.js).
+    const campaignPushes = [];
+    const keywordPushes  = [];
+    const adGroupPushes  = [];
+
     for (const action of actions) {
       try {
         if (action.entity_type === "campaign" && action.entity_id) {
@@ -568,6 +612,14 @@ router.post("/recommendations/:id/apply", async (req, res, next) => {
             sets.push("updated_at = NOW()");
             await query(`UPDATE campaigns SET ${sets.join(", ")} WHERE id = $1 AND workspace_id = $2`, vals);
             applied.push({ action_type: action.action_type, entity: action.entity_id });
+            const ctx = await campaignContext(action.entity_id, req.workspaceId);
+            if (ctx) {
+              campaignPushes.push({
+                ...ctx,
+                ...(p.daily_budget !== undefined ? { dailyBudget: parseFloat(p.daily_budget) } : {}),
+                ...(inferredState  !== undefined ? { state: inferredState } : {}),
+              });
+            }
           }
           // Bid adjustment — apply percentage change to keywords; fall back to ad_group default_bid for auto campaigns
           const pct = p.bid_adjustment_pct != null ? parseFloat(p.bid_adjustment_pct)
@@ -575,39 +627,95 @@ router.post("/recommendations/:id/apply", async (req, res, next) => {
                     : null;
           if (pct != null && !isNaN(pct)) {
             const multiplier = 1 + pct / 100;
-            const { rowCount: kwUpdated } = await query(
+            // RETURNING gives the post-update bids, which is exactly what Amazon needs —
+            // the API takes absolute values, not a percentage.
+            const { rows: kwRows } = await query(
               `UPDATE keywords
                SET bid = GREATEST(ROUND((bid * $1)::numeric, 2), 0.02), updated_at = NOW()
-               WHERE campaign_id = $2 AND workspace_id = $3 AND state != 'archived' AND bid IS NOT NULL`,
+               WHERE campaign_id = $2 AND workspace_id = $3 AND state != 'archived' AND bid IS NOT NULL
+               RETURNING id, bid`,
               [multiplier, action.entity_id, req.workspaceId]
             );
-            if (kwUpdated > 0) {
-              applied.push({ action_type: action.action_type, entity: action.entity_id, keywords_updated: kwUpdated });
+            if (kwRows.length) {
+              applied.push({ action_type: action.action_type, entity: action.entity_id, keywords_updated: kwRows.length });
+              const ctxs = await loadKeywordContext(req.workspaceId, kwRows.map(r => r.id));
+              const bidById = new Map(kwRows.map(r => [String(r.id), r.bid]));
+              for (const k of ctxs) {
+                if (!k.amazon_keyword_id || !k.connection_id) continue;
+                keywordPushes.push({
+                  amazonKeywordId: k.amazon_keyword_id,
+                  campaignType:    k.campaign_type,
+                  connectionId:    k.connection_id,
+                  profileId:       String(k.amazon_profile_id),
+                  marketplaceId:   k.marketplace_id,
+                  bid:             bidById.get(String(k.id)),
+                });
+              }
             } else {
               // Auto campaign — update ad_group default_bids instead
-              const { rowCount: agUpdated } = await query(
-                `UPDATE ad_groups
-                 SET default_bid = GREATEST(ROUND((default_bid * $1)::numeric, 2), 0.02), updated_at = NOW()
-                 WHERE campaign_id = $2 AND workspace_id = $3 AND state != 'archived' AND default_bid IS NOT NULL`,
+              const { rows: agRows } = await query(
+                `UPDATE ad_groups ag
+                 SET default_bid = GREATEST(ROUND((ag.default_bid * $1)::numeric, 2), 0.02), updated_at = NOW()
+                 FROM campaigns c, amazon_profiles p
+                 WHERE ag.campaign_id = c.id AND c.profile_id = p.id
+                   AND ag.campaign_id = $2 AND ag.workspace_id = $3
+                   AND ag.state != 'archived' AND ag.default_bid IS NOT NULL
+                 RETURNING ag.amazon_ag_id, ag.default_bid, c.campaign_type,
+                           p.connection_id, p.profile_id AS amazon_profile_id, p.marketplace_id`,
                 [multiplier, action.entity_id, req.workspaceId]
               );
-              applied.push({ action_type: action.action_type, entity: action.entity_id, ad_groups_updated: agUpdated });
+              applied.push({ action_type: action.action_type, entity: action.entity_id, ad_groups_updated: agRows.length });
+              for (const ag of agRows) {
+                if (!ag.amazon_ag_id || !ag.connection_id) continue;
+                adGroupPushes.push({
+                  amazonAdGroupId: ag.amazon_ag_id,
+                  campaignType:    ag.campaign_type,
+                  connectionId:    ag.connection_id,
+                  profileId:       String(ag.amazon_profile_id),
+                  marketplaceId:   ag.marketplace_id,
+                  defaultBid:      ag.default_bid,
+                });
+              }
             }
           }
         } else if (action.entity_type === "keyword" && action.entity_id) {
           const p = action.params || {};
-          if (p.bid !== undefined) {
-            await query("UPDATE keywords SET bid = $1, updated_at = NOW() WHERE id = $2 AND workspace_id = $3", [parseFloat(p.bid), action.entity_id, req.workspaceId]);
+          const kwSets = []; const kwVals = [action.entity_id, req.workspaceId]; let kpi = 3;
+          if (p.bid !== undefined)   { kwSets.push(`bid = $${kpi++}`);   kwVals.push(parseFloat(p.bid)); }
+          if (p.state !== undefined) { kwSets.push(`state = $${kpi++}`); kwVals.push(p.state); }
+          if (kwSets.length) {
+            kwSets.push("updated_at = NOW()");
+            await query(`UPDATE keywords SET ${kwSets.join(", ")} WHERE id = $1 AND workspace_id = $2`, kwVals);
             applied.push({ action_type: action.action_type, entity: action.entity_id });
-          }
-          if (p.state !== undefined) {
-            await query("UPDATE keywords SET state = $1, updated_at = NOW() WHERE id = $2 AND workspace_id = $3", [p.state, action.entity_id, req.workspaceId]);
-            applied.push({ action_type: action.action_type, entity: action.entity_id });
+            const [k] = await loadKeywordContext(req.workspaceId, [action.entity_id]);
+            if (k?.amazon_keyword_id && k.connection_id) {
+              keywordPushes.push({
+                amazonKeywordId: k.amazon_keyword_id,
+                campaignType:    k.campaign_type,
+                connectionId:    k.connection_id,
+                profileId:       String(k.amazon_profile_id),
+                marketplaceId:   k.marketplace_id,
+                ...(p.bid   !== undefined ? { bid: parseFloat(p.bid) } : {}),
+                ...(p.state !== undefined ? { state: p.state } : {}),
+              });
+            }
           }
         }
       } catch (actionErr) {
         logger.warn("AI apply: action failed", { error: actionErr.message, action });
       }
+    }
+
+    // Flush to Amazon. Non-fatal, like every other write-back path: the local DB is already
+    // updated, and a failure here must not 401/500 the user out of AdsFlow.
+    const results = await Promise.all([
+      pushCampaignUpdates(campaignPushes),
+      pushKeywordUpdates(keywordPushes),
+      pushAdGroupUpdates(adGroupPushes),
+    ]);
+    const amazonError = results.find(r => r.ok === false)?.error ?? null;
+    if (amazonError) {
+      logger.warn("AI apply: Amazon write-back rejected", { recommendationId: rec.id, error: amazonError });
     }
 
     await query(
@@ -627,9 +735,10 @@ router.post("/recommendations/:id/apply", async (req, res, next) => {
       entityName: rec.title,
       afterData: { actions: applied },
       source: "ai",
+      amazonStatus: applied.length ? (amazonError ? "error" : "success") : null,
     });
 
-    res.json({ applied: true, actionsExecuted: applied.length });
+    res.json({ applied: true, actionsExecuted: applied.length, amazonError });
   } catch (err) { next(err); }
 });
 
