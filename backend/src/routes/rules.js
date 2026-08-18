@@ -15,7 +15,7 @@ const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { writeAudit, updateAuditStatus } = require("./audit");
-const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget, pushCampaignUpdates, partialError } = require("../services/amazon/writeback");
+const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget, pushCampaignUpdates, partialError, campaignApiPath } = require("../services/amazon/writeback");
 const { put, post } = require("../services/amazon/adsClient");
 const { normalizeKeywordText, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
 const logger  = require("../config/logger");
@@ -48,6 +48,84 @@ function negativeStillJustified(metricConditions, aggregate, slices) {
   return slices
     ? slices.some(s => evaluate(metricConditions, s))
     : evaluate(metricConditions, aggregate);
+}
+
+// ── Reconciliation hysteresis ────────────────────────────────────────────────
+// Releasing a negative on a single unjustified run makes it flip: Amazon restates
+// conversions into the search-term report a day or two after the fact, so `orders` moves
+// 0 → 1 → 0 for the same term while the rolling window slides underneath it. Between
+// 11–18.08.2026 that produced 11 add → release-next-run → re-add cycles, each letting the
+// term spend again for a couple of days in between.
+//
+// So a release has to be confirmed: an unjustified run increments a persisted counter, a
+// justified run clears it, and the negative is only released once the count reaches
+// `safety.reconcile_grace_runs`. 1 restores the previous release-on-first-miss behaviour.
+const RECONCILE_GRACE_RUNS_DEFAULT = 2;
+const RECONCILE_TABLES = new Set(["negative_keywords", "negative_targets"]);
+
+async function confirmReconcileRelease({ table, id, missCount, justified, graceRuns, dryRun }) {
+  if (!RECONCILE_TABLES.has(table)) throw new Error(`Unexpected reconcile table: ${table}`);
+  if (justified) {
+    // Clear a part-way count so an unrelated miss later starts from scratch.
+    if (!dryRun && Number(missCount) > 0) {
+      await query(`UPDATE ${table} SET reconcile_miss_count = $1 WHERE id = $2`, [0, id]);
+    }
+    return false;
+  }
+  const next = Number(missCount || 0) + 1;
+  if (next >= graceRuns) return true;
+  if (!dryRun) {
+    await query(`UPDATE ${table} SET reconcile_miss_count = $1 WHERE id = $2`, [next, id]);
+  }
+  return false;
+}
+
+// ── Budget-utilization guard ─────────────────────────────────────────────────
+// A percentage budget raise is only meaningful when the budget is what stops the campaign
+// from spending more. Without this guard the rule kept raising campaigns that never came
+// close to their cap: on 2026-08-18, 25 of the 31 campaigns it raised were using under 10%
+// of their daily budget and several were spending €0.00/day, because the qualifying window
+// is 60 days long and a campaign that converted well two months ago still passes
+// `ACOS <= 15 AND orders >= 3` forever. Each run compounded another +20% on top, so the
+// account's total daily budget went 906 → 1090 → 1298 in two runs against flat spend.
+//
+// "Budget-limited" is measured the way Amazon's own out-of-budget signal is: a day counts
+// when the campaign spent at least `minUtilizationPct` of its current daily budget, and the
+// campaign must have hit that on at least MIN_BUDGET_LIMITED_DAYS separate days recently.
+// A window average would not do — a campaign that maxes out twice a week and idles the rest
+// averages low but is genuinely capped on the days it runs.
+const BUDGET_UTILIZATION_LOOKBACK_DAYS = 7;
+const MIN_BUDGET_LIMITED_DAYS = 2;
+const DEFAULT_MIN_BUDGET_UTILIZATION = 70;
+
+// Per-campaign daily spend for the recent window, keyed by Amazon campaign id.
+// One query for every campaign the rule matched, not one per campaign.
+async function loadRecentDailySpend(amazonCampaignIds, days) {
+  const ids = [...new Set(amazonCampaignIds.filter(Boolean))];
+  if (!ids.length) return new Map();
+  const { rows } = await query(
+    `SELECT amazon_id, date, SUM(cost) AS cost
+       FROM fact_metrics_daily
+      WHERE entity_type = 'campaign'
+        AND amazon_id = ANY($1::text[])
+        AND date >= CURRENT_DATE - $2::int
+        AND date <  CURRENT_DATE
+      GROUP BY amazon_id, date`,
+    [ids, days]
+  );
+  const byCampaign = new Map();
+  for (const r of rows) {
+    if (!byCampaign.has(r.amazon_id)) byCampaign.set(r.amazon_id, []);
+    byCampaign.get(r.amazon_id).push(parseFloat(r.cost) || 0);
+  }
+  return byCampaign;
+}
+
+// How many of the recent days the campaign spent at/above `pct` of `budget`.
+function budgetLimitedDays(dailySpend, budget, pct) {
+  if (!Array.isArray(dailySpend) || !budget || budget <= 0) return 0;
+  const floor = budget * (pct / 100);
+  return dailySpend.filter(cost => cost >= floor).length;
 }
 
 // Fill in the ratio metrics the rule conditions can reference. Mutates and returns `m`
@@ -590,11 +668,22 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   const skipped  = [];
   const errors   = [];
 
+  // Recent per-day spend, loaded once, only when a percentage raise can actually fire.
+  const raisesBudget = actions.some(a => a.type === "adjust_budget_pct");
+  const recentDailySpend = raisesBudget
+    ? await loadRecentDailySpend(
+        matched.filter(e => e.entity_type === "campaign").map(e => e.amazon_campaign_id),
+        BUDGET_UTILIZATION_LOOKBACK_DAYS
+      )
+    : new Map();
+
   // Helper: record an entity that matched conditions but cannot have the
   // action applied (e.g., already in target state, duplicate negative).
   // Reason key is i18n-resolved on the frontend so UX explanations stay close
   // to translation files. Keep keys stable — they're shown in tooltips.
-  const recordSkip = (entity, action, reason) => {
+  // `extra` carries reason-specific detail the tooltip cannot derive from the metrics alone
+  // (e.g. how far a campaign actually was from its budget). Optional — omitted for most skips.
+  const recordSkip = (entity, action, reason, extra) => {
     skipped.push({
       entity_id: entity.id,
       entity_type: entity.entity_type,
@@ -607,6 +696,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         clicks: entity.clicks, orders: entity.orders,
         spend: entity.spend, acos: entity.acos,
       },
+      ...(extra ? { detail: extra } : {}),
     });
   };
 
@@ -626,8 +716,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       // key the fresh placeholder on the row's own uuid so it stays unique.
       const synthetic = isSyntheticNegId(prior.amazon_neg_target_id);
       await query(
+        // reconcile_miss_count resets — a re-owned row is a fresh negative for its new owner.
         `UPDATE negative_targets
-            SET state='enabled', source_rule_id=$1, source_entity_type=$2, updated_at=NOW()${synthetic ? ", amazon_neg_target_id=$4" : ""}
+            SET state='enabled', source_rule_id=$1, source_entity_type=$2,
+                reconcile_miss_count=0, updated_at=NOW()${synthetic ? ", amazon_neg_target_id=$4" : ""}
           WHERE id=$3`,
         synthetic
           ? [rule.id, sourceEntityType, prior.id, `rule-neg-${prior.id}`]
@@ -1054,9 +1146,12 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                 // overwrites it with the real id once Amazon accepts the negative.
                 const synthetic = isSyntheticNegId(priorRow.amazon_neg_keyword_id);
                 await query(
+                  // reconcile_miss_count resets: the row is a fresh negative for its new owner,
+                  // and inheriting a part-way count would release it early.
                   `UPDATE negative_keywords
                       SET state='enabled', source_rule_id=$1, source_entity_type=$2,
-                          keyword_text=$3, updated_at=NOW()${synthetic ? ", amazon_neg_keyword_id=$5" : ""}
+                          keyword_text=$3, reconcile_miss_count=0,
+                          updated_at=NOW()${synthetic ? ", amazon_neg_keyword_id=$5" : ""}
                     WHERE id=$4`,
                   synthetic
                     ? [rule.id, entity.entity_type, negKeywordText, priorRow.id, `rule-${priorRow.id}-${matchType}`]
@@ -1502,9 +1597,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             });
             if (entity.amazon_campaign_id && entity.connection_id) {
               const isSD = entity.campaign_type === "sponsoredDisplay";
-              const campPath = isSD ? "/sd/campaigns"
-                             : entity.campaign_type === "sponsoredBrands"  ? "/sb/campaigns"
-                             : "/sp/campaigns";
+              const campPath = campaignApiPath(entity.campaign_type);
               // SD (v2-style) takes a bare array with a lowercase state; SP/SB take the wrapped uppercase form.
               const stateData = isSD
                 ? [{ campaignId: entity.amazon_campaign_id, state: "paused" }]
@@ -1534,9 +1627,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             });
             if (entity.amazon_campaign_id && entity.connection_id) {
               const isSD = entity.campaign_type === "sponsoredDisplay";
-              const campPath = isSD ? "/sd/campaigns"
-                             : entity.campaign_type === "sponsoredBrands"  ? "/sb/campaigns"
-                             : "/sp/campaigns";
+              const campPath = campaignApiPath(entity.campaign_type);
               // SD (v2-style) takes a bare array with a lowercase state; SP/SB take the wrapped uppercase form.
               const stateData = isSD
                 ? [{ campaignId: entity.amazon_campaign_id, state: "enabled" }]
@@ -1567,6 +1658,28 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           const currentBudget = parseFloat(entity.daily_budget);
           if (!Number.isFinite(currentBudget) || currentBudget <= 0) {
             recordSkip(entity, action, "unknown_budget"); continue;
+          }
+          // Only raise a budget that is actually binding — see the BUDGET_UTILIZATION_*
+          // constants. Set min_budget_utilization to 0 to opt out and raise unconditionally.
+          const minUtilization = safety?.min_budget_utilization === undefined
+            || safety?.min_budget_utilization === null
+            || safety?.min_budget_utilization === ""
+            ? DEFAULT_MIN_BUDGET_UTILIZATION
+            : parseFloat(safety.min_budget_utilization);
+          if (Number.isFinite(minUtilization) && minUtilization > 0) {
+            const dailySpend  = recentDailySpend.get(entity.amazon_campaign_id) || [];
+            const limitedDays = budgetLimitedDays(dailySpend, currentBudget, minUtilization);
+            if (limitedDays < MIN_BUDGET_LIMITED_DAYS) {
+              recordSkip(entity, action, "budget_not_binding", {
+                daily_budget: currentBudget,
+                max_daily_spend: dailySpend.length ? Math.max(...dailySpend) : 0,
+                budget_limited_days: limitedDays,
+                required_days: MIN_BUDGET_LIMITED_DAYS,
+                utilization_pct: minUtilization,
+                lookback_days: BUDGET_UTILIZATION_LOOKBACK_DAYS,
+              });
+              continue;
+            }
           }
           const maxBudget     = safety?.max_budget ? parseFloat(safety.max_budget) : null;
           // max_budget caps GROWTH — it must never pull a budget down. A plain
@@ -1658,10 +1771,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   // For each active negative: re-evaluate the same conditions against current metrics.
   // If conditions are NOT met → the term now converts or no longer qualifies → remove negative.
   const removed = [];
+  // Consecutive unjustified runs required before a negative is actually released.
+  const reconcileGraceRuns = Math.max(
+    1, parseInt(safety?.reconcile_grace_runs, 10) || RECONCILE_GRACE_RUNS_DEFAULT
+  );
   {
     const { rows: prevNegKws } = await query(
       `SELECT nk.id, nk.keyword_text, nk.campaign_id, nk.ad_group_id,
               nk.amazon_neg_keyword_id, nk.match_type, nk.level, nk.source_entity_type,
+              nk.reconcile_miss_count,
               p.profile_id AS amazon_profile_id, p.connection_id, p.marketplace_id,
               c.campaign_type, c.name AS campaign_name
        FROM negative_keywords nk
@@ -1733,7 +1851,12 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       }
       withDerivedMetrics(m);
 
-      if (!negativeStillJustified(metricConditions, m, slices)) {
+      const releaseNegKw = await confirmReconcileRelease({
+        table: "negative_keywords", id: nk.id, missCount: nk.reconcile_miss_count,
+        justified: negativeStillJustified(metricConditions, m, slices),
+        graceRuns: reconcileGraceRuns, dryRun,
+      });
+      if (releaseNegKw) {
         removed.push({
           type: "keyword", id: nk.id, keyword_text: nk.keyword_text,
           campaign_name: nk.campaign_name, action: "remove_negative_reconcile",
@@ -1772,6 +1895,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     const { rows: prevNegTgts } = await query(
       `SELECT nt.id, nt.expression, nt.campaign_id, nt.ad_group_id,
               nt.amazon_neg_target_id, nt.level, nt.source_entity_type,
+              nt.reconcile_miss_count,
               p.profile_id AS amazon_profile_id, p.connection_id, p.marketplace_id,
               c.campaign_type, c.name AS campaign_name
        FROM negative_targets nt
@@ -1824,7 +1948,12 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
       }
       withDerivedMetrics(m);
 
-      if (!negativeStillJustified(metricConditions, m, slices)) {
+      const releaseNegTgt = await confirmReconcileRelease({
+        table: "negative_targets", id: nt.id, missCount: nt.reconcile_miss_count,
+        justified: negativeStillJustified(metricConditions, m, slices),
+        graceRuns: reconcileGraceRuns, dryRun,
+      });
+      if (releaseNegTgt) {
         removed.push({
           type: "target", id: nt.id,
           keyword_text: asinValue || JSON.stringify(exprArr),

@@ -105,8 +105,13 @@ function recordSuccess(profileId) {
   circuitState.delete(profileId);
 }
 
-// ─── Versioned Accept headers for SP v3 endpoints ─────────────────────────────
-// Amazon Ads API v3 requires content-type versioning for SP sub-resources
+// ─── Versioned media types (Accept + Content-Type) ────────────────────────────
+// Amazon Ads API v3+ requires content-type versioning for SP sub-resources and for the
+// SB v4 resources. Everything else (SD, profiles, reports) is plain application/json.
+//
+// A path that needs a versioned type but is not listed here does not fail softly: Amazon
+// answers 406 "No match for accept header" before it ever looks at the body. That is what
+// broke every SB campaign budget write-back — see the /sb/v4/campaigns entry below.
 function getAcceptHeader(path) {
   if (path.includes("/sp/adGroups"))                    return "application/vnd.spAdGroup.v3+json";
   // Keyword recommendations — must be checked before /sp/targets (more specific)
@@ -119,6 +124,10 @@ function getAcceptHeader(path) {
   if (path.includes("/sp/negativeTargets"))             return "application/vnd.spNegativeTargetingClause.v3+json";
   if (path.includes("/sp/targets"))                     return "application/vnd.spTargetingClause.v3+json";
   if (path.includes("/sp/campaigns"))                   return "application/vnd.spCampaign.v3+json";
+  // SB campaigns live on v4 — the v3 /sb/campaigns routes were removed by Amazon. The media
+  // type is the one entities.js already uses successfully for POST /sb/v4/campaigns/list, so
+  // it is verified against the live API rather than inferred from the docs.
+  if (path.includes("/sb/v4/campaigns"))                return "application/vnd.sbcampaignresource.v4+json";
   return "application/json";
 }
 
@@ -189,8 +198,12 @@ async function adsRequest({
           Authorization: `Bearer ${accessToken}`,
           "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
           "Amazon-Advertising-API-Scope": profileId,  // must be the Amazon numeric profile ID
+          // Accept and Content-Type must carry the same versioned type. This used to send the
+          // versioned type only for /sp/ paths and application/json everywhere else, which is
+          // what made /sb/v4/* unreachable. Paths with no versioned type resolve to
+          // application/json for both, exactly as before.
           "Accept": getAcceptHeader(path),
-          "Content-Type": path.startsWith("/sp/") ? getAcceptHeader(path) : "application/json",
+          "Content-Type": getAcceptHeader(path),
         },
         timeout: 30000,
         validateStatus: null, // Handle all status codes manually
@@ -332,4 +345,4 @@ async function getAll(opts, pageSize = 100) {
   return results;
 }
 
-module.exports = { adsRequest, get, post, put, patch, getAll };
+module.exports = { adsRequest, get, post, put, patch, getAll, getAcceptHeader };

@@ -538,13 +538,17 @@ describe("POST /campaigns", () => {
     expect(res.body.error).toMatch(/profile not found/i);
   });
 
-  it("creates SB campaign — uses /sb/campaigns endpoint", async () => {
+  // NOTE: the path is now the v4 one, but SB *creation* is still not functional — the payload
+  // built below is v3-era (budgetType: "dailyBudget", no brandEntityId/goal/costType/creative).
+  // It answered 406 on the removed v3 route before and will fail validation on v4; migrating
+  // the create payload is a separate piece of work. This asserts the shared path only.
+  it("creates SB campaign — uses the v4 /sb/v4/campaigns endpoint", async () => {
     const created = { ...SAMPLE_CAMPAIGN, campaign_type: "sponsoredBrands" };
     mockCreate(created);
     const { post: apiPost } = require("../src/services/amazon/adsClient");
     const res = await request(app).post("/campaigns").send({ ...SP_PAYLOAD, campaignType: "sponsoredBrands" });
     expect(res.status).toBe(200);
-    expect(apiPost.mock.calls[0][0].path).toBe("/sb/campaigns");
+    expect(apiPost.mock.calls[0][0].path).toBe("/sb/v4/campaigns");
   });
 
   it("creates SD campaign — uses /sd/campaigns endpoint", async () => {
@@ -674,12 +678,15 @@ describe("PATCH /campaigns/:id", () => {
     expect(payload.dailyBudget).toBeUndefined();
   });
 
-  it("SB campaign — budget uses nested budget object", async () => {
+  // SB v4 is flat with an uppercase budgetType — the shape Amazon returns for a live SB
+  // campaign is {"budget": 20, "budgetType": "DAILY", ...}, with no nested object.
+  it("SB campaign — budget is flat with an uppercase budgetType", async () => {
     mockPatch({ ...CAMPAIGN_DB_ROW, campaign_type: "sponsoredBrands" });
     const res = await request(app).patch(`/campaigns/${CAMP_ID}`).send({ dailyBudget: 60 });
     expect(res.status).toBe(200);
     const payload = putPayload();
-    expect(payload.budget).toEqual({ budget: 60, budgetType: "DAILY" });
+    expect(payload.budget).toBe(60);
+    expect(payload.budgetType).toBe("DAILY");
     expect(payload.dailyBudget).toBeUndefined();
   });
 
@@ -693,10 +700,12 @@ describe("PATCH /campaigns/:id", () => {
     expect(payload.budgetType).toBe("daily");
   });
 
-  it("SB campaign — uses /sb/campaigns endpoint", async () => {
+  // Editing an SB campaign from the UI hit the removed v3 route and 406'd, exactly as the
+  // rule engine's budget write-back did.
+  it("SB campaign — uses the v4 /sb/v4/campaigns endpoint", async () => {
     mockPatch({ ...CAMPAIGN_DB_ROW, campaign_type: "sponsoredBrands" });
     await request(app).patch(`/campaigns/${CAMP_ID}`).send({ state: "paused" });
-    expect(apiPut.mock.calls[0][0].path).toBe("/sb/campaigns");
+    expect(apiPut.mock.calls[0][0].path).toBe("/sb/v4/campaigns");
   });
 
   it("SD campaign — uses /sd/campaigns endpoint", async () => {

@@ -1,0 +1,21 @@
+-- Consecutive-miss counter for negative reconciliation.
+--
+-- Reconciliation re-evaluates every negative the rule created and releases the ones whose
+-- conditions no longer hold. Judging that on a single run makes negatives flip: Amazon
+-- restates conversions into the search-term report a day or two late, so `orders` moves
+-- 0 → 1 → 0 for the same term while the rolling window also slides underneath it. Measured
+-- over 11–18.08.2026: 11 terms were added, released on the very next daily run, then
+-- re-added two or three days later. `gaskartuschen schraubventil 230g` went add 14.08 →
+-- release 15.08 → add 17.08 and spent €10.18 on 9 clicks with 0 orders in between.
+--
+-- The counter turns a one-run verdict into a confirmed one: a run that finds the negative
+-- unjustified increments it, a run that finds it justified again resets it to 0, and the
+-- negative is only released once the count reaches the rule's `safety.reconcile_grace_runs`
+-- (default 2 — one confirming run). Every flip observed in the window above lasted a single
+-- run, so this removes all of them while still releasing a genuinely converting term one day
+-- later than before.
+--
+-- 0 is the correct default for existing rows: nothing has missed yet, and a row that is
+-- unjustified will simply take one extra daily run to be released.
+ALTER TABLE negative_keywords ADD COLUMN IF NOT EXISTS reconcile_miss_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE negative_targets  ADD COLUMN IF NOT EXISTS reconcile_miss_count INTEGER NOT NULL DEFAULT 0;

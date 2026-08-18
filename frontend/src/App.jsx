@@ -13530,6 +13530,22 @@ const RuleWizardModal = ({
                           onChange={e => setForm(f => ({...f, safety:{...f.safety, max_budget:e.target.value}}))}
                           placeholder="500" style={{ ...INP_SM, width:"50%" }} />
                       </div>
+                      <div>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }} title={t("rules.minBudgetUtilizationHint")}>
+                          {t("rules.minBudgetUtilization")}
+                        </div>
+                        <input type="number" min="0" max="100" value={form.safety.min_budget_utilization ?? ""}
+                          onChange={e => setForm(f => ({...f, safety:{...f.safety, min_budget_utilization:e.target.value}}))}
+                          placeholder="70" style={{ ...INP_SM }} />
+                      </div>
+                      <div>
+                        <div style={{ fontSize:11, color:"var(--tx3)", marginBottom:3 }} title={t("rules.reconcileGraceRunsHint")}>
+                          {t("rules.reconcileGraceRuns")}
+                        </div>
+                        <input type="number" min="1" value={form.safety.reconcile_grace_runs ?? ""}
+                          onChange={e => setForm(f => ({...f, safety:{...f.safety, reconcile_grace_runs:e.target.value}}))}
+                          placeholder="2" style={{ ...INP_SM }} />
+                      </div>
                     </div>
                   </div>
                 </div>

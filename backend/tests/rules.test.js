@@ -1506,7 +1506,10 @@ describe("Reconciliation — negative keywords", () => {
 
   it("removes the negative only when no slice qualifies any more", async () => {
     // Both slices now convert well below the ACOS threshold → nothing justifies the negative.
-    mockReconcileRun(stRule, [negKwRow()], [
+    // reconcile_miss_count: 1 puts the row on its confirming run — releasing on the first
+    // unjustified run is what let late-reported conversions flip negatives (see the
+    // hysteresis suite below). The slice logic under test is unchanged either way.
+    mockReconcileRun(stRule, [negKwRow({ reconcile_miss_count: 1 })], [
       { clicks: "25", spend: "10.00", orders: "1", sales: "500.00", impressions: "900" },
       { clicks: "4",  spend: "1.00",  orders: "1", sales: "80.00",  impressions: "120" },
     ]);
@@ -1561,6 +1564,125 @@ describe("Reconciliation — negative keywords", () => {
   });
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  Reconciliation hysteresis — a release has to be confirmed
+//
+//  Live failure this encodes (11–18.08.2026): 11 search terms were negated, released on the
+//  very next daily run, then negated again two or three days later. Amazon restates
+//  conversions into the search-term report a day or two late, so `orders` moves 0 → 1 → 0
+//  for the same term while the 60-day window slides underneath it — and a release decided on
+//  a single run follows that noise. `gaskartuschen schraubventil 230g` went add 14.08 →
+//  release 15.08 → add 17.08 and spent €10.18 on 9 clicks with 0 orders in between.
+// ═════════════════════════════════════════════════════════════════════════════
+describe("Reconciliation — hysteresis before releasing a negative", () => {
+  let app;
+  beforeEach(() => { jest.clearAllMocks(); app = buildApp(); });
+  afterEach(() => { dbQuery.mockReset(); });
+
+  const rule = (safety) => makeRule({
+    actions: JSON.stringify([{ type: "add_negative_keyword", value: "exact" }]),
+    scope: JSON.stringify({ entity_type: "search_term", period_days: 60 }),
+    conditions: JSON.stringify([
+      { metric: "clicks", op: "gte", value: "12" },
+      { metric: "orders", op: "eq",  value: "1"  },
+      { metric: "acos",   op: "gte", value: "25" },
+    ]),
+    ...(safety ? { safety: JSON.stringify(safety) } : {}),
+  });
+
+  const row = (overrides = {}) => ({
+    id: "negkw-001", keyword_text: "gaskartuschen schraubventil 230g",
+    campaign_id: CAMP_ID, ad_group_id: AG_ID,
+    amazon_neg_keyword_id: "AZ_NEG_001", match_type: "negative_exact",
+    level: "ad_group", source_entity_type: "search_term",
+    amazon_profile_id: "123456789", connection_id: "conn-001",
+    marketplace_id: "ATVPDKIKX0DER", campaign_type: "sponsoredProducts",
+    campaign_name: "Campaign A", reconcile_miss_count: 0,
+    ...overrides,
+  });
+
+  // The term converted and now sits far under the ACOS threshold → no slice justifies the
+  // negative. This is the "release" verdict a single run would have acted on.
+  const UNJUSTIFIED = [{ clicks: "25", spend: "10.00", orders: "1", sales: "500.00", impressions: "900" }];
+  // Back above the threshold — the shape the very next day's restated report produced.
+  const JUSTIFIED   = [{ clicks: "25", spend: "88.50", orders: "1", sales: "100.00", impressions: "900" }];
+
+  function mockRun(negKws, sliceRows, { dryRun, safety } = {}) {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rule(safety)] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })            // campaign_exemptions
+      .mockResolvedValueOnce({ rows: [] })            // no entities matched
+      .mockResolvedValueOnce({ rows: negKws });       // reconcile: negative_keywords
+    negKws.forEach(() => {
+      dbQuery.mockResolvedValueOnce({ rows: sliceRows });  // slice metrics
+      if (!dryRun) dbQuery.mockResolvedValueOnce({ rows: [] }); // counter write / archive
+    });
+    for (let i = 0; i < 6; i++) dbQuery.mockResolvedValueOnce({ rows: [] }); // tail queries
+  }
+
+  const counterWrite = () => dbQuery.mock.calls.find(([sql]) =>
+    /UPDATE negative_keywords SET reconcile_miss_count/.test(sql));
+
+  it("holds the negative on the first unjustified run", async () => {
+    mockRun([row({ reconcile_miss_count: 0 })], UNJUSTIFIED, {});
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(0);
+    expect(counterWrite()[1]).toEqual([1, "negkw-001"]);
+  });
+
+  it("releases it once a second consecutive run agrees", async () => {
+    mockRun([row({ reconcile_miss_count: 1 })], UNJUSTIFIED, {});
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(1);
+    expect(res.body.removed[0].action).toBe("remove_negative_reconcile");
+  });
+
+  it("clears the count when the next run finds the negative justified again", async () => {
+    // This is the flip that actually happened: day N says release, day N+1 says keep.
+    // The count resets, so the term is never let back in.
+    mockRun([row({ reconcile_miss_count: 1 })], JUSTIFIED, {});
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(0);
+    expect(counterWrite()[1]).toEqual([0, "negkw-001"]);
+  });
+
+  it("does not touch the counter on a justified run that was already clean", async () => {
+    mockRun([row({ reconcile_miss_count: 0 })], JUSTIFIED, {});
+    await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(counterWrite()).toBeUndefined();
+  });
+
+  it("writes nothing on a dry run", async () => {
+    mockRun([row({ reconcile_miss_count: 0 })], UNJUSTIFIED, { dryRun: true });
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.removed_count).toBe(0);
+    expect(counterWrite()).toBeUndefined();
+  });
+
+  it("reconcile_grace_runs=1 restores release-on-first-miss", async () => {
+    mockRun([row({ reconcile_miss_count: 0 })], UNJUSTIFIED, { safety: { reconcile_grace_runs: "1" } });
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(1);
+  });
+
+  it("a longer grace period holds the negative for that many runs", async () => {
+    mockRun([row({ reconcile_miss_count: 2 })], UNJUSTIFIED, { safety: { reconcile_grace_runs: "4" } });
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(0);
+    expect(counterWrite()[1]).toEqual([3, "negkw-001"]);
+  });
+
+  it("treats a missing counter as zero rather than releasing", async () => {
+    // Rows that predate the column carry NULL until the first reconcile touches them.
+    mockRun([row({ reconcile_miss_count: null })], UNJUSTIFIED, {});
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.removed_count).toBe(0);
+    expect(counterWrite()[1]).toEqual([1, "negkw-001"]);
+  });
+});
+
+
 // ─── Amazon write-back failures must surface in the run result ────────────────
 //
 // Write-backs are deliberately non-fatal: the local DB is updated regardless, so a
@@ -1601,13 +1723,26 @@ describe("adjust_budget_pct", () => {
     });
   }
 
+  // Recent per-day spend rows that make every campaign look budget-limited, so the
+  // utilization guard passes and the test exercises the raise math it is actually about.
+  function maxedOutDays(campRows) {
+    return campRows.flatMap(c => [0, 1].map(i => ({
+      amazon_id: c.amazon_campaign_id,
+      date: `2026-08-1${6 + i}`,
+      cost: c.daily_budget,           // spent the whole budget → 100% utilization
+    })));
+  }
+
   // Same shape as mockKeywordRun, but the campaign branch fetches campaigns.
-  function mockCampaignRun(rule, campRows, extraMocks = []) {
+  // `dailySpendRows` overrides the utilization data; pass [] for a campaign that never
+  // came close to its budget.
+  function mockCampaignRun(rule, campRows, extraMocks = [], dailySpendRows) {
     dbQuery
       .mockResolvedValueOnce({ rows: [rule] })
       .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
       .mockResolvedValueOnce({ rows: [] })           // campaign_exemptions
-      .mockResolvedValueOnce({ rows: campRows });    // campaigns
+      .mockResolvedValueOnce({ rows: campRows })     // campaigns
+      .mockResolvedValueOnce({ rows: dailySpendRows ?? maxedOutDays(campRows) }); // utilization guard
     extraMocks.forEach(m => dbQuery.mockResolvedValueOnce(m));
     dbQuery
       .mockResolvedValueOnce({ rows: [] })           // reconcile: negative_keywords
@@ -1730,6 +1865,125 @@ describe("adjust_budget_pct", () => {
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
     expect(res.body.applied_count).toBe(0);
     expect(res.body.skipped[0].reason).toBe("not_enabled");
+  });
+
+  // ── Budget-utilization guard ───────────────────────────────────────────────
+  //
+  // Live failure this encodes (2026-08-18): the rule raised 29 campaigns by +20% every three
+  // days on a 60-day qualifying window. 25 of the 31 raised were using under 10% of their
+  // daily budget and several were spending €0.00/day — a campaign that converted well two
+  // months ago keeps passing `ACOS <= 15 AND orders >= 3` forever. Once the write-back was
+  // fixed on 14.08 the raises started compounding for real: the account's total daily budget
+  // went 906 → 1090 → 1298 in two runs while spend on those campaigns stayed flat.
+
+  // A day of spend for a campaign, as fact_metrics_daily returns it.
+  const spendDay = (date, cost, amazonId = "AZ_CAMP_001") => ({ amazon_id: amazonId, date, cost });
+
+  it("does not raise a campaign that never comes near its budget", async () => {
+    // "1 [A]-Gaskartusche 230g mp": budget 86.40, average spend €0.09/day.
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "86.40" })], [], [
+      spendDay("2026-08-15", "0.09"), spendDay("2026-08-16", "0.11"), spendDay("2026-08-17", "0.07"),
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("budget_not_binding");
+  });
+
+  it("does not raise a campaign with no recent spend at all", async () => {
+    // Several of the raised campaigns had no metrics rows in the window — long dead, still
+    // qualifying on 60-day-old orders.
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "51.84" })], [], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("budget_not_binding");
+  });
+
+  it("raises a campaign that is genuinely capped by its budget", async () => {
+    // Two days at/over the 70% mark of a €50 budget → the budget is what limits it.
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [
+      { rows: [] },
+    ], [
+      spendDay("2026-08-15", "48.90"), spendDay("2026-08-16", "12.00"), spendDay("2026-08-17", "35.10"),
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+    expect(res.body.applied[0]).toMatchObject({ previous_budget: 50, new_budget: 60 });
+  });
+
+  it("needs more than one budget-limited day", async () => {
+    // A single spike is not a pattern — one busy day should not compound the budget.
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [], [
+      spendDay("2026-08-15", "49.50"), spendDay("2026-08-16", "3.00"), spendDay("2026-08-17", "2.10"),
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("budget_not_binding");
+  });
+
+  it("reports what the campaign actually spent, so the skip is checkable", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "86.40" })], [], [
+      spendDay("2026-08-16", "0.09"), spendDay("2026-08-17", "0.11"),
+    ]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.skipped[0].detail).toMatchObject({
+      daily_budget: 86.4, max_daily_spend: 0.11, budget_limited_days: 0,
+      required_days: 2, utilization_pct: 70,
+    });
+  });
+
+  it("honours a custom threshold from the rule's safety settings", async () => {
+    // At 20% the same campaign is considered budget-limited and the raise goes through.
+    mockCampaignRun(
+      budgetRule({ max_budget: "100", min_budget_utilization: "20" }),
+      [makeCampaign({ daily_budget: "50.00" })],
+      [{ rows: [] }],
+      [spendDay("2026-08-16", "11.00"), spendDay("2026-08-17", "12.50")],
+    );
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+    expect(res.body.applied[0].new_budget).toBe(60);
+  });
+
+  it("0 opts out of the guard entirely", async () => {
+    mockCampaignRun(
+      budgetRule({ max_budget: "100", min_budget_utilization: "0" }),
+      [makeCampaign({ daily_budget: "50.00" })],
+      [{ rows: [] }],
+      [],  // no spend at all
+    );
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+    expect(res.body.applied[0].new_budget).toBe(60);
+  });
+
+  it("applies the guard on a dry run too, so the preview matches the real run", async () => {
+    mockCampaignRun(budgetRule({ max_budget: "100" }), [makeCampaign({ daily_budget: "50.00" })], [], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("budget_not_binding");
+  });
+
+  it("leaves set_budget alone — it writes an absolute value the user asked for", async () => {
+    const rule = makeRule({
+      conditions: JSON.stringify([{ metric: "acos", op: "lte", value: 15 }]),
+      actions:    JSON.stringify([{ type: "set_budget", value: "25" }]),
+      scope:      JSON.stringify({ entity_type: "campaign", period_days: 60 }),
+      safety:     JSON.stringify({ max_budget: "100" }),
+    });
+    // No utilization query is issued for a rule that cannot raise by a percentage, so the
+    // mock sequence has no slot for one.
+    dbQuery
+      .mockResolvedValueOnce({ rows: [rule] })
+      .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [makeCampaign({ daily_budget: "50.00" })] })
+      .mockResolvedValueOnce({ rows: [] })   // UPDATE campaigns
+      .mockResolvedValueOnce({ rows: [] })   // reconcile: negative_keywords
+      .mockResolvedValueOnce({ rows: [] })   // reconcile: negative_targets
+      .mockResolvedValueOnce({ rows: [] });  // UPDATE rules
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+    expect(res.body.applied[0].new_budget).toBe(25);
   });
 });
 
@@ -2022,6 +2276,9 @@ describe("Reconciliation — synthetic ids are not archived on Amazon", () => {
     amazon_profile_id: "123456789", connection_id: "conn-001",
     marketplace_id: "ATVPDKIKX0DER", campaign_type: "sponsoredProducts",
     campaign_name: "Campaign A",
+    // Already missed once, so this run is the confirming one and the release goes through —
+    // these tests are about which id reaches Amazon, not about the grace period.
+    reconcile_miss_count: 1,
   };
 
   it("does not call Amazon for a negative whose id is an archived- placeholder", async () => {

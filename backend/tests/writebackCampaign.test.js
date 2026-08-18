@@ -20,7 +20,7 @@ jest.mock("../src/services/amazon/adsClient", () => ({
 
 const { put } = require("../src/services/amazon/adsClient");
 const {
-  pushCampaignUpdates, pushAdGroupUpdates, campaignBudgetFields, wrapCampaigns,
+  pushCampaignUpdates, pushAdGroupUpdates, campaignBudgetFields, wrapCampaigns, campaignApiPath,
 } = require("../src/services/amazon/writeback");
 
 const BASE = {
@@ -43,9 +43,16 @@ describe("campaignBudgetFields", () => {
     expect(fields.dailyBudget).toBeUndefined();
   });
 
-  it("nests the budget for SB", () => {
-    expect(campaignBudgetFields("sponsoredBrands", 60))
-      .toEqual({ budget: { budget: 60, budgetType: "DAILY" } });
+  // SB v4 is flat, like SD but with an uppercase budgetType. Read off what Amazon actually
+  // returns for a live SB campaign (stored raw_data):
+  //   {"budget": 20, "budgetType": "DAILY", "campaignId": "439113387587087", ...}
+  // Sending SP's nested object here would have been the same silent no-op that hid the SP
+  // budget bug for a month — once the 406 stopped hiding it first.
+  it("keeps SB v4 flat, with an uppercase budgetType", () => {
+    const fields = campaignBudgetFields("sponsoredBrands", 60);
+    expect(fields).toEqual({ budget: 60, budgetType: "DAILY" });
+    expect(fields.budget).not.toEqual(expect.objectContaining({ budgetType: "DAILY" }));
+    expect(fields.dailyBudget).toBeUndefined();
   });
 
   it("keeps SD flat and lowercase (its PUT is still v2-style)", () => {
@@ -57,6 +64,26 @@ describe("campaignBudgetFields", () => {
     expect(campaignBudgetFields("sponsoredProducts", "25.50"))
       .toEqual({ budget: { budget: 25.5, budgetType: "DAILY" } });
     expect(campaignBudgetFields("sponsoredProducts", "not-a-number")).toEqual({});
+  });
+});
+
+// ─── campaignApiPath ─────────────────────────────────────────────────────────
+// One definition, because this map was copy-pasted at five call sites and every copy sent SB
+// to the v3 /sb/campaigns route Amazon removed — so SB budget raises and SB state changes from
+// the campaign edit form both answered 406 "No match for accept header".
+describe("campaignApiPath", () => {
+  it("points SB at the v4 route, not the removed v3 one", () => {
+    expect(campaignApiPath("sponsoredBrands")).toBe("/sb/v4/campaigns");
+  });
+
+  it("leaves SP and SD where they are", () => {
+    expect(campaignApiPath("sponsoredProducts")).toBe("/sp/campaigns");
+    expect(campaignApiPath("sponsoredDisplay")).toBe("/sd/campaigns");
+  });
+
+  it("returns undefined for an unknown type so callers can refuse to guess", () => {
+    expect(campaignApiPath("sponsoredSomething")).toBeUndefined();
+    expect(campaignApiPath(undefined)).toBeUndefined();
   });
 });
 
@@ -140,7 +167,7 @@ describe("pushCampaignUpdates", () => {
       { ...BASE, amazonCampaignId: "AZ_CAMP_003", profileId: "99999", campaignType: "sponsoredProducts", dailyBudget: 30 },
     ]);
     const paths = put.mock.calls.map(([o]) => o.path).sort();
-    expect(paths).toEqual(["/sb/campaigns", "/sp/campaigns", "/sp/campaigns"]);
+    expect(paths).toEqual(["/sb/v4/campaigns", "/sp/campaigns", "/sp/campaigns"]);
   });
 
   it("is a no-op for an empty list", async () => {

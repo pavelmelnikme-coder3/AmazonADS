@@ -3,7 +3,7 @@ const { query, withTransaction } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit } = require("./audit");
 const { post: apiPost, put: apiPut } = require("../services/amazon/adsClient");
-const { campaignBudgetFields, wrapCampaigns, partialError } = require("../services/amazon/writeback");
+const { campaignBudgetFields, wrapCampaigns, partialError, campaignApiPath } = require("../services/amazon/writeback");
 const logger = require("../config/logger");
 
 const router = express.Router();
@@ -200,12 +200,9 @@ router.patch("/:id", async (req, res, next) => {
       };
     }
 
-    // SP uses the same v3-compatible path; SB/SD never had a /v2/ prefix
-    const endpoint = {
-      sponsoredProducts: "/sp/campaigns",
-      sponsoredBrands:   "/sb/campaigns",
-      sponsoredDisplay:  "/sd/campaigns",
-    }[campaign.campaign_type];
+    // SP keeps its v3-compatible path, SB is on v4, SD never had a /v2/ prefix — see
+    // campaignApiPath. Editing an SB campaign used to 406 here exactly as the rule engine did.
+    const endpoint = campaignApiPath(campaign.campaign_type);
 
     // SP/SB campaign mutations are wrapped in { campaigns: [...] }; SD (PUT) takes a bare array.
     const campaignsData = wrapCampaigns(campaign.campaign_type, [amazonPayload]);
@@ -383,11 +380,7 @@ router.post("/", async (req, res, next) => {
 
     let amazonCampaignId = `camp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-    const path = {
-      sponsoredProducts: "/sp/campaigns",
-      sponsoredBrands:   "/sb/campaigns",
-      sponsoredDisplay:  "/sd/campaigns",
-    }[campaignType];
+    const path = campaignApiPath(campaignType);
 
     let amazonData;
     if (campaignType === "sponsoredProducts") {

@@ -21,7 +21,7 @@
 
 const { query } = require("../../db/pool");
 const { put } = require("../amazon/adsClient");
-const { pushKeywordUpdates, pushNegativeAsin } = require("../amazon/writeback");
+const { pushKeywordUpdates, pushNegativeAsin, campaignApiPath, campaignBudgetFields, wrapCampaigns } = require("../amazon/writeback");
 const logger = require("../../config/logger");
 
 // ─── Cooldown windows (seconds) ───────────────────────────────────────────────
@@ -517,22 +517,22 @@ async function tryApiUpdate(entity, updateType, newValue) {
       const isSD = entity.campaign_type === "sponsoredDisplay";
       const campaignUpdate = { campaignId: entity.amazon_campaign_id };
       if (updateType === "campaign_state")  campaignUpdate.state = isSD ? String(newValue).toLowerCase() : newValue;
+      // campaignBudgetFields, not a hand-rolled shape: the flat `dailyBudget` written here
+      // is not a field in any current campaign schema, so Amazon dropped it and answered
+      // success — the same silent no-op that hid 29 budget raises in the live engine.
       if (updateType === "campaign_budget") {
-        if (isSD) { campaignUpdate.budget = newValue; campaignUpdate.budgetType = "daily"; }
-        else      { campaignUpdate.dailyBudget = newValue; }
+        Object.assign(campaignUpdate, campaignBudgetFields(entity.campaign_type, newValue));
       }
 
-      const path =
-        entity.campaign_type === "sponsoredProducts" ? "/sp/campaigns" :
-        entity.campaign_type === "sponsoredBrands"   ? "/sb/campaigns" :
-        "/sd/campaigns";
+      const path = campaignApiPath(entity.campaign_type);
+      if (!path) return;
 
       await put({
         connectionId: entity.connection_id,
         profileId:    entity.amazon_profile_id.toString(),
         marketplace:  entity.marketplace_id,
         path,
-        data:         isSD ? [campaignUpdate] : { campaigns: [campaignUpdate] },
+        data:         wrapCampaigns(entity.campaign_type, [campaignUpdate]),
         group:        "campaigns",
       });
     }

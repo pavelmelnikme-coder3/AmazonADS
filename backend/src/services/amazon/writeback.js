@@ -357,22 +357,27 @@ async function loadKeywordContext(workspaceId, keywordIds) {
 /**
  * Build the campaign-mutation fields for a daily budget, per campaign type.
  *
- * SP and SB v3 both model the budget as a nested object; there is no `dailyBudget`
- * field in the v3 campaign schema (a GET returns `budget: {budget, budgetType}`).
- * Sending the v2-style flat `dailyBudget` is not rejected — Amazon ignores the unknown
- * field and still answers 207 with the campaign in `success[]`, so the caller records a
- * successful write while the budget on Amazon never changes. That silently no-op'd every
- * SP budget write-back (rules and the campaign edit form alike) until 2026-08-10.
- * SD is the exception: its PUT is still v2-style (flat budget, lowercase budgetType).
+ * SP v3 models the budget as a nested object; there is no `dailyBudget` field in the v3
+ * campaign schema (a GET returns `budget: {budget, budgetType}`). Sending the v2-style flat
+ * `dailyBudget` is not rejected — Amazon ignores the unknown field and still answers 207 with
+ * the campaign in `success[]`, so the caller records a successful write while the budget on
+ * Amazon never changes. That silently no-op'd every SP budget write-back (rules and the
+ * campaign edit form alike) until 2026-08-10.
+ *
+ * SB v4 and SD are both flat, and differ only in the case of budgetType. The SB shape is read
+ * straight off what Amazon returns for these campaigns — the stored raw_data of a live SB
+ * campaign is `{"budget": 20, "budgetType": "DAILY", ...}`, with no nested object anywhere.
+ * Sending SP's nested shape to SB would have been the same silent no-op once the 406 that hid
+ * it was fixed.
  *
  * Returns a fragment to merge into the campaign object — never a whole payload.
  */
 function campaignBudgetFields(campaignType, dailyBudget) {
   const budget = parseFloat(dailyBudget);
   if (!Number.isFinite(budget)) return {};
-  return campaignType === "sponsoredDisplay"
-    ? { budget, budgetType: "daily" }
-    : { budget: { budget, budgetType: "DAILY" } };
+  if (campaignType === "sponsoredDisplay") return { budget, budgetType: "daily" };
+  if (campaignType === "sponsoredBrands" || campaignType === "SB") return { budget, budgetType: "DAILY" };
+  return { budget: { budget, budgetType: "DAILY" } };
 }
 
 /**
@@ -380,6 +385,26 @@ function campaignBudgetFields(campaignType, dailyBudget) {
  */
 function wrapCampaigns(campaignType, items) {
   return campaignType === "sponsoredDisplay" ? items : { campaigns: items };
+}
+
+/**
+ * The campaign endpoint for a campaign type. Returns undefined for an unknown type so the
+ * caller can decide whether that is fatal.
+ *
+ * This map used to be copy-pasted at five call sites (this file, routes/campaigns.js twice,
+ * routes/rules.js twice, services/rules/engine.js), all of them pointing SB at the v3
+ * `/sb/campaigns` route Amazon has removed. Every SB campaign mutation therefore answered
+ * 406 "No match for accept header" — budget raises from the rule engine and state changes
+ * from the campaign edit form alike. One definition so a path fix cannot land in some of
+ * them and miss the rest; adsClient.getAcceptHeader carries the matching media type.
+ */
+const CAMPAIGN_API_PATHS = {
+  sponsoredProducts: "/sp/campaigns",
+  sponsoredBrands:   "/sb/v4/campaigns",
+  sponsoredDisplay:  "/sd/campaigns",
+};
+function campaignApiPath(campaignType) {
+  return CAMPAIGN_API_PATHS[campaignType];
 }
 
 /**
@@ -395,14 +420,8 @@ async function pushCampaignUpdates(updates) {
   if (!updates?.length) return { ok: true };
 
   let anyError = null;
-  const PATHS = {
-    sponsoredProducts: "/sp/campaigns",
-    sponsoredBrands:   "/sb/campaigns",
-    sponsoredDisplay:  "/sd/campaigns",
-  };
-
   for (const [campaignType, byType] of groupBy(updates, "campaignType")) {
-    const path = PATHS[campaignType];
+    const path = campaignApiPath(campaignType);
     if (!path) {
       anyError = `Unsupported campaign type: ${campaignType}`;
       logger.warn("Campaign write-back skipped: unknown type", { campaignType });
@@ -784,4 +803,5 @@ module.exports = {
   pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext,
   pushNewKeywords, archiveNegativeKeyword, archiveNegativeTarget,
   pushCampaignUpdates, pushAdGroupUpdates, campaignBudgetFields, wrapCampaigns, partialError,
+  campaignApiPath,
 };
