@@ -94,6 +94,7 @@ the rule adds on one run exactly what it removes on the next, forever. Both side
 | **term identity** | both sides group/compare on `sqlNormalizeKeywordText(...)`. Amazon returns the same shopper term in several typographic spellings (U+00A0 vs a plain space); they are one negative keyword on Amazon and must be one entity here. |
 | **row ownership** | re-negating re-activates and **re-owns** an existing inactive row for that ad group instead of inserting a new one, so the rule that now justifies the negative becomes its `source_rule_id`. Otherwise the row stays owned by the rule that archived it, that rule keeps re-archiving it, and the sync keeps flipping it back. |
 | **release requires conversion** | `negativeStillJustified()` — a negative comes off **only** when the term has orders. Zero orders keeps it, whatever the click count has decayed to. |
+| **release must be confirmed** | a single run's verdict is not enough: reconciliation must find the negative unjustified on `safety.reconcile_grace_runs` **consecutive** runs (default 2) before releasing it. See below. |
 
 ### Why release requires conversion evidence *(2026-08-04)*
 
@@ -130,6 +131,51 @@ normalizes.
 **Health check:** a second rule run immediately after the first must be a no-op —
 `applied = 0`, `removed = 0`, zero audit writes. Any churn there means the invariant is broken.
 
+### Why a release must be confirmed across runs *(2026-08-18)*
+
+Requiring conversion evidence removed the click-decay loop but not a second, slower one:
+**Amazon restates the search-term report.** Conversions land against a day one or two days
+after that day closes, so the same term's `orders` reads 0, then 1, then 0 again as the report
+is re-ingested and the 60-day window slides underneath it. A release decided on a single run
+follows that noise exactly.
+
+Measured 11–18.08.2026: 11 terms were negated, released on the very next daily run, and
+re-negated two or three days later. `gaskartuschen schraubventil 230g` went add 14.08 →
+release 15.08 → add 17.08, spending €10.18 on 9 clicks with **0 orders** in the gap.
+
+`confirmReconcileRelease()` turns the one-run verdict into a confirmed one via
+`negative_keywords.reconcile_miss_count` / `negative_targets.reconcile_miss_count`
+(migration `048`):
+
+- unjustified run → increment; release only when the count reaches `reconcile_grace_runs`
+- justified run → reset to 0
+- row re-owned by another rule (the add path re-activates an inactive row) → reset to 0, since
+  it is a fresh negative for its new owner and must not inherit a part-way count
+
+Every flip observed in that window lasted a single run, so the default of 2 removes all of
+them; the cost is that a genuinely converting term is released one day later than before.
+
+### Budget raises require the budget to be binding *(2026-08-18)*
+
+`adjust_budget_pct` matched on performance alone, which says nothing about whether the budget
+is what limits the campaign. With a 60-day qualifying window a campaign that converted well two
+months ago keeps passing `ACOS <= 15 AND orders >= 3` indefinitely, so the rule kept raising
+campaigns that never came near their cap — on 2026-08-18, **25 of the 31** it raised were using
+under 10% of their daily budget and several were spending €0.00/day. Harmless while the
+write-back was silently no-op'ing; once that was fixed (2026-08-14) each run compounded another
++20% and the account's total daily budget went 906 → 1090 → 1298 in two runs against flat spend.
+
+A raise now requires the campaign to have been **budget-limited on at least
+`MIN_BUDGET_LIMITED_DAYS` (2) of the last `BUDGET_UTILIZATION_LOOKBACK_DAYS` (7) days**, where a
+day counts when its spend reached `safety.min_budget_utilization` (default 70%) of the current
+daily budget. Otherwise the campaign is skipped as `budget_not_binding`, with a `detail` payload
+naming the budget, the peak day's spend and the day count so the decision is checkable.
+
+Deliberately **not** a window average: a campaign that maxes out twice a week and idles the rest
+averages low but is genuinely capped on the days it runs. `loadRecentDailySpend()` fetches the
+whole set in a single query covering every matched campaign, and only runs at all when the rule
+actually has an `adjust_budget_pct` action.
+
 ### Negative state on Amazon
 
 Amazon rejects `state: ARCHIVED` on the negative-keyword/target endpoints, so "archiving" a
@@ -141,6 +187,43 @@ Batch endpoints answer **207 Multi-Status**: a 2xx HTTP status with per-item rej
 `<dataKey>.error[]`. `adsClient` returns any 2xx body without throwing, so every write-back
 helper must inspect that array (`partialError()` in `services/amazon/writeback.js`) — otherwise
 a refused write is recorded as a success.
+
+### Campaign endpoints differ by ad type — path, media type and budget shape *(2026-08-18)*
+
+The three ad types are on three different API generations, and a mismatch on **any** of the
+three axes below fails, each in its own way:
+
+| | path | Accept / Content-Type | daily budget in the payload |
+|---|---|---|---|
+| **SP** | `/sp/campaigns` | `application/vnd.spCampaign.v3+json` | nested: `budget: { budget, budgetType: "DAILY" }` |
+| **SB** | `/sb/v4/campaigns` | `application/vnd.sbcampaignresource.v4+json` | **flat**: `budget, budgetType: "DAILY"` |
+| **SD** | `/sd/campaigns` | `application/json` | flat, lowercase: `budget, budgetType: "daily"` |
+
+Both are centralised — `campaignApiPath()` / `campaignBudgetFields()` in `writeback.js`, media
+type in `adsClient.getAcceptHeader()` — because the path map had been copy-pasted at **five**
+call sites (write-back, `routes/campaigns.js` ×2, `routes/rules.js` ×2,
+`services/rules/engine.js`) and every copy pointed SB at the removed v3 `/sb/campaigns`.
+
+Two failure modes to keep apart:
+
+- **Wrong media type → `406 "No match for accept header"`.** Rejected before Amazon looks at
+  the body, so nothing in the payload is even evaluated. `getAcceptHeader` used to map only
+  `/sp/*` paths, and `Content-Type` was derived by a *separate* expression
+  (`path.startsWith("/sp/") ? … : "application/json"`) — that asymmetry is what let the SB gap
+  go unnoticed. Both headers now come from the one function.
+- **Wrong field shape → silent success.** Amazon drops unknown fields and still answers 207 with
+  the campaign in `success[]`, so the caller records a write that never happened. This hid the
+  SP budget bug for a month and would have hidden the SB one too, had the 406 not come first.
+
+**Therefore: a write-back is only verified by reading the value back.** `{ok: true}` proves the
+request was accepted, not that it changed anything. The SB fix was confirmed against the live
+API on a paused campaign — budget 20 → 21 read back as 21, restored to 20, with every other
+field (name, state, bidding, portfolioId) unchanged, which also confirms these PUTs are partial
+updates rather than full replacements.
+
+⚠️ SB campaign **creation** (`POST /campaigns`) still sends a v3-era payload
+(`budgetType: "dailyBudget"`, no `brandEntityId`/`goal`/`costType`/creative) and does not work;
+only the path was corrected.
 
 ---
 

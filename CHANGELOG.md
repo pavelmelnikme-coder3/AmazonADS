@@ -6,6 +6,110 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-18 — Rules: budget raises with nothing to raise, an unreachable SB endpoint, and negatives that flip
+
+Prompted by account ROAS falling from 6.95 to 5.19 over 11–17.08. The rules turned out not to be
+the cause — but auditing them surfaced three defects, one of which had been failing invisibly
+since the day before.
+
+### The ROAS drop itself (no code change)
+
+Decomposed on `sales_1d` rather than `sales_14d`, because the recent week is not yet mature:
+the `sales_14d / sales_1d` ratio is 1.22 for a settled week against 1.167 for the fresh one, so
+the last seven days are understated by ~4–5%.
+
+- **Three campaigns were switched on outside AdsFlow on 12.08** — `AM - SP B0BMXNFVP5 – Keyword`
+  and `– Produkt`, plus `8 [SP]-BPM-Gaskartusche 450g`. No metrics rows in the preceding 60 days
+  and no campaign state-change event in `audit_events` for the whole of August, so nothing in
+  this app enabled them. Together **€824, 27% of account spend, at ROAS ≈ 4.1**. Excluding them
+  the account went 7.40 → 6.03 rather than 6.95 → 5.19.
+- The remainder is CPC +6.5%, CVR −14% (6.90% → 5.93%) and clicks −8%, concentrated in
+  `AM - SP - Magic` (ROAS 8.92 → 6.50, −€2,133 of sales) — partly cannibalised by the new
+  B0BMXNFVP5 campaigns, which advertise the same ASIN.
+- Checked and dismissed: campaign row counts in `fact_metrics_daily` swing between 60 and 126
+  per day. The extra rows are all-zero rows written by backfill runs; the daily report only
+  returns entities with activity. No data is missing.
+
+### Fixed
+
+- **The budget rule raised budgets that were never the constraint.** `adjust_budget_pct` matched
+  on performance alone, which says nothing about whether the budget limits the campaign, and its
+  60-day qualifying window keeps a campaign that converted well two months ago passing
+  `ACOS <= 15 AND orders >= 3` indefinitely. On 08-18 it raised 29 campaigns; **25 of the 31
+  matches were using under 10% of their daily budget** and several were spending €0.00/day. That
+  was harmless only while the write-back was silently no-op'ing — once that was fixed on 08-14
+  the raises started compounding for real and the account's total daily budget went
+  **906 → 1090 → 1298 in two runs** against flat spend, with individual campaigns walking
+  30 → 36 → 43.20 → 51.84 in six days.
+
+  A raise now requires the budget to actually bind: the campaign must have spent at least
+  `safety.min_budget_utilization` (default **70%**) of its daily budget on **2 of the last 7
+  days**. Deliberately not a window average — a campaign that maxes out twice a week and idles
+  the rest averages low but is genuinely capped on the days it runs. Non-qualifying campaigns
+  skip as `budget_not_binding`, carrying a `detail` payload (budget, peak day's spend, day
+  count) so the decision is checkable rather than merely asserted. `0` opts out.
+
+  A dry run against production now blocks **all 31** matches. The highest single-day spend among
+  them was €12.06 against a €69.12 budget, and €9.67 against a €100 one — the rule had had no
+  legitimate work to do for some time.
+
+- **Every Sponsored Brands campaign mutation was answering 406.** The first SB budget raise ever
+  attempted (08-18, 30 → 36) came back
+  `406 {"code":"406","details":"No match for accept header"}`. Three separate bugs stacked:
+
+  1. `adsClient.getAcceptHeader()` mapped only `/sp/*` paths, and `Content-Type` was derived by
+     a *different* expression (`path.startsWith("/sp/") ? … : "application/json"`). SB therefore
+     went out as plain JSON. Both headers now come from the one function.
+  2. The path was `/sb/campaigns` — the v3 route Amazon has removed. SB campaigns are on
+     **`/sb/v4/campaigns`** with media type **`application/vnd.sbcampaignresource.v4+json`**,
+     the same one `entities.js` already uses successfully to list them.
+  3. The budget was sent in SP's nested shape. **SB v4 is flat** — confirmed from a live
+     campaign's stored `raw_data`: `{"budget": 20, "budgetType": "DAILY", …}`. Had only the
+     header been fixed, this would have become the silent 207-success no-op instead.
+
+  The path map was copy-pasted at **five** call sites — write-back, `routes/campaigns.js` ×2,
+  `routes/rules.js` ×2 and the legacy `services/rules/engine.js` — all pointing SB at the dead
+  route, so editing or pausing an SB campaign from the UI failed identically. Replaced by one
+  exported `campaignApiPath()`. The legacy engine also still wrote the flat `dailyBudget` field
+  that belongs to no current schema; it now shares `campaignBudgetFields()`.
+
+- **Negatives flipped on and off across days.** Requiring conversion evidence (08-04) closed the
+  click-decay loop but not a slower one: Amazon restates the search-term report, so a term's
+  `orders` reads 0, then 1, then 0 again as data is re-ingested and the 60-day window slides.
+  Between 11–18.08, **11 terms** were negated, released on the very next daily run and re-negated
+  two or three days later. `gaskartuschen schraubventil 230g` went add 14.08 → release 15.08 →
+  add 17.08, spending €10.18 on 9 clicks with **zero** orders in the gap.
+
+  A release must now be confirmed over `safety.reconcile_grace_runs` **consecutive** runs
+  (default 2), tracked in a new `reconcile_miss_count` column on `negative_keywords` and
+  `negative_targets`. A justified run resets it, as does the add path re-owning an inactive row —
+  a re-owned row is a fresh negative for its new owner and must not inherit a part-way count.
+  Every flip observed lasted exactly one run, so the default removes all of them; the cost is
+  that a genuinely converting term is released one day later. `1` restores the old behaviour.
+
+### Verification
+
+Beyond 1206 passing tests (+26), the SB write path was confirmed **against the live Amazon API**
+on a paused campaign, because a 207/`ok` proves only that the request was accepted — precisely
+the trap that hid the SP budget bug for a month. A no-op write left every field identical
+(confirming these PUTs are partial updates, not full replacements); a real write moved the
+budget 20 → 21, read back as 21, and was restored to 20 with name, state, bidding and portfolio
+untouched. All three rules were then dry-run against production data, and the deploy was
+followed by 52 report-pipeline operations with zero errors and zero 406s.
+
+### Known gaps
+
+- **SB campaign creation still does not work.** `POST /campaigns` builds a v3-era payload
+  (`budgetType: "dailyBudget"`, no `brandEntityId` / `goal` / `costType` / creative). It answered
+  406 on the dead route before and will now fail validation on v4 instead; only the path was
+  corrected. Migrating the create payload is separate work.
+- **`npm run migrate` does nothing.** `backend/src/db/migrate.js` only exports `runMigrations`,
+  so running it directly exits 0 having applied nothing — migrations are applied at app startup.
+  Related: nodemon watches `.js`, so copying a `.sql` migration to the server does not trigger
+  the reload that would run it; the backend has to be restarted explicitly.
+
+---
+
 ## [Unreleased] — 2026-08-14 — Rules: SB/SD budgets were never stored, and the rule guessed
 
 Found while auditing a clean rule run. The eight daily rules were healthy — all `completed`,

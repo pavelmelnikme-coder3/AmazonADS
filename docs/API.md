@@ -226,6 +226,15 @@ Request body matches the rule shape:
 }
 ```
 
+**`safety` fields** *(all optional; the two added 2026-08-18 apply their default when absent)*
+
+| field | default | effect |
+|---|---|---|
+| `min_bid` / `max_bid` | — | bid clamps |
+| `max_budget` | — | caps budget **growth**; never lowers a budget already above it |
+| `min_budget_utilization` | `70` | percent of the daily budget a day's spend must reach for that day to count as budget-limited. `adjust_budget_pct` only raises a campaign that was budget-limited on **≥ 2 of the last 7 days**; otherwise it skips with `budget_not_binding`. `0` disables the check. |
+| `reconcile_grace_runs` | `2` | consecutive runs that must find a negative unjustified before reconciliation releases it. `1` releases on the first such run (the pre-2026-08-18 behaviour). |
+
 Response shape:
 ```json
 {
@@ -236,6 +245,9 @@ Response shape:
   "removed_count":   3,
   "applied":         [{ "entity_id": "...", "keyword_text": "...", "action": "...", "metrics": {...} }],
   "skipped":         [{ "entity_id": "...", "reason": "already_negative", "action": "...", "metrics": {...} }],
+  // a `budget_not_binding` skip also carries `detail`:
+  //   { "daily_budget": 69.12, "max_daily_spend": 12.06, "budget_limited_days": 0,
+  //     "required_days": 2, "utilization_pct": 70, "lookback_days": 7 }
   "removed":         [{ "id": "...", "keyword_text": "...", "action": "remove_negative_reconcile", "metrics": {...} }],
   "errors":          [],
   "writeback_errors":      [],

@@ -347,6 +347,12 @@ actions: [{ type: "adjust_bid_pct", value: "-10" }]
 }
 ```
 
+**Safety:** `min_bid` / `max_bid` clamp bids; `max_budget` caps budget *growth* (never lowers).
+`min_budget_utilization` (default 70, `0` disables) gates `adjust_budget_pct` — the campaign must
+have spent that share of its daily budget on 2 of the last 7 days, otherwise the budget is not
+what limits it and the raise is skipped as `budget_not_binding`. `reconcile_grace_runs`
+(default 2) is how many consecutive runs must find a negative unjustified before it is released.
+
 **Operators:** `gt` `gte` `lt` `lte` `eq` `neq`  
 **Bid condition:** metric `"bid"` → applied as SQL WHERE on `k.bid` / `t.bid` directly  
 **Period:** `period_days: 1` = yesterday only; otherwise last N days
