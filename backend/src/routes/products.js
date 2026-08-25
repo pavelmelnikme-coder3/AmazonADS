@@ -37,6 +37,11 @@ router.get("/", async (req, res, next) => {
          p.created_at, p.parent_asin,
          ${advExists} AS is_advertised,
          (p.title IS NOT NULL AND p.title <> '') AS is_available,
+         -- How many campaigns carry an ad for this ASIN (see GET /products/ad-placements
+         -- for the campaign names themselves). "Live" = enabled ad in an enabled campaign,
+         -- i.e. what has to be switched off to stop promoting the product.
+         COALESCE(adcamp.campaign_count, 0)      AS ad_campaign_count,
+         COALESCE(adcamp.live_campaign_count, 0) AS ad_campaign_live_count,
          s.best_rank,
          s.best_category,
          s.classification_ranks,
@@ -89,6 +94,20 @@ router.get("/", async (req, res, next) => {
          ORDER BY captured_at DESC
          LIMIT 1
        ) s ON true
+       LEFT JOIN LATERAL (
+         SELECT COUNT(DISTINCT pa.campaign_id) FILTER (
+                  WHERE c.state <> 'archived' AND pa.state <> 'archived') AS campaign_count,
+                -- Same three-link rule the panel uses for its green dot: a paused
+                -- ad GROUP stops delivery just as a paused campaign does, so it
+                -- must not be counted as live here either.
+                COUNT(DISTINCT pa.campaign_id) FILTER (
+                  WHERE c.state = 'enabled' AND pa.state = 'enabled'
+                    AND COALESCE(ag.state, 'enabled') = 'enabled') AS live_campaign_count
+         FROM product_ads pa
+         JOIN campaigns c ON c.id = pa.campaign_id
+         LEFT JOIN ad_groups ag ON ag.id = pa.ad_group_id
+         WHERE pa.workspace_id = p.workspace_id AND UPPER(pa.asin) = p.asin
+       ) adcamp ON true
        LEFT JOIN product_listing_health lh ON lh.product_id = p.id
        LEFT JOIN sku_mapping sm
          ON sm.workspace_id = p.workspace_id AND sm.asin = p.asin
@@ -278,6 +297,145 @@ router.get("/new-unadvertised", async (req, res, next) => {
     }
 
     res.json({ days, items: rows });
+  } catch (err) { next(err); }
+});
+
+// GET /products/ad-placements?asins=B0AAA,B0BBB
+// "Where is this ASIN actually being advertised?" — the campaigns/ad groups that
+// carry an ad for it, so a product can be pulled out of advertising without
+// hunting through the Amazon console.
+//
+// Source of truth is `product_ads` (Amazon's ad rows: one per ASIN/SKU inside an
+// ad group), synced for SP and SD. Sponsored Brands is NOT covered — its ASINs
+// live in creatives behind a different endpoint we don't sync — so the response
+// states its own coverage instead of implying a complete picture.
+router.get("/ad-placements", async (req, res, next) => {
+  try {
+    const asins = [...new Set(
+      String(req.query.asins || "")
+        .split(",")
+        .map(s => s.trim().toUpperCase())
+        .filter(s => /^[A-Z0-9]{10}$/.test(s))
+    )].slice(0, 200);
+
+    if (!asins.length) return res.json({ coverage: ["SP", "SD"], placements: {} });
+
+    const { rows } = await query(
+      `SELECT UPPER(pa.asin)   AS asin,
+              pa.amazon_ad_id, pa.sku, pa.state AS ad_state,
+              c.id             AS campaign_id,
+              c.amazon_campaign_id,
+              c.name           AS campaign_name,
+              c.campaign_type,
+              c.state          AS campaign_state,
+              c.daily_budget,
+              pf.name          AS portfolio_name,
+              prof.marketplace_id,
+              ag.name          AS ad_group_name,
+              ag.state         AS ad_group_state
+         FROM product_ads pa
+         JOIN campaigns c          ON c.id    = pa.campaign_id
+         JOIN amazon_profiles prof ON prof.id = c.profile_id
+         LEFT JOIN portfolios pf   ON pf.id   = c.portfolio_id
+         LEFT JOIN ad_groups ag    ON ag.id   = pa.ad_group_id
+        WHERE pa.workspace_id = $1
+          AND UPPER(pa.asin) = ANY($2::text[])
+          -- Archived campaigns and archived ads cannot serve and cannot be
+          -- revived, so they are noise for "where do I switch this off?" —
+          -- and leaving them in would make the panel disagree with the
+          -- campaign count on the product row, which filters them the same way.
+          AND c.state <> 'archived'
+          AND pa.state <> 'archived'`,
+      [req.workspaceId, asins]
+    );
+
+    // Campaign-level spend for the last 7 full days. It covers the WHOLE campaign,
+    // not just this ASIN (Amazon reports per-ASIN spend only aggregated across
+    // campaigns), so the field name says so and the UI labels it that way.
+    const campaignAmazonIds = [...new Set(rows.map(r => r.amazon_campaign_id).filter(Boolean))];
+    const spendByCampaign = new Map();
+    if (campaignAmazonIds.length) {
+      const { rows: mrows } = await query(
+        `SELECT amazon_id,
+                COALESCE(SUM(cost), 0)      AS spend,
+                COALESCE(SUM(sales_14d), 0) AS sales,
+                COALESCE(SUM(clicks), 0)    AS clicks
+           FROM fact_metrics_daily
+          WHERE workspace_id = $1
+            AND entity_type = 'campaign'
+            AND amazon_id = ANY($2::text[])
+            AND date >= CURRENT_DATE - 7 AND date <= CURRENT_DATE - 1
+          GROUP BY amazon_id`,
+        [req.workspaceId, campaignAmazonIds]
+      );
+      for (const m of mrows) spendByCampaign.set(m.amazon_id, m);
+    }
+
+    // Group ad rows → one entry per (ASIN, campaign). A listing normally has one
+    // ad per SKU (FBA + FBM) in every ad group, so the raw rows repeat the same
+    // campaign many times — collapse them and keep the detail underneath.
+    const placements = {};
+    for (const a of asins) placements[a] = [];
+
+    const byKey = new Map();
+    for (const r of rows) {
+      const key = `${r.asin}::${r.campaign_id}`;
+      let entry = byKey.get(key);
+      if (!entry) {
+        const m = spendByCampaign.get(r.amazon_campaign_id);
+        entry = {
+          campaign_id:        r.campaign_id,
+          amazon_campaign_id: r.amazon_campaign_id,
+          campaign_name:      r.campaign_name,
+          campaign_type:      r.campaign_type,
+          campaign_state:     r.campaign_state,
+          marketplace_id:     r.marketplace_id,
+          portfolio_name:     r.portfolio_name,
+          daily_budget:       r.daily_budget == null ? null : Number(r.daily_budget),
+          campaign_spend_7d:  m ? Number(m.spend) : 0,
+          campaign_sales_7d:  m ? Number(m.sales) : 0,
+          campaign_clicks_7d: m ? Number(m.clicks) : 0,
+          ad_count:           0,
+          enabled_ad_count:   0,
+          skus:               [],
+          ad_groups:          [],
+          is_live:            false,
+        };
+        byKey.set(key, entry);
+        (placements[r.asin] = placements[r.asin] || []).push(entry);
+      }
+      entry.ad_count += 1;
+      if (r.ad_state === "enabled") entry.enabled_ad_count += 1;
+      if (r.sku && !entry.skus.includes(r.sku)) entry.skus.push(r.sku);
+
+      const agName = r.ad_group_name || null;
+      let ag = entry.ad_groups.find(g => g.name === agName);
+      if (!ag) {
+        ag = { name: agName, state: r.ad_group_state || null, ad_count: 0, enabled_ad_count: 0 };
+        entry.ad_groups.push(ag);
+      }
+      ag.ad_count += 1;
+      if (r.ad_state === "enabled") ag.enabled_ad_count += 1;
+
+      // "Live" = the ad actually serves: enabled ad, in an enabled ad group,
+      // in an enabled campaign. Any paused link in that chain stops delivery.
+      if (r.ad_state === "enabled" && r.campaign_state === "enabled"
+          && (r.ad_group_state || "enabled") === "enabled") {
+        entry.is_live = true;
+      }
+    }
+
+    // Live campaigns first (that's what the user has to switch off), then the
+    // still-enabled ones, then paused/archived; alphabetical inside each tier.
+    const tier = (c) => c.is_live ? 0 : c.campaign_state === "enabled" ? 1 : c.campaign_state === "paused" ? 2 : 3;
+    for (const a of Object.keys(placements)) {
+      placements[a].sort((x, y) =>
+        tier(x) - tier(y) ||
+        y.campaign_spend_7d - x.campaign_spend_7d ||
+        String(x.campaign_name).localeCompare(String(y.campaign_name)));
+    }
+
+    res.json({ coverage: ["SP", "SD"], placements });
   } catch (err) { next(err); }
 });
 

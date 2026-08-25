@@ -560,3 +560,124 @@ describe("GET /products/timeseries", () => {
     expect(res.body.aggregate[0].orders).toBe(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GET /products/ad-placements — which campaigns advertise an ASIN
+// ─────────────────────────────────────────────────────────────────────────────
+describe("GET /products/ad-placements", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  const adRow = (over = {}) => ({
+    asin: "B0FKTRLCPJ",
+    amazon_ad_id: "1",
+    sku: "9481-FBA1",
+    ad_state: "enabled",
+    campaign_id: "camp-1",
+    amazon_campaign_id: "111",
+    campaign_name: "1 [A]-Fußstütze",
+    campaign_type: "sponsoredProducts",
+    campaign_state: "enabled",
+    daily_budget: "10.00",
+    portfolio_name: null,
+    marketplace_id: "A1PA6795UKMFR9",
+    ad_group_name: "1 [A]-[Sub]-Fußstütze",
+    ad_group_state: "enabled",
+    ...over,
+  });
+
+  it("collapses the per-SKU ad rows into one entry per campaign", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        adRow(),
+        adRow({ amazon_ad_id: "2", sku: "9481-AMZ1" }),
+      ] })
+      .mockResolvedValueOnce({ rows: [{ amazon_id: "111", spend: "12.5", sales: "40", clicks: "9" }] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    expect(res.status).toBe(200);
+    const camps = res.body.placements.B0FKTRLCPJ;
+    expect(camps).toHaveLength(1);
+    expect(camps[0].campaign_name).toBe("1 [A]-Fußstütze");
+    expect(camps[0].ad_count).toBe(2);
+    expect(camps[0].enabled_ad_count).toBe(2);
+    expect(camps[0].skus).toEqual(["9481-FBA1", "9481-AMZ1"]);
+    expect(camps[0].campaign_spend_7d).toBe(12.5);
+    expect(camps[0].is_live).toBe(true);
+  });
+
+  it("marks a campaign as not live when any link in the chain is paused", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        adRow({ campaign_id: "camp-paused", amazon_campaign_id: "222", campaign_name: "paused camp", campaign_state: "paused" }),
+        adRow({ campaign_id: "camp-adpaused", amazon_campaign_id: "333", campaign_name: "ad paused", ad_state: "paused" }),
+        adRow({ campaign_id: "camp-agpaused", amazon_campaign_id: "444", campaign_name: "ag paused", ad_group_state: "paused" }),
+      ] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    expect(res.status).toBe(200);
+    const byName = Object.fromEntries(res.body.placements.B0FKTRLCPJ.map(c => [c.campaign_name, c]));
+    expect(byName["paused camp"].is_live).toBe(false);
+    expect(byName["ad paused"].is_live).toBe(false);
+    expect(byName["ad paused"].enabled_ad_count).toBe(0);
+    expect(byName["ag paused"].is_live).toBe(false);
+  });
+
+  it("sorts serving campaigns first, then by campaign spend", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        adRow({ campaign_id: "c-paused", amazon_campaign_id: "222", campaign_name: "B paused", campaign_state: "paused" }),
+        adRow({ campaign_id: "c-small",  amazon_campaign_id: "333", campaign_name: "C live small" }),
+        adRow({ campaign_id: "c-big",    amazon_campaign_id: "444", campaign_name: "A live big" }),
+      ] })
+      .mockResolvedValueOnce({ rows: [
+        { amazon_id: "333", spend: "1", sales: "0", clicks: "1" },
+        { amazon_id: "444", spend: "90", sales: "0", clicks: "5" },
+      ] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    expect(res.body.placements.B0FKTRLCPJ.map(c => c.campaign_name))
+      .toEqual(["A live big", "C live small", "B paused"]);
+  });
+
+  it("returns an empty bucket for a tracked ASIN with no ads and skips junk input", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ,not-an-asin");
+    expect(res.status).toBe(200);
+    expect(res.body.placements).toEqual({ B0FKTRLCPJ: [] });
+    // No campaign ids → no second (metrics) query
+    expect(dbQuery).toHaveBeenCalledTimes(1);
+    expect(dbQuery.mock.calls[0][1][1]).toEqual(["B0FKTRLCPJ"]);
+  });
+
+  it("excludes archived campaigns and archived ads — they cannot serve", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    const sql = dbQuery.mock.calls[0][0];
+    expect(sql).toMatch(/c\.state <> 'archived'/);
+    expect(sql).toMatch(/pa\.state <> 'archived'/);
+  });
+
+  it("counts campaigns on the product list with the same archived filter", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    await request(app).get("/products");
+    const sql = dbQuery.mock.calls[0][0];
+    expect(sql).toMatch(/ad_campaign_count/);
+    expect(sql).toMatch(/c\.state <> 'archived' AND pa\.state <> 'archived'/);
+    // The "live" counter must use the same three-link rule as the panel:
+    // campaign + ad + ad group all enabled.
+    expect(sql).toMatch(/COALESCE\(ag\.state, 'enabled'\) = 'enabled'/);
+  });
+
+  it("does not touch the database when no valid ASIN is given", async () => {
+    const res = await request(app).get("/products/ad-placements?asins=xyz");
+    expect(res.status).toBe(200);
+    expect(res.body.placements).toEqual({});
+    expect(dbQuery).not.toHaveBeenCalled();
+  });
+});

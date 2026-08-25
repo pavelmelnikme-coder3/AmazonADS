@@ -6,6 +6,67 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-25 — Products: which campaigns advertise this ASIN
+
+Asked for a way to stop promoting one product without hunting through the Amazon console:
+the app knew a product was "Advertised" but never said *where*. Building it surfaced three
+data defects behind that same link.
+
+### Added
+
+- **"Кампании (live/total)" panel on the Products page**, in both the flat and the
+  "По листингам" view. Per campaign: SP/SD badge, state, the ad groups holding the ASIN, its
+  SKUs (FBA + FBM), the campaign's 7-day spend and daily budget, a dot for "actually serving",
+  and two links — the name opens the internal Campaigns page pre-filtered by that campaign,
+  the ↗ opens it in Amazon's console, where the pause switch lives. Lazy per ASIN: the product
+  list ships only the counts, the campaign names are fetched when the panel is first opened.
+- `GET /products/ad-placements?asins=…` (see `docs/API.md`) — `product_ads` grouped to one entry
+  per (ASIN, campaign); serving campaigns first, then by spend. Archived campaigns and archived
+  ads are excluded (they cannot serve, and leaving them in would make the panel disagree with
+  the count on the product row).
+- `ad_campaign_count` / `ad_campaign_live_count` on `GET /products` (+4 ms on 551 products).
+  Verified equal to the panel's rows for **all 502 advertised ASINs**.
+- **SD product ads are now synced.** `fetchProductAds` was SP-only, so the 19 enabled Sponsored
+  Display campaigns were invisible to anything built on `product_ads`. Added the legacy
+  `GET /sd/productAds` (v2-style, the same shape SD campaigns/ad groups/targets already use) —
+  453 SD ads on the live account, none of which had ever been stored. **Sponsored Brands has no
+  equivalent**: its ASINs sit inside creatives with no list endpoint, so SB can never appear
+  here; the panel says so instead of implying full coverage.
+
+### Fixed
+
+- **Ads could lose their campaign permanently.** `syncProductAds`' `ON CONFLICT … DO UPDATE`
+  never updated `campaign_id`/`ad_group_id`. An ad first seen while its campaign was still
+  unknown locally — a campaign created between two daily entity syncs — kept `campaign_id NULL`
+  **forever**, because every later sync updated only asin/sku/state. Such an ad is invisible to
+  the new panel, to the `is_advertised` flag, and to the "новинки без рекламы" tab, which joins
+  `product_ads` to `campaigns`. Now `COALESCE(EXCLUDED.x, product_ads.x)`, so a later sync heals
+  the link and a transient resolution miss never wipes a good one. Healed on production: 30
+  orphaned ads → 22, the remainder belonging to two campaigns Amazon no longer returns at all
+  (no metrics rows in their entire history).
+- **"Live" ignored the ad group.** The count on the product row treated campaign + ad enabled as
+  serving, while the panel required the ad group too. A campaign with a paused ad group was
+  counted as live on the row but not in the panel. Both now use the same three-link rule.
+- **The count on the button read as the total.** "Кампании (8)" for a product in 10 campaigns —
+  it was showing the serving count alone. Now `(8/10)`, collapsing to `(10)` when all serve.
+- **Listing rows double-counted shared campaigns.** Variations of one listing usually sit in the
+  same campaigns, and the row summed the per-ASIN counters: 49 where 32 distinct campaigns
+  existed. Once the panel data is loaded the button counts campaigns distinctly across the
+  family (the summed upper bound is still used before that).
+- **Navigating to a campaign lost the search on a cold page.** The Campaigns page applies a
+  deep-link search through an `af:navigate` listener, which only exists once that page has been
+  mounted; the first navigation of a session therefore landed on an unfiltered list of all 1178
+  campaigns. The name is now also written to `sessionStorage`, which the page reads during its
+  first render.
+
+### Notes
+
+- Entity sync runs daily (~10:00 UTC), so a campaign created today only appears in the panel
+  tomorrow. The 2026-08-25 run went through the new path cleanly: `sp: 3931, sd: 453`.
+- 1216 tests (8 new, including a dedicated `syncProductAds` suite).
+
+---
+
 ## [Unreleased] — 2026-08-18 — Rules: budget raises with nothing to raise, an unreachable SB endpoint, and negatives that flip
 
 Prompted by account ROAS falling from 6.95 to 5.19 over 11–17.08. The rules turned out not to be

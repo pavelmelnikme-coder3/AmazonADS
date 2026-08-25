@@ -674,10 +674,26 @@ async function syncPortfolios(profileDbRecord, amazonPortfolios) {
 
 // ─── PRODUCT ADS ─────────────────────────────────────────────────────────────
 
-// Sponsored Products product ads via v3 (POST /sp/productAds/list).
-// Legacy GET /sp/productAds returns 403 in the EU region — same v2 deprecation
-// as targets/keywords. v3 uses the standard list-with-stateFilter pattern.
+// Product ads = the rows that tie an ASIN/SKU to an ad group, i.e. the only
+// record of WHICH campaigns advertise a given product. Fetched for both ad types
+// that expose them:
+//   SP — v3 POST /sp/productAds/list
+//   SD — legacy GET /sd/productAds (Amazon has no v3 list for SD)
+// Sponsored Brands has no equivalent: its ASINs live inside creatives, so SB
+// campaigns never appear in product_ads.
 async function fetchProductAds(profile) {
+  const [sp, sd] = await Promise.all([
+    fetchSpProductAds(profile),
+    fetchSdProductAds(profile),
+  ]);
+  logger.info("Product ads fetch complete",
+    { profileId: profile.profile_id, sp: sp.length, sd: sd.length });
+  return [...sp, ...sd];
+}
+
+// Legacy GET /sd/productAds returns 403 in the EU region — same v2 deprecation
+// as targets/keywords. v3 uses the standard list-with-stateFilter pattern.
+async function fetchSpProductAds(profile) {
   const { getValidAccessToken } = require("./lwa");
   const axios = require("axios");
 
@@ -732,6 +748,36 @@ async function fetchProductAds(profile) {
   }
 }
 
+// SD product ads — the legacy v2-style GET, the same pattern SD campaigns,
+// ad groups and targets already use (Amazon never shipped a v3 SD list).
+// Field names match SP's v3 shape (adId/campaignId/adGroupId/asin/sku/state),
+// so syncProductAds stores both without a translation layer.
+async function fetchSdProductAds(profile) {
+  const base = baseOpts(profile);
+  try {
+    const ads = await getAll({
+      ...base,
+      path: "/sd/productAds",
+      params: { stateFilter: "enabled,paused,archived" },
+      group: "product_ads",
+      responseKey: "productAds",
+    });
+    logger.info("SD productAds fetch complete",
+      { profileId: profile.profile_id, total: ads.length });
+    return ads;
+  } catch (err) {
+    const status = err.status || err.response?.status;
+    if ([401, 403, 404, 405].includes(status)) {
+      logger.info("SD productAds skipped (no access)",
+        { profileId: profile.profile_id, status });
+      return [];
+    }
+    logger.warn("SD productAds fetch failed",
+      { profileId: profile.profile_id, status, error: err.message });
+    return [];
+  }
+}
+
 async function syncProductAds(profileDbRecord, amazonProductAds) {
   if (!amazonProductAds.length) return 0;
   const { id: profileDbId, workspace_id: workspaceId } = profileDbRecord;
@@ -773,6 +819,13 @@ async function syncProductAds(profileDbRecord, amazonProductAds) {
          (workspace_id, profile_id, campaign_id, ad_group_id, amazon_ad_id, asin, sku, state, raw_data, synced_at)
        VALUES ${values.join(",")}
        ON CONFLICT (profile_id, amazon_ad_id) DO UPDATE SET
+         -- campaign_id/ad_group_id used to be left out of the update, so an ad
+         -- first seen before its campaign existed in our DB (a campaign created
+         -- between two syncs) stayed orphaned forever: invisible to the campaign
+         -- panel, to is_advertised and to "new, not advertised". COALESCE keeps
+         -- the known link if this run couldn't resolve the campaign.
+         campaign_id=COALESCE(EXCLUDED.campaign_id, product_ads.campaign_id),
+         ad_group_id=COALESCE(EXCLUDED.ad_group_id, product_ads.ad_group_id),
          asin=EXCLUDED.asin, sku=EXCLUDED.sku, state=EXCLUDED.state,
          raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
       params

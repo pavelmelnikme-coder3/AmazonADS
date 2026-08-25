@@ -4659,6 +4659,140 @@ const ListingRecommendationsPanel = ({ issues, checkedAt, tr }) => {
   );
 };
 
+// Which campaigns advertise a given ASIN — the answer to "I want to stop
+// promoting this product but I don't know where it runs". Data comes from
+// GET /products/ad-placements (product_ads → campaign), lazily per ASIN.
+//
+// Each row links out twice: the name jumps to the internal Campaigns page
+// (pre-filtered by that name) and the ↗ icon opens the campaign in Amazon's
+// own console, where the pause switch lives.
+const AD_CAMPAIGN_TYPE_BADGE = { sponsoredProducts: "bg-bl", sponsoredBrands: "bg-grn", sponsoredDisplay: "bg-amb" };
+const AdPlacementsPanel = ({ asins, data, loading, tr }) => {
+  const adTypeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || ct;
+  const list = (asins || []).filter(Boolean);
+  const isLoading = list.some(a => loading.has(a));
+  const known = list.filter(a => data[a]);
+  const total = known.reduce((n, a) => n + (data[a]?.length || 0), 0);
+
+  if (isLoading && !known.length) {
+    return <div style={{ fontSize: 12, color: "var(--tx3)" }}>{tr("products.loading")}</div>;
+  }
+  if (!total) {
+    return <div style={{ fontSize: 12, color: "var(--tx3)" }}>{tr("products.adCampaignsNone")}</div>;
+  }
+
+  const goToCampaign = (name) => {
+    // Two paths, because CampaignsPage is keep-alive: if it is already mounted its
+    // af:navigate listener applies the search; if this is the first visit of the
+    // session it isn't listening yet, and it reads this sessionStorage key during
+    // its first render instead (the listener clears the key when it wins).
+    try { sessionStorage.setItem("af:pending_search:campaigns", name); } catch { /* private mode */ }
+    window.dispatchEvent(new CustomEvent("af:navigate", { detail: { page: "campaigns", search: name } }));
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {known.map(asin => {
+        const camps = data[asin] || [];
+        if (!camps.length) return null;
+        return (
+          <div key={asin}>
+            <div style={{ display: "flex", gap: 8, alignItems: "baseline", marginBottom: 4 }}>
+              {list.length > 1 && (
+                <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--tx3)" }}>{asin}</span>
+              )}
+              <span style={{ fontSize: 11, color: "var(--tx3)" }}>
+                {tr("products.adCampaignsSummary", { n: camps.length, live: camps.filter(c => c.is_live).length })}
+              </span>
+            </div>
+            {/* One ASIN can sit in dozens of campaigns (45 is the current record
+                in this account) — cap the height so the panel never pushes the
+                rest of the product list off-screen. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 4,
+              maxHeight: camps.length > 8 ? 300 : undefined,
+              overflowY: camps.length > 8 ? "auto" : undefined,
+              paddingRight: camps.length > 8 ? 4 : undefined }}>
+              {camps.map(c => {
+                // A paused campaign (or a paused ad inside a live one) is not
+                // spending — showing that distinction is the whole point here.
+                const dot = c.is_live ? "var(--grn)"
+                  : c.campaign_state === "enabled" ? "var(--amb)" : "var(--tx3)";
+                const adsUrl = amazonAdsCampaignUrl(c);
+                const agNames = (c.ad_groups || []).map(g => g.name).filter(n => n && n !== c.campaign_name);
+                return (
+                  <div key={c.campaign_id} style={{
+                    display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                    padding: "6px 10px", borderRadius: 6,
+                    background: "var(--s2)", border: "1px solid var(--b2)",
+                  }}>
+                    <span title={c.is_live ? tr("products.adLive") : tr("products.adNotServing")}
+                      style={{ width: 7, height: 7, borderRadius: "50%", background: dot, flexShrink: 0 }} />
+                    <span className={`badge ${AD_CAMPAIGN_TYPE_BADGE[c.campaign_type] || "bg-bl"}`} style={{ fontSize: 9 }}>
+                      {adTypeLabel(c.campaign_type)}
+                    </span>
+                    <button
+                      onClick={() => goToCampaign(c.campaign_name)}
+                      title={tr("products.adOpenInApp")}
+                      style={{ background: "none", border: "none", padding: 0, cursor: "pointer",
+                        fontSize: 12, fontWeight: 600, color: "var(--ac2)", textAlign: "left",
+                        maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {c.campaign_name}
+                    </button>
+                    <span className={`badge ${c.campaign_state === "enabled" ? "bg-grn" : c.campaign_state === "paused" ? "bg-amb" : "bg-bl"}`} style={{ fontSize: 9 }}>
+                      {tr({ enabled: "common.statusEnabled", paused: "common.statusPaused", archived: "common.statusArchived" }[c.campaign_state] || "common.statusEnabled")}
+                    </span>
+                    {c.enabled_ad_count === 0 && (
+                      <span className="badge bg-amb" style={{ fontSize: 9 }} title={tr("products.adPausedHint")}>
+                        {tr("products.adPaused")}
+                      </span>
+                    )}
+                    {c.portfolio_name && (
+                      <span style={{ fontSize: 10, color: "var(--tx3)" }}>{c.portfolio_name}</span>
+                    )}
+                    {agNames.length > 0 && (
+                      <span style={{ fontSize: 10, color: "var(--tx3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 260 }}
+                        title={agNames.join(", ")}>
+                        {tr("products.adGroups")}: {agNames.join(", ")}
+                      </span>
+                    )}
+                    {c.skus?.length > 0 && (
+                      <span style={{ fontSize: 10, fontFamily: "var(--mono)", color: "var(--tx3)" }}>
+                        {c.skus.join(" · ")}
+                      </span>
+                    )}
+                    <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8 }}>
+                      {/* Campaign-level spend: covers every ASIN in the campaign,
+                          not this one alone — Amazon reports per-ASIN spend only
+                          aggregated across campaigns. Labelled so it can't be
+                          misread as this product's spend. */}
+                      <span style={{ fontSize: 10, color: "var(--tx3)" }} title={tr("products.adCampaignSpendHint")}>
+                        {tr("products.adCampaignSpend")} €{Number(c.campaign_spend_7d || 0).toFixed(2)}
+                      </span>
+                      {c.daily_budget != null && (
+                        <span style={{ fontSize: 10, color: "var(--tx3)" }} title={tr("products.adBudgetHint")}>
+                          €{Number(c.daily_budget).toFixed(2)}/{tr("products.adPerDay")}
+                        </span>
+                      )}
+                      {adsUrl && (
+                        <a href={adsUrl} target="_blank" rel="noopener noreferrer"
+                          title={tr("products.adOpenInAmazon")}
+                          style={{ color: "var(--tx2)", display: "inline-flex", alignItems: "center" }}>
+                          <ExternalLink size={12} strokeWidth={1.75} />
+                        </a>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 10, color: "var(--tx3)" }}>{tr("products.adCoverageHint")}</div>
+    </div>
+  );
+};
+
 // ─── Cross-country listing matrix ───────────────────────────────────────────
 // One row per ASIN, one column per EU marketplace the seller sells in. A cell is
 // the health of that ASIN's listing in that country: missing, N findings, or
@@ -5270,6 +5404,30 @@ const ProductsPage = ({ workspaceId }) => {
   const [periodOrders, setPeriodOrders] = useState(null);
   const [compareMode, setCompareMode] = useState(false);  // overlay previous period on the trend charts
 
+  // ── "In which campaigns is this ASIN advertised?" ──────────────────────────
+  // Loaded lazily per ASIN (the product list already carries the campaign COUNT,
+  // so nothing is fetched until the user opens a product's campaign panel).
+  const [adPlacements, setAdPlacements] = useState({});                    // ASIN → [campaign, ...]
+  const [adPlacementsLoading, setAdPlacementsLoading] = useState(() => new Set());
+  const [expandedAds, setExpandedAds] = useState(() => new Set());         // product IDs (flat view)
+  const [expandedListingAds, setExpandedListingAds] = useState(() => new Set()); // listing IDs
+  const loadPlacements = (asins) => {
+    const want = [...new Set((asins || []).filter(a => a && !(a in adPlacements)))];
+    if (!want.length) return;
+    setAdPlacementsLoading(s => { const n = new Set(s); want.forEach(a => n.add(a)); return n; });
+    get(`/products/ad-placements?asins=${want.join(",")}`)
+      .then(d => setAdPlacements(m => ({ ...m, ...(d?.placements || {}) })))
+      .catch(e => setError(e.message))
+      .finally(() => setAdPlacementsLoading(s => { const n = new Set(s); want.forEach(a => n.delete(a)); return n; }));
+  };
+  const toggleAdPanel = (key, asins, setter) => {
+    setter(s => {
+      const n = new Set(s);
+      if (n.has(key)) n.delete(key); else { n.add(key); loadPlacements(asins); }
+      return n;
+    });
+  };
+
   const { data: products, loading, mutate } = useAsync(
     () => workspaceId ? get("/products") : Promise.resolve([]),
     [workspaceId, tick]
@@ -5410,6 +5568,11 @@ const ProductsPage = ({ workspaceId }) => {
         // 0 in the sum above and get mistaken for a clean listing.
         all_checked: ch.every(c => c.lh_checked_at),
         ad_spend_7d: adSpend7,
+        // Campaign counts are per ASIN; a variation family can share campaigns,
+        // so these are upper bounds used only to label the button — the panel
+        // itself lists the real (deduplicated per ASIN) campaigns.
+        ad_campaign_count: ch.reduce((s2, c) => s2 + num(c.ad_campaign_count), 0),
+        ad_campaign_live_count: ch.reduce((s2, c) => s2 + num(c.ad_campaign_live_count), 0),
         units_7d: ch.reduce((s, c) => s + num(c.qty_7d), 0), // qty_7d is quantity_ordered — units, not orders
         acos_7d: adSales7 > 0 ? (adSpend7 / adSales7) * 100 : null,
         tacos_7d: revenue7 > 0 ? (adSpend7 / revenue7) * 100 : null,
@@ -6155,6 +6318,33 @@ const ProductsPage = ({ workspaceId }) => {
                             {fullyOpen ? tr("products.collapseAllCharts") : tr("products.expandAllCharts")}
                           </button>
                         )}
+                        {(() => {
+                          // Variations usually share campaigns, so the per-ASIN counters
+                          // summed on the listing row are an upper bound. Once the panel
+                          // data is loaded for every child, count the campaigns distinctly.
+                          const loaded = L.asins.every(a => adPlacements[a]);
+                          let total = L.ad_campaign_count, live = L.ad_campaign_live_count;
+                          if (loaded) {
+                            const all = new Set(), serving = new Set();
+                            for (const a of L.asins) for (const c of (adPlacements[a] || [])) {
+                              all.add(c.campaign_id);
+                              if (c.is_live) serving.add(c.campaign_id);
+                            }
+                            total = all.size; live = serving.size;
+                          }
+                          const label = total === 0 ? "" : live === total ? ` (${total})` : ` (${live}/${total})`;
+                          return (
+                            <button
+                              onClick={() => toggleAdPanel(L.listing_id, L.asins, setExpandedListingAds)}
+                              className="btn btn-ghost"
+                              title={tr("products.adCampaignsHint")}
+                              style={{ fontSize: 11, padding: "4px 10px", display: "inline-flex", alignItems: "center", gap: 5,
+                                color: live > 0 ? "var(--grn)" : total > 0 ? "var(--amb)" : undefined }}>
+                              {expandedListingAds.has(L.listing_id) ? <ChevronUp size={12} strokeWidth={1.75} /> : <ChevronDown size={12} strokeWidth={1.75} />}
+                              {tr("products.adCampaigns")}{label}
+                            </button>
+                          );
+                        })()}
                         <button
                           onClick={() => toggleSet(setExpandedListingRecs, L.listing_id)}
                           className="btn btn-ghost"
@@ -6171,6 +6361,13 @@ const ProductsPage = ({ workspaceId }) => {
                         )}
                       </div>
                     </div>
+
+                    {/* Ad campaigns carrying this listing's ASINs */}
+                    {expandedListingAds.has(L.listing_id) && (
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                        <AdPlacementsPanel asins={L.asins} data={adPlacements} loading={adPlacementsLoading} tr={tr} />
+                      </div>
+                    )}
 
                     {/* Recommendations */}
                     {expandedListingRecs.has(L.listing_id) && (
@@ -6257,6 +6454,14 @@ const ProductsPage = ({ workspaceId }) => {
             const hist = history[p.id] || [];
             const isExpanded = expandedIds.has(p.id);
             const isRecExpanded = expandedRecs.has(p.id);
+            const isAdsExpanded = expandedAds.has(p.id);
+            const adCampCount  = Number(p.ad_campaign_count) || 0;
+            const adLiveCount  = Number(p.ad_campaign_live_count) || 0;
+            // "8" next to "Кампании" reads as "8 campaigns" — so when only some of
+            // them are actually serving, show both numbers instead of the live one alone.
+            const adCampLabel  = adCampCount === 0 ? ""
+              : adLiveCount === adCampCount ? ` (${adCampCount})`
+              : ` (${adLiveCount}/${adCampCount})`;
             const isRefreshing = refreshingId === p.id;
             const bsrUpdated = p.bsr_updated_at
               ? new Date(p.bsr_updated_at).toLocaleString("en", {
@@ -6437,6 +6642,17 @@ const ProductsPage = ({ workspaceId }) => {
                   </div>
 
                   <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                    {/* Which campaigns advertise this ASIN — the count comes with the
+                        product list, the campaign names are fetched on first open. */}
+                    <button
+                      onClick={() => toggleAdPanel(p.id, [p.asin], setExpandedAds)}
+                      className="btn btn-ghost"
+                      title={tr("products.adCampaignsHint")}
+                      style={{ fontSize: 11, padding: "4px 10px",
+                        color: adLiveCount > 0 ? "var(--grn)" : adCampCount > 0 ? "var(--amb)" : undefined }}
+                    >
+                      {isAdsExpanded ? <ChevronUp size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} /> : <ChevronDown size={11} strokeWidth={1.75} style={{display:'inline-block',verticalAlign:'middle'}} />} {tr("products.adCampaigns")}{adCampLabel}
+                    </button>
                     <button
                       onClick={() => setExpandedRecs(s => { const n = new Set(s); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n; })}
                       className="btn btn-ghost"
@@ -6476,6 +6692,16 @@ const ProductsPage = ({ workspaceId }) => {
                     </button>
                   </div>
                 </div>
+
+                {isAdsExpanded && (
+                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--b1)" }}>
+                    <div style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)",
+                      textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 }}>
+                      {tr("products.adCampaigns")}
+                    </div>
+                    <AdPlacementsPanel asins={[p.asin]} data={adPlacements} loading={adPlacementsLoading} tr={tr} />
+                  </div>
+                )}
 
                 {isRecExpanded && (
                   <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--b1)" }}>
