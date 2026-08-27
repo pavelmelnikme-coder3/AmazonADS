@@ -4667,6 +4667,13 @@ const ListingRecommendationsPanel = ({ issues, checkedAt, tr }) => {
 // (pre-filtered by that name) and the ↗ icon opens the campaign in Amazon's
 // own console, where the pause switch lives.
 const AD_CAMPAIGN_TYPE_BADGE = { sponsoredProducts: "bg-bl", sponsoredBrands: "bg-grn", sponsoredDisplay: "bg-amb" };
+// Amazon's SCREAMING_SNAKE reasons an enabled SB ad shows nothing, in words.
+const SB_BLOCK_REASON = {
+  REJECTED_BY_MODERATION:     "products.sbRejected",
+  PENDING_MODERATION_REVIEW:  "products.sbInReview",
+  AD_POLICING_SUSPENDED:      "products.sbSuspended",
+  AD_POLICING_PENDING_REVIEW: "products.sbPolicyReview",
+};
 const AdPlacementsPanel = ({ asins, data, loading, tr }) => {
   const adTypeLabel = ct => ({ sponsoredProducts: "SP", sponsoredBrands: "SB", sponsoredDisplay: "SD" })[ct] || ct;
   const list = (asins || []).filter(Boolean);
@@ -4744,6 +4751,13 @@ const AdPlacementsPanel = ({ asins, data, loading, tr }) => {
                     {c.enabled_ad_count === 0 && (
                       <span className="badge bg-amb" style={{ fontSize: 9 }} title={tr("products.adPausedHint")}>
                         {tr("products.adPaused")}
+                      </span>
+                    )}
+                    {/* An enabled SB ad in an enabled campaign that Amazon still
+                        refuses to show — without this the row would look live. */}
+                    {c.blocked_reason && (
+                      <span className="badge bg-red" style={{ fontSize: 9 }} title={tr("products.adBlockedHint")}>
+                        {tr("products.adBlocked", { reason: SB_BLOCK_REASON[c.blocked_reason] ? tr(SB_BLOCK_REASON[c.blocked_reason]) : c.blocked_reason })}
                       </span>
                     )}
                     {c.portfolio_name && (

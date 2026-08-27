@@ -424,14 +424,14 @@ how many campaigns hold an ad for this ASIN, and how many of those actually serv
 (campaign **and** ad **and** ad group enabled). Archived campaigns and archived ads are
 excluded from both, matching `GET /products/ad-placements`.
 
-### GET /products/ad-placements?asins=B0AAA,B0BBB *(2026-08-25)*
+### GET /products/ad-placements?asins=B0AAA,B0BBB *(2026-08-25, SB added 2026-08-27)*
 "Which campaigns advertise this ASIN?" — the lookup behind the **Кампании (live/total)**
 panel on the Products page, so a product can be pulled out of advertising without hunting
 through the Amazon console. Up to 200 ASINs per call; unknown/malformed ASINs are dropped,
 a valid ASIN with no ads comes back as an empty array.
 
 ```json
-{ "coverage": ["SP", "SD"],
+{ "coverage": ["SP", "SD", "SB"],
   "placements": { "B0FKTRLCPJ": [ {
     "campaign_id": "…", "amazon_campaign_id": "275655371626878",
     "campaign_name": "6 [SP-BM]-Fußstütze grib - 9481",
@@ -440,21 +440,29 @@ a valid ASIN with no ads comes back as an empty array.
     "campaign_spend_7d": 32.77, "campaign_sales_7d": 0, "campaign_clicks_7d": 41,
     "ad_count": 2, "enabled_ad_count": 2, "skus": ["9481-FBA1", "9481-AMZ1"],
     "ad_groups": [ { "name": "…", "state": "enabled", "ad_count": 2, "enabled_ad_count": 2 } ],
-    "is_live": true } ] } }
+    "is_live": true, "blocked_reason": null } ] } }
 ```
 
 - Source is `product_ads` (one Amazon ad row per ASIN/SKU inside an ad group), grouped to one
   entry per (ASIN, campaign) — a listing normally has one ad per SKU (FBA + FBM) in every ad
   group, so the raw rows repeat the same campaign many times.
-- `is_live` requires **all three** links to be enabled: campaign, ad group, ad. A paused ad
-  group stops delivery exactly like a paused campaign.
+- `is_live` requires **all three** links to be enabled — campaign, ad group, ad — *and* a creative
+  Amazon is willing to show. A paused ad group stops delivery exactly like a paused campaign.
+- `blocked_reason` (SB only) names why an enabled ad inside an **enabled** campaign still shows
+  nothing: `REJECTED_BY_MODERATION`, `PENDING_MODERATION_REVIEW`, `AD_POLICING_*`. It is null when
+  anything in the campaign can serve, and null under a paused campaign (the campaign state already
+  explains that). Read from `creative.creativeStatus` / `extendedData.servingStatus`, which SP/SD
+  rows do not carry — their verdict is unchanged.
 - `campaign_spend_7d` is the **whole campaign's** spend over the last 7 full days, across all
   its products — Amazon reports per-ASIN spend only aggregated across campaigns. The UI labels
   it as such.
 - Ordering: serving first, then by campaign spend, then by name.
-- **Coverage is SP + SD.** Sponsored Brands can never appear: its ASINs live inside creatives
-  and Amazon exposes no list endpoint for them, so SB ads are absent from `product_ads`
-  entirely. The response states its own coverage rather than implying a complete picture.
+- **Coverage is SP + SD + SB.** SB ASINs come from `POST /sb/v4/ads/list` →
+  `creative.asins` (media type `application/vnd.sbadresource.v4+json`): one ad expands to one
+  `product_ads` row per ASIN, keyed `sb:{adId|adGroupId}:{ASIN}`. Pass `stateFilter` explicitly —
+  the default response omits everything but ENABLED. SB rows have no SKU and no `ad_group_id`
+  (Amazon's SB ad-group list is not synced), so their `ad_groups` entry is a single null-named
+  bucket and their delivery chain is ad → campaign.
 
 ### POST /products
 Add a new ASIN to track (queues a meta + BSR fetch job).

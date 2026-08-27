@@ -583,6 +583,25 @@ describe("GET /products/ad-placements", () => {
     marketplace_id: "A1PA6795UKMFR9",
     ad_group_name: "1 [A]-[Sub]-Fußstütze",
     ad_group_state: "enabled",
+    ad_can_serve: true,
+    serving_status: null,
+    creative_status: null,
+    ...over,
+  });
+
+  // One SB ad expands to one row per creative ASIN: no SKU, no ad group of its
+  // own, and a creative status that can veto delivery on its own.
+  const sbRow = (over = {}) => adRow({
+    amazon_ad_id: "sb:900:B0FKTRLCPJ",
+    sku: null,
+    campaign_id: "camp-sb",
+    amazon_campaign_id: "555",
+    campaign_name: "SB - Brand collection",
+    campaign_type: "sponsoredBrands",
+    ad_group_name: null,
+    ad_group_state: null,
+    creative_status: "PUBLISHED",
+    serving_status: "AD_STATUS_LIVE",
     ...over,
   });
 
@@ -672,6 +691,78 @@ describe("GET /products/ad-placements", () => {
     // The "live" counter must use the same three-link rule as the panel:
     // campaign + ad + ad group all enabled.
     expect(sql).toMatch(/COALESCE\(ag\.state, 'enabled'\) = 'enabled'/);
+  });
+
+  it("includes Sponsored Brands, whose ads carry no SKU and no ad group", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [sbRow()] })
+      .mockResolvedValueOnce({ rows: [{ amazon_id: "555", spend: "5", sales: "0", clicks: "2" }] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    expect(res.body.coverage).toEqual(["SP", "SD", "SB"]);
+    const [c] = res.body.placements.B0FKTRLCPJ;
+    expect(c.campaign_type).toBe("sponsoredBrands");
+    expect(c.skus).toEqual([]);
+    expect(c.ad_groups).toEqual([{ name: null, state: null, ad_count: 1, enabled_ad_count: 1 }]);
+    expect(c.is_live).toBe(true);
+    expect(c.blocked_reason).toBeNull();
+  });
+
+  it("does not call an enabled SB ad live when its creative was rejected", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        sbRow({ ad_can_serve: false, creative_status: "REJECTED_BY_MODERATION",
+                serving_status: "AD_POLICING_SUSPENDED" }),
+      ] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    const [c] = res.body.placements.B0FKTRLCPJ;
+    expect(c.campaign_state).toBe("enabled");
+    expect(c.enabled_ad_count).toBe(1);
+    expect(c.is_live).toBe(false);
+    expect(c.blocked_reason).toBe("REJECTED_BY_MODERATION");
+  });
+
+  it("does not repeat the creative reason under a paused campaign", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        sbRow({ campaign_state: "paused", ad_can_serve: false,
+                creative_status: "REJECTED_BY_MODERATION" }),
+      ] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    const [c] = res.body.placements.B0FKTRLCPJ;
+    // The paused campaign badge already explains why nothing runs.
+    expect(c.blocked_reason).toBeNull();
+    expect(c.is_live).toBe(false);
+  });
+
+  it("keeps a campaign live when only one of its two creatives is blocked", async () => {
+    dbQuery
+      .mockResolvedValueOnce({ rows: [
+        sbRow({ ad_can_serve: false, creative_status: "PENDING_MODERATION_REVIEW" }),
+        sbRow({ amazon_ad_id: "sb:901:B0FKTRLCPJ" }),
+      ] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get("/products/ad-placements?asins=B0FKTRLCPJ");
+    const [c] = res.body.placements.B0FKTRLCPJ;
+    expect(c.is_live).toBe(true);
+    expect(c.blocked_reason).toBeNull();
+  });
+
+  it("excludes ads Amazon refuses to show from the advertised test and live count", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    await request(app).get("/products");
+    const sql = dbQuery.mock.calls[0][0];
+    // A rejected/policy-suspended creative must not make a product "advertised"…
+    expect(sql).toMatch(/creativeStatus', 'PUBLISHED'\) = 'PUBLISHED'/);
+    expect(sql).toMatch(/servingStatus', ''\) NOT LIKE 'AD_POLICING%'/);
+    // …and the SP/SD rows, which carry neither field, keep the old verdict.
+    expect(sql).toMatch(/COALESCE\(pa\.raw_data->'creative'->>'creativeStatus', 'PUBLISHED'\)/);
   });
 
   it("does not touch the database when no valid ASIN is given", async () => {

@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-08-27 — Sponsored Brands in the ASIN→campaign panel, and a Russian label that said the wrong thing
+
+An audit of the "which campaigns advertise this ASIN" panel against the live Ads API. The mapping
+itself held up exactly — but the audit found the panel's own footnote to be false, and one
+translation to be claiming something the data never said.
+
+### Verified
+
+- Re-fetched every product ad from Amazon for the DE profile and diffed it against `product_ads`:
+  **4384 ads, 0 missing, 0 stale, 0 state / campaign / ASIN mismatches.** Campaign states and daily
+  budgets of all 15 campaigns behind the sample ASIN (B0CBPTKQMQ) matched Amazon one for one, ad
+  groups included.
+- The 22 ads still without a campaign belong to two campaign ids Amazon itself no longer knows:
+  404 from `/sd/campaigns/{id}`, empty from `/sp/campaigns/list` with an explicit id filter and
+  ARCHIVED included, 404 from the legacy v2 routes. Hiding them is correct, and all 10 affected
+  ASINs still have real campaigns, so none of them is wrongly shown as unadvertised.
+
+### Added
+
+- **Sponsored Brands is now covered.** `POST /sb/v4/ads/list` (media type
+  `application/vnd.sbadresource.v4+json`) returns `creative.asins` — the endpoint the old footnote
+  claimed did not exist. One SB ad expands to one `product_ads` row per creative ASIN: **134 rows /
+  43 ASINs on the live account, 27 of them tracked products** whose SB campaigns the panel used to
+  omit silently. Three traps, each costing a round trip: the default response returns only ENABLED
+  ads (49 of 71 — pass `stateFilter` explicitly); `adId` is absent on older ads (32 of 71 — the ad
+  group is 1:1 with the ad and is the fallback key); and the row key is prefixed `sb:` so it can
+  never collide with Amazon's numeric SP/SD ad ids.
+- **A creative Amazon refuses to show no longer counts as advertising.** An SB ad stays `ENABLED`
+  indefinitely while its creative is rejected or waiting for moderation (21 rejected + 7 pending on
+  this account); only `creative.creativeStatus` and `extendedData.servingStatus` know. Both are
+  stored and read by the `is_advertised` test, the live counter on the product row and the panel's
+  green dot. SP/SD rows carry neither field, so the COALESCE defaults leave their verdict unchanged.
+  When such an ad sits in an *enabled* campaign the row explains itself ("не откручивается: креатив
+  отклонён"); under a paused campaign the badge is suppressed, since the campaign state already
+  says why nothing runs.
+
+### Fixed
+
+- **The Russian summary said "с показами" — "with impressions".** It counts campaigns *able to
+  serve*, which is not the same thing: an SD campaign with a €0.02 bid and zero impressions in 7
+  days was counted, correctly, and read as a lie. Now "Кампаний: {n} · откручивается: {live}",
+  which also drops the "1 кампаний" plural. EN/DE already said "serving" / "werden ausgeliefert".
+- **The coverage footnote was factually wrong** in all three languages ("Sponsored Brands ... no
+  API list endpoint exists"). It now states what is actually true: SB is included, and its ASINs
+  come from the creative, which is why no ad group is shown for those rows.
+
+### Notes
+
+- SB ad groups are still not synced (Amazon's SB v4 ad-group list is a different endpoint than the
+  one `fetchAdGroups` probes), so SB rows carry no `ad_group_id`. The delivery chain for them is
+  ad → campaign, and `analyticsReport`'s campaign→ASIN mapping joins through `ad_groups`, so ad
+  attribution is deliberately untouched by this change.
+- 1227 tests (11 new).
+
+---
+
 ## [Unreleased] — 2026-08-25 — Products: which campaigns advertise this ASIN
 
 Asked for a way to stop promoting one product without hunting through the Amazon console:

@@ -675,20 +675,113 @@ async function syncPortfolios(profileDbRecord, amazonPortfolios) {
 // ─── PRODUCT ADS ─────────────────────────────────────────────────────────────
 
 // Product ads = the rows that tie an ASIN/SKU to an ad group, i.e. the only
-// record of WHICH campaigns advertise a given product. Fetched for both ad types
-// that expose them:
+// record of WHICH campaigns advertise a given product. Fetched for all three
+// ad types:
 //   SP — v3 POST /sp/productAds/list
 //   SD — legacy GET /sd/productAds (Amazon has no v3 list for SD)
-// Sponsored Brands has no equivalent: its ASINs live inside creatives, so SB
-// campaigns never appear in product_ads.
+//   SB — v4 POST /sb/v4/ads/list, whose creatives carry the ASIN list
 async function fetchProductAds(profile) {
-  const [sp, sd] = await Promise.all([
+  const [sp, sd, sb] = await Promise.all([
     fetchSpProductAds(profile),
     fetchSdProductAds(profile),
+    fetchSbProductAds(profile),
   ]);
   logger.info("Product ads fetch complete",
-    { profileId: profile.profile_id, sp: sp.length, sd: sd.length });
-  return [...sp, ...sd];
+    { profileId: profile.profile_id, sp: sp.length, sd: sd.length, sb: sb.length });
+  return [...sp, ...sd, ...sb];
+}
+
+// Sponsored Brands ads. Unlike SP/SD there is no "product ad" entity: one SB ad
+// carries a creative that lists several ASINs, so a single ad expands into one
+// product_ads row per ASIN. Notes that cost us a debugging round each:
+//   • The default (no stateFilter) response only returns ENABLED ads — 49 of 71
+//     on this account. Ask for all three states explicitly, like every other sync.
+//   • `adId` is absent on older ads (32 of 71 here). The ad group is 1:1 with the
+//     ad in every SB campaign, so it is the stable fallback key.
+//   • ENABLED is not the same as serving: a rejected or policy-suspended creative
+//     stays "ENABLED" forever. `extendedData.servingStatus` is the field that
+//     knows, so it is carried into raw_data and the placements panel reads it.
+async function fetchSbProductAds(profile) {
+  const { getValidAccessToken } = require("./lwa");
+  const axios = require("axios");
+
+  const baseUrl = resolveBaseUrl(profile);
+  const mediaType = "application/vnd.sbadresource.v4+json";
+
+  try {
+    const accessToken = await getValidAccessToken(profile.connection_id);
+    const ads = [];
+    let nextToken = null;
+    let page = 0;
+    do {
+      const body = {
+        stateFilter: { include: ["ENABLED", "PAUSED", "ARCHIVED"] },
+        maxResults: 100,
+      };
+      if (nextToken) body.nextToken = nextToken;
+      const response = await axios.post(`${baseUrl}/sb/v4/ads/list`, body, {
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Amazon-Advertising-API-ClientId": process.env.AMAZON_CLIENT_ID,
+          "Amazon-Advertising-API-Scope": String(profile.profile_id),
+          "Content-Type": mediaType,
+          "Accept": mediaType,
+        },
+        timeout: 30000,
+      });
+      const batch = Array.isArray(response.data?.ads) ? response.data.ads : [];
+      ads.push(...batch);
+      nextToken = response.data?.nextToken || null;
+      page++;
+    } while (nextToken && page < 400);
+
+    const expanded = expandSbAdsToProductAds(ads);
+    logger.info("SB ads fetch complete",
+      { profileId: profile.profile_id, ads: ads.length, asinRows: expanded.length });
+    return expanded;
+  } catch (err) {
+    const status = err.response?.status || err.status;
+    if ([401, 403, 404, 405].includes(status)) {
+      logger.info("SB ads skipped (no access)",
+        { profileId: profile.profile_id, status });
+      return [];
+    }
+    logger.warn("SB ads fetch failed",
+      { profileId: profile.profile_id, status, error: err.message,
+        responseBody: err.response?.data });
+    return [];
+  }
+}
+
+// One SB ad × N creative ASINs → N rows shaped like an SP/SD product ad, so
+// syncProductAds stores them without a translation layer. The synthetic ad id is
+// prefixed "sb:" — it can never collide with Amazon's numeric SP/SD ad ids.
+function expandSbAdsToProductAds(ads) {
+  const out = [];
+  for (const ad of ads) {
+    const key = ad.adId || ad.adGroupId;
+    if (!key) continue;
+    for (const rawAsin of ad.creative?.asins || []) {
+      const asin = String(rawAsin || "").toUpperCase();
+      if (!asin) continue;
+      out.push({
+        adId:      `sb:${key}:${asin}`,
+        adGroupId: ad.adGroupId,
+        campaignId: ad.campaignId,
+        asin,
+        sku:   null,               // SB creatives reference ASINs, never SKUs
+        state: ad.state,
+        adType: "sponsoredBrands",
+        sbAdId: ad.adId || null,
+        creative:     { creativeStatus: ad.creative?.creativeStatus || null,
+                        type: ad.creative?.type || null,
+                        headline: ad.creative?.headline || null },
+        extendedData: { servingStatus: ad.extendedData?.servingStatus || null,
+                        servingStatusDetails: ad.extendedData?.servingStatusDetails || null },
+      });
+    }
+  }
+  return out;
 }
 
 // Legacy GET /sd/productAds returns 403 in the EU region — same v2 deprecation
@@ -1258,6 +1351,7 @@ module.exports = {
   fetchPortfolios,
   syncPortfolios,
   fetchProductAds,
+  expandSbAdsToProductAds,
   syncProductAds,
   fetchTargets,
   syncTargets,

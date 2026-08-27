@@ -10,6 +10,17 @@ const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
 
+// An SB ad keeps state "ENABLED" while its creative is rejected or still waiting
+// for moderation — Amazon reports that separately, in creativeStatus and in
+// extendedData.servingStatus, and such an ad shows nothing to anyone. SP/SD rows
+// carry neither field, so the COALESCE defaults leave them judged exactly as
+// before. Campaign-level reasons (paused, out of budget) are deliberately NOT
+// read from servingStatus: the campaign state column already carries those.
+const AD_CAN_SERVE = `(
+       COALESCE(pa.raw_data->'creative'->>'creativeStatus', 'PUBLISHED') = 'PUBLISHED'
+   AND COALESCE(pa.raw_data->'extendedData'->>'servingStatus', '') NOT LIKE 'AD_POLICING%'
+)`;
+
 // GET /products — list all products for workspace with latest BSR + metrics
 router.get("/", async (req, res, next) => {
   try {
@@ -22,7 +33,7 @@ router.get("/", async (req, res, next) => {
     const advExists = `EXISTS (
       SELECT 1 FROM product_ads pa JOIN campaigns c ON c.id = pa.campaign_id
       WHERE pa.workspace_id = p.workspace_id AND UPPER(pa.asin) = p.asin
-        AND pa.state = 'enabled' AND c.state = 'enabled'
+        AND pa.state = 'enabled' AND c.state = 'enabled' AND ${AD_CAN_SERVE}
     )`;
     let availFilter = "";
     if (availability === "available")   availFilter = "AND p.title IS NOT NULL AND p.title <> ''";
@@ -102,7 +113,8 @@ router.get("/", async (req, res, next) => {
                 -- must not be counted as live here either.
                 COUNT(DISTINCT pa.campaign_id) FILTER (
                   WHERE c.state = 'enabled' AND pa.state = 'enabled'
-                    AND COALESCE(ag.state, 'enabled') = 'enabled') AS live_campaign_count
+                    AND COALESCE(ag.state, 'enabled') = 'enabled'
+                    AND ${AD_CAN_SERVE}) AS live_campaign_count
          FROM product_ads pa
          JOIN campaigns c ON c.id = pa.campaign_id
          LEFT JOIN ad_groups ag ON ag.id = pa.ad_group_id
@@ -255,7 +267,7 @@ router.get("/new-unadvertised", async (req, res, next) => {
         WHERE NOT EXISTS (
                 SELECT 1 FROM product_ads pa JOIN campaigns c ON c.id = pa.campaign_id
                  WHERE pa.workspace_id = $1 AND UPPER(pa.asin) = na.asin
-                   AND pa.state = 'enabled' AND c.state = 'enabled'
+                   AND pa.state = 'enabled' AND c.state = 'enabled' AND ${AD_CAN_SERVE}
               )
         ORDER BY na.added_at DESC`,
       [req.workspaceId, days]
@@ -306,9 +318,9 @@ router.get("/new-unadvertised", async (req, res, next) => {
 // hunting through the Amazon console.
 //
 // Source of truth is `product_ads` (Amazon's ad rows: one per ASIN/SKU inside an
-// ad group), synced for SP and SD. Sponsored Brands is NOT covered — its ASINs
-// live in creatives behind a different endpoint we don't sync — so the response
-// states its own coverage instead of implying a complete picture.
+// ad group) for SP and SD, plus one row per ASIN of an SB creative. SB ads have
+// no ad group of their own in our DB (Amazon exposes no SB ad-group list we
+// sync), so their ad_group_name is null and the delivery chain is ad → campaign.
 router.get("/ad-placements", async (req, res, next) => {
   try {
     const asins = [...new Set(
@@ -318,11 +330,14 @@ router.get("/ad-placements", async (req, res, next) => {
         .filter(s => /^[A-Z0-9]{10}$/.test(s))
     )].slice(0, 200);
 
-    if (!asins.length) return res.json({ coverage: ["SP", "SD"], placements: {} });
+    if (!asins.length) return res.json({ coverage: ["SP", "SD", "SB"], placements: {} });
 
     const { rows } = await query(
       `SELECT UPPER(pa.asin)   AS asin,
               pa.amazon_ad_id, pa.sku, pa.state AS ad_state,
+              ${AD_CAN_SERVE} AS ad_can_serve,
+              pa.raw_data->'extendedData'->>'servingStatus' AS serving_status,
+              pa.raw_data->'creative'->>'creativeStatus'    AS creative_status,
               c.id             AS campaign_id,
               c.amazon_campaign_id,
               c.name           AS campaign_name,
@@ -397,6 +412,7 @@ router.get("/ad-placements", async (req, res, next) => {
           campaign_clicks_7d: m ? Number(m.clicks) : 0,
           ad_count:           0,
           enabled_ad_count:   0,
+          blocked_reason:     null,
           skus:               [],
           ad_groups:          [],
           is_live:            false,
@@ -407,6 +423,14 @@ router.get("/ad-placements", async (req, res, next) => {
       entry.ad_count += 1;
       if (r.ad_state === "enabled") entry.enabled_ad_count += 1;
       if (r.sku && !entry.skus.includes(r.sku)) entry.skus.push(r.sku);
+      // Why an enabled ad in an enabled campaign still shows nothing (SB only).
+      // Under a paused campaign the reason is noise — the campaign badge already
+      // says why nothing runs, and the tooltip here would contradict it.
+      if (r.ad_state === "enabled" && r.campaign_state === "enabled"
+          && !r.ad_can_serve && !entry.blocked_reason) {
+        entry.blocked_reason = r.creative_status && r.creative_status !== "PUBLISHED"
+          ? r.creative_status : r.serving_status;
+      }
 
       const agName = r.ad_group_name || null;
       let ag = entry.ad_groups.find(g => g.name === agName);
@@ -417,13 +441,19 @@ router.get("/ad-placements", async (req, res, next) => {
       ag.ad_count += 1;
       if (r.ad_state === "enabled") ag.enabled_ad_count += 1;
 
-      // "Live" = the ad actually serves: enabled ad, in an enabled ad group,
-      // in an enabled campaign. Any paused link in that chain stops delivery.
+      // "Live" = the ad actually serves: enabled ad, in an enabled ad group, in an
+      // enabled campaign, with a creative Amazon is willing to show. Any broken
+      // link in that chain stops delivery.
       if (r.ad_state === "enabled" && r.campaign_state === "enabled"
-          && (r.ad_group_state || "enabled") === "enabled") {
+          && (r.ad_group_state || "enabled") === "enabled"
+          && r.ad_can_serve) {
         entry.is_live = true;
       }
     }
+
+    // A campaign with one rejected creative and one live creative is serving —
+    // the reason only matters when nothing in it can show.
+    for (const e of byKey.values()) if (e.is_live) e.blocked_reason = null;
 
     // Live campaigns first (that's what the user has to switch off), then the
     // still-enabled ones, then paused/archived; alphabetical inside each tier.
@@ -435,7 +465,7 @@ router.get("/ad-placements", async (req, res, next) => {
         String(x.campaign_name).localeCompare(String(y.campaign_name)));
     }
 
-    res.json({ coverage: ["SP", "SD"], placements });
+    res.json({ coverage: ["SP", "SD", "SB"], placements });
   } catch (err) { next(err); }
 });
 
@@ -1064,7 +1094,7 @@ router.get("/marketplaces", async (req, res, next) => {
     const advExistsMkt = `EXISTS (
       SELECT 1 FROM product_ads pa JOIN campaigns c ON c.id = pa.campaign_id
        WHERE pa.workspace_id = p.workspace_id AND UPPER(pa.asin) = p.asin
-         AND pa.state = 'enabled' AND c.state = 'enabled'
+         AND pa.state = 'enabled' AND c.state = 'enabled' AND ${AD_CAN_SERVE}
     )`;
     const adsFilter = ads === "advertised" ? ` AND ${advExistsMkt}`
                     : ads === "not_advertised" ? ` AND NOT ${advExistsMkt}`
