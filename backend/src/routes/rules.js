@@ -17,7 +17,7 @@ const { query } = require("../db/pool");
 const { writeAudit, updateAuditStatus } = require("./audit");
 const { pushNegativeKeyword, pushNegativeAsin, pushNegativeTarget, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget, pushCampaignUpdates, partialError, campaignApiPath } = require("../services/amazon/writeback");
 const { put, post } = require("../services/amazon/adsClient");
-const { normalizeKeywordText, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
+const { normalizeKeywordText, unsupportedKeywordChars, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
 const logger  = require("../config/logger");
 const { getRedis } = require("../config/redis");
 
@@ -1163,6 +1163,19 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
           // common in German queries) with PATTERN_NOT_MATCHED. Negate the normalized text —
           // it targets the same traffic and is the only form Amazon accepts.
           if (!negKeywordText) { recordSkip(entity, action, "empty_keyword_text"); continue; }
+          // Characters Amazon refuses that normalization must not "fix". Substituting a space
+          // for the comma in "abdeckplane wohnmobil 7,50 m" makes a *different* keyword: that
+          // query took 6 clicks in August 2026 while a negative_exact for the space-form sat
+          // enabled in the same ad group. Negating the substitute would report success for a
+          // negative that blocks nothing, then skip the term forever as `already_negative`.
+          // Surface it instead, so it can be handled by hand.
+          const unsupportedChars = unsupportedKeywordChars(negKeywordText);
+          if (unsupportedChars.length) {
+            recordSkip(entity, action, "unsupported_keyword_text", {
+              keyword_text: negKeywordText, characters: unsupportedChars,
+            });
+            continue;
+          }
 
           for (const matchType of negMatchTypes) {
             // Normalize match_type: Amazon sync stores "negative_exact"/"negative_phrase" (snake_case)

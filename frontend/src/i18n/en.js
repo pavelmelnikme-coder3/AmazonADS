@@ -936,6 +936,8 @@ export default {
     skipReason_at_max_budget_tip: "The budget already meets or exceeds the rule's max_budget safety limit. No raise is applied, and the rule never lowers a budget.",
     skipReason_budget_not_binding: "Budget is not the limit",
     skipReason_budget_not_binding_tip: "The campaign is not running out of budget, so raising it would change nothing. A raise needs at least 2 of the last 7 days on which the campaign spent the min_budget_utilization share of its daily budget. Set min_budget_utilization to 0 in the rule's safety settings to raise unconditionally.",
+    skipReason_unsupported_keyword_text: "Characters Amazon rejects",
+    skipReason_unsupported_keyword_text_tip: "The search term contains characters the Ads API will not accept in a keyword ({chars} — commas, slashes, quotes and similar). It is reported rather than negated: substituting a space would create a different keyword that need not block this term, and the rule would then treat it as handled forever. Negate it by hand in a form Amazon takes, or exclude it from the rule's scope.",
     skipReason_amazon_rejected_keyword_text: "Amazon rejected the text",
     skipReason_amazon_rejected_keyword_text_tip: "Amazon refused this keyword text and will refuse it again — the characters it contains are outside the set the Ads API accepts. The negative was rolled back rather than left looking applied, and the rule stops retrying it. Negate the term by hand in a form Amazon takes, or exclude it from the rule's scope.",
     skipReason_amazon_rejected_negative_target: "Amazon rejected the target",

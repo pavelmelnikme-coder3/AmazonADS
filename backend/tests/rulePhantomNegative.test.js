@@ -16,9 +16,10 @@
  *   • no sync could repair it, because a synthetic id matches nothing Amazon returns.
  * The term went on spending, unblocked and unreported, until it was found by hand.
  *
- * Covered here: the text is sanitized before it is sent; a rejection rolls the row back and
- * records why; a permanent rejection is reported as a skip on later runs instead of being
- * retried forever; a transient one is retried.
+ * Covered here: a term carrying characters Amazon refuses is skipped rather than rewritten
+ * into a different keyword; a rejection rolls the row back and records why; a permanent
+ * rejection is reported as a skip on later runs instead of being retried forever; a transient
+ * one is retried.
  */
 
 const request = require("supertest");
@@ -124,6 +125,9 @@ function mockRun(stRows, extraMocks = []) {
   dbQuery.mockResolvedValue({ rows: [] });
 }
 
+// Text Amazon accepts, for the scenarios that need the write-back to actually be attempted.
+const ACCEPTED = { keyword_text: "campingstuhl kompakt" };
+
 const findCall = (needle) =>
   dbQuery.mock.calls.find(([sql]) => String(sql).includes(needle));
 
@@ -131,30 +135,59 @@ let app;
 beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
 afterEach(() => { dbQuery.mockReset(); });
 
+describe("a term carrying characters Amazon refuses", () => {
+  it("is skipped, not rewritten into a different keyword", async () => {
+    // Substituting a space for the comma would negate "abdeckplane wohnmobil 7 50 m" — a
+    // different keyword. That query took 6 clicks in August 2026 while a negative_exact for
+    // the space-form sat enabled in the same ad group, so the substitute blocks nothing while
+    // the run reports success and every later run skips the term as `already_negative`.
+    mockRun([makeSearchTerm()], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+
+    expect(res.body.applied_count).toBe(0);
+    expect(res.body.skipped[0].reason).toBe("unsupported_keyword_text");
+    expect(res.body.skipped[0].detail.characters).toEqual([","]);
+    expect(pushNegativeKeyword).not.toHaveBeenCalled();
+    expect(findCall("INSERT INTO negative_keywords")).toBeUndefined();
+  });
+
+  it("is reported every run, so it stays visible until handled by hand", async () => {
+    mockRun([makeSearchTerm()], []);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+
+    const exec = findCall("INSERT INTO rule_executions");
+    expect(exec[1]).toContain("completed");   // a skip is not a failure
+    const diagnostics = JSON.parse(exec[1][exec[1].length - 1]);
+    expect(diagnostics.skipped_by_reason).toEqual({ unsupported_keyword_text: 1 });
+  });
+});
+
 describe("negating a term Amazon accepts", () => {
-  it("sends the sanitized text, not the raw report text", async () => {
-    mockRun([makeSearchTerm()], [
+  const CLEAN = { keyword_text: "campingstuhl 150\u00A0kg" };   // the live U+00A0 case
+
+  it("sends the whitespace-normalized text, not the raw report text", async () => {
+    mockRun([makeSearchTerm(CLEAN)], [
       { rows: [] },                      // dedup SELECT
       { rows: [{ id: "neg-ins-001" }] }, // INSERT RETURNING id
     ]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     expect(pushNegativeKeyword).toHaveBeenCalledWith(expect.objectContaining({
-      keywordText: "abdeckplane wohnmobil 7 50 m",   // comma replaced — Amazon rejects it
+      keywordText: "campingstuhl 150 kg",   // plain space — Amazon rejects U+00A0
     }));
   });
 
-  it("stores the sanitized text locally, so reconciliation can match it back", async () => {
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+  it("stores the normalized text locally, so reconciliation can match it back", async () => {
+    mockRun([makeSearchTerm(CLEAN)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     const insert = findCall("INSERT INTO negative_keywords");
-    expect(insert[1]).toContain("abdeckplane wohnmobil 7 50 m");
-    expect(insert[1]).not.toContain("abdeckplane wohnmobil 7,50 m");
+    expect(insert[1]).toContain("campingstuhl 150 kg");
+    expect(insert[1]).not.toContain(CLEAN.keyword_text);   // the raw U+00A0 form
   });
 
   it("leaves the row alone when Amazon accepts it", async () => {
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+    mockRun([makeSearchTerm(CLEAN)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     expect(res.body.writeback_error_count).toBe(0);
@@ -170,7 +203,7 @@ describe("negating a term Amazon refuses", () => {
   afterEach(() => { pushNegativeKeyword.mockResolvedValue({ ok: true }); });
 
   it("rolls the row back to archived instead of leaving it enabled", async () => {
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+    mockRun([makeSearchTerm(ACCEPTED)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     const rollback = findCall("writeback_error = $2");
@@ -182,7 +215,7 @@ describe("negating a term Amazon refuses", () => {
   });
 
   it("frees the placeholder id so a later attempt can re-own the row", async () => {
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+    mockRun([makeSearchTerm(ACCEPTED)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     // A real numeric Amazon id would be kept; a "rule-…" placeholder is replaced.
@@ -190,7 +223,7 @@ describe("negating a term Amazon refuses", () => {
   });
 
   it("reports the run as partial, not completed", async () => {
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+    mockRun([makeSearchTerm(ACCEPTED)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     expect(res.body.writeback_error_count).toBe(1);
@@ -200,7 +233,7 @@ describe("negating a term Amazon refuses", () => {
   });
 
   it("marks the audit row as an error", async () => {
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+    mockRun([makeSearchTerm(ACCEPTED)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
     expect(updateAuditStatus).toHaveBeenCalledWith("audit-1", "error", AMAZON_PATTERN_REJECTION);
   });
@@ -208,7 +241,7 @@ describe("negating a term Amazon refuses", () => {
   it("waits for the rejection before returning — the run must not finish first", async () => {
     let settle;
     pushNegativeKeyword.mockReturnValueOnce(new Promise(r => { settle = r; }));
-    mockRun([makeSearchTerm()], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
+    mockRun([makeSearchTerm(ACCEPTED)], [{ rows: [] }, { rows: [{ id: "neg-ins-001" }] }]);
 
     const pending = request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
     await new Promise(r => setImmediate(r));
@@ -229,7 +262,7 @@ describe("a term Amazon has already refused", () => {
   });
 
   it("is reported as a skip carrying Amazon's reason, not retried", async () => {
-    mockRun([makeSearchTerm()], [priorRejection(AMAZON_PATTERN_REJECTION)]);
+    mockRun([makeSearchTerm(ACCEPTED)], [priorRejection(AMAZON_PATTERN_REJECTION)]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     expect(res.body.applied_count).toBe(0);
@@ -239,7 +272,7 @@ describe("a term Amazon has already refused", () => {
   });
 
   it("does not count as a failure — the run is completed, with the reason recorded", async () => {
-    mockRun([makeSearchTerm()], [priorRejection(AMAZON_PATTERN_REJECTION)]);
+    mockRun([makeSearchTerm(ACCEPTED)], [priorRejection(AMAZON_PATTERN_REJECTION)]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
 
     expect(res.body.writeback_error_count).toBe(0);
@@ -250,7 +283,7 @@ describe("a term Amazon has already refused", () => {
   });
 
   it("is retried when the earlier failure was only an outage", async () => {
-    mockRun([makeSearchTerm()], [
+    mockRun([makeSearchTerm(ACCEPTED)], [
       priorRejection('Amazon API error: 401 {"message":"Unauthorized exception"}'),
       { rows: [{ id: "neg-old-001" }] },
     ]);
@@ -261,7 +294,7 @@ describe("a term Amazon has already refused", () => {
   });
 
   it("clears the stale error when the row is re-owned for a fresh attempt", async () => {
-    mockRun([makeSearchTerm()], [
+    mockRun([makeSearchTerm(ACCEPTED)], [
       priorRejection("Amazon API error: 429 Too Many Requests"),
       { rows: [{ id: "neg-old-001" }] },
     ]);
@@ -276,7 +309,7 @@ describe("a term Amazon has already refused", () => {
       .mockResolvedValueOnce({ rows: [NEG_RULE] })
       .mockResolvedValueOnce({ rows: [{ org_id: ORG_ID }] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [makeSearchTerm()] })
+      .mockResolvedValueOnce({ rows: [makeSearchTerm(ACCEPTED)] })
       .mockResolvedValueOnce({ rows: [{
         id: "neg-live-001", state: "enabled", ad_group_id: AG_ID,
         amazon_neg_keyword_id: "112233445566", writeback_error: null,

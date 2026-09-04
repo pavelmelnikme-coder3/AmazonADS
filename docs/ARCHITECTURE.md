@@ -95,6 +95,68 @@ the rule adds on one run exactly what it removes on the next, forever. Both side
 | **row ownership** | re-negating re-activates and **re-owns** an existing inactive row for that ad group instead of inserting a new one, so the rule that now justifies the negative becomes its `source_rule_id`. Otherwise the row stays owned by the rule that archived it, that rule keeps re-archiving it, and the sync keeps flipping it back. |
 | **release requires conversion** | `negativeStillJustified()` — a negative comes off **only** when the term has orders. Zero orders keeps it, whatever the click count has decayed to. |
 | **release must be confirmed** | a single run's verdict is not enough: reconciliation must find the negative unjustified on `safety.reconcile_grace_runs` **consecutive** runs (default 2) before releasing it. See below. |
+| **the local row must mean what it says** | a row is `enabled` only if the negative really exists on Amazon. Reconciliation asks whether a negative is still *justified*, never whether it *exists*, so a row that lies is never questioned again. See below. |
+
+### A local row must never claim a negative that Amazon refused *(2026-09-04)*
+
+Creating a negative is the only write-back whose failure nothing else in the system can notice:
+
+- the row is written with a synthetic `rule-…` id, so **no sync will ever reconcile it** —
+  that id matches nothing Amazon returns;
+- the add path then skips the term as `already_negative` on every later run;
+- reconciliation re-checks the metrics, not Amazon.
+
+So a rejected create used to leave a row that claimed the term was blocked while it went on
+spending, with nothing retrying and nothing reporting. Found live 2026-09-01:
+`abdeckplane wohnmobil 7,50 m`, refused for the **plain ASCII comma**.
+
+Two mechanisms keep the row honest, and a third temptation is deliberately refused.
+
+1. **Rewrite whitespace, and only whitespace.** `services/amazon/keywordText.js` replaces
+   Unicode space separators, zero-width characters and control characters with a plain space.
+   Every code point it touches is a typographic variant of a space or is invisible, so the
+   normalized keyword still matches the same shopper traffic.
+
+2. **Report, never substitute, other characters Amazon refuses.** `unsupportedKeywordChars()`
+   returns them and the add path skips the term as `unsupported_keyword_text`.
+
+   ⚠️ **Do not "fix" these by substituting a space.** `7 50` is a *different keyword* from
+   `7,50`, and the account's own data says Amazon treats it that way: the query
+   `abdeckplane wohnmobil 7,50 m` took 6 clicks in August 2026 while a `negative_exact` for
+   `abdeckplane wohnmobil 7 50 m` sat enabled in the very same ad group, untouched by AdsFlow.
+   A substitution would have the rule report a negative as applied while the term kept
+   spending — and then skip it as `already_negative` on every later run. That is the same
+   silent failure in a new costume.
+
+   The accepted set is derived from what Amazon has actually accepted on this account
+   (~40k confirmed entities): letters, digits, space, `- + & . ' _ ( )`. Amazon's documented
+   list is not usable — it names `"` as valid while the API rejects it
+   ([amzn/ads-advanced-tools-docs#143](https://github.com/amzn/ads-advanced-tools-docs/issues/143)).
+
+3. **Roll back on rejection.** A refused create sets the row to `archived`, frees its
+   placeholder id and stores `writeback_error`. A rejection describing the *input*
+   (`PATTERN_NOT_MATCHED`, `malformedValueError`, `INVALID_ARGUMENT`, `NOT_SUPPORTED`) is
+   permanent, so later runs report it as a skip instead of re-issuing a doomed write; anything
+   else (401/429/5xx, timeouts, duplicates) is transient and retried. This is the catch-all: it
+   covers characters the allow-list has never seen.
+
+⚠️ **`normalizeKeywordText()` and `sqlNormalizeKeywordText()` must produce identical output.**
+Negatives are stored normalized while `search_term_metrics.query` keeps Amazon's raw text, and
+reconciliation matches a negative to its metrics by comparing the two. If they disagree, the
+lookup returns nothing, the term reads as "0 clicks", and the negative is mismanaged. The mirror
+covers the whitespace pass only — the unsupported-character check has no SQL counterpart because
+it never rewrites anything. Verified equal on all **38 807** distinct production search terms;
+re-run that comparison after any change to either function.
+
+**Health check:** no rule-created negative should ever be `enabled` with no Amazon row behind it —
+
+```sql
+SELECT * FROM negative_keywords
+ WHERE state = 'enabled' AND raw_data IS NULL AND source_rule_id IS NOT NULL;
+```
+
+`raw_data IS NULL` means the row has never come back from a sync, i.e. it does not exist on
+Amazon. The same query against `negative_targets` / `amazon_neg_target_id` applies.
 
 ### Why release requires conversion evidence *(2026-08-04)*
 

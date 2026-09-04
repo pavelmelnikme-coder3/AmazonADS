@@ -6,6 +6,123 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-04 — The week's rule runs, audited: four silent failures
+
+A review of how the rules and alerts behaved over the past week. They were *running* fine — nine
+rules, every scheduled day, no missed runs, no crashes; alerts firing on time and on the right
+data. Everything below was invisible from the app: work that looked done and was not.
+
+### Verified
+
+- **Every negative and pause the rules wrote this week landed on Amazon**, checked against
+  `raw_data` after a sync — 51 negative keywords, 25 negative targets, 12 keyword pauses. One
+  exception, which is finding #1.
+- **Alerts are correct.** The overspend alert fired on 08-24 and 08-31 and on no other day, which
+  is exactly the two days yesterday's spend crossed €400 (449.97 and 449.68). The Friday-08:00
+  movers digests fired at 06:15 UTC = 08:15 Berlin, on schedule. BSR snapshots are live and moving
+  (1650/day across 275 products), so the movers alert is reading real data.
+- **No gaps in the data the rules run on**: `fact_metrics_daily` and `search_term_metrics` are
+  complete for every day of the window.
+- **All nine rules dry-run clean against production** after the changes — 0 errors, and every
+  "0 applied" now states its reason.
+
+### Fixed
+
+- **A negative Amazon refuses no longer looks applied.** On 2026-09-01 the rule negated
+  `abdeckplane wohnmobil 7,50 m`; Amazon answered `PATTERN_NOT_MATCHED` — the **plain ASCII
+  comma** — and the local row was left `state='enabled'` carrying a synthetic `rule-…` id. That is
+  the one write-back failure nothing else in the system can see: no sync can reconcile a synthetic
+  id, reconciliation only re-checks whether the *metrics* still justify a negative and never
+  whether it exists, and the add path skipped the term as `already_negative` from then on. Nothing
+  retried it and nothing reported it.
+
+  A rejected create now rolls the row back to `archived` with the reason stored. A rejection
+  describing the input is treated as permanent — the next run reports it as a skip carrying
+  Amazon's message instead of re-issuing a doomed write — while 401/429/5xx and timeouts stay
+  transient and are retried.
+
+  A term carrying characters Amazon will not take is **skipped, not rewritten**
+  (`unsupported_keyword_text`, with the offending characters attached). Substituting a space for
+  the comma was the obvious fix and is the wrong one: `7 50` is a different keyword from `7,50`,
+  and this account's data says Amazon treats it that way — the query took 6 clicks in August while
+  a `negative_exact` for `abdeckplane wohnmobil 7 50 m` sat enabled in the very same ad group,
+  untouched by AdsFlow. A substitution would have the rule report a negative as applied while the
+  term kept spending, then skip it as `already_negative` forever: the same silent failure wearing a
+  different hat. Unicode whitespace (U+00A0 and friends) *is* still rewritten — that is a spelling
+  variant of a space, not a different word.
+
+  The accepted set comes from ~40 000 entities Amazon has actually accepted on this account —
+  letters, digits, space, `- + & . ' _ ( )`. Amazon's documented list could not be used: it names
+  `"` as valid while the API rejects it
+  ([amzn/ads-advanced-tools-docs#143](https://github.com/amzn/ads-advanced-tools-docs/issues/143)).
+  **936 of the 38 807 distinct search terms on record carry such a character**, so this recurs.
+
+- **`negative_targets.state` was never synced from Amazon.** The upsert omitted the column
+  entirely — not in the INSERT list, not in the `ON CONFLICT DO UPDATE` — while
+  `syncNegativeKeywords` has always had it. The column held whatever AdsFlow last wrote locally and
+  was never checked against reality, so every divergence was permanent and undetectable:
+  **43 ASIN negatives the rules had released were still ENABLED on Amazon**, blocking traffic the
+  rules had decided should flow, and **51 shown as active here were ARCHIVED**. All 94 healed by
+  the fix plus one resync; all three divergence counts now read 0.
+
+- **`add_negative_target` was fire-and-forget.** The `target` branch used a bare
+  `post(...).then(...)` that reported `success` whenever the HTTP call did not throw — including a
+  207 Multi-Status whose body rejected the clause — and was never pushed onto `pendingWritebacks`,
+  so `executeRule` could return and the run be marked completed before Amazon had answered. It now
+  goes through `pushNegativeTarget` (generalised out of `pushNegativeAsin`) under `trackWriteback`,
+  with the same 207 inspection and duplicate recovery as every other write-back.
+
+- **A run that changed nothing is no longer indistinguishable from a broken one.** Only the applied
+  actions were persisted; the per-entity skip reasons the engine already computes were thrown away
+  when `executeRule` returned. The budget rule reported "30 matched · 0 actions" three times last
+  week — **correct** (not one campaign was budget-limited; the largest runs a €200 budget against a
+  peak day of €72.30) but unexplainable from the UI. `rule_executions` now carries
+  `entities_skipped` and `diagnostics`, and the run-history modal shows the breakdown by reason and
+  any Amazon rejections.
+
+- **The negatives pages counted coverage that did not exist.** Both list endpoints returned every
+  row regardless of state, so negatives a rule had released — `PAUSED` or `ARCHIVED` on Amazon,
+  blocking nothing — sat alongside live ones with nothing to tell them apart: 246 of 8881 keywords
+  and 184 of 5610 targets. They now default to enabled, take `?state=`, and the pages get an
+  Active / Released / All filter.
+
+- **Report requests could stall forever.** A row only left `pending`/`requested`/`processing` when
+  the worker that owned it finished, so any worker that died first — a deploy reload, a container
+  restart, a lost BullMQ job — abandoned it permanently. 44 such rows had accumulated since June,
+  which made "is the pipeline healthy?" unanswerable and would have hidden a real stall in the
+  crowd. The 04:00 cleanup cron now times out anything untouched for 12 h.
+
+- **The Wawi `items` sync aborted on every run.** `wawiGetPagesParallel` tolerated a failed page —
+  it logs and skips one — but fetched **page 1 bare**, so a single slow response threw out of the
+  pager and killed the whole step: "timeout of 90000ms exceeded", 8× a day, item catalog unsynced
+  each time. Item objects are heavy (Wawi serialises ~0.6 s each), so an occasional slow page is
+  normal. Pages are now retried twice; Wawi stays read-only, so retrying a GET is safe.
+
+### Notes
+
+- ⚠️ **`normalizeKeywordText()` and its SQL mirror must stay byte-identical.** Negatives are stored
+  normalized while `search_term_metrics.query` keeps Amazon's raw text, and reconciliation matches
+  the two — a disagreement makes the lookup return nothing, the term read as "0 clicks", and the
+  negative mismanaged. The mirror covers the whitespace pass only; the unsupported-character check
+  has no SQL counterpart because it never rewrites anything. Verified equal on **all 38 807**
+  distinct production search terms — re-run that check after touching either function.
+- The first cut of this release *did* substitute a space for unsupported punctuation, and the JS
+  and SQL normalizers were reconciled across three Unicode traps to support it (`\p{N}` vs
+  `[:alnum:]` on `²`; combining marks; NFC for a decomposed `ä`). Verifying the fix against the
+  live account is what showed the substitution to be unsound, and all of it came back out. The
+  simpler normalizer is the one that shipped.
+- A negative released by a rule reads `paused`, not `archived`, once synced: `archiveNegativeKeyword`
+  sets Amazon state to `PAUSED` because Amazon rejects `ARCHIVED` on a PUT. Both states behave
+  identically throughout the rule engine, which tests `state = 'enabled'`.
+- `module.exports.executeRule` is exported so every active rule can be dry-run against a live
+  database without going through auth — the check used to validate this release.
+- Not changed, and worth a decision: `[Exact]-13cl-1or-90d` has matched nothing for as long as the
+  data goes back. Of 13 805 exact keywords only 11 reach its 13-click threshold in 90 days, and all
+  11 have ≥2 orders, while the rule requires exactly 1. That is a threshold choice, not a defect.
+- 1299 tests (72 new).
+
+---
+
 ## [Unreleased] — 2026-08-27 — Sponsored Brands in the ASIN→campaign panel, and a Russian label that said the wrong thing
 
 An audit of the "which campaigns advertise this ASIN" panel against the live Ads API. The mapping

@@ -10,12 +10,19 @@
  *   • "abdeckplane wohnmobil 7,50 m" was rejected on 2026-09-01 for the plain ASCII
  *     comma, and — because the local row was left claiming success — never retried.
  *
- * The JS normalizer and its SQL mirror must agree exactly: negatives are stored
- * normalized while search_term_metrics.query keeps Amazon's raw text, and reconciliation
- * compares the two. Verified equal on all 38 806 distinct production search terms.
+ * They are handled differently on purpose. Whitespace is rewritten — a no-break space is a
+ * typographic variant of a space, so the keyword still matches the same traffic. Punctuation
+ * is NOT: "7 50" is a different keyword from "7,50", and the account's own data says Amazon
+ * agrees (that query took 6 clicks in August 2026 with a negative_exact for the space-form
+ * enabled in the same ad group). Such terms are reported by unsupportedKeywordChars() and
+ * skipped by the caller instead.
+ *
+ * The JS normalizer and its SQL mirror must agree exactly: negatives are stored normalized
+ * while search_term_metrics.query keeps Amazon's raw text, and reconciliation compares the
+ * two. Verified equal on all 38 806 distinct production search terms.
  */
 
-const { normalizeKeywordText, needsKeywordNormalization, sqlNormalizeKeywordText } =
+const { normalizeKeywordText, unsupportedKeywordChars, sqlNormalizeKeywordText } =
   require("../src/services/amazon/keywordText");
 
 const hex = s => Buffer.from(s, "utf8").toString("hex");
@@ -49,57 +56,62 @@ describe("normalizeKeywordText — whitespace", () => {
   });
 });
 
-describe("normalizeKeywordText — characters Amazon refuses", () => {
-  it("replaces the comma that broke the 2026-09-01 negative", () => {
+describe("normalizeKeywordText — characters Amazon refuses are left alone", () => {
+  it("does NOT substitute the comma that broke the 2026-09-01 negative", () => {
+    // Comma to space would be a different keyword, not a different spelling. Evidence:
+    // "abdeckplane wohnmobil 7,50 m" took 6 clicks in August 2026 while a negative_exact for
+    // "abdeckplane wohnmobil 7 50 m" sat enabled in the same ad group. Rewriting would make
+    // the rule claim a negative that blocks nothing.
     expect(normalizeKeywordText("abdeckplane wohnmobil 7,50 m"))
-      .toBe("abdeckplane wohnmobil 7 50 m");
+      .toBe("abdeckplane wohnmobil 7,50 m");
   });
 
-  it("replaces with a space rather than deleting, so digits stay separate", () => {
-    // Deleting would produce "750" and silently negate a different number.
-    expect(normalizeKeywordText("7,50")).toBe("7 50");
-  });
-
-  it("replaces the other characters seen only in report text, never in accepted entities", () => {
-    expect(normalizeKeywordText('4" desk')).toBe("4 desk");          // amzn/ads-advanced-tools-docs#143
-    expect(normalizeKeywordText("100 × 100")).toBe("100 100");
-    expect(normalizeKeywordText("gas 50°")).toBe("gas 50");
-    expect(normalizeKeywordText("matte 60/40")).toBe("matte 60 40");
-    expect(normalizeKeywordText("rabatt 20%")).toBe("rabatt 20");
-    expect(normalizeKeywordText("größe: xl")).toBe("größe xl");
-    expect(normalizeKeywordText("zelt – 2 mann")).toBe("zelt 2 mann");
-  });
-
-  it("drops superscripts and fractions, which Postgres [:alnum:] also drops", () => {
-    expect(normalizeKeywordText("brandschutzfolie b1 9m²")).toBe("brandschutzfolie b1 9m");
-    expect(normalizeKeywordText("selbstklebend⁸")).toBe("selbstklebend");
+  it("leaves every other unsupported character in place too", () => {
+    for (const raw of ['4" desk', "100 × 100", "gas 50°", "matte 60/40", "rabatt 20%", "größe: xl"]) {
+      expect(normalizeKeywordText(raw)).toBe(raw);
+    }
   });
 });
 
-describe("normalizeKeywordText — characters Amazon accepts", () => {
-  it("preserves German letters and the punctuation real Amazon entities contain", () => {
+describe("unsupportedKeywordChars", () => {
+  it("reports the comma Amazon rejected", () => {
+    expect(unsupportedKeywordChars("abdeckplane wohnmobil 7,50 m")).toEqual([","]);
+  });
+
+  it("reports the characters seen only in report text, never in an accepted entity", () => {
+    expect(unsupportedKeywordChars('4" desk')).toEqual(['"']);
+    expect(unsupportedKeywordChars("100 × 100")).toEqual(["×"]);
+    expect(unsupportedKeywordChars("gas 50°")).toEqual(["°"]);
+    expect(unsupportedKeywordChars("matte 60/40")).toEqual(["/"]);
+    expect(unsupportedKeywordChars("rabatt 20%")).toEqual(["%"]);
+    expect(unsupportedKeywordChars("zelt – 2 mann")).toEqual(["–"]);
+    expect(unsupportedKeywordChars("brandschutzfolie 9m²")).toEqual(["²"]);
+  });
+
+  it("de-duplicates and keeps every distinct offender", () => {
+    expect(unsupportedKeywordChars("a, b, c/d").sort()).toEqual([",", "/"]);
+  });
+
+  it("passes text Amazon accepts — including the punctuation real entities contain", () => {
     // Every character here appears in this account's Amazon-confirmed keywords/negatives.
-    expect(normalizeKeywordText("fußmatte 80 cm 2er-set")).toBe("fußmatte 80 cm 2er-set");
-    expect(normalizeKeywordText("kleines packmaß")).toBe("kleines packmaß");
-    expect(normalizeKeywordText("m & m's 2.5 (xl) a_b+c")).toBe("m & m's 2.5 (xl) a_b+c");
+    expect(unsupportedKeywordChars("fußmatte 80 cm 2er-set")).toEqual([]);
+    expect(unsupportedKeywordChars("m & m's 2.5 (xl) a_b+c")).toEqual([]);
+    expect(unsupportedKeywordChars("kleines packmaß")).toEqual([]);
+  });
+
+  it("ignores whitespace normalization already handles", () => {
+    expect(unsupportedKeywordChars("campingstuhl 150 kg")).toEqual([]);   // U+00A0
+    expect(unsupportedKeywordChars("a\tb")).toEqual([]);
   });
 
   it("keeps non-Latin scripts, so other marketplaces still work", () => {
-    expect(normalizeKeywordText("キャンプ 用品")).toBe("キャンプ 用品");
-    expect(normalizeKeywordText("кемпинг стул")).toBe("кемпинг стул");
-  });
-});
-
-describe("normalizeKeywordText — Unicode form", () => {
-  it("precomposes a decomposed umlaut instead of stripping the mark off it", () => {
-    const decomposed = "wäschekorb";           // a + combining diaeresis
-    expect(decomposed).not.toBe("wäschekorb");
-    expect(normalizeKeywordText(decomposed)).toBe("wäschekorb");
+    expect(unsupportedKeywordChars("キャンプ 用品")).toEqual([]);
+    expect(unsupportedKeywordChars("кемпинг стул")).toEqual([]);
   });
 
-  it("deletes a combining mark that has no precomposed form, without splitting the token", () => {
-    // U+05C1 on a letter that cannot absorb it — seen live on one search term.
-    expect(normalizeKeywordText("abcׁdef")).toBe("abcdef");
+  it("returns nothing for non-strings", () => {
+    expect(unsupportedKeywordChars(null)).toEqual([]);
+    expect(unsupportedKeywordChars(undefined)).toEqual([]);
   });
 });
 
@@ -111,7 +123,6 @@ describe("normalizeKeywordText — contract", () => {
 
   it("returns an empty string for whitespace-only input", () => {
     expect(normalizeKeywordText("  ​")).toBe("");
-    expect(normalizeKeywordText(",,,")).toBe("");
   });
 
   it("passes non-strings through untouched", () => {
@@ -125,18 +136,6 @@ describe("normalizeKeywordText — contract", () => {
       const once = normalizeKeywordText(raw);
       expect(normalizeKeywordText(once)).toBe(once);
     }
-  });
-});
-
-describe("needsKeywordNormalization", () => {
-  it("flags text Amazon would reject", () => {
-    expect(needsKeywordNormalization("abdeckplane wohnmobil 7,50 m")).toBe(true);
-    expect(needsKeywordNormalization("campingstuhl 150 kg")).toBe(true);
-  });
-
-  it("leaves acceptable text unflagged", () => {
-    expect(needsKeywordNormalization("campingstuhl 150 kg")).toBe(false);
-    expect(needsKeywordNormalization(null)).toBe(false);
   });
 });
 
@@ -156,10 +155,11 @@ describe("sqlNormalizeKeywordText", () => {
     expect(sql).toContain("\\uFEFF");   // BOM
   });
 
-  it("mirrors the character allow-list and the NFC + combining-mark passes", () => {
+  it("mirrors only the whitespace pass — it must never rewrite characters", () => {
+    // The unsupported-character check has no SQL counterpart on purpose: it decides whether
+    // to skip a term, it never substitutes, so there is nothing for the mirror to reproduce.
     const sql = sqlNormalizeKeywordText("$1");
-    expect(sql).toContain("normalize($1, NFC)");     // precomposition, as in JS
-    expect(sql).toContain("[^[:alnum:] ''()_+&.-]"); // the allow-list, doubled quote for SQL
-    expect(sql).toContain("\\u0300-\\u036F");        // combining marks
+    expect(sql).not.toContain("[:alnum:]");
+    expect(sql).not.toContain("NFC");
   });
 });

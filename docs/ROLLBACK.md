@@ -74,6 +74,12 @@ Each version may include DB migrations. Check which need reverting:
 |---------------|---------|----------------|
 | `001_initial.sql` | 0.1.0 | Only on full reset |
 | `003_rules_alerts.sql` | 0.3.0 | Only if rolling back to < 0.3.0 |
+| `049_writeback_failures_and_skip_reasons.sql` | 2026-09-04 | **No** — purely additive columns the old code ignores |
+
+Migrations are additive by convention, so rolling the *code* back rarely needs a schema change.
+049 is the normal case: it adds `writeback_error` / `writeback_failed_at` to the two negatives
+tables and `entities_skipped` / `diagnostics` to `rule_executions`. Older code simply does not
+read them, and leaving them in place keeps the rejection history if you roll forward again.
 
 **To revert migration 003:**
 ```bash

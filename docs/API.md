@@ -155,6 +155,29 @@ Bulk bid or status update.
 
 ---
 
+## Negatives *(state filter added 2026-09-04)*
+
+### GET /negative-keywords
+### GET /negative-asins
+
+Both take `search`, `campaignId` / `campaignIds`, `campaignType`, `page`, `limit`, `sortBy`,
+`sortDir` — plus `matchType` and `level` on `/negative-keywords` — and:
+
+| param | default | effect |
+|---|---|---|
+| `state` | `enabled` | `enabled` \| `paused` \| `archived` \| `all`. Anything else falls back to `enabled`. |
+
+**Why the default is not `all`.** A negative released by a rule is set to `PAUSED` on Amazon
+(Amazon rejects `ARCHIVED` on a PUT), so it blocks nothing. Both endpoints used to return every
+row regardless of state, which counted those as live coverage: on 2026-09-04, 246 of 8881
+negative keywords and 184 of 5610 negative targets. The count query applies the same filter, so
+pagination matches the rows, and `state` is returned on each row.
+
+This only became meaningful once `negative_targets.state` was actually synced from Amazon — the
+upsert had omitted the column entirely, so the value was whatever AdsFlow last wrote locally.
+
+---
+
 ## Bulk Operations
 
 ### POST /bulk/campaigns/status
@@ -258,7 +281,34 @@ Response shape:
 `scope.entity_type` accepts: `keyword` (default), `product_target`, `search_term` (new).
 
 `skipped[*].reason` is one of: `already_paused`, `already_enabled`, `not_enabled`, `already_negative`,
-`wrong_entity_type`, `campaign_not_enabled`, `is_active_target`, `not_asin_query`, `empty_keyword_text`.
+`wrong_entity_type`, `campaign_not_enabled`, `is_active_target`, `not_asin_query`, `empty_keyword_text`,
+`unknown_budget`, `at_max_budget`, `budget_not_binding`, `no_asin_search_terms`,
+`non_negatable_expression_type`, `unsupported_keyword_text`, `amazon_rejected_keyword_text`,
+`amazon_rejected_negative_target`.
+
+#### A negative Amazon refuses *(2026-09-04)*
+
+Creating a negative is the one write-back whose failure nothing else can notice: the local row
+carries a synthetic `rule-…` id, so no sync will ever reconcile it against Amazon, and the add
+path then skips the term forever as `already_negative`. Until 2026-09-04 such a row was simply
+left `state='enabled'` — the term kept spending with nothing blocking it and nothing retrying.
+
+A rejected create now rolls the row back to `state='archived'` and stores the reason in
+`negative_keywords.writeback_error` / `negative_targets.writeback_error`. The next run reads it:
+
+| rejection | next run |
+|---|---|
+| `PATTERN_NOT_MATCHED`, `malformedValueError`, `INVALID_ARGUMENT`, `NOT_SUPPORTED` / `UNSUPPORTED` | skipped as `amazon_rejected_keyword_text` / `amazon_rejected_negative_target`, with Amazon's message in `detail.amazon_error` — the same text would be refused again |
+| 401 / 429 / 5xx / timeouts, and duplicates | retried; the stored error is cleared when the row is re-owned |
+
+Before any of that, `services/amazon/keywordText.js` rewrites Unicode whitespace (U+00A0 and
+friends) to a plain space — a meaning-preserving spelling change. Other characters Amazon refuses
+are **not** rewritten: the term is skipped as `unsupported_keyword_text`, with the offending
+characters in `detail.characters`. Substituting a space would negate a *different* keyword
+(`7 50` is not `7,50`) and the run would report success for a negative that need not block the
+term. The accepted set comes from entities Amazon has actually accepted — letters, digits, space,
+`- + & . ' _ ( )` — because the documented list names `"` as valid while the API rejects it
+(amzn/ads-advanced-tools-docs#143).
 
 #### `errors` vs `writeback_errors` *(2026-08-03)*
 
@@ -274,6 +324,20 @@ Amazon write-backs are deliberately non-fatal, so a rejection never lands in `er
 refused the change on every run for days. Each entry is
 `{ entity_id, entity_type, keyword_text, action, stage: "amazon_writeback", error }`.
 `rule_executions.actions_failed` counts both, and a run with either is stored as `status: "partial"`.
+
+### GET /rules/:id/runs
+
+Execution history, newest first (50 max). Alongside the counters and `summary` (the applied
+actions), each row carries *why* a run did what it did — added 2026-09-04, because a run that
+matched entities and applied none was previously indistinguishable from a broken one:
+
+| field | meaning |
+|---|---|
+| `entities_skipped` | how many matches were skipped |
+| `diagnostics.skipped_by_reason` | `{ reason: count }` — e.g. `{ "budget_not_binding": 26, "not_enabled": 1 }` |
+| `diagnostics.skipped_samples` | up to 5 entities per reason, each `{ entity_type, keyword_text, action, amazon_error? }` |
+| `diagnostics.writeback_errors` | Amazon rejections (capped at 25) — these never appear in `errors` |
+| `diagnostics.errors` | local action failures (capped at 25) |
 
 Validation: 400 if `conditions` or `actions` arrays are missing/empty.
 
