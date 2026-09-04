@@ -22,6 +22,18 @@ router.get('/', async (req, res, next) => {
     const params = [req.workspaceId];
     let pi = 2;
 
+    // Only negatives Amazon is actually enforcing, unless asked otherwise.
+    //
+    // This listed every row regardless of state, so released negatives — PAUSED or ARCHIVED
+    // on Amazon, blocking nothing — were shown alongside live ones with no way to tell them
+    // apart. It was invisible until negative_targets.state started being synced from Amazon
+    // (it never was before); on 2026-09-04 that was 184 of 5610 rows.
+    const stateFilter = String(req.query.state || 'enabled').toLowerCase();
+    if (stateFilter !== 'all') {
+      conditions.push(`nt.state = $${pi++}`);
+      params.push(['enabled', 'paused', 'archived'].includes(stateFilter) ? stateFilter : 'enabled');
+    }
+
     const rawCampaignIds = req.query['campaignIds[]'] || req.query.campaignIds;
     const campaignIds = rawCampaignIds
       ? (Array.isArray(rawCampaignIds) ? rawCampaignIds : rawCampaignIds.split(','))
@@ -54,7 +66,7 @@ router.get('/', async (req, res, next) => {
 
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(
-        `SELECT nt.id, nt.expression, nt.level, nt.campaign_id, nt.ad_group_id, nt.ad_type, nt.created_at,
+        `SELECT nt.id, nt.expression, nt.level, nt.campaign_id, nt.ad_group_id, nt.ad_type, nt.created_at, nt.state,
                 c.name AS campaign_name, c.campaign_type,
                 ag.name AS ad_group_name
          FROM negative_targets nt

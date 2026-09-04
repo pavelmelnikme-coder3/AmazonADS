@@ -10151,6 +10151,7 @@ function NegativeKeywordsTab({ workspaceId }) {
   const [filterMatchType, setFilterMatchType] = useState('');   // '' | 'negativeExact' | 'negativePhrase'
   const [filterLevel, setFilterLevel] = useState('');           // '' | 'campaign' | 'ad_group'
   const [filterCampaignType, setFilterCampaignType] = useState(''); // '' | 'SP' | 'SB' | 'SD'
+  const [filterState, setFilterState] = useState('enabled');    // 'enabled' | 'paused' | 'all'
   const [filterCampaignIds, setFilterCampaignIds] = useState([]);
   const [sortBy, setSortBy]         = useState('created_at');
   const [sortDir, setSortDir]       = useState('desc');
@@ -10209,12 +10210,13 @@ function NegativeKeywordsTab({ workspaceId }) {
     if (filterMatchType) p.set('matchType', filterMatchType);
     if (filterLevel) p.set('level', filterLevel);
     if (filterCampaignType) p.set('campaignType', filterCampaignType);
+    p.set('state', filterState);
     filterCampaignIds.forEach(id => p.append('campaignIds[]', id));
     apiFetch(`/negative-keywords?${p}`)
       .then(d => { setNegatives(d.data || []); setTotal(d.pagination?.total || 0); setSelected(new Set()); })
       .catch(() => setNegatives([]))
       .finally(() => setLoading(false));
-  }, [search, filterMatchType, filterLevel, filterCampaignType, filterCampaignIds, sortBy, sortDir, page, workspaceId]);
+  }, [search, filterMatchType, filterLevel, filterCampaignType, filterState, filterCampaignIds, sortBy, sortDir, page, workspaceId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -10379,6 +10381,14 @@ function NegativeKeywordsTab({ workspaceId }) {
           <button key={f.v} onClick={() => { setFilterCampaignType(f.v); setPage(1); }}
             className={`btn ${filterCampaignType === f.v ? 'btn-primary' : 'btn-ghost'}`}
             style={{ fontSize: 11, padding: '4px 8px' }}>{f.l}</button>
+        ))}
+        <div style={{ width: 1, height: 20, background: 'var(--b2)' }} />
+        {/* Live vs released. The list shows only negatives Amazon is enforcing by default —
+            a released one blocks nothing, so counting it as active overstates coverage. */}
+        {[{ v: 'enabled', l: 'Active' }, { v: 'paused', l: 'Released' }, { v: 'all', l: 'All' }].map(f => (
+          <button key={f.v} onClick={() => { setFilterState(f.v); setPage(1); }}
+            className={`btn ${filterState === f.v ? 'btn-primary' : 'btn-ghost'}`}
+            style={{ fontSize: 11, padding: '4px 10px' }}>{f.l}</button>
         ))}
 
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -10743,6 +10753,7 @@ function NegativeAsinsTab({ workspaceId }) {
 
   const [search, setSearch]         = useState('');
   const [filterCampaignType, setFilterCampaignType] = useState('');
+  const [filterState, setFilterState] = useState('enabled');    // 'enabled' | 'paused' | 'all'
   const [sortBy, setSortBy]         = useState('created_at');
   const [sortDir, setSortDir]       = useState('desc');
   const [selected, setSelected]     = useState(new Set());
@@ -10775,11 +10786,12 @@ function NegativeAsinsTab({ workspaceId }) {
     const p = new URLSearchParams({ limit: PAGE_SIZE, page, sortBy, sortDir });
     if (search) p.set('search', search);
     if (filterCampaignType) p.set('campaignType', filterCampaignType);
+    p.set('state', filterState);
     apiFetch(`/negative-asins?${p}`)
       .then(d => { setItems(d.data || []); setTotal(d.pagination?.total || 0); setSelected(new Set()); })
       .catch(() => setItems([]))
       .finally(() => setLoading(false));
-  }, [search, filterCampaignType, sortBy, sortDir, page, workspaceId]);
+  }, [search, filterCampaignType, filterState, sortBy, sortDir, page, workspaceId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -10864,6 +10876,14 @@ function NegativeAsinsTab({ workspaceId }) {
           <button key={f.v} onClick={() => { setFilterCampaignType(f.v); setPage(1); }}
             className={`btn ${filterCampaignType === f.v ? 'btn-primary' : 'btn-ghost'}`}
             style={{ fontSize: 11, padding: '4px 8px' }}>{f.l}</button>
+        ))}
+        <div style={{ width: 1, height: 20, background: 'var(--b2)' }} />
+        {/* Live vs released. The list shows only negatives Amazon is enforcing by default —
+            a released one blocks nothing, so counting it as active overstates coverage. */}
+        {[{ v: 'enabled', l: 'Active' }, { v: 'paused', l: 'Released' }, { v: 'all', l: 'All' }].map(f => (
+          <button key={f.v} onClick={() => { setFilterState(f.v); setPage(1); }}
+            className={`btn ${filterState === f.v ? 'btn-primary' : 'btn-ghost'}`}
+            style={{ fontSize: 11, padding: '4px 10px' }}>{f.l}</button>
         ))}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, alignItems: 'center' }}>
           <span style={{ color: 'var(--tx3)', fontSize: 12 }}>{total.toLocaleString()} negatives</span>

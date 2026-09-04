@@ -22,6 +22,16 @@ router.get('/', async (req, res, next) => {
     const params = [req.workspaceId];
     let pi = 2;
 
+    // Only negatives Amazon is actually enforcing, unless asked otherwise. This listed every
+    // row regardless of state, so negatives released by a rule — PAUSED or ARCHIVED on Amazon,
+    // blocking nothing — appeared alongside live ones with nothing to tell them apart.
+    // On 2026-09-04 that was 246 of 8881 rows.
+    const stateFilter = String(req.query.state || 'enabled').toLowerCase();
+    if (stateFilter !== 'all') {
+      conditions.push(`nk.state = $${pi++}`);
+      params.push(['enabled', 'paused', 'archived'].includes(stateFilter) ? stateFilter : 'enabled');
+    }
+
     const rawCampaignIds = req.query['campaignIds[]'] || req.query.campaignIds;
     const campaignIds = rawCampaignIds
       ? (Array.isArray(rawCampaignIds) ? rawCampaignIds : rawCampaignIds.split(','))
@@ -73,7 +83,7 @@ router.get('/', async (req, res, next) => {
     const [{ rows }, { rows: countRows }] = await Promise.all([
       query(
         `SELECT nk.id, nk.keyword_text, nk.match_type, nk.level,
-                nk.campaign_id, nk.ad_group_id, nk.created_at,
+                nk.campaign_id, nk.ad_group_id, nk.created_at, nk.state,
                 c.name AS campaign_name, c.campaign_type,
                 ag.name AS ad_group_name
          FROM negative_keywords nk
