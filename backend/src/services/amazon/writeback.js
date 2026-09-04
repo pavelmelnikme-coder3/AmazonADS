@@ -559,14 +559,35 @@ async function pushNegativeAsin({
   localId, connectionId, profileId, marketplaceId, campaignType,
   amazonCampaignId, amazonAdGroupId, asinValue, level,
 }) {
+  // SP v3 API requires SCREAMING_SNAKE_CASE for expression type and UPPERCASE state
+  return pushNegativeTarget({
+    localId, connectionId, profileId, marketplaceId, campaignType,
+    amazonCampaignId, amazonAdGroupId, level,
+    expression: [{ type: "ASIN_SAME_AS", value: asinValue }],
+    asinValue,
+  });
+}
+
+/**
+ * Create a negative targeting clause from an arbitrary expression.
+ *
+ * The rule engine used to inline this call as a bare `post(...).then(...)`: it was
+ * fire-and-forget (so `executeRule` returned before Amazon had answered) and it reported
+ * `success` whenever the request did not throw — including a 207 Multi-Status whose body
+ * rejected the clause, in which case `realId` was simply undefined and ignored. Going
+ * through this helper puts the call under the same {ok,error} contract, 207 inspection and
+ * duplicate recovery as every other write-back.
+ */
+async function pushNegativeTarget({
+  localId, connectionId, profileId, marketplaceId, campaignType,
+  amazonCampaignId, amazonAdGroupId, expression, expressionType, level, asinValue,
+}) {
   if (!connectionId || !profileId) return { ok: false, error: "No Amazon connection" };
 
   try {
-    // SP v3 API requires SCREAMING_SNAKE_CASE for expression type and UPPERCASE state
-    const expression = [{ type: "ASIN_SAME_AS", value: asinValue }];
     const payload = {
       expression,
-      expressionType: "manual",
+      expressionType: expressionType || "manual",
       state: "ENABLED",
       campaignId: amazonCampaignId,
     };
@@ -575,8 +596,8 @@ async function pushNegativeAsin({
       payload.adGroupId = amazonAdGroupId;
     }
 
-    // SP negative targets endpoint; SD uses /sd/negativeTargets but rare for manual adds
-    const path = "/sp/negativeTargets";
+    const path = campaignType === "sponsoredDisplay" || campaignType === "SD"
+      ? "/sd/negativeTargets" : "/sp/negativeTargets";
 
     const result = await post({
       connectionId,
@@ -597,10 +618,10 @@ async function pushNegativeAsin({
       const errors = result?.negativeTargetingClauses?.error || [];
       if (errors.length > 0) {
         const errMsg = errors[0]?.description || errors[0]?.message || JSON.stringify(errors[0]);
-        if (isDuplicateError(errMsg)) {
+        if (isDuplicateError(errMsg) && asinValue) {
           return recoverDuplicateNegativeTarget({ connectionId, profileId, marketplaceId, localId, amazonCampaignId, amazonAdGroupId, asinValue });
         }
-        logger.warn("Negative ASIN rejected by Amazon", { profileId, path, amazonError: errMsg });
+        logger.warn("Negative target rejected by Amazon", { profileId, path, amazonError: errMsg });
         return { ok: false, error: errMsg };
       }
       logger.warn("Negative ASIN write-back: no realId in response", { profileId, path });
@@ -617,10 +638,10 @@ async function pushNegativeAsin({
     logger.info("Negative ASIN write-back ok", { profileId, path, realId });
     return { ok: true };
   } catch (e) {
-    if (isDuplicateError(e.message)) {
+    if (isDuplicateError(e.message) && asinValue) {
       return recoverDuplicateNegativeTarget({ connectionId, profileId, marketplaceId, localId, amazonCampaignId, amazonAdGroupId, asinValue });
     }
-    logger.warn("Negative ASIN write-back failed (non-fatal)", { profileId, error: e.message });
+    logger.warn("Negative target write-back failed (non-fatal)", { profileId, error: e.message });
     return { ok: false, error: e.message };
   }
 }
@@ -800,7 +821,7 @@ async function archiveNegativeTarget({ localId, connectionId, profileId, marketp
 }
 
 module.exports = {
-  pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, loadKeywordContext,
+  pushKeywordUpdates, pushNegativeKeyword, pushNegativeAsin, pushNegativeTarget, loadKeywordContext,
   pushNewKeywords, archiveNegativeKeyword, archiveNegativeTarget,
   pushCampaignUpdates, pushAdGroupUpdates, campaignBudgetFields, wrapCampaigns, partialError,
   campaignApiPath,

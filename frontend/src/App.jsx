@@ -11106,8 +11106,78 @@ function NegativesTab({ workspaceId }) {
   );
 }
 
+// A finished run used to persist only the list of actions it applied, so a run that matched
+// entities and changed none looked exactly like a run that broke. Live example: the budget
+// rule reported "30 matched · 0 actions" three times in one week — correct behaviour (no
+// campaign was actually budget-limited) that was indistinguishable from a failure. The
+// engine's own skip reasons and Amazon's rejections are now stored with the run and shown here.
+function RuleRunDiagnostics({ run }) {
+  const { t } = useI18n();
+  const d          = run.diagnostics || {};
+  const byReason   = d.skipped_by_reason || {};
+  const samples    = d.skipped_samples || {};
+  const rejections = d.writeback_errors || [];
+  const reasons    = Object.entries(byReason).sort((a, b) => b[1] - a[1]);
+  if (!reasons.length && !rejections.length) return null;
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      {reasons.length > 0 && (
+        <details>
+          <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--tx2)', userSelect: 'none' }}>
+            {(run.actions_taken || 0) === 0 ? t('rules.histNoActions') : t('rules.histSkipBreakdown')}
+          </summary>
+          <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+            {reasons.map(([reason, count]) => {
+              // An unrecognised key must not render as a raw "rules.skipReason_x" string.
+              const label = t(`rules.skipReason_${reason}`);
+              const tip   = t(`rules.skipReason_${reason}_tip`);
+              const shown = label.startsWith('rules.') ? reason.replace(/_/g, ' ') : label;
+              const first = (samples[reason] || [])[0];
+              return (
+                <div key={reason} style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11 }}>
+                  <span className="badge" style={{ fontSize: 9, background: 'var(--s3)', color: 'var(--tx2)', flexShrink: 0 }}>
+                    {count}
+                  </span>
+                  <Tip text={tip.startsWith('rules.') ? shown : tip}>
+                    <span style={{ color: 'var(--tx2)', cursor: 'help', borderBottom: '1px dotted var(--tx3)', flexShrink: 0 }}>
+                      {shown}
+                    </span>
+                  </Tip>
+                  {first?.keyword_text && (
+                    <span style={{ color: 'var(--tx3)', fontFamily: 'var(--mono)', fontSize: 10,
+                                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {first.keyword_text}{count > 1 ? ' …' : ''}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      )}
+      {rejections.length > 0 && (
+        <details style={{ marginTop: 6 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--red)', userSelect: 'none' }}>
+            {t('rules.histAmazonRejections')}: {rejections.length}
+          </summary>
+          <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+            {rejections.map((e, i) => (
+              <div key={i} style={{ fontSize: 10, color: 'var(--tx3)', wordBreak: 'break-word' }}>
+                • <span style={{ fontFamily: 'var(--mono)' }}>{e.keyword_text || e.entity_id}</span>
+                {e.action ? ` — ${e.action.replace(/_/g, ' ')}` : ''}: {String(e.error).slice(0, 240)}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 // ─── RuleHistoryModal ─────────────────────────────────────────────────────────
 function RuleHistoryModal({ rule, onClose }) {
+  const { t } = useI18n();
   const [runs, setRuns]     = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -11158,11 +11228,17 @@ function RuleHistoryModal({ rule, onClose }) {
                 <span className="badge bg-bl" style={{ fontSize: 10 }}>
                   {run.entities_matched || 0} matched · {run.actions_taken || 0} actions
                 </span>
+                {run.entities_skipped > 0 && (
+                  <span className="badge" style={{ fontSize: 10, background: 'var(--s3)', color: 'var(--tx2)' }}>
+                    {run.entities_skipped} {t('rules.skipped').toLowerCase()}
+                  </span>
+                )}
               </div>
             </div>
             {run.error_message && (
               <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 4 }}>{run.error_message}</div>
             )}
+            <RuleRunDiagnostics run={run} />
             {run.summary && Array.isArray(run.summary) && run.summary.length > 0 && (
               <div style={{ marginTop: 8 }}>
                 {run.summary.slice(0, 3).map((a, i) => (

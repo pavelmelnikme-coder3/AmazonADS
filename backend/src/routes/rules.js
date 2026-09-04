@@ -15,7 +15,7 @@ const router  = express.Router();
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { writeAudit, updateAuditStatus } = require("./audit");
-const { pushNegativeKeyword, pushNegativeAsin, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget, pushCampaignUpdates, partialError, campaignApiPath } = require("../services/amazon/writeback");
+const { pushNegativeKeyword, pushNegativeAsin, pushNegativeTarget, pushKeywordUpdates, archiveNegativeKeyword, archiveNegativeTarget, pushCampaignUpdates, partialError, campaignApiPath } = require("../services/amazon/writeback");
 const { put, post } = require("../services/amazon/adsClient");
 const { normalizeKeywordText, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
 const logger  = require("../config/logger");
@@ -28,6 +28,23 @@ router.use(requireAuth, requireWorkspace);
 // placeholder for re-use. Neither may be sent to Amazon as an entity id.
 function isSyntheticNegId(id) {
   return !id || id.startsWith("rule-") || id.startsWith("archived-");
+}
+
+// Amazon rejections that describe the *input* rather than a temporary condition: the same
+// text will be refused again tomorrow, and the day after. Re-issuing the write every run
+// spends an API call and writes an audit error for nothing, so a negative whose creation
+// failed this way is not retried — it is reported as skipped, with the reason, instead.
+//
+// Everything else (401, 429, 5xx, timeouts, connection resets — the 2026-06 access incident
+// was all 401s) is treated as transient and retried on the next run.
+// Duplicate errors are deliberately absent: they mean the negative *does* exist on Amazon,
+// and pushNegativeKeyword/pushNegativeAsin already recover the real id from one. If that
+// recovery itself fails the next run should try again.
+const PERMANENT_WRITEBACK_ERROR =
+  /PATTERN_NOT_MATCHED|malformedValueError|Keyword is invalid|INVALID_ARGUMENT|NOT_SUPPORTED|UNSUPPORTED/i;
+
+function isPermanentWritebackError(message) {
+  return !!message && PERMANENT_WRITEBACK_ERROR.test(String(message));
 }
 
 // Decide whether a negative this rule created should stay in place.
@@ -236,23 +253,53 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     return null;
   };
 
-  const trackWriteback = (auditId, promise, warnMsg, ctx = {}) => {
+  // `onFailure(error)` lets a caller undo the local row it wrote optimistically. Creating a
+  // negative is the one write-back whose failure the system cannot otherwise notice: the row
+  // carries a synthetic id, so no sync will ever reconcile it against Amazon, and the add path
+  // then skips the term forever as `already_negative`. See rollbackFailedNegative below.
+  const trackWriteback = (auditId, promise, warnMsg, ctx = {}, onFailure = null) => {
     const record = (error) => {
       writebackErrors.push({ ...ctx, stage: "amazon_writeback", error: String(error) });
+    };
+    const fail = async (error) => {
+      record(error);
+      if (onFailure) {
+        // A rollback that throws must not swallow the audit update below.
+        try { await onFailure(error); }
+        catch (e) { logger.warn("Write-back rollback failed", { error: e.message }); }
+      }
+      return updateAuditStatus(auditId, "error", error);
     };
     const tracked = promise
       .then(r => {
         const failure = writebackFailure(r);
-        if (failure) record(failure);
-        return updateAuditStatus(auditId, failure ? "error" : "success", failure);
+        return failure ? fail(failure) : updateAuditStatus(auditId, "success", null);
       })
       .catch(e => {
         logger.warn(warnMsg, { error: e.message });
-        record(e.message);
-        return updateAuditStatus(auditId, "error", e.message);
+        return fail(e.message);
       });
     pendingWritebacks.push(tracked);
     return tracked;
+  };
+
+  // Undo a negative this run created locally but Amazon refused. The row goes back to
+  // 'archived' — the honest state, since nothing is blocking the term — and keeps the reason,
+  // so the next run can tell a permanently-invalid keyword (skip, with the reason reported)
+  // from a transient outage (retry). The id is only replaced when it is still a placeholder;
+  // a real Amazon id means the entity does exist and must stay addressable.
+  const rollbackFailedNegative = (table, idColumn, localId) => async (error) => {
+    if (!RECONCILE_TABLES.has(table)) throw new Error(`Unexpected rollback table: ${table}`);
+    if (!localId) return;
+    await query(
+      `UPDATE ${table}
+          SET state = 'archived',
+              ${idColumn} = CASE WHEN ${idColumn} ~ '^[0-9]+$' THEN ${idColumn}
+                                 ELSE 'archived-' || (EXTRACT(EPOCH FROM NOW())::bigint) || '-' || id END,
+              writeback_error = $2, writeback_failed_at = NOW(), updated_at = NOW()
+        WHERE id = $1`,
+      [localId, String(error).slice(0, 2000)]
+    );
   };
 
   // Separate bid/budget threshold conditions (applied in SQL WHERE) from metric conditions (post-fetch filter).
@@ -700,6 +747,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
     });
   };
 
+  // The row describing this negative for this ad group, if one already exists. Negatives are
+  // written at ad-group level, so a row for a different ad group is a different negative.
+  const priorNegTargetRow = (existing, adGroupId) =>
+    (existing || []).find(r => String(r.ad_group_id ?? "") === String(adGroupId ?? "")) || null;
+
   // Claim the negative_target row for an expression the rule wants negated.
   //
   // `existing` is every row matching the call site's dedup predicate, in ANY state. If one is
@@ -719,7 +771,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
         // reconcile_miss_count resets — a re-owned row is a fresh negative for its new owner.
         `UPDATE negative_targets
             SET state='enabled', source_rule_id=$1, source_entity_type=$2,
-                reconcile_miss_count=0, updated_at=NOW()${synthetic ? ", amazon_neg_target_id=$4" : ""}
+                reconcile_miss_count=0, writeback_error=NULL, writeback_failed_at=NULL,
+                updated_at=NOW()${synthetic ? ", amazon_neg_target_id=$4" : ""}
           WHERE id=$3`,
         synthetic
           ? [rule.id, sourceEntityType, prior.id, `rule-neg-${prior.id}`]
@@ -1028,12 +1081,19 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             // campaign (any ad group, or campaign-level), skip — it's already
             // excluded effectively.
             const { rows: dupTgt } = await query(
-              `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets
+              `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
                WHERE workspace_id=$1 AND campaign_id=$2
                  AND expression @> $3::jsonb`,
               [workspaceId, entity.campaign_id, exprUpperJson]
             );
             if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+            {
+              const priorNt = priorNegTargetRow(dupTgt, entity.ad_group_id);
+              if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {
+                recordSkip(entity, action, "amazon_rejected_negative_target", { amazon_error: priorNt.writeback_error });
+                continue;
+              }
+            }
 
             let insertedNtId = null;
             if (!dryRun) {
@@ -1083,7 +1143,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   asinValue: asinUpper,
                   level: "ad_group",
                 }), "Rule auto-route negative_target write-back failed",
-                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" });
+                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" },
+                  rollbackFailedNegative("negative_targets", "amazon_neg_target_id", insertedNtId));
               }
             }
 
@@ -1109,9 +1170,9 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             // Rows are matched on normalized text so a negative added before this normalization
             // (raw U+00A0 text) is still recognised as the same keyword.
             const { rows: existing } = await query(
-              `SELECT id, state, ad_group_id, amazon_neg_keyword_id FROM negative_keywords
+              `SELECT id, state, ad_group_id, amazon_neg_keyword_id, writeback_error FROM negative_keywords
                WHERE workspace_id=$1 AND campaign_id=$2
-               AND LOWER(${sqlNormalizeKeywordText("keyword_text")})=LOWER($3)
+               AND LOWER(${sqlNormalizeKeywordText("keyword_text")})=LOWER(${sqlNormalizeKeywordText("$3")})
                AND REPLACE(LOWER(match_type),'_','') = REPLACE(LOWER($4),'_','')`,
               [workspaceId, entity.campaign_id, negKeywordText, matchType]
             );
@@ -1122,6 +1183,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             // same negative, since these are written at ad-group level.
             const priorRow = existing.find(r =>
               String(r.ad_group_id ?? "") === String(entity.ad_group_id ?? "")) || null;
+            // Amazon already refused this exact text for a reason that will not change. Report
+            // it every run rather than re-issuing the same doomed write — the skip carries the
+            // Amazon message, so the term shows up as unnegatable instead of vanishing.
+            if (priorRow && isPermanentWritebackError(priorRow.writeback_error)) {
+              recordSkip(entity, action, "amazon_rejected_keyword_text", {
+                match_type: matchType, keyword_text: negKeywordText, amazon_error: priorRow.writeback_error,
+              });
+              continue;
+            }
 
             let insertedId = null;
             if (!dryRun) {
@@ -1151,6 +1221,7 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   `UPDATE negative_keywords
                       SET state='enabled', source_rule_id=$1, source_entity_type=$2,
                           keyword_text=$3, reconcile_miss_count=0,
+                          writeback_error=NULL, writeback_failed_at=NULL,
                           updated_at=NOW()${synthetic ? ", amazon_neg_keyword_id=$5" : ""}
                     WHERE id=$4`,
                   synthetic
@@ -1196,7 +1267,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   matchType,
                   level: "ad_group",
                 }), "Rule add_negative_keyword write-back failed",
-                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: negKeywordText, action: "add_negative_keyword" });
+                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: negKeywordText, action: "add_negative_keyword" },
+                  rollbackFailedNegative("negative_keywords", "amazon_neg_keyword_id", insertedId));
               }
             }
             applied.push({
@@ -1220,10 +1292,17 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             const asinUpper    = entity.keyword_text.toUpperCase();
             const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
             const { rows: dupTgt } = await query(
-              `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
+              `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
               [workspaceId, entity.campaign_id, exprUpperJson]
             );
             if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+            {
+              const priorNt = priorNegTargetRow(dupTgt, entity.ad_group_id);
+              if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {
+                recordSkip(entity, action, "amazon_rejected_negative_target", { amazon_error: priorNt.writeback_error });
+                continue;
+              }
+            }
             let insertedNtId = null;
             if (!dryRun) {
               insertedNtId = await claimNegTargetRow(dupTgt, {
@@ -1256,7 +1335,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                   amazonAdGroupId: entity.amazon_ad_group_id || null,
                   asinValue: asinUpper, level: "ad_group",
                 }), "Rule add_neg_target ST write-back failed",
-                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" });
+                  { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" },
+                  rollbackFailedNegative("negative_targets", "amazon_neg_target_id", insertedNtId));
               }
             }
             applied.push({
@@ -1316,11 +1396,18 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const asinUpper = asinRow.asin;
               const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
               const { rows: dupTgt } = await query(
-                `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets
+                `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
                  WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
                 [workspaceId, entity.campaign_id, exprUpperJson]
               );
               if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+              {
+                const priorNt = priorNegTargetRow(dupTgt, entity.ad_group_id);
+                if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {
+                  recordSkip(entity, action, "amazon_rejected_negative_target", { amazon_error: priorNt.writeback_error });
+                  continue;
+                }
+              }
 
               let insertedNtId = null;
               if (!dryRun) {
@@ -1364,7 +1451,8 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
                     asinValue: asinUpper,
                     level: "ad_group",
                   }), "Rule query-type neg_target write-back failed",
-                    { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" });
+                    { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: entity.keyword_text, action: "add_negative_target" },
+                    rollbackFailedNegative("negative_targets", "amazon_neg_target_id", insertedNtId));
                 }
               }
               applied.push({
@@ -1391,11 +1479,18 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             ? entity.expression : JSON.stringify(entity.expression);
 
           const { rows: existing } = await query(
-            `SELECT id, state, ad_group_id, amazon_neg_target_id FROM negative_targets
+            `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
              WHERE workspace_id=$1 AND campaign_id=$2 AND ad_group_id=$3 AND expression=$4::jsonb`,
             [workspaceId, entity.campaign_id, entity.ad_group_id, exprJson]
           );
           if (existing.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+          {
+            const priorNt = priorNegTargetRow(existing, entity.ad_group_id);
+            if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {
+              recordSkip(entity, action, "amazon_rejected_negative_target", { amazon_error: priorNt.writeback_error });
+              continue;
+            }
+          }
 
           let insertedNtId = null;
           if (!dryRun) {
@@ -1429,35 +1524,22 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             if (insertedNtId && entity.connection_id) {
               const targetExpr = typeof entity.expression === "string"
                 ? JSON.parse(entity.expression) : entity.expression;
-              const ntPath = entity.campaign_type === "sponsoredDisplay"
-                ? "/sd/negativeTargets" : "/sp/negativeTargets";
-              post({
+              // Was an inline fire-and-forget post(): it resolved "success" whenever the HTTP
+              // call did not throw, so a 207 rejection (no id in the body) was recorded as a
+              // clean write, and executeRule could return before Amazon had answered at all.
+              trackWriteback(addNegTgtAudit, pushNegativeTarget({
+                localId: insertedNtId,
                 connectionId: entity.connection_id,
                 profileId: String(entity.amazon_profile_id),
-                marketplace: entity.marketplace_id,
-                path: ntPath,
-                data: { negativeTargetingClauses: [{
-                  expression: targetExpr,
-                  expressionType: "manual",
-                  state: "ENABLED",
-                  campaignId: entity.amazon_campaign_id,
-                  ...(entity.amazon_ad_group_id ? { adGroupId: entity.amazon_ad_group_id } : {}),
-                }] },
-                group: "keywords",
-              }).then(result => {
-                const created = result?.negativeTargetingClauses?.success?.[0]
-                  || result?.negativeTargetingClauses?.[0]
-                  || result?.[0];
-                const realId = created?.negativeTargetId || created?.targetId;
-                if (realId && insertedNtId) {
-                  query("UPDATE negative_targets SET amazon_neg_target_id = $1 WHERE id = $2",
-                    [String(realId), insertedNtId]).catch(() => {});
-                }
-                return updateAuditStatus(addNegTgtAudit, "success");
-              }).catch(e => {
-                logger.warn("Rule add_negative_target write-back failed", { error: e.message });
-                return updateAuditStatus(addNegTgtAudit, "error", e.message);
-              });
+                marketplaceId: entity.marketplace_id,
+                campaignType: entity.campaign_type,
+                amazonCampaignId: entity.amazon_campaign_id,
+                amazonAdGroupId: entity.amazon_ad_group_id || null,
+                expression: targetExpr,
+                level: "ad_group",
+              }), "Rule add_negative_target write-back failed",
+                { entity_id: entity.id, entity_type: entity.entity_type, keyword_text: null, action: "add_negative_target" },
+                rollbackFailedNegative("negative_targets", "amazon_neg_target_id", insertedNtId));
             }
           }
           applied.push({
@@ -2390,7 +2472,7 @@ router.get("/:id/runs", async (req, res, next) => {
     const { rows } = await query(
       `SELECT id, started_at, completed_at, dry_run, status,
               entities_evaluated, entities_matched, actions_taken, actions_failed,
-              summary, error_message
+              entities_skipped, summary, diagnostics, error_message
        FROM rule_executions
        WHERE rule_id = $1 AND workspace_id = $2
        ORDER BY started_at DESC LIMIT 50`,
@@ -2419,6 +2501,42 @@ function runStatusFromResult(result) {
   return failed ? "partial" : "completed";
 }
 
+// Why a run did what it did, condensed for storage.
+//
+// A run that matched 30 entities and changed none is normal — every match can be legitimately
+// skipped (already paused, budget not binding, already negative). Persisting only the applied
+// list made that indistinguishable from a broken rule, and the reasons the engine had already
+// computed were thrown away when executeRule returned. `by_reason` gives the shape of the run
+// at a glance; `samples` keeps a few entity names per reason so it can be acted on, capped so
+// a 20 000-entity run cannot bloat the row.
+const DIAGNOSTIC_SAMPLES_PER_REASON = 5;
+
+function summarizeRunDiagnostics(result) {
+  const byReason = {};
+  const samples  = {};
+  for (const s of (result?.skipped || [])) {
+    const reason = s?.reason || "unknown";
+    byReason[reason] = (byReason[reason] || 0) + 1;
+    if (!samples[reason]) samples[reason] = [];
+    if (samples[reason].length < DIAGNOSTIC_SAMPLES_PER_REASON) {
+      samples[reason].push({
+        entity_type:  s?.entity_type || null,
+        keyword_text: s?.keyword_text || s?.campaign_name || null,
+        action:       s?.action || null,
+        ...(s?.detail?.amazon_error ? { amazon_error: String(s.detail.amazon_error).slice(0, 300) } : {}),
+      });
+    }
+  }
+  return {
+    skipped_by_reason: byReason,
+    skipped_samples:   samples,
+    // Amazon rejections never reach `errors` (the local DB is updated regardless), so without
+    // this the only record of them was the audit row.
+    writeback_errors: (result?.writeback_errors || []).slice(0, 25),
+    errors:           (result?.errors || []).slice(0, 25),
+  };
+}
+
 // Persist a row into rule_executions so /rules/:id/runs has real history.
 // Best-effort: a failed insert must never break rule execution.
 //
@@ -2430,15 +2548,18 @@ async function insertRuleExecution(ruleId, workspaceId, result, dryRun, startedA
     await query(
       `INSERT INTO rule_executions
          (rule_id, workspace_id, started_at, completed_at, dry_run, status,
-          entities_evaluated, entities_matched, actions_taken, actions_failed, summary)
-       VALUES ($1,$2,COALESCE($3, NOW()),NOW(),$4,$5,$6,$7,$8,$9,$10)`,
+          entities_evaluated, entities_matched, actions_taken, actions_failed,
+          entities_skipped, summary, diagnostics)
+       VALUES ($1,$2,COALESCE($3, NOW()),NOW(),$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         ruleId, workspaceId, startedAt, !!dryRun, runStatusFromResult(result),
         result?.total_evaluated || 0,
         result?.matched_count || 0,
         (result?.applied_count || 0) + (result?.removed_count || 0),
         (result?.errors?.length || 0) + (result?.writeback_error_count || 0),
+        result?.skipped_count || 0,
         JSON.stringify(result?.applied || []),
+        JSON.stringify(summarizeRunDiagnostics(result)),
       ]
     );
   } catch (e) {
@@ -2483,5 +2604,8 @@ async function executeAllDueRules(workspaceId) {
 
 module.exports = router;
 module.exports.executeAllDueRules = executeAllDueRules;
+// Exposed for dry-run verification against a live database without going through auth.
+module.exports.executeRule = executeRule;
 // Internals exposed for unit tests only — not part of the route contract.
-module.exports.__test = { runStatusFromResult, withDerivedMetrics, isSyntheticNegId, negativeStillJustified };
+module.exports.__test = { runStatusFromResult, withDerivedMetrics, isSyntheticNegId, negativeStillJustified,
+  isPermanentWritebackError, summarizeRunDiagnostics };

@@ -230,13 +230,34 @@ async function startScheduler() {
     }
   }, null, true, "UTC");
 
-  // ─── Daily cleanup: delete failed reports older than 2 days ─────────────────
+  // ─── Daily cleanup: time out stalled reports, delete failed ones ────────────
+  //
+  // A report request only ever left 'pending'/'requested'/'processing' when the worker that
+  // owned it finished. Any worker that died first — a nodemon reload on deploy, a container
+  // restart, a lost BullMQ job — abandoned its row in a non-terminal state forever: on
+  // 2026-09-04 the table held rows stuck since June, and five from a single 2026-08-27
+  // backfill. They are harmless individually but they make "is the pipeline healthy?"
+  // unanswerable, and they hide a real stall behind a crowd of dead ones.
+  //
+  // Amazon reports are minutes-scale; anything untouched for STALE_REPORT_HOURS is not
+  // coming back, so it is failed explicitly and swept by the same DELETE below.
+  const STALE_REPORT_HOURS = 12;
   const reportCleanupJob = new CronJob("0 4 * * *", async () => {
     try {
+      const { rowCount: staleCount } = await query(
+        `UPDATE report_requests
+            SET status = 'failed',
+                error_message = COALESCE(error_message,
+                  'Abandoned: no progress for ' || $1::int || 'h (worker restarted or job lost)'),
+                updated_at = NOW()
+          WHERE status IN ('pending', 'requested', 'processing')
+            AND COALESCE(updated_at, created_at) < NOW() - make_interval(hours => $1::int)`,
+        [STALE_REPORT_HOURS]
+      );
       const { rowCount } = await query(
         `DELETE FROM report_requests WHERE status = 'failed' AND created_at < NOW() - INTERVAL '2 days'`
       );
-      logger.info("Cron: Cleaned up failed reports", { deleted: rowCount });
+      logger.info("Cron: Cleaned up reports", { timedOut: staleCount, deleted: rowCount });
     } catch (err) {
       logger.error("Cron report cleanup failed", { error: err.message });
     }

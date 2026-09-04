@@ -1306,7 +1306,7 @@ async function syncNegativeTargets(profileDbRecord, amazonNegTargets, adType = "
     const params = [];
     let pi = 1;
     for (const t of chunk) {
-      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
+      values.push(`($${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},$${pi++},NOW())`);
       params.push(
         workspaceId, profileDbId,
         campMap.get(String(t.campaignId)) || null,
@@ -1315,18 +1315,29 @@ async function syncNegativeTargets(profileDbRecord, amazonNegTargets, adType = "
         t.expression ? JSON.stringify(t.expression) : null,
         t.expressionType || null,
         t.adGroupId ? "ad_group" : "campaign",
+        (t.state || "ENABLED").toLowerCase(),
         JSON.stringify(t),
       );
     }
     if (!values.length) continue;
     await query(
+      // `state` is synced from Amazon, exactly as syncNegativeKeywords does.
+      //
+      // It used to be omitted here — not in the column list, not in the DO UPDATE — so
+      // negative_targets.state was whatever AdsFlow last wrote locally and was never
+      // reconciled with reality. Any divergence became permanent and undetectable: on
+      // 2026-09-04 that was 43 ASIN negatives the rules had "released" (local 'archived')
+      // that were still ENABLED on Amazon and blocking traffic, plus 51 the other way round
+      // — shown as active here while Amazon had them ARCHIVED. Amazon is the authority on
+      // whether a negative is live, so its state wins.
       `INSERT INTO negative_targets
          (workspace_id, profile_id, campaign_id, ad_group_id, amazon_neg_target_id, ad_type,
-          expression, expression_type, level, raw_data, synced_at)
+          expression, expression_type, level, state, raw_data, synced_at)
        VALUES ${values.join(",")}
        ON CONFLICT (profile_id, amazon_neg_target_id) DO UPDATE SET
          expression=EXCLUDED.expression,
          expression_type=EXCLUDED.expression_type,
+         state=EXCLUDED.state,
          raw_data=EXCLUDED.raw_data, synced_at=NOW(), updated_at=NOW()`,
       params
     );
