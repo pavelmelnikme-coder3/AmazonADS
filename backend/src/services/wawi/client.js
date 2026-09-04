@@ -85,8 +85,37 @@ async function wawiGetAll(conn, path, params = {}, onPage, { pageSize = DEFAULT_
  * Page 1 is fetched first to learn TotalPages; the rest run in chunks of `concurrency`.
  * Order is not guaranteed (callers must be order-independent / idempotent).
  */
-async function wawiGetPagesParallel(conn, path, params = {}, onPage, { pageSize = DEFAULT_PAGE_SIZE, timeout = 30000, concurrency = 4 } = {}) {
-  const first = await wawiGet(conn, path, { ...params, pageNumber: 1, pageSize }, { timeout });
+// One page, retried on a transient failure.
+//
+// Later pages were already tolerant — a failed one is logged and skipped — but page 1 was
+// fetched bare, so a single slow response aborted the whole step. That is what "Wawi sync
+// step failed: items — timeout of 90000ms exceeded" was: every run, the entire item catalog
+// went unsynced because the first page took too long. Item objects are heavy (Wawi
+// serialises ~0.6 s each), so an occasional slow page is expected, not exceptional.
+//
+// Wawi is the live production ERP and strictly read-only to us, so retrying a GET is safe;
+// the attempts are few and spaced to keep the load off it.
+const PAGE_RETRIES = 2;
+const PAGE_RETRY_DELAY_MS = 2000;
+
+async function wawiGetPage(conn, path, params, pageNumber, pageSize, timeout, retryDelayMs) {
+  let lastErr;
+  for (let attempt = 0; attempt <= PAGE_RETRIES; attempt++) {
+    try {
+      return await wawiGet(conn, path, { ...params, pageNumber, pageSize }, { timeout });
+    } catch (e) {
+      lastErr = e;
+      if (attempt < PAGE_RETRIES) {
+        logger.warn("wawi page retry", { path, page: pageNumber, attempt: attempt + 1, error: e.message });
+        await new Promise((r) => setTimeout(r, retryDelayMs * (attempt + 1)));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+async function wawiGetPagesParallel(conn, path, params = {}, onPage, { pageSize = DEFAULT_PAGE_SIZE, timeout = 30000, concurrency = 4, retryDelayMs = PAGE_RETRY_DELAY_MS } = {}) {
+  const first = await wawiGetPage(conn, path, params, 1, pageSize, timeout, retryDelayMs);
   if (Array.isArray(first)) { if (first.length) await onPage(first, { pageNumber: 1 }); return first.length; }
   const grand = first?.TotalItems ?? null;
   const items1 = Array.isArray(first?.Items) ? first.Items : [];
@@ -97,7 +126,7 @@ async function wawiGetPagesParallel(conn, path, params = {}, onPage, { pageSize 
     const batch = [];
     for (let k = 0; k < concurrency && p + k <= totalPages; k++) batch.push(p + k);
     const results = await Promise.all(batch.map((pn) =>
-      wawiGet(conn, path, { ...params, pageNumber: pn, pageSize }, { timeout }).then((d) => ({ pn, d })).catch((e) => ({ pn, err: e }))));
+      wawiGetPage(conn, path, params, pn, pageSize, timeout, retryDelayMs).then((d) => ({ pn, d })).catch((e) => ({ pn, err: e }))));
     for (const r of results) {
       if (r.err) { logger.warn("wawi page failed", { path, page: r.pn, error: r.err.message }); continue; }
       const its = Array.isArray(r.d?.Items) ? r.d.Items : [];
