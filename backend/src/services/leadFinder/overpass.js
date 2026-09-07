@@ -206,7 +206,16 @@ function pickAddress(tags) {
  * "busy" to the user on the first hiccup.
  */
 const BUSY_STATUSES = new Set([406, 429, 503, 504]);
-const RETRY_DELAYS_MS = [2000, 5000];
+// Connection-level refusals are the same "come back shortly" signal as a busy status, they
+// just arrive before HTTP does. The public instance rate-limits by dropping TCP connections,
+// and Node reports that as ECONNREFUSED with an EMPTY message — so it used to be classified
+// as a hard "service unavailable", logged as `{"error":""}`, and not retried. Observed live
+// on 2026-09-07: a 304-tile run over Germany was refused after ~5 tiles, then marched through
+// 237 more at full speed getting nothing, and would have reported `completed` with 6 results.
+const RETRYABLE_NETWORK_CODES = new Set([
+  "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "EPIPE", "ENETUNREACH",
+]);
+const RETRY_DELAYS_MS = [2000, 5000, 15000];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function searchBusinesses({ bbox, query, limit = 501 }) {
@@ -239,15 +248,23 @@ async function searchBusinesses({ bbox, query, limit = 501 }) {
         logger.warn("leadFinder.overpass: query timed out (not retrying)", { query });
         throw new Error("Search timed out — try a more specific business type or a smaller region");
       }
-      if (!BUSY_STATUSES.has(status)) {
-        logger.error("leadFinder.overpass: request failed", { error: err.message, status });
+      const retryable = BUSY_STATUSES.has(status) || RETRYABLE_NETWORK_CODES.has(err.code);
+      if (!retryable) {
+        // err.message is empty for most socket-level failures — err.code is the only thing
+        // that identifies them, so it has to be in the log.
+        logger.error("leadFinder.overpass: request failed", { error: err.message, code: err.code, status });
         throw new Error("Search service unavailable, try again shortly");
       }
-      logger.warn("leadFinder.overpass: busy, retrying", { status, attempt });
+      logger.warn("leadFinder.overpass: busy, retrying", { status, code: err.code, attempt });
       if (attempt < RETRY_DELAYS_MS.length) await sleep(RETRY_DELAYS_MS[attempt]);
     }
   }
-  if (lastErr) throw new Error("Search service is busy right now — try again in a minute");
+  if (lastErr) {
+    logger.warn("leadFinder.overpass: giving up after retries", { code: lastErr.code, status: lastErr.response?.status });
+    const e = new Error("Search service is busy right now — try again in a minute");
+    e.overpassBusy = true; // lets the tiled worker tell "provider refusing us" from "bad tile"
+    throw e;
+  }
 
   // Overpass doesn't always fail loudly on an internal timeout — for very large bboxes (e.g. a
   // whole-country region from Nominatim) it can return HTTP 200 with an EMPTY elements array

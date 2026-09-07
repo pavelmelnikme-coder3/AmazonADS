@@ -697,11 +697,21 @@ async function startWorkers() {
       // walk, so a "whole of Germany" search returned the Allgäu and said nothing about it.
       const visitOrder = spreadTileOrder(tiles);
       const tileCap = perTileCap(visitOrder.length);
-      logger.info("Lead finder tiled search started", { searchId, tileCount: visitOrder.length, tileCap });
+      const tileDelayMs = visitOrder.length > 50 ? 5000 : 1500;
+      logger.info("Lead finder tiled search started", { searchId, tileCount: visitOrder.length, tileCap, tileDelayMs });
 
       let currentTotal = 0;
       let tilesDone = 0;
       let truncated = false;
+      // A tile that fails on its own (one bad bbox, one slow query) is worth skipping. A run of
+      // them means the provider is refusing us, and continuing does two bad things: it produces
+      // a search that reports itself `completed` with almost nothing found — indistinguishable
+      // from "the region really has almost nothing" — and it keeps hammering the endpoint that
+      // is already rate-limiting us. Live on 2026-09-07: a Germany run was refused after ~5 of
+      // 304 tiles and burned through 237 more at full speed, on its way to reporting 6 results.
+      const MAX_CONSECUTIVE_TILE_FAILURES = 8;
+      let consecutiveFailures = 0;
+      let abortedReason = null;
 
       for (const tile of visitOrder) {
         const { rows: [row] } = await query(`SELECT cancel_requested FROM lead_searches WHERE id = $1`, [searchId]);
@@ -732,10 +742,22 @@ async function startWorkers() {
           const toInsert = businesses.slice(0, tileBudget);
           const inserted = await persistResults(searchId, workspaceId, toInsert);
           currentTotal += inserted.length;
+          consecutiveFailures = 0;
         } catch (e) {
           // One tile timing out (or Overpass being briefly overloaded) shouldn't kill the
           // whole country search — partial coverage beats aborting entirely.
-          logger.warn("Lead finder tile failed, skipping", { searchId, tile, error: e.message });
+          consecutiveFailures++;
+          logger.warn("Lead finder tile failed, skipping", {
+            searchId, tile, error: e.message, code: e.code, consecutiveFailures });
+          if (consecutiveFailures >= MAX_CONSECUTIVE_TILE_FAILURES) {
+            abortedReason = `Search provider stopped responding after ${tilesDone} of ${tiles.length} areas `
+              + `(${currentTotal} found so far). The public OpenStreetMap endpoint rate-limits by refusing `
+              + `connections; wait a few minutes and run the search again.`;
+            logger.error("Lead finder aborting: provider refusing requests", { searchId, tilesDone, currentTotal });
+            break;
+          }
+          // Back off before the next tile — retrying at full speed is what deepens a rate limit.
+          await new Promise((r) => setTimeout(r, tileDelayMs * 2 * consecutiveFailures));
         }
 
         tilesDone++;
@@ -745,9 +767,13 @@ async function startWorkers() {
         );
         await job.updateProgress(Math.round((tilesDone / visitOrder.length) * 100));
 
-        // Polite pacing between tiles — same spirit as the scrape batch delay (routes/leadFinder.js),
-        // avoids hammering the free public Overpass instance with back-to-back large-area queries.
-        await new Promise((r) => setTimeout(r, 1500));
+        // Polite pacing between tiles. A country grid is hundreds of queries in a row, and the
+        // free public Overpass instance rate-limits that by refusing connections outright: a
+        // 304-tile run at 1.5s got this server blocked after roughly five tiles on 2026-09-07,
+        // and the block then outlived the run. Country-scale scans get a much slower cadence —
+        // a whole-Germany pass becomes ~25 minutes, which is fine for a background job and is
+        // the difference between finishing and being cut off.
+        await new Promise((r) => setTimeout(r, tileDelayMs));
       }
 
       // Always re-persist truncated/result_count here too — the "remaining <= 0" branch above
@@ -755,12 +781,17 @@ async function startWorkers() {
       // check fires at the *top* of an iteration, before any DB write in that iteration), so
       // relying solely on the last per-tile write would silently leave truncated=false in a
       // hit-the-cap-exactly case.
+      // A run cut short because the provider refused us is NOT a completed search — reporting it
+      // as one is how "6 Asian restaurants in Germany" would have looked like a real answer.
       await query(
-        `UPDATE lead_searches SET status = 'completed', tiles_done = $1, result_count = $2, truncated = $3
-         WHERE id = $4 AND status = 'running'`,
-        [tilesDone, currentTotal, truncated, searchId]
+        `UPDATE lead_searches
+            SET status = $5, tiles_done = $1, result_count = $2, truncated = $3, error_message = $6
+          WHERE id = $4 AND status = 'running'`,
+        [tilesDone, currentTotal, truncated || !!abortedReason, searchId,
+         abortedReason ? "failed" : "completed", abortedReason]
       );
-      logger.info("Lead finder tiled search completed", { searchId, tilesDone, currentTotal, truncated });
+      logger[abortedReason ? "warn" : "info"]("Lead finder tiled search finished",
+        { searchId, tilesDone, currentTotal, truncated, aborted: !!abortedReason });
     },
     { connection: createRedisConnection(), concurrency: 1 }
   );
