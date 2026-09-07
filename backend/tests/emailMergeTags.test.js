@@ -80,3 +80,48 @@ describe("public link base", () => {
       .toContain("a%2Fb%3Fc");
   });
 });
+
+describe("the compliance footer speaks the recipient's language", () => {
+  // It is the one part of a marketing email this code writes rather than the campaign author,
+  // and it shipped hardcoded English under a German campaign.
+  const { resolveLocale } = require("../src/services/email/render");
+  const de = { ...CONTACT, attributes: { locale: "de-DE" } };
+
+  test("an explicit locale wins", () => {
+    expect(renderHtmlForContact("<p/>", CONTACT, { locale: "de" })).toContain("Abmelden");
+    expect(renderHtmlForContact("<p/>", CONTACT, { locale: "ru" })).toContain("Отписаться");
+  });
+
+  test("a contact's own locale attribute is used when the caller says nothing", () => {
+    expect(renderHtmlForContact("<p/>", de, {})).toContain("Sie erhalten diese E-Mail");
+  });
+
+  test("`lang` works as well as `locale`", () => {
+    expect(resolveLocale({ attributes: { lang: "ru" } }, {})).toBe("ru");
+  });
+
+  test("a region suffix is tolerated", () => {
+    expect(resolveLocale({ attributes: { locale: "de-AT" } }, {})).toBe("de");
+  });
+
+  test("the deployment default applies when the contact says nothing", () => {
+    expect(withEnv({ MAIL_DEFAULT_LOCALE: "de" }, () => resolveLocale({ attributes: {} }, {}))).toBe("de");
+  });
+
+  test("an unknown language falls through to English rather than an empty footer", () => {
+    expect(resolveLocale({ attributes: { locale: "xx" } }, {})).toBe("en");
+    expect(renderHtmlForContact("<p/>", { ...CONTACT, attributes: { locale: "xx" } }, {}))
+      .toContain("You are receiving this");
+  });
+
+  test("the test-send note is localised too", () => {
+    expect(renderHtmlForContact("<p/>", CONTACT, { locale: "de", isTest: true })).toContain("Testsendungen");
+  });
+
+  test("a localised footer still carries a working unsubscribe link", () => {
+    const out = withEnv({ APP_PUBLIC_URL: "https://a.example" },
+      () => renderHtmlForContact("<p/>", de, {}));
+    expect(out).toContain("https://a.example/api/v1/email/unsubscribe/TOK123");
+    expect(out).not.toMatch(/href=""/);
+  });
+});

@@ -57,6 +57,32 @@ function contactFields(contact, opts = {}) {
   };
 }
 
+// The compliance footer is appended to every marketing email, so it is the one piece of the
+// message this code writes rather than the campaign author — and it shipped hardcoded English
+// under a German campaign. Kept deliberately small: this is legal boilerplate, not UI copy, so
+// it lives here rather than pulling the frontend's i18n bundle into the mail path.
+const FOOTER_TEXT = {
+  en: { optIn: "You are receiving this because you opted in.", unsubscribe: "Unsubscribe",
+        test: "[TEST] Unsubscribe link is disabled in test sends — it only works for real recipients." },
+  de: { optIn: "Sie erhalten diese E-Mail, weil Sie sich dafür angemeldet haben.", unsubscribe: "Abmelden",
+        test: "[TEST] Der Abmeldelink ist in Testsendungen deaktiviert — er funktioniert nur für echte Empfänger." },
+  ru: { optIn: "Вы получаете это письмо, потому что подписались на рассылку.", unsubscribe: "Отписаться",
+        test: "[TEST] В тестовой отправке ссылка отписки отключена — она работает только для реальных получателей." },
+};
+
+// Order of preference: what the caller asked for, then what the contact itself says (an
+// imported `locale`/`lang` attribute), then the deployment default, then English. Unknown
+// values fall through rather than rendering an empty footer.
+function resolveLocale(contact, opts = {}) {
+  const attrs = contact?.attributes && typeof contact.attributes === "object" ? contact.attributes : {};
+  const candidates = [opts.locale, attrs.locale, attrs.lang, process.env.MAIL_DEFAULT_LOCALE, "en"];
+  for (const c of candidates) {
+    const key = String(c || "").slice(0, 2).toLowerCase();
+    if (FOOTER_TEXT[key]) return key;
+  }
+  return "en";
+}
+
 /**
  * Render the final HTML for one recipient: merge tags applied + a compliance footer
  * appended (postal address from COMPANY_POSTAL_ADDRESS + unsubscribe link). The footer
@@ -70,9 +96,10 @@ function contactFields(contact, opts = {}) {
 function renderHtmlForContact(htmlBody, contact, opts = {}) {
   const body = applyMergeTags(htmlBody, contactFields(contact, opts));
   const addr = process.env.COMPANY_POSTAL_ADDRESS || "";
+  const txt = FOOTER_TEXT[resolveLocale(contact, opts)];
   const unsubLine = opts.isTest
-    ? `<div>[TEST] Unsubscribe link is disabled in test sends — it only works for real recipients.</div>`
-    : `<div>You are receiving this because you opted in. <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;">Unsubscribe</a>.</div>`;
+    ? `<div>${esc(txt.test)}</div>`
+    : `<div>${esc(txt.optIn)} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;">${esc(txt.unsubscribe)}</a>.</div>`;
   const footer = `
   <div style="margin-top:28px;padding-top:14px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
     ${addr ? `<div style="margin-bottom:6px;">${esc(addr)}</div>` : ""}
@@ -81,4 +108,4 @@ function renderHtmlForContact(htmlBody, contact, opts = {}) {
   return `${body}${footer}`;
 }
 
-module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact };
+module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact, resolveLocale, FOOTER_TEXT };
