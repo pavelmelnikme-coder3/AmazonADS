@@ -752,10 +752,24 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
   const priorNegTargetRow = (existing, adGroupId) =>
     (existing || []).find(r => String(r.ad_group_id ?? "") === String(adGroupId ?? "")) || null;
 
+  // Does an existing negative actually stop THIS entity's traffic?
+  //
+  // Amazon enforces a negative at the level it was created: a campaign-level negative covers
+  // every ad group, an ad-group-level one covers only its own. The dedup below used to accept
+  // any enabled row anywhere in the campaign as "handled". That was only ever equivalent to
+  // this because a term could not appear in two ad groups at once — which was itself a storage
+  // bug: every search-term report row for a term collapsed onto one (campaign, query, day)
+  // slot, so sibling ad groups were invisible (migration 050). With the granularity restored,
+  // campaign-wide dedup would report `already_negative` for terms nothing is blocking, and the
+  // term would go on spending in the sibling ad group with the run reporting no action needed.
+  const negativeCoversAdGroup = (row, adGroupId) =>
+    row.state === "enabled" &&
+    (row.level === "campaign" || String(row.ad_group_id ?? "") === String(adGroupId ?? ""));
+
   // Claim the negative_target row for an expression the rule wants negated.
   //
-  // `existing` is every row matching the call site's dedup predicate, in ANY state. If one is
-  // already enabled the caller skips as `already_negative` (unchanged, campaign-wide behaviour).
+  // `existing` is every row matching the call site's dedup predicate, in ANY state. If one of
+  // them already covers this ad group the caller skips as `already_negative`.
   // Otherwise an inactive row for the same ad group is re-activated and re-owned rather than
   // inserting a second row — same reasoning as the negative-keyword path: leaving the row owned
   // by the rule that archived it is what let one rule undo another's work on every run.
@@ -1077,16 +1091,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             );
             if (activeTgt.length > 0) { recordSkip(entity, action, "is_active_target"); continue; }
 
-            // Dedup: if this ASIN is already a negative_target anywhere in the
-            // campaign (any ad group, or campaign-level), skip — it's already
-            // excluded effectively.
+            // Dedup: skip only if a negative_target already excludes this ASIN where Amazon
+            // enforces it for this entity — campaign-level, or ad-group-level in this ad group.
             const { rows: dupTgt } = await query(
-              `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
+              `SELECT id, state, level, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
                WHERE workspace_id=$1 AND campaign_id=$2
                  AND expression @> $3::jsonb`,
               [workspaceId, entity.campaign_id, exprUpperJson]
             );
-            if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+            if (dupTgt.some(r => negativeCoversAdGroup(r, entity.ad_group_id))) { recordSkip(entity, action, "already_negative"); continue; }
             {
               const priorNt = priorNegTargetRow(dupTgt, entity.ad_group_id);
               if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {
@@ -1183,15 +1196,15 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             // Rows are matched on normalized text so a negative added before this normalization
             // (raw U+00A0 text) is still recognised as the same keyword.
             const { rows: existing } = await query(
-              `SELECT id, state, ad_group_id, amazon_neg_keyword_id, writeback_error FROM negative_keywords
+              `SELECT id, state, level, ad_group_id, amazon_neg_keyword_id, writeback_error FROM negative_keywords
                WHERE workspace_id=$1 AND campaign_id=$2
                AND LOWER(${sqlNormalizeKeywordText("keyword_text")})=LOWER(${sqlNormalizeKeywordText("$3")})
                AND REPLACE(LOWER(match_type),'_','') = REPLACE(LOWER($4),'_','')`,
               [workspaceId, entity.campaign_id, negKeywordText, matchType]
             );
-            // "Already negative" stays campaign-wide, as before — an enabled negative anywhere
-            // in the campaign means the term is handled.
-            if (existing.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+            // "Already negative" means a negative Amazon actually enforces for THIS ad group:
+            // campaign-level anywhere in the campaign, or ad-group-level in this ad group.
+            if (existing.some(r => negativeCoversAdGroup(r, entity.ad_group_id))) { recordSkip(entity, action, "already_negative"); continue; }
             // Re-use is deliberately narrower: only a row for this same ad group describes the
             // same negative, since these are written at ad-group level.
             const priorRow = existing.find(r =>
@@ -1305,10 +1318,10 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
             const asinUpper    = entity.keyword_text.toUpperCase();
             const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
             const { rows: dupTgt } = await query(
-              `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
+              `SELECT id, state, level, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
               [workspaceId, entity.campaign_id, exprUpperJson]
             );
-            if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+            if (dupTgt.some(r => negativeCoversAdGroup(r, entity.ad_group_id))) { recordSkip(entity, action, "already_negative"); continue; }
             {
               const priorNt = priorNegTargetRow(dupTgt, entity.ad_group_id);
               if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {
@@ -1409,11 +1422,11 @@ async function executeRule(rule, workspaceId, dryRun = false, actorId = null, ac
               const asinUpper = asinRow.asin;
               const exprUpperJson = JSON.stringify([{ type: "ASIN_SAME_AS", value: asinUpper }]);
               const { rows: dupTgt } = await query(
-                `SELECT id, state, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
+                `SELECT id, state, level, ad_group_id, amazon_neg_target_id, writeback_error FROM negative_targets
                  WHERE workspace_id=$1 AND campaign_id=$2 AND expression @> $3::jsonb`,
                 [workspaceId, entity.campaign_id, exprUpperJson]
               );
-              if (dupTgt.some(r => r.state === "enabled")) { recordSkip(entity, action, "already_negative"); continue; }
+              if (dupTgt.some(r => negativeCoversAdGroup(r, entity.ad_group_id))) { recordSkip(entity, action, "already_negative"); continue; }
               {
                 const priorNt = priorNegTargetRow(dupTgt, entity.ad_group_id);
                 if (priorNt && isPermanentWritebackError(priorNt.writeback_error)) {

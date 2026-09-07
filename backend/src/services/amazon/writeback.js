@@ -325,10 +325,23 @@ async function recoverDuplicateNegativeKeyword({ connectionId, profileId, market
       });
   }
   if (existing.state && existing.state !== "ENABLED") {
-    await put({
+    // This re-enable IS the write-back — Amazon already holds the negative, so nothing else in
+    // this call blocks the term. Its result therefore has to be reported like any other write:
+    // the batch endpoint answers 207 Multi-Status, so a per-item rejection rides in
+    // `<dataKey>.error[]` behind a 2xx and an unchecked `put()` resolves as if it had worked.
+    // Reporting `ok` there would leave the row `enabled` locally while Amazon keeps it PAUSED,
+    // and every later run then skips the term as `already_negative` — spending on a negative
+    // that blocks nothing, invisibly. Returning the failure lets the caller roll the row back.
+    const reEnable = await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
       path, data: { [dataKey]: [{ keywordId: existing.id, state: "ENABLED" }] }, group: "keywords",
-    }).catch((e) => logger.warn("Re-enable duplicate negative keyword failed", { profileId, keywordId: existing.id, error: e.message }));
+    }).catch((e) => ({ __threw: e.message }));
+    const err = reEnable?.__threw || partialError(reEnable, dataKey);
+    if (err) {
+      logger.warn("Re-enable duplicate negative keyword failed", { profileId, keywordId: existing.id, error: err });
+      return { ok: false, error: err, realId: existing.id };
+    }
+    logger.info("Duplicate negative keyword re-enabled", { profileId, path, keywordId: existing.id });
   }
   return { ok: true, duplicate: true, realId: existing.id };
 }
@@ -666,10 +679,18 @@ async function recoverDuplicateNegativeTarget({ connectionId, profileId, marketp
       });
   }
   if (existing.state && existing.state !== "ENABLED") {
-    await put({
+    // See recoverDuplicateNegativeKeyword: this re-enable is the whole write-back, and a 207
+    // per-item rejection hides behind a 2xx, so its result must be checked and reported.
+    const reEnable = await put({
       connectionId, profileId: profileId.toString(), marketplace: marketplaceId,
       path: "/sp/negativeTargets", data: { negativeTargetingClauses: [{ targetId: existing.id, state: "ENABLED" }] }, group: "keywords",
-    }).catch((e) => logger.warn("Re-enable duplicate negative target failed", { profileId, targetId: existing.id, error: e.message }));
+    }).catch((e) => ({ __threw: e.message }));
+    const err = reEnable?.__threw || partialError(reEnable, "negativeTargetingClauses");
+    if (err) {
+      logger.warn("Re-enable duplicate negative target failed", { profileId, targetId: existing.id, error: err });
+      return { ok: false, error: err, realId: existing.id };
+    }
+    logger.info("Duplicate negative target re-enabled", { profileId, targetId: existing.id });
   }
   return { ok: true, duplicate: true, realId: existing.id };
 }

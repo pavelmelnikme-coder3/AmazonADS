@@ -1109,7 +1109,7 @@ describe("Action: add_negative_keyword", () => {
   it("dry-run: already exists in negative_keywords → already_negative skip", async () => {
     const kw = makeKeyword({ state: "enabled", acos: "80" });
     mockKeywordRun(negRule("exact"), [kw], [
-      { rows: [{ id: "neg-001", state: "enabled" }] }, // dedup → found ENABLED → skip
+      { rows: [{ id: "neg-001", state: "enabled", level: "ad_group", ad_group_id: AG_ID }] }, // dedup → ENABLED in this ad group → skip
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(0);
@@ -1186,7 +1186,7 @@ describe("Action: add_negative_keyword — ASIN auto-routing", () => {
   it("ASIN already in negative_targets → already_negative skip", async () => {
     mockSearchTermRun(asinRule(), [asinSearchTerm()], [
       { rows: [] },                      // activeTgt check → not an active target
-      { rows: [{ id: "nt-existing", state: "enabled" }] }, // dedup → found ENABLED
+      { rows: [{ id: "nt-existing", state: "enabled", level: "ad_group", ad_group_id: AG_ID }] }, // dedup → ENABLED in this ad group
     ]);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: true });
     expect(res.body.applied_count).toBe(0);
@@ -2109,7 +2109,7 @@ describe("add_negative_keyword — normalization and archived-row re-use", () =>
   it("looks the negative up on normalized text on both sides", async () => {
     mockAddRun([makeSearchTerm({ keyword_text: NBSP_TERM, acos: "80" })], [], [{ id: "neg-new" }]);
     await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
-    const dedup = dbQuery.mock.calls.find(c => /FROM negative_keywords/.test(c[0]) && /SELECT id, state, ad_group_id/.test(c[0]));
+    const dedup = dbQuery.mock.calls.find(c => /FROM negative_keywords/.test(c[0]) && /SELECT id, state, level, ad_group_id/.test(c[0]));
     expect(dedup[0]).toMatch(/regexp_replace/);
     expect(dedup[1]).toContain(CLEAN_TERM);
   });
@@ -2185,12 +2185,23 @@ describe("add_negative_keyword — normalization and archived-row re-use", () =>
       expect.objectContaining({ localId: "neg-paused" }));
   });
 
-  it("keeps 'already negative' campaign-wide — an enabled row in another ad group still skips", async () => {
-    // Re-use is ad-group scoped, but the already_negative check must stay campaign-wide as
-    // it always was; narrowing it would make rules create a burst of extra negatives.
+  it("an enabled row in ANOTHER ad group does not count — it blocks nothing here", async () => {
+    // Amazon applies an ad-group-level negative only inside its own ad group, so a negative
+    // sitting in a sibling ad group leaves this term spending. Skipping it as
+    // `already_negative` reported the term as handled while it went on costing money.
     mockAddRun(
       [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
-      [{ id: "neg-other-ag", state: "enabled", ad_group_id: "ag---9999" }],
+      [{ id: "neg-other-ag", state: "enabled", level: "ad_group", ad_group_id: "ag---9999" }],
+      [],
+    );
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+  });
+
+  it("a CAMPAIGN-level negative does count from any ad group — Amazon enforces it campaign-wide", async () => {
+    mockAddRun(
+      [makeSearchTerm({ keyword_text: CLEAN_TERM, acos: "80" })],
+      [{ id: "neg-camp", state: "enabled", level: "campaign", ad_group_id: null }],
       [],
     );
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
@@ -2477,8 +2488,17 @@ describe("add_negative_target — archived-row re-use", () => {
     expect(pushNegativeAsin).toHaveBeenCalledWith(expect.objectContaining({ localId: "nt-new" }));
   });
 
-  it("still skips campaign-wide when an enabled target row exists in another ad group", async () => {
-    mockRun([{ id: "nt-other", state: "enabled", ad_group_id: "ag---9999" }], []);
+  it("an enabled target row in another ad group does not count — it blocks nothing here", async () => {
+    // Same rule as for negative keywords: an ad-group-level negative target only excludes the
+    // ASIN inside its own ad group.
+    mockRun([{ id: "nt-other", state: "enabled", level: "ad_group", ad_group_id: "ag---9999" }],
+            [{ id: "nt-new" }]);
+    const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
+    expect(res.body.applied_count).toBe(1);
+  });
+
+  it("a campaign-level target row does count from any ad group", async () => {
+    mockRun([{ id: "nt-camp", state: "enabled", level: "campaign", ad_group_id: null }], []);
     const res = await request(app).post(`/rules/${RULE_ID}/run`).send({ dry_run: false });
     expect(res.body.applied_count).toBe(0);
     expect(res.body.skipped[0].reason).toBe("already_negative");

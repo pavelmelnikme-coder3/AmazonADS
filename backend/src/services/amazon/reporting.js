@@ -386,41 +386,83 @@ async function ingestSearchTermData({ workspaceId, profileDbId, rows, startDate,
   if (!rows?.length) return 0;
   let processed = 0;
 
+  // The search-term report is emitted per (date, campaign, ad group, keyword, match type,
+  // search term): the same shopper query comes back once for every keyword that matched it.
+  // Several of those rows therefore land on one upsert key, and writing them one at a time with
+  // `DO UPDATE SET clicks = EXCLUDED.clicks` OVERWRITES — the last row processed wins and the
+  // rest are silently dropped. This is the same defect ingestReportData was fixed for; on the
+  // live 2026-09-06 report it cost 20 of 547 clicks and EUR 16.47 of EUR 322.46, with the term
+  // "keilkissen bett" stored as 1 click against the 10 it actually took. Since these are the
+  // numbers the negative-keyword rules threshold on, the loss showed up as negatives never added.
+  //
+  // So: pre-aggregate by the upsert key (summing the metrics) and write each group once. The
+  // write stays idempotent — re-ingesting the same report reproduces the same sums — and the key
+  // now matches the report's own granularity, so keyword/match-type/ad-group slices coexist
+  // instead of overwriting each other (migration 050).
+  const num = v => Number(v) || 0;
+  const agg = new Map();
   for (const row of rows) {
-    // Only process rows that actually have a searchTerm
     const searchTerm = row.searchTerm || row.query;
     if (!searchTerm) continue;
+    const date = row.date || startDate;
+    const amazonCampaignId = row.campaignId ? String(row.campaignId) : null;
+    const amazonAdGroupId  = row.adGroupId  ? String(row.adGroupId)  : null;
+    const amazonKeywordId  = row.keywordId  ? String(row.keywordId)  : null;
+    const keywordText      = row.keyword || row.keywordText || null;
+    const matchType        = row.matchType || null;
 
+    // Mirrors the two conflict targets below: with a campaign the key is
+    // (campaign, ad group, query, keyword text, match type, date); without one the partial
+    // index keys on (query, keyword text, match type, date).
+    const key = amazonCampaignId
+      ? `c\u0000${amazonCampaignId}\u0000${amazonAdGroupId || ""}\u0000${searchTerm}\u0000${keywordText || ""}\u0000${matchType || ""}\u0000${date}`
+      : `n\u0000${searchTerm}\u0000${keywordText || ""}\u0000${matchType || ""}\u0000${date}`;
+
+    let a = agg.get(key);
+    if (!a) {
+      a = {
+        searchTerm, date, amazonCampaignId, amazonAdGroupId, amazonKeywordId, keywordText, matchType,
+        campaignName: row.campaignName || null, adGroupName: row.adGroupName || null,
+        impressions: 0, clicks: 0, cost: 0, orders: 0, sales: 0,
+      };
+      agg.set(key, a);
+    }
+    // A group can span several keywordIds only when Amazon reports the same keyword text and
+    // match type twice; keep the first id rather than letting a later row blank it out.
+    if (!a.amazonKeywordId && amazonKeywordId) a.amazonKeywordId = amazonKeywordId;
+    a.impressions += num(row.impressions);
+    a.clicks      += num(row.clicks);
+    a.cost        += num(row.cost);
+    a.orders      += num(row.purchases14d) || num(row.purchases);  // SB reports have no window suffix
+    a.sales       += num(row.sales14d)     || num(row.sales);
+  }
+
+  for (const a of agg.values()) {
     try {
-      const date = row.date || startDate;
-      const amazonCampaignId = row.campaignId ? String(row.campaignId) : null;
-      const amazonAdGroupId  = row.adGroupId  ? String(row.adGroupId)  : null;
-      const amazonKeywordId  = row.keywordId  ? String(row.keywordId)  : null;
-
       // Resolve local UUIDs
-      const campaignUuid = amazonCampaignId
+      const campaignUuid = a.amazonCampaignId
         ? (await query("SELECT id FROM campaigns WHERE amazon_campaign_id = $1 AND workspace_id = $2 LIMIT 1",
-            [amazonCampaignId, workspaceId]))?.rows?.[0]?.id || null
+            [a.amazonCampaignId, workspaceId]))?.rows?.[0]?.id || null
         : null;
 
-      const adGroupUuid = amazonAdGroupId
+      const adGroupUuid = a.amazonAdGroupId
         ? (await query("SELECT id FROM ad_groups WHERE amazon_ag_id = $1 AND workspace_id = $2 LIMIT 1",
-            [amazonAdGroupId, workspaceId]))?.rows?.[0]?.id || null
+            [a.amazonAdGroupId, workspaceId]))?.rows?.[0]?.id || null
         : null;
 
-      const keywordUuid = amazonKeywordId
+      const keywordUuid = a.amazonKeywordId
         ? (await query("SELECT id FROM keywords WHERE amazon_keyword_id = $1 AND workspace_id = $2 LIMIT 1",
-            [amazonKeywordId, workspaceId]))?.rows?.[0]?.id || null
+            [a.amazonKeywordId, workspaceId]))?.rows?.[0]?.id || null
         : null;
-
-      const amazonCampId = amazonCampaignId || null;
-      const amazonAgId   = amazonAdGroupId  || null;
 
       // Two separate conflict targets depending on whether campaign was resolved:
-      // - campaign known  → conflict on (workspace_id, campaign_id, query, date_start, date_end)
+      // - campaign known  → conflict on idx_stm_unique_v2, the report's own granularity
       // - campaign unknown → conflict on the partial unique index idx_stm_null_campaign_unique
       const conflictClause = campaignUuid
-        ? `ON CONFLICT (workspace_id, campaign_id, query, date_start, date_end)
+        ? `ON CONFLICT (workspace_id, campaign_id,
+                        COALESCE(ad_group_id, '00000000-0000-0000-0000-000000000000'::uuid),
+                        query, COALESCE(keyword_text,''), COALESCE(match_type,''),
+                        date_start, date_end)
            WHERE campaign_id IS NOT NULL`
         : `ON CONFLICT (workspace_id, query, COALESCE(keyword_text,''), COALESCE(match_type,''), date_start, date_end)
            WHERE campaign_id IS NULL`;
@@ -441,6 +483,7 @@ async function ingestSearchTermData({ workspaceId, profileDbId, rows, startDate,
            orders             = EXCLUDED.orders,
            sales              = EXCLUDED.sales,
            campaign_name      = COALESCE(EXCLUDED.campaign_name, search_term_metrics.campaign_name),
+           ad_group_name      = COALESCE(EXCLUDED.ad_group_name, search_term_metrics.ad_group_name),
            keyword_id         = COALESCE(EXCLUDED.keyword_id, search_term_metrics.keyword_id),
            keyword_text       = COALESCE(EXCLUDED.keyword_text, search_term_metrics.keyword_text),
            amazon_campaign_id = COALESCE(EXCLUDED.amazon_campaign_id, search_term_metrics.amazon_campaign_id),
@@ -451,26 +494,26 @@ async function ingestSearchTermData({ workspaceId, profileDbId, rows, startDate,
           profileDbId,
           campaignUuid,
           adGroupUuid,
-          row.campaignName || null,
-          row.adGroupName  || null,
-          searchTerm,
+          a.campaignName,
+          a.adGroupName,
+          a.searchTerm,
           keywordUuid,
-          row.keyword || row.keywordText || null,
-          row.matchType    || null,
-          row.impressions  || 0,
-          row.clicks       || 0,
-          row.cost         || 0,
-          row.purchases14d || row.purchases || 0,
-          row.sales14d     || row.sales     || 0,
-          date,
-          date,
-          amazonCampId,
-          amazonAgId,
+          a.keywordText,
+          a.matchType,
+          a.impressions,
+          a.clicks,
+          a.cost,
+          a.orders,
+          a.sales,
+          a.date,
+          a.date,
+          a.amazonCampaignId,
+          a.amazonAdGroupId,
         ]
       );
       processed++;
     } catch (err) {
-      logger.warn("Failed to ingest search term row", { error: err.message, searchTerm });
+      logger.warn("Failed to ingest search term row", { error: err.message, searchTerm: a.searchTerm });
     }
   }
 
