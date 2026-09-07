@@ -19883,14 +19883,10 @@ function AIPage({ workspaceId }) {
 
         {/* Suggested prompts */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-          {[
-            "Which campaigns are overspending budget?",
-            "Where is ACOS too high?",
-            "Which keywords should be paused?",
-            "Show top performers this week",
-            "Which search terms to add as keywords?",
-            "Where are the most wasteful clicks?",
-          ].map(p => (
+          {/* Localised: these six shipped hardcoded in English and stayed English in the RU/DE
+              UI — the one language-mixing case that survived the i18n audit. */}
+          {["prompt1", "prompt2", "prompt3", "prompt4", "prompt5", "prompt6"]
+            .map(k => t(`ai.${k}`)).map(p => (
             <button key={p} onClick={() => setPrompt(p)}
               className="btn btn-ghost"
               style={{ fontSize: 11, padding: "4px 10px", borderRadius: 20, color: "var(--tx3)" }}>

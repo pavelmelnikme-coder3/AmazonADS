@@ -12,6 +12,7 @@ const router = express.Router();
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 const { resolveUploadPath } = require("../services/email/uploads");
+const { renderHtmlForContact } = require("../services/email/render");
 
 const MessageValidator = require("sns-validator");
 const snsValidator = new MessageValidator();
@@ -58,6 +59,38 @@ async function doUnsubscribe(token) {
   if (lastSend) await query("UPDATE email_campaigns SET unsubscribed = unsubscribed + 1 WHERE id=$1", [lastSend.campaign_id]);
   return true;
 }
+
+// "View in browser" for a campaign the recipient was actually sent.
+//
+// Templates in this project carry a `{{ mirror }}` link, but it was never a merge tag — it
+// resolved to the empty string and shipped as `href=""` (the one campaign sent so far reached
+// 1070 recipients that way), and there was no route behind it either. Both halves are fixed
+// together: the tag now renders, and this serves it.
+//
+// Keyed by the recipient's own opaque unsubscribe token as well as the campaign id, so the URL
+// is not enumerable and only someone who received the email can open it. The page is rendered
+// for that recipient, exactly as their copy was — merge tags and compliance footer included.
+router.get("/campaigns/:id/mirror/:token", async (req, res) => {
+  try {
+    const { rows: [contact] } = await query(
+      "SELECT * FROM email_contacts WHERE unsubscribe_token = $1", [req.params.token]);
+    if (!contact) return res.status(404).send("Link expired or invalid");
+
+    // The campaign has to belong to the same workspace as the token holder, and has to have
+    // actually been sent — a draft is not something a recipient can have received.
+    const { rows: [campaign] } = await query(
+      `SELECT id, html_body, subject FROM email_campaigns
+        WHERE id = $1 AND workspace_id = $2 AND status IN ('sending','sent','paused')`,
+      [req.params.id, contact.workspace_id]);
+    if (!campaign) return res.status(404).send("Link expired or invalid");
+
+    res.set("Content-Type", "text/html; charset=utf-8")
+       .send(renderHtmlForContact(campaign.html_body || "", contact, { campaignId: campaign.id }));
+  } catch (e) {
+    logger.warn("campaign mirror failed", { error: e.message });
+    res.status(500).send("Could not load this email");
+  }
+});
 
 // One-click POST (mail clients post List-Unsubscribe=One-Click). Always 200 to avoid retries.
 router.post("/unsubscribe/:token", express.urlencoded({ extended: false }), async (req, res) => {

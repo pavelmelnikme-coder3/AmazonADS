@@ -9,10 +9,26 @@ function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+// Base the public links are built on. APP_PUBLIC_URL is what a RECIPIENT's mail client will
+// open, so it has to be reachable from outside; FRONTEND_URL is a usable stand-in on a
+// deployment that has not set it, and is better than emitting a host-less relative URL —
+// which is a dead link in an email and an invalid RFC 8058 List-Unsubscribe header value.
+function publicBase() {
+  return (process.env.APP_PUBLIC_URL || process.env.FRONTEND_URL || "").replace(/\/+$/, "");
+}
+
 // Public unsubscribe URL for a contact's opaque token (RFC 8058 link target).
 function unsubscribeUrl(token) {
-  const base = (process.env.APP_PUBLIC_URL || "").replace(/\/+$/, "");
-  return `${base}/api/v1/email/unsubscribe/${encodeURIComponent(token)}`;
+  return `${publicBase()}/api/v1/email/unsubscribe/${encodeURIComponent(token)}`;
+}
+
+// "View in browser" URL for a campaign. Keyed by the recipient's own opaque token as well as
+// the campaign, so the link is not an enumerable id and the page can only be reached by
+// someone who was actually sent the email.
+function mirrorUrl(campaignId, token) {
+  if (!campaignId || !token) return "";
+  return `${publicBase()}/api/v1/email/campaigns/${encodeURIComponent(campaignId)}`
+       + `/mirror/${encodeURIComponent(token)}`;
 }
 
 // Replace {{key}} merge tags from a flat field map (first_name, last_name, email, + attributes).
@@ -24,13 +40,20 @@ function applyMergeTags(html, fields) {
   });
 }
 
-function contactFields(contact) {
+function contactFields(contact, opts = {}) {
   const attrs = contact.attributes && typeof contact.attributes === "object" ? contact.attributes : {};
   return {
     email: contact.email,
     first_name: contact.first_name || "",
     last_name: contact.last_name || "",
     ...attrs,
+    // `unsubscribe` and `mirror` are what the templates in this project actually use, and they
+    // were NOT merge tags: applyMergeTags substituted contact fields only, so both collapsed to
+    // the empty string and shipped as `href=""`. The one campaign sent so far went to 1070
+    // recipients with two dead links (checked 2026-09-07). Contact attributes cannot shadow
+    // these — a stray `unsubscribe` column must not be able to redirect the opt-out link.
+    unsubscribe: unsubscribeUrl(contact.unsubscribe_token),
+    mirror: mirrorUrl(opts.campaignId, contact.unsubscribe_token),
   };
 }
 
@@ -45,7 +68,7 @@ function contactFields(contact) {
  *   Show a plain note instead of a dead link so that isn't mistaken for a bug.
  */
 function renderHtmlForContact(htmlBody, contact, opts = {}) {
-  const body = applyMergeTags(htmlBody, contactFields(contact));
+  const body = applyMergeTags(htmlBody, contactFields(contact, opts));
   const addr = process.env.COMPANY_POSTAL_ADDRESS || "";
   const unsubLine = opts.isTest
     ? `<div>[TEST] Unsubscribe link is disabled in test sends — it only works for real recipients.</div>`
@@ -58,4 +81,4 @@ function renderHtmlForContact(htmlBody, contact, opts = {}) {
   return `${body}${footer}`;
 }
 
-module.exports = { esc, unsubscribeUrl, applyMergeTags, contactFields, renderHtmlForContact };
+module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact };

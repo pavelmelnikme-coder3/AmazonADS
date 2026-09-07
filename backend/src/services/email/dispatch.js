@@ -95,7 +95,7 @@ async function processBatch({ campaignId, contactIds }) {
   const entries = contacts.map((c) => ({
     email: c.email,
     subject: applyMergeTags(campaign.subject || "", contactFields(c)),
-    html: renderHtmlForContact(campaign.html_body || "", c),
+    html: renderHtmlForContact(campaign.html_body || "", c, { campaignId: campaign.id }),
     unsubscribeToken: c.unsubscribe_token,
     sendId: c.send_id,
     _contactId: c.id,

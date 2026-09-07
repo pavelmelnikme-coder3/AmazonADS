@@ -9,7 +9,19 @@ async function connectDB() {
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+    // Postgres SSL is its OWN setting, not a side effect of NODE_ENV.
+    //
+    // This used to read `NODE_ENV === "production"`, which made setting NODE_ENV correctly a
+    // way to take the app down: this deployment runs Postgres in a container on the compose
+    // network with `ssl = off`, so pg would offer SSL, the server would refuse it, connectDB()
+    // would throw and the backend would never start. The ROADMAP item "Set NODE_ENV=production"
+    // was therefore a trap for anyone who did exactly what it asked (checked 2026-09-07).
+    //
+    // Opt in explicitly with DATABASE_SSL=true when the database actually terminates TLS —
+    // a managed instance, or anything reached across a network you do not control.
+    ssl: /^(1|true|yes|require)$/i.test(process.env.DATABASE_SSL || "")
+      ? { rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false" }
+      : false,
   });
 
   pool.on("error", (err) => logger.error("Unexpected PG pool error", { error: err.message }));
