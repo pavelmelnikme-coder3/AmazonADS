@@ -148,6 +148,18 @@ covers the whitespace pass only — the unsupported-character check has no SQL c
 it never rewrites anything. Verified equal on all **38 807** distinct production search terms;
 re-run that comparison after any change to either function.
 
+⚠️ **`search_term_metrics`' unique key must match the report's granularity.** Amazon emits the
+search-term report once per *keyword* that matched a query — `(date, campaign, ad group, keyword,
+match type, search term)` — so several report rows describe one query on one day. The key
+(`idx_stm_unique_v2`, migration 050) carries all of that; a narrower one makes those rows collide and
+the ingest's `DO UPDATE` **overwrite** rather than add. It was
+`(workspace, campaign, query, dates)` until 2026-09-07, which silently dropped 2–4% of clicks and
+~5% of spend every day — measured on the 09-06 report: 547 clicks stored as 527, one term's 10
+clicks stored as 1. Ingest also pre-aggregates by that key before writing, so re-ingesting a report
+reproduces the same sums. Everything downstream SUMs over the range it wants
+(`routes/rules.js` groups by `(query, campaign, ad_group, match_type)`;
+`routes/searchTerms.js` adds the keyword) — keep it that way rather than assuming one row per query.
+
 **Health check:** no rule-created negative should ever be `enabled` with no Amazon row behind it —
 
 ```sql

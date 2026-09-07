@@ -6,6 +6,124 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-07 — The numbers the rules decide on, and the search that answered a different question
+
+Another audit of the week's rule runs. As in 09-04, the rules themselves were fine — eight rules,
+every day since 08-30, every run `completed` bar one `partial`, no write-back errors, every
+rule-created negative carrying a real Amazon id and `raw_data`. The defects were one level down, in
+the data the rules threshold on and in a tool that reported a search it had not performed.
+
+### Verified
+
+- **Every rule ran on schedule, 08-30 → 09-07.** One `partial` (09-01) — the comma keyword from the
+  09-04 entry, now correctly reported as `unsupported_keyword_text`.
+- **No write-back failures.** Zero rows with `writeback_error`, zero synthetic ids, `raw_data`
+  present on all 25 negatives the rules created this week.
+- **The duplicate-recovery path is live and working.** Six negatives were paused on Amazon from
+  outside AdsFlow between 08-29 and 09-04; the 09-07 08:00 run re-enabled one of them, confirmed
+  `ENABLED` by querying the Ads API directly.
+- **A pre-existing test flake, measured not assumed**: `rules.test.js` "socket hang up", 3 of 20
+  full-suite runs on a clean tree. Not introduced by this week's changes.
+
+### Fixed
+
+- **The search-term ingest overwrote instead of summing, every day.** Amazon emits the search-term
+  report once per *keyword* that matched a query — granularity `(date, campaign, ad group, keyword,
+  match type, search term)` — but the upsert key was only `(workspace, campaign, query, date)`. Every
+  one of those rows landed on a single slot and `DO UPDATE SET clicks = EXCLUDED.clicks` kept the
+  last one processed.
+
+  Re-downloading the completed 2026-09-06 SP report measures it: **392 rows in, 383 stored; 547
+  clicks became 527 and €322.46 became €305.99.** The term `keilkissen bett` took 10 clicks that day
+  and was stored as 1. These are exactly the numbers the negative-keyword rules threshold on
+  ("8 clicks, 0 orders"), so terms that had earned a negative never reached it. Same defect
+  `ingestReportData` was fixed for in Stage 28's advertised-product path; the adjacent function
+  never got the treatment.
+
+  Ingest now pre-aggregates by the upsert key, and migration `050` widens that key to the report's
+  own granularity so keyword/match-type/ad-group slices coexist. A 90-day backfill re-ingested the
+  history: **572 `(campaign, query, day)` groups recovered their rows**, 505 clicks restored in the
+  31-day window alone against the generous "one row survives" baseline.
+
+- **`already_negative` counted negatives Amazon does not enforce here.** The check accepted any
+  enabled negative anywhere in the campaign, while the rules write them at **ad-group** level, where
+  Amazon applies them only inside their own ad group. That was harmless only because the storage bug
+  above made a term physically unable to appear in two ad groups; with granularity restored it would
+  have started reporting terms as handled while they kept spending in a sibling ad group. It now
+  counts a negative only where Amazon enforces it: campaign-level anywhere, ad-group-level in this ad
+  group.
+
+- **The duplicate re-enable never checked its own result.** When a negative already exists on Amazon
+  the create is refused as a duplicate and the existing PAUSED negative is re-enabled instead — that
+  PUT *is* the whole write-back. Its result was unchecked: a thrown error was swallowed by
+  `.catch(logger.warn)` and a 207 per-item rejection is invisible behind a 2xx, and the function
+  returned `ok` either way. A refused re-enable would leave the row `enabled` locally against a
+  PAUSED negative on Amazon, and every later run would skip the term as `already_negative` — spend
+  behind a negative that blocks nothing, with no failure reported anywhere. Both recovery functions
+  now inspect the 207 body and return the failure, which the existing `trackWriteback` +
+  `rollbackFailedNegative` path already handles.
+
+- **Lead Finder searched for a different business than the one asked for.** A free-text query was
+  split on spaces and **ORed** across name/amenity/shop/cuisine/craft/office, so the broadest word
+  decided: `"asiatisches restaurant"` became `asiatisches|restaurant`, and `amenity=restaurant` is on
+  every restaurant there is. The qualifier could not have helped even under AND — OSM writes
+  `cuisine=chinese`, never "asiatisches".
+
+  The live 2026-07-15 run over Germany: **500 results, 39 of them (7.8%) actually Asian**, 208 plain
+  `restaurant` with no cuisine tag, and 119 literally the same rows as a plain `"restaurant"` search
+  four hours earlier. The 131 contacts imported from it are Bavarian and Black Forest inns —
+  Berggasthof, Alpe, "Zum Lamm" — with **one** Asian restaurant among them.
+
+  Cuisine and venue words are now translated into real tag filters, German inflections reduce to a
+  stem, the user's own word stays in the name pattern for places with no `cuisine` tag, and leftover
+  words are ANDed. Checked against the live Overpass API over central Munich: **60 of 60 results
+  Asian.**
+
+- **…and it searched only one corner of the region.** The result budget was spent first-come on a
+  south→north tile walk, so that run stopped after **24 of 304 tiles** and every result sat between
+  47.34°N and 48.20°N — the Alpine strip of a country spanning 47.3 to 55.1. The list read as
+  national and was the Allgäu. Tiles are now visited on a stride coprime to their count (first 24
+  now span 47.27–54.77°N), each gets a share of the budget rather than the whole of it, and
+  exhausting a tile's share no longer ends the run. `truncated` reaches the search history, and the
+  UI marks such a list a **sample** with the coverage it achieved — previously indistinguishable
+  from a complete scan once the completion toast was gone.
+
+- **A rate-limited scan reported itself as a finished search.** overpass-api.de rate-limits by
+  refusing the TCP connection, which Node surfaces as `ECONNREFUSED` with an **empty** message — so
+  it fell through to the permanent "service unavailable" branch, was never retried, and logged as
+  `{"error":""}`. The worker skipped the tile and carried on at full speed: the 09-07 rebuild was
+  refused after ~5 of 304 tiles and walked 237 more collecting nothing, on its way to reporting
+  `completed` with 6 results. Connection-level failures are now retried with backoff, `err.code` is
+  logged, and 8 consecutive tile failures end the run as **failed** with the cause — verified in
+  production: "stopped responding after 7 of 304 areas". Country grids pace at 5 s/tile; 1.5 s is
+  what got this server blocked.
+
+### Added
+
+- **Delete a contact list from the Contacts tab.** "Delete this list" means two different things and
+  only the person clicking knows which, so the dialog asks: the list can go while the people stay —
+  they may be real contacts filed under the wrong name, exactly the `asian` case above — or the
+  people can go with it. Under either choice a contact that also belongs to another list is only
+  untagged, never deleted. A segment defined purely by that tag goes with the list; the whole
+  operation is refused with `409` while a campaign is sending or scheduled against it. The two modes
+  audit under separate action names.
+
+### Known, not fixed
+
+- **Marketing email cannot send on this deployment.** `provider.isConfigured()` is `false`: the Brevo
+  adapter reads `MAIL_FROM_EMAIL`/`SES_FROM_EMAIL`, and only `BREVO_FROM_EMAIL` is set. `/send` and
+  `/test` return 400.
+- **`{{ mirror }}` and `{{ unsubscribe }}` are not merge tags.** `applyMergeTags` substitutes contact
+  fields only, so both collapse to `href=""` — the B2B campaign already sent to 1070 recipients with
+  two dead links. There is no mirror route at all. The appended compliance footer is separate and
+  does carry an unsubscribe link, but with `APP_PUBLIC_URL` unset it is a **host-less relative URL**,
+  which also makes the RFC 8058 `List-Unsubscribe` header invalid. `COMPANY_POSTAL_ADDRESS` is unset,
+  so the footer carries no address.
+- SB search-term reports before ~2026-07-10 return `400` from Amazon (report retention); those
+  backfill chunks are not retryable.
+
+---
+
 ## [Unreleased] — 2026-09-04 — The week's rule runs, audited: four silent failures
 
 A review of how the rules and alerts behaved over the past week. They were *running* fine — nine

@@ -721,7 +721,15 @@ POST   /contacts/import-file   multipart file (.csv/.xlsx) + consent_source*  �
                                 other columns become merge-tag attributes → { imported, skipped, invalid, detected, rows }
 PATCH  /contacts/:id      { first_name?, last_name?, attributes?, tags?, status? }
 DELETE /contacts/:id
+DELETE /contacts/lists/:tag?mode=untag|contacts   — delete a whole list (tag). DEFAULT is `untag`.
+                                → { ok, tag, mode, contacts, deleted_contacts, untagged, deleted_segments }
 ```
+- `mode=untag` (default): the list disappears, the people stay. `mode=contacts`: the people go too —
+  but a contact that **also belongs to another list** is only untagged, never deleted, under either mode.
+- A segment whose whole filter is that one tag is deleted with the list (it could only match nothing
+  afterwards). `409` if a campaign is `sending`/`scheduled` against that segment — pause it first, rather
+  than emptying a live send's audience underneath it.
+- `404` when the tag matches no contact. Audited as `email_list.delete` / `email_list.delete_with_contacts`.
 Segments: `GET/POST/PUT/DELETE /segments` — `filter` JSON `{ tags:[], status:'active' }`; a campaign with no `segment_id` targets all active contacts.
 
 Campaigns:
@@ -769,6 +777,50 @@ POST /webhooks/brevo?token=<BREVO_WEBHOOK_SECRET>   — the one actually in use.
                                     Not signed by Brevo → 403 without the correct ?token. Must be registered manually
                                     in Brevo's dashboard (Transactional → Settings → Webhook) — see docs/EMAIL_SES_SETUP.md.
 ```
+
+---
+
+## Lead Finder *(business prospecting via OpenStreetMap — 2026-07; query semantics corrected 2026-09-07)*
+
+Finds businesses in a region from public OSM data, optionally scrapes contact emails off their
+websites, and promotes them into `email_contacts`. Results are **scraped, not opted-in**: they land
+with `consent_source='scraped_public_website'` and are never presented as consent.
+
+### Authenticated — `/api/v1/lead-finder` (requireAuth + requireWorkspace)
+```
+POST   /search               { region*, query* }  → 200 {search, results} | 202 {search, status:"running"}
+GET    /searches             — history (carries `truncated` so a sampled list can be marked as one)
+GET    /searches/:id         — poll an in-progress tiled search: status, tiles_done/tiles_total, truncated
+GET    /searches/:id/results
+POST   /searches/:id/scrape        { resultIds? }  — scrapes 25 pending websites per call
+POST   /searches/:id/cancel
+POST   /searches/:id/add-to-contacts { tag? }      — promotes rows that yielded an email
+```
+
+**How the free-text query is interpreted.** OSM has no free-text description of a business: the kind
+of place is one tag (`amenity=restaurant`), what it serves is another (`cuisine=chinese`), and both
+use **English** values whatever language the name is in. So the query is translated, not word-matched:
+
+- Recognised cuisine/venue words become real tag filters —
+  `"asiatisches restaurant"` → `[amenity~"^(restaurant|fast_food)$"][~"^(cuisine|name)$"~"asian|chinese|…"]`.
+  German inflections reduce to a stem (`asiatisch`/`asiatisches`/`asiatische`), and the user's own word
+  stays in the *name* pattern because many places carry no `cuisine` tag but do say "Asia Wok" on the sign.
+- A named venue is a **hint, not a restriction**: "sushi bar" also searches `amenity=restaurant`, which is
+  how such places are actually tagged.
+- Any remaining words are **ANDed** (one filter each). They used to be ORed, which meant the broadest word
+  decided the whole search — `"asiatisches restaurant"` returned every restaurant in the region.
+
+**Coverage.** A region larger than 2.5° is split into 0.5° tiles and run as a background job. Tiles are
+visited on a stride coprime to their count, so a budget that runs out still buys a region-wide sample
+rather than one edge of the map, and each tile gets only its share of `MAX_RESULTS_PER_SEARCH` (500).
+`truncated` means the region holds more than was returned — the saved search is a **sample**, and the UI
+labels it as one.
+
+**Provider limits.** overpass-api.de is a free shared endpoint that rate-limits by *refusing the TCP
+connection* (ECONNREFUSED with an empty message), not by answering 429. Those refusals are retried with
+backoff; 8 consecutive tile failures end the run as **failed** with the reason, rather than walking the
+rest of the grid collecting nothing and reporting `completed`. Country-scale grids pace at 5 s/tile
+(≈25 min for Germany) — 1.5 s got this server blocked mid-run.
 
 ---
 

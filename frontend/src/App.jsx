@@ -17773,6 +17773,14 @@ const EmailMarketingPage = ({ workspaceId }) => {
   // real contacts filed under the wrong name), or the people can go with it.
   const [deleteListModal, setDeleteListModal] = useState(null); // { tag, count }
 
+  // A block button whose label and hint wrap. Not `.btn` — see the comment at the call site.
+  const optionCardStyle = (disabled) => ({
+    display: "block", width: "100%", textAlign: "left", whiteSpace: "normal",
+    background: "var(--s2)", border: "1px solid var(--b2)", borderRadius: 8,
+    padding: "11px 14px", marginBottom: 8, color: "var(--tx)",
+    font: "inherit", cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.6 : 1,
+  });
+
   async function doDeleteList(mode) {
     const tag = deleteListModal?.tag;
     if (!tag) return;
@@ -18153,7 +18161,7 @@ const EmailMarketingPage = ({ workspaceId }) => {
                     : <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} disabled={busy} onClick={doCreateSegmentFromTag}>
                         <Plus size={12} /> {t("email.createSegmentFromList")}
                       </button>}
-                  <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px", color: "var(--dn, #dc2626)" }}
+                  <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px", color: "var(--red)" }}
                     disabled={busy}
                     onClick={() => setDeleteListModal({
                       tag: tagFilter,
@@ -18365,21 +18373,22 @@ const EmailMarketingPage = ({ workspaceId }) => {
               {t("email.deleteListBody", { count: deleteListModal.count })}
             </p>
 
-            <button className="btn" disabled={busy} onClick={() => doDeleteList("untag")}
-              style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", marginBottom: 8, padding: "10px 14px", height: "auto" }}>
-              <span>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{t("email.deleteListKeepContacts")}</div>
-                <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2 }}>{t("email.deleteListKeepContactsHint")}</div>
-              </span>
+            {/* Deliberately NOT .btn: that class is `white-space:nowrap`, which is right for a
+                one-line control and wrong here — these are option cards with a wrapping hint
+                under the label, and nowrap pushed the hint straight out of the dialog. */}
+            <button disabled={busy} onClick={() => doDeleteList("untag")} style={optionCardStyle(busy)}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{t("email.deleteListKeepContacts")}</div>
+              <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 3, lineHeight: 1.45 }}>
+                {t("email.deleteListKeepContactsHint")}
+              </div>
             </button>
 
-            <button className="btn" disabled={busy} onClick={() => doDeleteList("contacts")}
-              style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", padding: "10px 14px", height: "auto",
-                       borderColor: "var(--dn, #dc2626)", color: "var(--dn, #dc2626)" }}>
-              <span>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{t("email.deleteListWithContacts")}</div>
-                <div style={{ fontSize: 11, opacity: 0.85, marginTop: 2 }}>{t("email.deleteListWithContactsHint")}</div>
-              </span>
+            <button disabled={busy} onClick={() => doDeleteList("contacts")}
+              style={{ ...optionCardStyle(busy), marginBottom: 0, borderColor: "var(--red)", color: "var(--red)" }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{t("email.deleteListWithContacts")}</div>
+              <div style={{ fontSize: 11, marginTop: 3, lineHeight: 1.45, opacity: 0.85 }}>
+                {t("email.deleteListWithContactsHint")}
+              </div>
             </button>
 
             <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
