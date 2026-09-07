@@ -17718,7 +17718,9 @@ const EmailMarketingPage = ({ workspaceId }) => {
           loadLeadSearches();
           if (s.status === "failed") setErr(s.error_message || t("email.leadsSearchFailed"));
           else if (s.status === "cancelled") flash(t("email.leadsSearchCancelled"));
-          else flash(s.truncated ? t("email.leadsSearchDoneTruncated", { n: s.result_count }) : t("email.leadsSearchDone", { n: s.result_count }));
+          else flash(s.truncated
+            ? t("email.leadsSearchDoneTruncatedTiled", { n: s.result_count, done: s.tiles_done, total: s.tiles_total })
+            : t("email.leadsSearchDone", { n: s.result_count }));
         }
       } catch { /* transient poll failure — try again next tick */ }
     };
@@ -18207,6 +18209,13 @@ const EmailMarketingPage = ({ workspaceId }) => {
                     opacity: (leadScraping || leadCountrySearchRun?.status === "running") && leadSearchId !== s.id ? 0.5 : 1 }}>
                   {s.status === "running" && <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--amb, #f59e0b)", animation: "pulse 1.2s infinite" }} />}
                   {s.region_query} · {s.business_query} ({s.result_count})
+                  {s.truncated && (
+                    <span title={t("email.leadsTruncatedHint", { done: s.tiles_done, total: s.tiles_total })}
+                      style={{ fontSize: 9, fontWeight: 700, letterSpacing: 0.3, padding: "1px 4px",
+                        borderRadius: 3, background: "#fef3c7", color: "#92400e" }}>
+                      {t("email.leadsTruncatedBadge")}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>

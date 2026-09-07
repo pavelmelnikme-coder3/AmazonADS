@@ -107,7 +107,12 @@ router.post("/search", async (req, res, next) => {
 router.get("/searches", async (req, res, next) => {
   try {
     const { rows } = await query(
-      `SELECT id, region_query, business_query, result_count, created_at, status, tiles_total, tiles_done
+      // `truncated` rides along so the history can mark a saved list as a SAMPLE. Without it
+      // a partial scan looks identical to a complete one once the completion toast is gone —
+      // which is how a 500-result "restaurants in Germany" list that covered 24 of 304 tiles
+      // came to be used as if it were national.
+      `SELECT id, region_query, business_query, result_count, created_at, status,
+              tiles_total, tiles_done, truncated
        FROM lead_searches WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 50`,
       [req.workspaceId]
     );

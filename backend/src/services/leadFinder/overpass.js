@@ -1,9 +1,26 @@
 /**
  * Business search via the OpenStreetMap Overpass API — free, no API key, ToS-compliant.
- * A free-text query ("sushi restaurant", "car repair shop") is split into words and matched
- * as a case-insensitive OR across the tags most likely to describe a business
- * (name/amenity/shop/cuisine/craft/office), since OSM tags are single-word values spread
- * across different keys rather than one free-text field.
+ *
+ * OSM has no free-text description of a business. What kind of place it is lives in one tag
+ * (amenity=restaurant), what it serves lives in another (cuisine=chinese), and both use
+ * ENGLISH values no matter what language the mapper wrote the name in. A free-text query has
+ * to be translated into those tags; matching it as loose words does not work.
+ *
+ * This module used to split the query on spaces and OR the words together across
+ * name/amenity/shop/cuisine/craft/office. Two things followed from that, and together they
+ * silently turned one search into a completely different one:
+ *
+ *   1. OR means the BROADEST word wins. "asiatisches restaurant" became
+ *      `asiatisches|restaurant`, and `amenity=restaurant` is on every restaurant on earth —
+ *      so the qualifier contributed nothing and the search returned all restaurants. Measured
+ *      on the live 2026-07-15 run over Germany: 500 results, 39 of them (7.8%) actually Asian,
+ *      208 plain `restaurant` with no cuisine at all, and 119 of the businesses were literally
+ *      the same rows as a plain "restaurant" search run four hours earlier.
+ *   2. The qualifier could not have matched even under AND: OSM writes `cuisine=chinese`,
+ *      not "asiatisches", so a German adjective matches no value anywhere.
+ *
+ * So: recognised cuisine/venue words are translated into real tag filters, and any remaining
+ * free-text words are ANDed (every word must match the element) instead of ORed.
  */
 const axios = require("axios");
 const logger = require("../../config/logger");
@@ -21,28 +38,146 @@ function sanitizeWord(w) {
   return w.replace(/[^\p{L}\p{N}'-]/gu, "");
 }
 
-function buildValuePattern(query) {
-  const words = String(query || "")
+// ── Query interpretation ─────────────────────────────────────────────────────
+// Words the user might type for a kind of food → the OSM `cuisine` values that actually
+// carry that meaning. OSM values are English and snake_case; the user types German. Without
+// this table no cuisine word the user writes can match anything, which is defect (2) above.
+//
+// Matching is by stem so German inflections work: "asiatisch", "asiatisches", "asiatische"
+// all reduce to the stem "asiat". Short stems must match the whole token — a 3-letter stem
+// used as a prefix would swallow unrelated words ("bar" matching "Barcelona").
+const STEM_PREFIX_MIN = 5;
+
+const CUISINE_STEMS = [
+  { stems: ["asiat", "asian", "asia"],
+    values: ["asian", "chinese", "vietnamese", "thai", "japanese", "korean", "sushi", "indian",
+             "indonesian", "malaysian", "taiwanese", "mongolian", "ramen", "noodle", "wok",
+             "dim_sum", "pho", "cantonese", "szechuan"] },
+  { stems: ["chines", "china"], values: ["chinese", "cantonese", "szechuan", "dim_sum"] },
+  { stems: ["vietnames", "vietnam"], values: ["vietnamese", "pho"] },
+  { stems: ["thailänd", "thailaend", "thai", "thailand"], values: ["thai"] },
+  { stems: ["japan"], values: ["japanese", "sushi", "ramen"] },
+  { stems: ["sushi"], values: ["sushi", "japanese"] },
+  { stems: ["korean", "korea"], values: ["korean"] },
+  { stems: ["indisch", "indian", "indien"], values: ["indian"] },
+  { stems: ["italien", "italian"], values: ["italian", "pizza"] },
+  { stems: ["pizza", "pizzeria"], values: ["pizza", "italian"] },
+  { stems: ["griech", "greek"], values: ["greek"] },
+  { stems: ["türk", "tuerk", "turkish", "döner", "doener", "kebab"], values: ["turkish", "kebab"] },
+  { stems: ["mexikan", "mexican"], values: ["mexican"] },
+  { stems: ["spanisch", "spanish", "tapas"], values: ["spanish", "tapas"] },
+  { stems: ["burger"], values: ["burger"] },
+  { stems: ["vegan"], values: ["vegan", "vegetarian"] },
+  { stems: ["vegetar"], values: ["vegetarian", "vegan"] },
+];
+
+// Words naming the kind of venue → OSM `amenity` values.
+const VENUE_STEMS = [
+  { stems: ["restaurant", "gaststätt", "gaststaett", "gasthaus", "gasthof", "lokal"],
+    values: ["restaurant"] },
+  { stems: ["imbiss", "schnellrestaurant", "fastfood", "takeaway"], values: ["fast_food"] },
+  { stems: ["café", "cafe", "kaffee", "coffee"], values: ["cafe"] },
+  { stems: ["bar", "kneipe", "pub"], values: ["bar", "pub"] },
+];
+
+// A cuisine search with no venue word still means "a place that serves this", so allow the
+// food venues rather than every tagged object in the bbox.
+const DEFAULT_FOOD_AMENITIES = ["restaurant", "fast_food", "cafe", "bar", "pub"];
+
+function matchesStem(token, stems) {
+  return stems.some((stem) =>
+    token === stem || (stem.length >= STEM_PREFIX_MIN && token.startsWith(stem)));
+}
+
+function tokenize(query) {
+  return String(query || "")
+    .toLowerCase()
     .split(/\s+/)
     .map(sanitizeWord)
     .filter(Boolean);
+}
+
+/**
+ * Split a free-text query into the tag filters it actually means.
+ * @returns {{cuisineValues: string[], amenityValues: string[], freeWords: string[], words: string[]}}
+ */
+function interpretQuery(query) {
+  const words = tokenize(query);
   if (!words.length) throw new Error("query required");
-  return words.join("|");
+
+  const cuisineValues = [];
+  const amenityValues = [];
+  const cuisineWords  = [];
+  const freeWords     = [];
+
+  for (const word of words) {
+    const cuisine = CUISINE_STEMS.find((e) => matchesStem(word, e.stems));
+    if (cuisine) { cuisineValues.push(...cuisine.values); cuisineWords.push(word); continue; }
+    const venue = VENUE_STEMS.find((e) => matchesStem(word, e.stems));
+    if (venue) { amenityValues.push(...venue.values); continue; }
+    freeWords.push(word);
+  }
+
+  return {
+    cuisineValues: [...new Set(cuisineValues)],
+    amenityValues: [...new Set(amenityValues)],
+    // The user's own word goes into the name pattern too: a place called "Asiatisches
+    // Restaurant Lotus" or "Asia Wok" is a hit even when nobody tagged its cuisine.
+    cuisineWords: [...new Set(cuisineWords)],
+    freeWords,
+    words,
+  };
+}
+
+const BROAD_KEY_PATTERN = "^(name|amenity|shop|cuisine|craft|office)$";
+
+// Every filter on one statement is a conjunction in Overpass QL, so one filter per word is
+// AND — which is what a multi-word query means. ORing them (the old behaviour) let the
+// broadest word decide the whole search.
+function andWordFilters(words) {
+  return words.map((w) => `[~"${BROAD_KEY_PATTERN}"~"${w}",i]`).join("");
+}
+
+function buildFilters(query) {
+  const { cuisineValues, amenityValues, cuisineWords, freeWords } = interpretQuery(query);
+
+  if (!cuisineValues.length) {
+    // Nothing food-specific recognised. A named venue becomes a real amenity filter; anything
+    // left over stays free-text, now ANDed. "restaurant" alone is the amenity filter and
+    // nothing else — matching the bare word again across every key would only re-admit the
+    // noise the amenity filter exists to exclude.
+    if (amenityValues.length) {
+      return `[amenity~"^(${amenityValues.join("|")})$"]` + andWordFilters(freeWords);
+    }
+    return andWordFilters(freeWords.length ? freeWords : tokenize(query));
+  }
+
+  // A named venue is treated as a hint, not a restriction: "sushi bar" is idiom, and the
+  // places it means are tagged amenity=restaurant far more often than amenity=bar. Narrowing
+  // to the literal word would answer a reasonable query with almost nothing.
+  const amenities = amenityValues.length
+    ? [...new Set([...amenityValues, "restaurant", "fast_food"])]
+    : DEFAULT_FOOD_AMENITIES;
+  // cuisine OR name, because plenty of Asian restaurants carry no cuisine tag at all — but
+  // both halves are specific, unlike the old `amenity` match that let every restaurant in.
+  const cuisinePattern = [...new Set([...cuisineValues, ...cuisineWords])].join("|");
+  return `[amenity~"^(${amenities.join("|")})$"]`
+       + `[~"^(cuisine|name)$"~"${cuisinePattern}",i]`
+       + andWordFilters(freeWords);
 }
 
 function buildQuery(bbox, query, limit) {
   const { south, west, north, east } = bbox;
   const bboxStr = `${south},${west},${north},${east}`;
-  const valuePattern = buildValuePattern(query);
-  const keyPattern = "^(name|amenity|shop|cuisine|craft|office)$";
+  const filters = buildFilters(query);
   // Capping via "out ... <limit>;" makes Overpass itself stop early instead of us fetching
   // and discarding thousands of extra elements client-side — a broad word ("shop", "restaurant")
   // over a whole-city bbox can otherwise match tens of thousands of nodes, which was slow
   // enough to blow past our own axios timeout (observed: "shop" in Hamburg timed out at 30s).
   return `[out:json][timeout:25];
 (
-  node[~"${keyPattern}"~"${valuePattern}",i](${bboxStr});
-  way[~"${keyPattern}"~"${valuePattern}",i](${bboxStr});
+  node${filters}(${bboxStr});
+  way${filters}(${bboxStr});
 );
 out center tags ${limit};`;
 }
@@ -145,4 +280,4 @@ async function searchBusinesses({ bbox, query, limit = 501 }) {
   return results;
 }
 
-module.exports = { searchBusinesses };
+module.exports = { searchBusinesses, buildQuery, buildFilters, interpretQuery };

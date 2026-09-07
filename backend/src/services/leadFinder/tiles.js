@@ -56,4 +56,46 @@ function buildTileGrid(bbox, tileSizeDeg = TILE_SIZE_DEG) {
   return tiles;
 }
 
-module.exports = { needsTiling, buildTileGrid, TILE_SIZE_DEG, LARGE_BBOX_THRESHOLD_DEG, MAX_TILES, MAX_RESULTS_PER_SEARCH };
+/**
+ * Reorder tiles so consecutive visits land far apart on the grid.
+ *
+ * buildTileGrid walks rows south→north, and the worker stops once the result budget is spent,
+ * so a first-come budget buys "the southern edge of the region" while the search still reports
+ * itself as covering the whole region. Live case: the 2026-07-15 "restaurants in Germany" run
+ * stopped after 24 of 304 tiles and every one of its 500 results sat between 47.34°N and
+ * 48.20°N — the Alpine strip — for a country spanning 47.3°N to 55.1°N. The list read as a
+ * national sample and was actually the Allgäu.
+ *
+ * Walking with a stride coprime to the tile count visits every tile exactly once while
+ * spreading early visits across the whole grid, so a budget that runs out still buys a
+ * region-wide sample. Deterministic, unlike a shuffle: the same search reorders the same way.
+ */
+function spreadTileOrder(tiles) {
+  const n = tiles.length;
+  if (n < 4) return tiles.slice();
+  const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+  // Start near sqrt(n) so the stride is large enough to jump between grid rows but small
+  // enough that early visits still fan out rather than repeatedly wrapping the same way.
+  let step = Math.max(2, Math.round(Math.sqrt(n)));
+  while (step < n && gcd(step, n) !== 1) step++;
+  if (step >= n) return tiles.slice(); // no coprime stride available (n prime-adjacent edge)
+  const out = [];
+  for (let i = 0, idx = 0; i < n; i++, idx = (idx + step) % n) out.push(tiles[idx]);
+  return out;
+}
+
+// Per-tile share of the result budget. Without it the first tiles visited spend the whole
+// budget, which is the same geographic-bias bug spreadTileOrder addresses, one level down:
+// a single dense city tile can hold more restaurants than the entire cap.
+// The floor keeps sparse rural tiles from being rounded down to nothing useful.
+const MIN_RESULTS_PER_TILE = 3;
+
+function perTileCap(tileCount, totalCap = MAX_RESULTS_PER_SEARCH) {
+  if (tileCount <= 1) return totalCap;
+  return Math.max(MIN_RESULTS_PER_TILE, Math.ceil(totalCap / tileCount));
+}
+
+module.exports = {
+  needsTiling, buildTileGrid, spreadTileOrder, perTileCap,
+  TILE_SIZE_DEG, LARGE_BBOX_THRESHOLD_DEG, MAX_TILES, MAX_RESULTS_PER_SEARCH, MIN_RESULTS_PER_TILE,
+};

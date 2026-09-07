@@ -23,7 +23,7 @@ const { executeAllDueRules } = require("../routes/rules");
 const { query } = require("../db/pool");
 const { searchBusinesses } = require("../services/leadFinder/overpass");
 const { persistResults } = require("../services/leadFinder/persistResults");
-const { MAX_RESULTS_PER_SEARCH } = require("../services/leadFinder/tiles");
+const { MAX_RESULTS_PER_SEARCH, spreadTileOrder, perTileCap } = require("../services/leadFinder/tiles");
 const { filterByPolygon } = require("../services/leadFinder/geofilter");
 
 // ─── Queue definitions ────────────────────────────────────────────────────────
@@ -692,13 +692,18 @@ async function startWorkers() {
     QUEUES.LEAD_FINDER_SEARCH,
     async (job) => {
       const { searchId, workspaceId, tiles, businessQuery, polygon } = job.data;
-      logger.info("Lead finder tiled search started", { searchId, tileCount: tiles.length });
+      // Visit the grid in a spread order and give each tile only its share of the budget.
+      // Both exist for the same reason: the budget used to be spent first-come on a south→north
+      // walk, so a "whole of Germany" search returned the Allgäu and said nothing about it.
+      const visitOrder = spreadTileOrder(tiles);
+      const tileCap = perTileCap(visitOrder.length);
+      logger.info("Lead finder tiled search started", { searchId, tileCount: visitOrder.length, tileCap });
 
       let currentTotal = 0;
       let tilesDone = 0;
       let truncated = false;
 
-      for (const tile of tiles) {
+      for (const tile of visitOrder) {
         const { rows: [row] } = await query(`SELECT cancel_requested FROM lead_searches WHERE id = $1`, [searchId]);
         if (!row) break; // search row gone (deleted workspace/search) — nothing left to update
         if (row.cancel_requested) {
@@ -710,15 +715,21 @@ async function startWorkers() {
         const remaining = MAX_RESULTS_PER_SEARCH - currentTotal;
         if (remaining <= 0) { truncated = true; break; }
 
+        // Never let one tile take more than its share, even when the global budget would
+        // allow it — a single dense city tile holds more restaurants than the whole cap.
+        const tileBudget = Math.min(tileCap, remaining);
         try {
-          const rawBusinesses = await searchBusinesses({ bbox: tile, query: businessQuery, limit: remaining + 1 });
+          const rawBusinesses = await searchBusinesses({ bbox: tile, query: businessQuery, limit: tileBudget + 1 });
           // Tile bboxes are rectangles too — a tile straddling the real border (e.g. the
           // Rhine valley near France) can still return foreign-territory matches; filter
           // against the region's actual polygon boundary, not just its bounding rectangle.
           const businesses = filterByPolygon(rawBusinesses, polygon);
-          const capped = businesses.length > remaining;
-          const toInsert = capped ? businesses.slice(0, remaining) : businesses;
-          if (capped) truncated = true;
+          // More matches here than this tile's share: the region holds more than we return,
+          // so the search is a sample — but that is NOT a reason to stop, which is what the
+          // old code did. Stopping on the first dense tile is exactly how a national search
+          // ended up being one valley.
+          if (businesses.length > tileBudget) truncated = true;
+          const toInsert = businesses.slice(0, tileBudget);
           const inserted = await persistResults(searchId, workspaceId, toInsert);
           currentTotal += inserted.length;
         } catch (e) {
@@ -732,9 +743,8 @@ async function startWorkers() {
           `UPDATE lead_searches SET tiles_done = $1, result_count = $2, truncated = $3 WHERE id = $4`,
           [tilesDone, currentTotal, truncated, searchId]
         );
-        await job.updateProgress(Math.round((tilesDone / tiles.length) * 100));
+        await job.updateProgress(Math.round((tilesDone / visitOrder.length) * 100));
 
-        if (truncated) break;
         // Polite pacing between tiles — same spirit as the scrape batch delay (routes/leadFinder.js),
         // avoids hammering the free public Overpass instance with back-to-back large-area queries.
         await new Promise((r) => setTimeout(r, 1500));
