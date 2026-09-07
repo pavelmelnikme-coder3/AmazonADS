@@ -138,6 +138,86 @@ router.delete("/contacts/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Delete a whole list (tag).
+//
+// Two things can be meant by "delete this list", and they are not interchangeable, so the
+// caller has to say which:
+//   mode=untag    — the list disappears, the people stay (they may be legitimate contacts that
+//                   were simply filed under the wrong name). This is the default.
+//   mode=contacts — the people go too. Even then, a contact that also belongs to ANOTHER list
+//                   is only untagged, never deleted: it was never this list's to remove.
+//
+// Any segment defined purely by this tag goes with it, since it can only ever match nothing
+// afterwards — unless a campaign is mid-flight against it, which is refused rather than
+// silently emptying a send's audience underneath it.
+router.delete("/contacts/lists/:tag", async (req, res, next) => {
+  try {
+    const tag = String(req.params.tag || "").trim();
+    if (!tag) return res.status(400).json({ error: "tag required" });
+    const mode = req.query.mode === "contacts" ? "contacts" : "untag";
+
+    const { rows: [{ count: total }] } = await query(
+      `SELECT COUNT(*)::int AS count FROM email_contacts WHERE workspace_id=$1 AND tags && ARRAY[$2]::text[]`,
+      [req.workspaceId, tag]
+    );
+    if (!total) return res.status(404).json({ error: "List not found" });
+
+    // Segments whose whole definition is this one tag — they become dead once it is gone.
+    const { rows: segments } = await query(
+      `SELECT id FROM email_segments
+        WHERE workspace_id=$1 AND filter->'tags' = to_jsonb(ARRAY[$2]::text[])`,
+      [req.workspaceId, tag]
+    );
+    if (segments.length) {
+      const { rows: [{ count: live }] } = await query(
+        `SELECT COUNT(*)::int AS count FROM email_campaigns
+          WHERE workspace_id=$1 AND segment_id = ANY($2::uuid[]) AND status IN ('sending','scheduled')`,
+        [req.workspaceId, segments.map(s => s.id)]
+      );
+      if (live) return res.status(409).json({
+        error: "A campaign is currently sending or scheduled to this list — pause it first.",
+      });
+    }
+
+    let deletedContacts = 0;
+    if (mode === "contacts") {
+      const { rowCount } = await query(
+        `DELETE FROM email_contacts
+          WHERE workspace_id=$1 AND tags && ARRAY[$2]::text[] AND array_length(tags, 1) = 1`,
+        [req.workspaceId, tag]
+      );
+      deletedContacts = rowCount;
+    }
+    // Whatever survives (everything in untag mode; the multi-list contacts in contacts mode)
+    // just loses this one tag.
+    const { rowCount: untagged } = await query(
+      `UPDATE email_contacts SET tags = array_remove(tags, $2), updated_at = NOW()
+        WHERE workspace_id=$1 AND tags && ARRAY[$2]::text[]`,
+      [req.workspaceId, tag]
+    );
+
+    let deletedSegments = 0;
+    if (segments.length) {
+      const { rowCount } = await query(
+        `DELETE FROM email_segments WHERE workspace_id=$1 AND id = ANY($2::uuid[])`,
+        [req.workspaceId, segments.map(s => s.id)]
+      );
+      deletedSegments = rowCount;
+    }
+
+    await writeAudit({
+      orgId: req.orgId, workspaceId: req.workspaceId, actorId: req.user.id, actorName: req.user.name,
+      action: mode === "contacts" ? "email_list.delete_with_contacts" : "email_list.delete",
+      entityType: "email_list", entityId: tag, entityName: tag,
+      beforeData: { contacts: total }, afterData: { deletedContacts, untagged, deletedSegments },
+      source: "ui",
+    }).catch(() => {});
+
+    res.json({ ok: true, tag, mode, contacts: total, deleted_contacts: deletedContacts,
+               untagged, deleted_segments: deletedSegments });
+  } catch (err) { next(err); }
+});
+
 // ─── Segments ─────────────────────────────────────────────────────────────────
 router.get("/segments", async (req, res, next) => {
   try {

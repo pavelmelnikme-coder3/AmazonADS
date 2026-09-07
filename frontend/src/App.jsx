@@ -17768,6 +17768,26 @@ const EmailMarketingPage = ({ workspaceId }) => {
   // the composer's Segment dropdown only ever showed "All active contacts". This wraps a tag
   // into a one-click segment so it becomes selectable there.
   const segmentForTag = (tag) => segments.find(s => Array.isArray(s.filter?.tags) && s.filter.tags.length === 1 && s.filter.tags[0] === tag);
+  // Deleting a list can mean two different things and only the user knows which, so the
+  // dialog asks rather than picking one: the list can go while the people stay (they may be
+  // real contacts filed under the wrong name), or the people can go with it.
+  const [deleteListModal, setDeleteListModal] = useState(null); // { tag, count }
+
+  async function doDeleteList(mode) {
+    const tag = deleteListModal?.tag;
+    if (!tag) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await del(`/email-marketing/contacts/lists/${encodeURIComponent(tag)}?mode=${mode}`);
+      setDeleteListModal(null);
+      if (tagFilter === tag) setTagFilter("");
+      await Promise.all([loadContactTags(), loadContacts(), loadSegments()]);
+      flash(mode === "contacts"
+        ? t("email.listDeletedWithContacts", { tag, deleted: r.deleted_contacts, kept: r.untagged })
+        : t("email.listDeleted", { tag, kept: r.untagged }));
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  }
+
   async function doCreateSegmentFromTag() {
     if (!tagFilter || segmentForTag(tagFilter)) return;
     setBusy(true); setErr("");
@@ -18127,11 +18147,21 @@ const EmailMarketingPage = ({ workspaceId }) => {
                 ))}
               </div>
               {tagFilter && (
-                segmentForTag(tagFilter)
-                  ? <span style={{ fontSize: 11, color: "var(--tx3)" }}>✓ {t("email.segmentReady")}</span>
-                  : <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} disabled={busy} onClick={doCreateSegmentFromTag}>
-                      <Plus size={12} /> {t("email.createSegmentFromList")}
-                    </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {segmentForTag(tagFilter)
+                    ? <span style={{ fontSize: 11, color: "var(--tx3)" }}>✓ {t("email.segmentReady")}</span>
+                    : <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px" }} disabled={busy} onClick={doCreateSegmentFromTag}>
+                        <Plus size={12} /> {t("email.createSegmentFromList")}
+                      </button>}
+                  <button className="btn btn-ghost" style={{ fontSize: 11, padding: "3px 8px", color: "var(--dn, #dc2626)" }}
+                    disabled={busy}
+                    onClick={() => setDeleteListModal({
+                      tag: tagFilter,
+                      count: contactTags.find(x => x.tag === tagFilter)?.count || 0,
+                    })}>
+                    <Trash2 size={12} /> {t("email.deleteList")}
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -18327,6 +18357,40 @@ const EmailMarketingPage = ({ workspaceId }) => {
       )}
 
       {/* ── Import modal ── */}
+      {deleteListModal && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setDeleteListModal(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 470, maxWidth: "92vw" }}>
+            <h3 style={{ margin: "0 0 6px", fontSize: 17 }}>{t("email.deleteListTitle", { tag: deleteListModal.tag })}</h3>
+            <p style={{ fontSize: 13, color: "var(--tx2)", margin: "0 0 18px", lineHeight: 1.5 }}>
+              {t("email.deleteListBody", { count: deleteListModal.count })}
+            </p>
+
+            <button className="btn" disabled={busy} onClick={() => doDeleteList("untag")}
+              style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", marginBottom: 8, padding: "10px 14px", height: "auto" }}>
+              <span>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{t("email.deleteListKeepContacts")}</div>
+                <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2 }}>{t("email.deleteListKeepContactsHint")}</div>
+              </span>
+            </button>
+
+            <button className="btn" disabled={busy} onClick={() => doDeleteList("contacts")}
+              style={{ width: "100%", justifyContent: "flex-start", textAlign: "left", padding: "10px 14px", height: "auto",
+                       borderColor: "var(--dn, #dc2626)", color: "var(--dn, #dc2626)" }}>
+              <span>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{t("email.deleteListWithContacts")}</div>
+                <div style={{ fontSize: 11, opacity: 0.85, marginTop: 2 }}>{t("email.deleteListWithContactsHint")}</div>
+              </span>
+            </button>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setDeleteListModal(null)}>
+                {t("common.cancel") || "Cancel"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showImport && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowImport(false)}>
           <div onClick={e => e.stopPropagation()} style={{ background: "var(--s1)", borderRadius: 14, padding: 24, width: 480, maxWidth: "92vw" }}>
