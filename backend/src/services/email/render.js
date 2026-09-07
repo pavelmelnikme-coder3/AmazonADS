@@ -63,11 +63,11 @@ function contactFields(contact, opts = {}) {
 // it lives here rather than pulling the frontend's i18n bundle into the mail path.
 const FOOTER_TEXT = {
   en: { optIn: "You are receiving this because you opted in.", unsubscribe: "Unsubscribe",
-        test: "[TEST] Unsubscribe link is disabled in test sends — it only works for real recipients." },
+        test: "[TEST] Unsubscribe and view-in-browser links are inert in test sends — they only work for real recipients." },
   de: { optIn: "Sie erhalten diese E-Mail, weil Sie sich dafür angemeldet haben.", unsubscribe: "Abmelden",
-        test: "[TEST] Der Abmeldelink ist in Testsendungen deaktiviert — er funktioniert nur für echte Empfänger." },
+        test: "[TEST] Abmelde- und Browser-Links sind in Testsendungen inaktiv — sie funktionieren nur für echte Empfänger." },
   ru: { optIn: "Вы получаете это письмо, потому что подписались на рассылку.", unsubscribe: "Отписаться",
-        test: "[TEST] В тестовой отправке ссылка отписки отключена — она работает только для реальных получателей." },
+        test: "[TEST] Ссылки отписки и «открыть в браузере» в тестовой отправке неактивны — они работают только для реальных получателей." },
 };
 
 // Order of preference: what the caller asked for, then what the contact itself says (an

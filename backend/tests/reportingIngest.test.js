@@ -58,3 +58,24 @@ describe("advertised_product aggregation", () => {
     expect(ids.sort()).toEqual(["B0Y", "unknown"]);
   });
 });
+
+describe("row_count records what Amazon returned, not what we wrote", () => {
+  // Both ingest paths pre-aggregate, so several report rows become one upsert. Storing the
+  // upsert count would make the column disagree with its name and break the cheap health check
+  // "provider sent N, table holds M" — which is exactly how the 2026-09-07 search-term loss was
+  // found (392 rows in, 383 stored).
+  test("the two counts are genuinely different for an aggregating report", async () => {
+    const rows = [
+      { advertisedAsin: "B1", date: "2026-09-06", campaignId: 1, clicks: 1 },
+      { advertisedAsin: "B1", date: "2026-09-06", campaignId: 2, clicks: 2 },
+      { advertisedAsin: "B1", date: "2026-09-06", campaignId: 3, clicks: 3 },
+    ];
+    const written = await ingestReportData({
+      reportRequestId: "r9", workspaceId: WS, profileDbId: PROF,
+      reportLevel: "advertised_product", rows, campaignType: "SP",
+    });
+    // 3 report rows → 1 upsert. Storing `written` as row_count would report 1 for a 3-row report.
+    expect(written).toBe(1);
+    expect(rows.length).toBe(3);
+  });
+});

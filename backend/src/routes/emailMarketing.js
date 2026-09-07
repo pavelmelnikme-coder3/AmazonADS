@@ -413,7 +413,11 @@ router.post("/campaigns/:id/test", async (req, res, next) => {
       replyTo:   c.reply_to   || process.env.MAIL_REPLY_TO   || process.env.SES_REPLY_TO,
       configurationSet: process.env.SES_CONFIGURATION_SET,
       entries: [{ email, subject: `[TEST] ${applyMergeTags(c.subject || "", contactFields(fakeContact))}`,
-                  html: renderHtmlForContact(c.html_body || "", fakeContact, { isTest: true }), unsubscribeToken: fakeContact.unsubscribe_token }],
+                  // campaignId matters even here: without it `{{ mirror }}` resolves to nothing
+                  // and the test copy goes out with an `href=""` — the exact defect this whole
+                  // path was fixed for, reintroduced in the one send used to check the result.
+                  html: renderHtmlForContact(c.html_body || "", fakeContact, { isTest: true, campaignId: c.id }),
+                  unsubscribeToken: fakeContact.unsubscribe_token }],
       attachments: buildAttachmentList(c.attachments, c.id),
     });
     if (r.status !== "sent") return res.status(502).json({ error: r.error || "send failed" });

@@ -125,3 +125,21 @@ describe("the compliance footer speaks the recipient's language", () => {
     expect(out).not.toMatch(/href=""/);
   });
 });
+
+describe("a test send is a preview, so it must not reintroduce the dead link", () => {
+  // The /test path renders with its own fake contact. It originally passed no campaignId, so
+  // `{{ mirror }}` resolved to nothing and the one send used to CHECK the fix shipped the exact
+  // `href=""` the fix removes.
+  test("with a campaignId the mirror link is well-formed", () => {
+    const out = withEnv({ APP_PUBLIC_URL: "https://a.example" },
+      () => renderHtmlForContact('<a href="{{ mirror }}">b</a>', CONTACT, { isTest: true, campaignId: "camp-9" }));
+    expect(out).not.toMatch(/href=""/);
+    expect(out).toContain("/campaigns/camp-9/mirror/TOK123");
+  });
+
+  test("the footer note says BOTH links are inert, not just unsubscribe", () => {
+    const out = renderHtmlForContact("<p/>", CONTACT, { isTest: true });
+    expect(out).toMatch(/view-in-browser/i);
+    expect(out).toMatch(/\[TEST\]/);
+  });
+});

@@ -125,6 +125,7 @@ export default {
     step_items: "Artikel", step_customers: "Kunden",
   },
   common: {
+    search: "Suchen",
     workspace: "ARBEITSBEREICH",
     error: "Fehler: ",
     cancel: "Abbrechen",

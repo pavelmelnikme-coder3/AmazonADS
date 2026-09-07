@@ -591,12 +591,18 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
           }
         }
 
+        // row_count is what AMAZON returned, not what we wrote. Both ingest paths pre-aggregate
+        // — several report rows collapse into one upsert — so storing the upsert count would
+        // make the column disagree with its own name and quietly break the one cheap health
+        // check there is: comparing what the provider sent against what landed in the table.
+        // That comparison is how the 2026-09-07 search-term data loss was found (392 rows in,
+        // 383 stored), and it has to keep working.
         await query(
           "UPDATE report_requests SET status = 'completed', completed_at = NOW(), row_count = $1 WHERE id = $2",
-          [processed, requestId]
+          [rows.length, requestId]
         );
 
-        logger.info("Report pipeline completed", { requestId, amazonReportId, processed });
+        logger.info("Report pipeline completed", { requestId, amazonReportId, reportRows: rows.length, written: processed });
         return { success: true, processed };
       }
 

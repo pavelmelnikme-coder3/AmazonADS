@@ -108,6 +108,31 @@ the data the rules threshold on and in a tool that reported a search it had not 
   operation is refused with `409` while a campaign is sending or scheduled against it. The two modes
   audit under separate action names.
 
+### Found by reviewing the day's own changes
+
+A pass back over everything changed today, hunting for what the changes themselves broke.
+
+- **A test send would have shipped the dead link the day's work removed.** `/campaigns/:id/test`
+  renders with its own throwaway contact and passed no `campaignId`, so `{{ mirror }}` resolved to
+  nothing and came out as `href=""` — in the one send anybody would use to *check* the fix. It now
+  passes the campaign, and the test-send footer note says both links are inert rather than naming
+  only unsubscribe.
+
+- **`row_count` stopped meaning what its name says.** It stores the ingest's return value, and both
+  ingest paths pre-aggregate, so after today's change several report rows become one upsert and the
+  column would have drifted to counting writes. That quietly breaks the cheapest health check there
+  is — compare what the provider sent against what the table holds — which is precisely how the
+  search-term loss above was found (392 rows in, 383 stored). It records `rows.length` again, with
+  the write count kept in the log line.
+
+- **`common.search` was never a key.** A button in the Wawi section reads
+  `t("common.search") || "Search"`, so it has always rendered English in every language. Added to
+  en/ru/de — the same class as the AI prompt chips, found by checking every static `t()` call in
+  `App.jsx` against the bundle: 1050 call sites, one genuinely missing key.
+
+Also verified rather than assumed: i18n parity across the three files (1589 keys each), and every
+file changed today byte-identical between the repo and the production server.
+
 ### Known, not fixed
 
 - **Marketing email cannot send on this deployment.** `provider.isConfigured()` is `false`: the Brevo

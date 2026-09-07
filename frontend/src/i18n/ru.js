@@ -125,6 +125,7 @@ export default {
     step_items: "Товары", step_customers: "Клиенты",
   },
   common: {
+    search: "Найти",
     workspace: "WORKSPACE",
     error: "Ошибка: ",
     cancel: "Отмена",
