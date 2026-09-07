@@ -377,9 +377,24 @@ POST /sp/keywords/list     Content-Type: application/vnd.spKeyword.v3+json
 
 ## ⚠️ Write-Back to Amazon (Important)
 
-**Current limitation:** All changes (bid updates, pauses, negative keyword inserts) apply to the **local database only** — they are NOT sent to Amazon Ads API. Changes will be overwritten on the next entity sync.
+Changes **are** sent to Amazon: bid/state updates via `PUT /sp/keywords`, budget/state via the
+per-type campaign endpoints, negatives via `POST /sp/negativeKeywords` and `/sp/negativeTargets`.
+`services/amazon/writeback.js` owns all of it, and `routes/rules.js` tracks every call so a run
+cannot report success for a change Amazon refused.
 
-Planned: write-back via `PUT /sp/keywords`, `PUT /sp/campaigns`, `POST /sp/negativeKeywords`
+What to know before trusting a write-back:
+
+- **Amazon's batch endpoints answer 207 Multi-Status** — the HTTP call succeeds while individual
+  items are rejected in the body. Every writer inspects `<dataKey>.error[]`; a raw `put()`/`post()`
+  whose result goes unchecked will silently report a refused change as applied. This has been the
+  single most recurring defect in this codebase — see the 2026-08-10, 09-04 and 09-07 CHANGELOG
+  entries.
+- **The local row is written first and rolled back on refusal.** A rejected negative goes back to
+  `archived` carrying Amazon's message; a rejection describing the input is treated as permanent so
+  later runs report it as a skip instead of re-issuing a doomed write.
+- **Amazon is the source of truth on the next sync.** A local state that never landed is corrected
+  by the entity sync — provided the row carries a real Amazon id. Rows with a synthetic `rule-…` id
+  are invisible to every sync, which is why a failed create must never leave one behind.
 
 ---
 
@@ -511,9 +526,43 @@ All 8 items delivered. See [CHANGELOG.md](./CHANGELOG.md) for full details.
 
 ## 🚧 Known Issues / TODO
 
-- `negativeKeywords` entity sync — needs migration to `POST /sp/negativeKeywords/list`
-- SP-API root category BSR not returned (Amazon bug #2533)
-- **Write-back to Amazon not implemented** — all changes apply to local DB only
-- SB keyword-level reports excluded (Reporting API v3 in preview for SB)
-- Rules engine "yesterday" period: both startDate and endDate = yesterday
-- Two bid-increase rules (PT-Asins/SP-Key) are in Paused state in production — raise_bid_pct not yet scheduled automatically
+> Verified against the live deployment on 2026-09-07. Items that had been sitting here as "not
+> implemented" for months — write-back, the `negativeKeywords/list` migration, SB keyword-level
+> metrics — were all done long ago and have been removed.
+
+**Deployment, not yet done**
+
+- `NODE_ENV=development` on the production server. Express serves error stack traces in responses
+  and skips production optimizations. Set it to `production`.
+- Redis runs with no `requirepass`. Contained — it is not published to the host (only Postgres/Redis
+  container ports, no `0.0.0.0` binding) and does not answer from outside — but unauthenticated all
+  the same.
+
+**Marketing email cannot send on this deployment**
+
+- `provider.isConfigured()` is `false`: the Brevo adapter reads `MAIL_FROM_EMAIL` (falling back to
+  `SES_FROM_EMAIL`), and only `BREVO_FROM_EMAIL` is set. `/campaigns/:id/send` and `/test` return 400.
+- `{{ mirror }}` and `{{ unsubscribe }}` are **not merge tags** — `applyMergeTags` substitutes contact
+  fields only, so both collapse to `href=""`. The B2B campaign already went to 1070 recipients with two
+  dead links, and there is no mirror route at all. The compliance footer appended by
+  `renderHtmlForContact` is separate and does carry an unsubscribe link — but with `APP_PUBLIC_URL`
+  unset it is a host-less relative URL, which also makes the RFC 8058 `List-Unsubscribe` header invalid.
+  `COMPANY_POSTAL_ADDRESS` is unset, so that footer carries no address either.
+
+**Automation coverage**
+
+- **Nothing raises bids.** The nine active rules pause keywords, add negatives, and adjust one budget.
+  The two `raise_bid_pct` rules this section used to describe as "paused in production" no longer
+  exist in the database at all.
+
+**External limits**
+
+- SP-API does not return root-category BSR (Amazon bug #2533).
+- Lead Finder cannot complete a country-scale scan against the free public Overpass endpoint: it
+  rate-limits **by IP quota**, refusing TCP connections (`ECONNREFUSED` with an empty message) once a
+  few hundred queries have gone out. Mirrors do not help — `lz4`/`z` are the same cluster,
+  `overpass.osm.jp` has an expired certificate, and `overpass.osm.ch` is a Switzerland-only extract.
+  A run that gets refused now ends as `failed` with the reason rather than reporting `completed`.
+  Regular country-wide rebuilds need a self-hosted or paid instance, or per-Bundesland runs.
+- SB search-term reports before roughly 90 days back return `400` (Amazon report retention), so those
+  backfill ranges are not retryable.

@@ -1,8 +1,11 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 6 April 2026
-> Sprint 1 ✅ · Sprint 2 ✅ · Sprint 3 ✅ · Sprint 4 ✅ (S4-1,S4-2,S4-3,S4-5) · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅ · Keyword Research ✅
-> S4-4 (SB Keyword-level Reports) — SB `keywordText` field fix deployed; full keyword-level metrics pending Amazon Reporting API v3 GA for SB
+> Last updated: 7 September 2026 — statuses re-verified against the live deployment and the code.
+> Sprint 1 ✅ · Sprint 2 ✅ · Sprint 3 ✅ · Sprint 4 ✅ · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅ · Keyword Research ✅
+> S4-4 (SB keyword-level reports) — **working** via `sbSearchTerm`, which carries `keywordId`/`keywordText`;
+> SB keyword metrics are current in `fact_metrics_daily` (58 rows over the last 30 days, latest 2026-09-06).
+> Everything the sprints planned is delivered. The open work is in **Current Backlog** below, and it is
+> deployment configuration and follow-ups found in production — not unfinished sprint scope.
 > Based on: Live UX audit of all 12 sections, competitor analysis (Pacvue / Helium10 Ads / Scale Insights / Intentwise / Adbrew) + Nielsen Norman Group research
 
 ---
@@ -32,10 +35,14 @@ Deployed to Hetzner server 159.69.222.12. Security audit performed.
 | Auth brute-force protection | ✅ Done | 20 req/15 min on login/register/accept-invite |
 | Token leak prevention | ✅ Done | Removed tokenPreview from access token logs |
 
-**Pending (SSH access required):**
-- Close ports 5432/6379 (remove docker-compose port bindings for postgres/redis)
-- Add Redis password (`requirepass`)
-- Set `NODE_ENV=production`
+**Re-checked 2026-09-07:**
+- ~~Close ports 5432/6379~~ ✅ **Already done** — `docker compose ps` shows no host binding for
+  postgres/redis, and neither answers its own protocol from outside (Redis returns no `PONG`,
+  Postgres closes the connection). Note that a naive `nc -z` port scan reports them "open" from some
+  networks — so does port 12345, which has nothing behind it; only a protocol-level probe is evidence.
+- ❌ **Add Redis password (`requirepass`)** — still unset; `redis-cli PING` succeeds unauthenticated.
+  Contained by the missing host binding, but unmet.
+- ❌ **Set `NODE_ENV=production`** — still `development` on the production server.
 
 ---
 
@@ -381,10 +388,13 @@ On row hover in Campaigns → `🕐` icon → mini-popup with last 3 changes for
 
 ---
 
-### S4-4 · SB Keyword-Level Reports
+### ✅ S4-4 · SB Keyword-Level Reports
 **Source:** README Known Issues
 
-After Reporting API v3 GA for SB — add keyword-level metrics for Sponsored Brands
+Delivered through `sbSearchTerm`, which returns `keywordId`/`keywordText` alongside the search term —
+Amazon still has no separate SB keyword report, so this is the equivalent rather than a workaround.
+SB keyword rows are live in `fact_metrics_daily` (58 over the last 30 days, latest 2026-09-06).
+Caveat: SB search-term reports older than ~90 days return `400` (Amazon report retention).
 
 ---
 
@@ -452,15 +462,42 @@ Full audit and fix of all EN/RU/DE translations — zero language mixing.
 | Hide JSON in AI | S2 | ✅ Done | 🟡 Important | Low | UX Audit |
 | Target ACOS on dashboard | S2 | ✅ Done | 🟡 Important | Low | Helium10 |
 | Search Term Harvesting | S3 | ✅ Done | 🔴 Critical | High | All competitors |
-| Rule execution history | S3 | ⏳ Next | 🟡 Important | Medium | Scale Insights |
-| AI suggested prompts | S3 | ⏳ Next | 🟡 Important | Low | Pacvue Copilot |
-| Negative KW management | S3 | ⏳ Next | 🟡 Important | Medium | Scale Insights |
-| TACoS metric | S3 | ⏳ Next | 🟡 Important | Low | Helium10 |
-| Keyboard shortcuts | S3 | ⏳ Next | 🟢 Nice to have | Low | Pacvue |
-| User-saved filters | S3 | ⏳ Next | 🟡 Important | Low | Pacvue |
-| Column resize & hide | S3 | ⏳ Next | 🟡 Important | Medium | NNg |
-| Write-back to Amazon | S4 | 📋 Planned | 🔴 Critical | High | README TODO |
-| Algorithm stacking | S4 | 📋 Planned | 🟢 Nice to have | High | Scale Insights |
+| Rule execution history | S3 | ✅ Done | 🟡 Important | Medium | Scale Insights |
+| AI suggested prompts | S3 | ✅ Done | 🟡 Important | Low | Pacvue Copilot |
+| Negative KW management | S3 | ✅ Done | 🟡 Important | Medium | Scale Insights |
+| TACoS metric | S3 | ✅ Done | 🟡 Important | Low | Helium10 |
+| Keyboard shortcuts | S3 | ✅ Done | 🟢 Nice to have | Low | Pacvue |
+| User-saved filters | S3 | ✅ Done | 🟡 Important | Low | Pacvue |
+| Column resize & hide | S3 | ✅ Done | 🟡 Important | Medium | NNg |
+| Write-back to Amazon | S4 | ✅ Done | 🔴 Critical | High | README TODO |
+| Algorithm stacking | S4 | ✅ Done | 🟢 Nice to have | High | Scale Insights |
+| SB keyword-level reports | S4 | ✅ Done | 🟡 Important | Medium | README Known Issues |
+
+> This table contradicted the sprint sections above it for five months — every S3 row still read
+> "⏳ Next" while Sprint 3 was marked complete, and write-back read "📋 Planned" while it had become
+> the core of the product. Re-verified in code on 2026-09-07: `GET /rules/:id/runs` +
+> `RuleHistoryModal`, six prompt chips in the AI assistant, `routes/negativeKeywords.js` +
+> `negativeAsins.js`, 32 TACoS references, keyboard handlers, `savedFilters`, resizable/hideable
+> columns, `services/amazon/writeback.js`, and `routes/strategies.js` with `strategy_executions`.
+
+---
+
+## 📌 Current Backlog — what is actually open (7 September 2026)
+
+Every sprint item S1–S4 is delivered. What remains is deployment configuration and follow-ups found
+by auditing production, not unfinished sprint scope.
+
+| Item | Severity | Where | Notes |
+|------|----------|-------|-------|
+| `NODE_ENV=production` on the server | 🔴 | deployment | Currently `development`: error stack traces are served in responses. |
+| Redis `requirepass` | 🟡 | deployment | Unset. Contained (not reachable off-host) but unauthenticated. |
+| Marketing email cannot send | 🔴 | deployment | `MAIL_FROM_EMAIL`/`SES_FROM_EMAIL` unset, so `provider.isConfigured()` is false and `/send` + `/test` return 400. Only `BREVO_FROM_EMAIL` is set, which no adapter reads. |
+| `{{ mirror }}` / `{{ unsubscribe }}` are not merge tags | 🔴 | code | Both collapse to `href=""`; 1070 recipients already got a campaign with two dead links. No mirror route exists. |
+| `APP_PUBLIC_URL` unset | 🔴 | deployment | Makes the compliance-footer unsubscribe a host-less relative URL and the RFC 8058 `List-Unsubscribe` header invalid. |
+| `COMPANY_POSTAL_ADDRESS` unset | 🟡 | deployment | Auto-appended footer carries no postal address. |
+| No bid-raising automation | 🟡 | product | The nine active rules pause, negate and adjust one budget. The two `raise_bid_pct` rules older docs described as "paused" no longer exist in the database. |
+| Country-scale Lead Finder scans | 🟡 | external | The free public Overpass endpoint rate-limits by IP quota; a full-Germany rebuild cannot finish against it. Needs a self-hosted/paid instance or per-Bundesland runs. |
+| AI prompt chips are hardcoded English | 🟢 | i18n | The six suggested prompts bypass `t()` — the only known language-mixing left after the i18n audit. |
 
 ---
 
