@@ -35,14 +35,18 @@ Deployed to Hetzner server 159.69.222.12. Security audit performed.
 | Auth brute-force protection | ✅ Done | 20 req/15 min on login/register/accept-invite |
 | Token leak prevention | ✅ Done | Removed tokenPreview from access token logs |
 
-**Re-checked 2026-09-07:**
-- ~~Close ports 5432/6379~~ ✅ **Already done** — `docker compose ps` shows no host binding for
-  postgres/redis, and neither answers its own protocol from outside (Redis returns no `PONG`,
-  Postgres closes the connection). Note that a naive `nc -z` port scan reports them "open" from some
-  networks — so does port 12345, which has nothing behind it; only a protocol-level probe is evidence.
-- ❌ **Add Redis password (`requirepass`)** — still unset; `redis-cli PING` succeeds unauthenticated.
-  Contained by the missing host binding, but unmet.
-- ❌ **Set `NODE_ENV=production`** — still `development` on the production server.
+**Re-checked 2026-09-08 — all three now hold, each probed rather than read off a file:**
+- ✅ **Ports 5432/6379 closed** — `docker compose ps` shows no host binding for postgres/redis.
+  Note that a naive `nc -z` port scan reports them "open" from some networks — so does port 12345,
+  which has nothing behind it; only a protocol-level probe is evidence.
+- ✅ **Redis `requirepass` set** — `redis-cli PING` inside the container now answers
+  `NOAUTH Authentication required`.
+- ✅ **`NODE_ENV=production`** — `printenv NODE_ENV` in the running backend returns `production`.
+
+**Marketing email delivery, re-checked 2026-09-08:** `MAIL_FROM_EMAIL`, `APP_PUBLIC_URL` and
+`COMPANY_POSTAL_ADDRESS` are all set, and `provider.isConfigured()` returns true for `brevo` —
+so sending, the compliance footer and the RFC 8058 `List-Unsubscribe` header are all live. The
+three roadmap rows that called these open were stale.
 
 ---
 
@@ -489,12 +493,6 @@ by auditing production, not unfinished sprint scope.
 
 | Item | Severity | Where | Notes |
 |------|----------|-------|-------|
-| `NODE_ENV=production` on the server | 🔴 | deployment | Currently `development`: error stack traces are served in responses. |
-| Redis `requirepass` | 🟡 | deployment | Unset. Contained (not reachable off-host) but unauthenticated. |
-| Marketing email cannot send | 🔴 | deployment | `MAIL_FROM_EMAIL`/`SES_FROM_EMAIL` unset, so `provider.isConfigured()` is false and `/send` + `/test` return 400. Only `BREVO_FROM_EMAIL` is set, which no adapter reads. |
-| `{{ mirror }}` / `{{ unsubscribe }}` are not merge tags | 🔴 | code | Both collapse to `href=""`; 1070 recipients already got a campaign with two dead links. No mirror route exists. |
-| `APP_PUBLIC_URL` unset | 🔴 | deployment | Makes the compliance-footer unsubscribe a host-less relative URL and the RFC 8058 `List-Unsubscribe` header invalid. |
-| `COMPANY_POSTAL_ADDRESS` unset | 🟡 | deployment | Auto-appended footer carries no postal address. |
 | No bid-raising automation | 🟡 | product | The nine active rules pause, negate and adjust one budget. The two `raise_bid_pct` rules older docs described as "paused" no longer exist in the database. |
 | Lead Finder: no in-app country sweep | 🟡 | product | **Solved for data, not yet in the UI (2026-09-08).** Tiling a country is 304 Overpass requests and the public endpoint bans the IP first; one `area` query per Bundesland covers the same ground in 16 requests and never touches the quota. All 13,816 German asian restaurants were collected that way, but by script — the Lead Finder still only knows how to tile a bbox. |
 | Marketing routes have no role check | 🟡 | code | Deleting a contact list with its contacts, and sending a campaign, are open to any workspace member. `requireRole` exists and guards connections; note it reads the org role (`req.user.role`), not `req.workspaceRole`. |
