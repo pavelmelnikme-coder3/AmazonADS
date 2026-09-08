@@ -46,13 +46,44 @@ describe("POST /contacts/import", () => {
 
   test("imports valid, counts invalid emails, dedups via ON CONFLICT", async () => {
     dbQuery
-      .mockResolvedValueOnce({ rowCount: 1 })  // a@b.com inserted
-      .mockResolvedValueOnce({ rowCount: 0 }); // c@d.com conflict (skipped)
+      .mockResolvedValueOnce({ rows: [{ inserted: true }] })  // a@b.com inserted
+      .mockResolvedValueOnce({ rows: [] });                   // c@d.com already had every tag
     const res = await request(app()).post("/email-marketing/contacts/import")
       .send({ consent_source: "double-optin", contacts: [{ email: "a@b.com" }, { email: "c@d.com" }, { email: "not-an-email" }] });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ imported: 1, skipped: 1, invalid: 1 });
-    expect(dbQuery.mock.calls[0][0]).toMatch(/ON CONFLICT \(workspace_id, lower\(email\)\) DO NOTHING/);
+    expect(res.body).toEqual({ imported: 1, tagged: 0, skipped: 1, invalid: 1 });
+  });
+
+  // An address already on the list still belongs in the audience it is being imported
+  // under. A bare DO NOTHING dropped the tag on the floor: promoting the German lead
+  // sweep, 219 of 3,305 found addresses were already contacts and would have been
+  // missing from the campaign they had just been added to.
+  test("an address already on the list picks up the tag it was imported under", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ inserted: false }] });
+    const res = await request(app()).post("/email-marketing/contacts/import")
+      .send({ consent_source: "double-optin", contacts: [{ email: "a@b.com", tags: ["asian_b2b"] }] });
+    expect(res.body).toEqual({ imported: 0, tagged: 1, skipped: 0, invalid: 0 });
+
+    const [sql] = dbQuery.mock.calls[0];
+    expect(sql).toMatch(/ON CONFLICT \(workspace_id, lower\(email\)\) DO UPDATE/);
+    // Tags merge; the union is de-duplicated so a re-import cannot grow the array.
+    expect(sql).toMatch(/tags = ARRAY\(SELECT DISTINCT unnest\(email_contacts\.tags \|\| EXCLUDED\.tags\)\)/);
+    // Nothing to write when the tag is already there.
+    expect(sql).toMatch(/WHERE NOT \(email_contacts\.tags @> EXCLUDED\.tags\)/);
+  });
+
+  test("re-importing never rewrites consent or revives an unsubscribed contact", async () => {
+    // Consent belongs to the first collection of that address, and status decides whether
+    // anything may be sent at all — neither is the importer's to overwrite.
+    dbQuery.mockResolvedValueOnce({ rows: [{ inserted: false }] });
+    await request(app()).post("/email-marketing/contacts/import")
+      .send({ consent_source: "double-optin", contacts: [{ email: "a@b.com", tags: ["asian_b2b"] }] });
+
+    const [sql] = dbQuery.mock.calls[0];
+    const doUpdate = sql.slice(sql.indexOf("DO UPDATE"));
+    expect(doUpdate).not.toMatch(/consent_source|consent_method|consent_at|consent_ip/);
+    expect(doUpdate).not.toMatch(/status/);
+    expect(doUpdate).not.toMatch(/unsubscribe_token/);
   });
 });
 
@@ -79,13 +110,13 @@ describe("POST /contacts/import-file", () => {
   });
 
   test("parses a CSV, auto-detects columns, imports valid rows", async () => {
-    dbQuery.mockResolvedValueOnce({ rowCount: 1 });
+    dbQuery.mockResolvedValueOnce({ rows: [{ inserted: true }] });
     const csv = "EMAIL,VORNAME,NACHNAME,JOB_TITLE\na@b.com,Anna,Ernst,Manager\n";
     const res = await request(app()).post("/email-marketing/contacts/import-file")
       .field("consent_source", "csv upload")
       .attach("file", Buffer.from(csv), "contacts.csv");
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ imported: 1, skipped: 0, invalid: 0, rows: 1 });
+    expect(res.body).toMatchObject({ imported: 1, tagged: 0, skipped: 0, invalid: 0, rows: 1 });
     expect(res.body.detected).toMatchObject({ email: "EMAIL", first_name: "VORNAME", last_name: "NACHNAME" });
     const params = dbQuery.mock.calls[0][1];
     expect(params[1]).toBe("a@b.com");

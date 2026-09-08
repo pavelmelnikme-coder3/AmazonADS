@@ -222,10 +222,18 @@ router.post("/searches/:id/add-to-contacts", async (req, res, next) => {
 
     const tag = req.body?.tag?.trim() || `lead:${slug(search.region_query)}-${slug(search.business_query)}`;
 
+    // Every lead holding an address is a candidate, including ones promoted before.
+    // `added_to_contacts` records that a lead has been promoted at some point; it used to
+    // gate this query, which quietly made a second promotion under a different tag
+    // impossible — a lead promoted in July could never join an audience defined in
+    // September. Tags are per-audience, the flag is per-lead, so the flag is not the right
+    // question to ask here. insertContacts is idempotent and merges tags, so re-promoting
+    // an address that is already a contact costs one no-op statement and adds the tag it
+    // was missing.
     const { rows: candidates } = await query(
       `SELECT id, name, emails FROM lead_results
        WHERE id IN (SELECT result_id FROM lead_search_results WHERE search_id = $1)
-         AND workspace_id = $2 AND added_to_contacts = false AND array_length(emails, 1) > 0`,
+         AND workspace_id = $2 AND array_length(emails, 1) > 0`,
       [req.params.id, req.workspaceId]
     );
 
@@ -236,16 +244,20 @@ router.post("/searches/:id/add-to-contacts", async (req, res, next) => {
       [req.params.id, req.workspaceId]
     );
 
-    let added = 0, skipped = 0;
+    let added = 0, tagged = 0, skipped = 0;
     for (const c of candidates) {
       const contacts = c.emails.map((email) => ({ email, first_name: c.name, tags: [tag] }));
       const result = await insertContacts(req.workspaceId, contacts, "scraped_public_website", "lead_finder", req.ip);
       added += result.imported;
+      // Already a contact from an earlier import, now carrying this tag too — reported
+      // apart from `added` so the count of new addresses stays honest, and apart from
+      // `skipped` so a lead that did join this audience isn't described as ignored.
+      tagged += result.tagged;
       skipped += result.skipped + result.invalid;
       await query(`UPDATE lead_results SET added_to_contacts = true WHERE id = $1`, [c.id]);
     }
 
-    res.json({ added, skipped_no_email: skipped, already_added: alreadyAdded.rows[0].count, tag });
+    res.json({ added, tagged, skipped_no_email: skipped, already_added: alreadyAdded.rows[0].count, tag });
   } catch (err) { next(err); }
 });
 
