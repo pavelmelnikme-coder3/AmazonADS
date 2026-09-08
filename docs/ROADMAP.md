@@ -1,6 +1,6 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 7 September 2026 — statuses re-verified against the live deployment and the code.
+> Last updated: 8 September 2026 — statuses re-verified against the live deployment and the code.
 > Sprint 1 ✅ · Sprint 2 ✅ · Sprint 3 ✅ · Sprint 4 ✅ · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅ · Keyword Research ✅
 > S4-4 (SB keyword-level reports) — **working** via `sbSearchTerm`, which carries `keywordId`/`keywordText`;
 > SB keyword metrics are current in `fact_metrics_daily` (58 rows over the last 30 days, latest 2026-09-06).
@@ -482,7 +482,7 @@ Full audit and fix of all EN/RU/DE translations — zero language mixing.
 
 ---
 
-## 📌 Current Backlog — what is actually open (7 September 2026)
+## 📌 Current Backlog — what is actually open (8 September 2026)
 
 Every sprint item S1–S4 is delivered. What remains is deployment configuration and follow-ups found
 by auditing production, not unfinished sprint scope.
@@ -496,7 +496,11 @@ by auditing production, not unfinished sprint scope.
 | `APP_PUBLIC_URL` unset | 🔴 | deployment | Makes the compliance-footer unsubscribe a host-less relative URL and the RFC 8058 `List-Unsubscribe` header invalid. |
 | `COMPANY_POSTAL_ADDRESS` unset | 🟡 | deployment | Auto-appended footer carries no postal address. |
 | No bid-raising automation | 🟡 | product | The nine active rules pause, negate and adjust one budget. The two `raise_bid_pct` rules older docs described as "paused" no longer exist in the database. |
-| Country-scale Lead Finder scans | 🟡 | external | The free public Overpass endpoint rate-limits by IP quota; a full-Germany rebuild cannot finish against it. Needs a self-hosted/paid instance or per-Bundesland runs. |
+| Lead Finder: no in-app country sweep | 🟡 | product | **Solved for data, not yet in the UI (2026-09-08).** Tiling a country is 304 Overpass requests and the public endpoint bans the IP first; one `area` query per Bundesland covers the same ground in 16 requests and never touches the quota. All 13,816 German asian restaurants were collected that way, but by script — the Lead Finder still only knows how to tile a bbox. |
+| Marketing routes have no role check | 🟡 | code | Deleting a contact list with its contacts, and sending a campaign, are open to any workspace member. `requireRole` exists and guards connections; note it reads the org role (`req.user.role`), not `req.workspaceRole`. |
+| SP-API Finances role not granted | 🟡 | external | `sp_financials` has never held a row; the daily job 403s and is now recorded `skipped` with the reason. Needs the role in Seller Central. |
+| 276 tracked ASINs are gone from the DE catalog | 🟢 | data | Ad rows for delisted listings, `is_active` but 404 in SP-API and zero orders in 90 days. No longer probed (the sweep verdict is honoured), but they still sit in the product list. |
+| No search in the contacts list | 🟢 | product | The backend supports `?search=`; the UI never sends it. Noticeable now that one list holds 3,248 contacts. |
 | AI prompt chips are hardcoded English | 🟢 | i18n | The six suggested prompts bypass `t()` — the only known language-mixing left after the i18n audit. |
 
 ---

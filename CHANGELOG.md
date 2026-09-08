@@ -6,6 +6,113 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-08 — A health check that found five standing failures, and 13,816 leads the quota said were unreachable
+
+A full pass over production — containers, cron, queues, data freshness, write-back — plus the
+German lead sweep the 09-07 entry left blocked on an IP quota. The service was up and the rules
+were correct; underneath, five things had been failing on every run for weeks or months, each
+quiet enough to survive a green dashboard.
+
+### Verified
+
+- **Every scheduled job fires on time.** Reports 06:00, metrics backfill 06:30, SP sync 4-hourly,
+  Wawi at :20, rules hourly, alerts at :15. All 12 report requests for the day `completed`.
+- **Rules reach Amazon.** Nine runs, 109,590 entities evaluated, 24 actions, zero failures; the
+  day's negative (`gaskartusche`) confirmed on Amazon with `raw_data` synced at 09:01.
+- **No crashes.** Both app containers `RestartCount=0`, no unhandled rejections in 24h of logs.
+- **Sponsored Brands report retention measured against the live API**, not assumed: SP accepts a
+  start date 95 days back, SB refuses anything before 60 days.
+
+### Fixed
+
+- **Half the Catalog Items quota went to listings Amazon has already said are gone.** 276 of 553
+  tracked ASINs have never returned a BSR since being added in April/May — ad rows for listings
+  that no longer exist in the home marketplace. The 4-hourly BSR job and the daily listing-health
+  job asked about all of them anyway: ~1,400 warn lines a day, enough to bury a real failure. The
+  weekly cross-country sweep already records that verdict per (ASIN, marketplace), so both jobs
+  now read it instead of rediscovering it six times a day — and only while it is fresh, so a
+  relisted ASIN comes back on its own and a workspace that never ran a sweep is unaffected. Live
+  run after the change: 275 probed, 276 skipped, 275 upserted, zero 404 lines.
+
+- **A backfill chunk older than Sponsored Brands' retention was thrown away whole.** Amazon keeps
+  95 days of SP data but only 60 of SB, so the 09-07 search-term backfill was accepted for SP and
+  rejected for SB — 14 chunks lost to a bare "Request failed with status code 400". Amazon's own
+  body names the earliest date it still holds; a straddling window is now re-asked from that date,
+  a window entirely past retention is recorded `skipped` rather than retried forever, and Amazon's
+  explanation is carried into the row's `error_message`.
+
+- **A 429 mid-pagination killed the whole FBA inventory sync.** The retry wrapper can hold a
+  request for up to 90s — long enough for Amazon to expire the `nextToken` we were holding, after
+  which the next page 400s and the day's stock snapshot is lost (2026-09-08 04:20). The walk now
+  restarts once from page one.
+
+- **`sp_financials` has never held a row.** The Finances SP-API role was never granted, so the
+  daily job has 403'd since the integration was built. That is a standing permissions fact, not a
+  failure to investigate: it is recorded as `skipped`, with the reason, so `failed` in
+  `sp_sync_log` keeps meaning something broke.
+
+- **Production was running a build of `keywordRanks.js` from before rank portfolios.** The
+  frontend matched the repo and sends `portfolio_id` alone when an ASIN is dragged into a
+  portfolio; the deployed handler ignored it *and* defaulted the absent label to `""`, erasing the
+  ASIN's note. Found by hashing every deployed source file against HEAD — which also turned up 14
+  files on the server that exist nowhere in the repo, debris of an old flat `scp`.
+
+- **Emails OSM already publishes were thrown away.** The lead mapper dropped `email` /
+  `contact:email`, so the scraper re-fetched a business's website to learn what the search result
+  had already handed us, and a lead with a published address but no website was written off as
+  `no_website` and never revisited. Of the 13,816 German asian restaurants now in the tool, 1,674
+  publish an address in OSM — 1,302 site fetches avoided in this sweep alone.
+
+- **An address already on the list never picked up the tag it was imported under.**
+  `insertContacts` skipped conflicts outright, so re-importing a known address left it out of the
+  audience it had just been added to. Conflicts now merge tags, and only tags: consent belongs to
+  the first collection and is never rewritten, and `status` is untouched, so an unsubscribed
+  contact stays unsubscribed and out of every send.
+
+- **A lead promoted once could never join a second audience.** `add-to-contacts` filtered
+  candidates on `added_to_contacts = false`, which records that a lead was promoted at some point —
+  not whether it belongs in *this* audience. "Sam Son Vietnam House", promoted under `asian` in
+  July and matched again by the German sweep, was silently left out of `asian_b2b`.
+
+- **Deleting a list could silently aim a campaign at everyone.** `email_campaigns.segment_id` is
+  `ON DELETE SET NULL`, and NULL is not "no audience" — it is every active contact. Deleting a
+  segment therefore does not disarm a campaign pointing at it, it swaps that campaign's audience
+  for the whole list; reproduced against the live schema, a draft came back with `segment_id NULL`
+  the instant its segment was deleted. The list delete guarded only `sending` and `scheduled` — the
+  two states a campaign is least likely to be in when someone tidies up lists — and deleting a
+  segment directly had no guard at all. Both now refuse, naming the campaign, while anything in
+  `draft|scheduled|paused|sending` still points at it.
+
+- **The send confirmation never showed how many people it was about to reach.** It asked "send to
+  all matching contacts?" and the count appeared only in the notification *after* the send was
+  queued. `GET /campaigns/:id/audience` now answers that before the fact, and the dialog says
+  outright when a campaign has no segment and is therefore addressed to everyone.
+
+- **The contacts table showed one request's worth of rows and said nothing about the rest.** At
+  3,248 contacts in one list that meant 200 shown and 3,048 missing, under a list chip still
+  claiming the full count. It pages now.
+
+### Added
+
+- **The German asian-restaurant list, 13,816 businesses in all 16 Bundesländer.** The 09-07 entry
+  left this blocked: a country-wide sweep is 304 tiled Overpass requests and the public endpoint
+  bans the IP long before the end. One `area` query per Bundesland covers the same ground in 16
+  requests, which is not a quota event at all. 5,048 websites scraped (32% yielded an address),
+  giving **3,248 contacts** under `asian_b2b`, all active, none suppressed, consent recorded
+  honestly as `scraped_public_website`.
+
+### Notes
+
+- Amazon's own catalog cannot be checked from the server by scraping: `amazon.de/dp/<ASIN>` returns
+  a captcha page under HTTP 200. The SP-API verdict and the cross-country sweep are the evidence.
+- A whole-country Overpass query is accepted for `out count` (13,910 in 3m46s) but 504s on the
+  gateway when asked for the objects themselves. Per-Bundesland is the working shape.
+- Promoting leads must be scoped to the searches that found them. Promoting "everything with an
+  email" pulled 342 pizzerias from July's broken query into the new audience; they were removed —
+  131 contacts this session had created were deleted, 211 pre-existing ones only lost the tag.
+
+---
+
 ## [Unreleased] — 2026-09-07 — The numbers the rules decide on, and the search that answered a different question
 
 Another audit of the week's rule runs. As in 09-04, the rules themselves were fine — eight rules,

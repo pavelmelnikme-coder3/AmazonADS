@@ -716,21 +716,28 @@ Contacts:
 ```
 GET    /contacts?status=&tag=&search=&page=&limit=     — paginated list
 POST   /contacts/import        { consent_source*, consent_method?, contacts:[{email,first_name?,last_name?,attributes?,tags?}] }
-                                → { imported, skipped, invalid }   (consent_source REQUIRED — GDPR proof; dedup via ON CONFLICT)
+                                → { imported, tagged, skipped, invalid }   (consent_source REQUIRED — GDPR proof)
 POST   /contacts/import-file   multipart file (.csv/.xlsx) + consent_source*  — auto-detects email/first/last-name columns,
-                                other columns become merge-tag attributes → { imported, skipped, invalid, detected, rows }
+                                other columns become merge-tag attributes → { imported, tagged, skipped, invalid, detected, rows }
 PATCH  /contacts/:id      { first_name?, last_name?, attributes?, tags?, status? }
 DELETE /contacts/:id
 DELETE /contacts/lists/:tag?mode=untag|contacts   — delete a whole list (tag). DEFAULT is `untag`.
                                 → { ok, tag, mode, contacts, deleted_contacts, untagged, deleted_segments }
 ```
+- An address already on the list is **not** skipped: the import merges its tags, so it joins the audience
+  it was imported under (`tagged` counts those). Only tags merge — consent (source/method/at/ip) belongs to
+  the first time the address was collected and is never rewritten, and `status` is untouched, so an
+  unsubscribed contact stays unsubscribed and out of every send.
 - `mode=untag` (default): the list disappears, the people stay. `mode=contacts`: the people go too —
   but a contact that **also belongs to another list** is only untagged, never deleted, under either mode.
 - A segment whose whole filter is that one tag is deleted with the list (it could only match nothing
-  afterwards). `409` if a campaign is `sending`/`scheduled` against that segment — pause it first, rather
-  than emptying a live send's audience underneath it.
+  afterwards). `409` while **any** campaign in `draft`/`scheduled`/`paused`/`sending` still points at that
+  segment, naming it. This is not politeness: `segment_id` is `ON DELETE SET NULL` and NULL means *all active
+  contacts*, so deleting the segment would not empty that campaign's audience — it would widen it to everyone.
+  `sent`/`failed` campaigns never block a cleanup.
 - `404` when the tag matches no contact. Audited as `email_list.delete` / `email_list.delete_with_contacts`.
 Segments: `GET/POST/PUT/DELETE /segments` — `filter` JSON `{ tags:[], status:'active' }`; a campaign with no `segment_id` targets all active contacts.
+`DELETE /segments/:id` returns `409` under the same rule as the list delete above, for the same reason.
 
 Campaigns:
 ```
@@ -738,6 +745,10 @@ GET    /campaigns                 GET /campaigns/:id
 POST   /campaigns   { name*, subject, from_name, from_email, reply_to, html_body, segment_id, content_blocks? }
 PUT    /campaigns/:id             (editable only while draft/scheduled/paused; content_blocks explicitly settable to null)
 DELETE /campaigns/:id             (draft/scheduled/paused/failed only)
+GET    /campaigns/:id/audience    → { recipients, segment_id, segment_name, all_contacts }
+                                     — who this campaign would actually reach, resolved by the send path's own
+                                     rules (active + segment tags + not suppressed). `all_contacts:true` means
+                                     it has no segment and is addressed to everyone. Ask before sending.
 POST   /campaigns/:id/test        { email }            — ⚠️ ALWAYS use this for verification, not /send (see below)
 POST   /campaigns/:id/send        → { ok, total, batches }   — ⚠️ targets the campaign's REAL, FULL audience
                                      (or its segment) immediately, no dry-run mode; writes audit email_campaign.send
@@ -782,6 +793,14 @@ POST /webhooks/brevo?token=<BREVO_WEBHOOK_SECRET>   — the one actually in use.
 
 ## Lead Finder *(business prospecting via OpenStreetMap — 2026-07; query semantics corrected 2026-09-07)*
 
+> **Country-scale collection.** `POST /search` tiles a region's bbox — 304 requests for Germany, which
+> the public `overpass-api.de` answers with an IP ban long before the end. An Overpass `area` query per
+> administrative region does the same job in 16: `area["ISO3166-2"="DE-BY"]` + the same tag filters,
+> `out center tags`. The whole country in one query is accepted for `out count` (13,910) but 504s when
+> asked for the objects. The tool itself still only knows how to tile; the 2026-09-08 German sweep was
+> collected by script and imported through `mapElements` + `persistResults`, the same path a live search
+> uses.
+
 Finds businesses in a region from public OSM data, optionally scrapes contact emails off their
 websites, and promotes them into `email_contacts`. Results are **scraped, not opted-in**: they land
 with `consent_source='scraped_public_website'` and are never presented as consent.
@@ -795,7 +814,18 @@ GET    /searches/:id/results
 POST   /searches/:id/scrape        { resultIds? }  — scrapes 25 pending websites per call
 POST   /searches/:id/cancel
 POST   /searches/:id/add-to-contacts { tag? }      — promotes rows that yielded an email
+                                     → { added, tagged, skipped_no_email, already_added, tag }
 ```
+- **Every lead holding an address is a candidate, promoted before or not.** `added_to_contacts` records
+  that a lead has been promoted at some point; tags describe audiences and a lead can belong to several,
+  so the flag is not the question this endpoint asks. It used to gate the query, which made a second
+  promotion under a different tag impossible — a lead promoted in July could never join an audience
+  defined in September. `tagged` counts addresses that were already contacts and have now joined this
+  audience; re-promoting is idempotent.
+- An address published in OSM (`email` / `contact:email`) is taken straight from the search result: the
+  lead is stored `scrape_status='found'` with no site fetch at all, which also reaches the leads that
+  have an address but **no** website — the ones the scraper marks `no_website` and never revisits.
+  Measured on the 13,816-business German sweep: 1,674 addresses from tags, 1,302 fetches avoided.
 
 **How the free-text query is interpreted.** OSM has no free-text description of a business: the kind
 of place is one tag (`amenity=restaurant`), what it serves is another (`cuisine=chinese`), and both
