@@ -255,7 +255,9 @@ async function startScheduler() {
         [STALE_REPORT_HOURS]
       );
       const { rowCount } = await query(
-        `DELETE FROM report_requests WHERE status = 'failed' AND created_at < NOW() - INTERVAL '2 days'`
+        // 'skipped' (window older than Amazon's retention) is terminal like
+        // 'failed' and would otherwise pile up forever, so it ages out too.
+        `DELETE FROM report_requests WHERE status IN ('failed', 'skipped') AND created_at < NOW() - INTERVAL '2 days'`
       );
       logger.info("Cron: Cleaned up reports", { timedOut: staleCount, deleted: rowCount });
     } catch (err) {

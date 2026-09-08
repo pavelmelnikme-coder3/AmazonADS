@@ -45,15 +45,57 @@ async function _finishLog(logId, status, counts, extra = {}) {
   );
 }
 
+// ─── Which ASINs are worth a Catalog Items call ───────────────────────────────
+//
+// The weekly cross-country sweep already records, per (ASIN, marketplace),
+// whether Amazon's catalog knows the ASIN at all. Half the tracked catalog is
+// ad rows for listings that no longer exist at home: on 2026-09-08, 276 of 553
+// tracked ASINs had never once returned a BSR since being added in April/May,
+// and asking again six times a day only burned the shared Catalog Items quota
+// and buried real failures under ~1400 warn lines a day.
+//
+// So skip an ASIN while a *fresh* sweep verdict says this marketplace's catalog
+// does not have it. Freshness is the safety valve: once the verdict ages past
+// the TTL the ASIN is probed again, so a relisted ASIN always finds its way
+// back, and a workspace that has never run a sweep keeps today's behaviour.
+const CATALOG_VERDICT_TTL_DAYS = 14;
+
+async function _catalogTargets(workspaceId, marketplaceId) {
+  const { rows } = await pool.query(
+    `SELECT p.id, p.asin, (l.product_id IS NOT NULL) AS known_missing
+       FROM products p
+       LEFT JOIN product_marketplace_listings l
+              ON l.product_id       = p.id
+             AND l.marketplace_id   = $2
+             AND l.exists_in_catalog = false
+             AND l.checked_at       > NOW() - ($3 || ' days')::interval
+      WHERE p.workspace_id = $1 AND p.marketplace_id = $2 AND p.is_active = true`,
+    [workspaceId, marketplaceId, CATALOG_VERDICT_TTL_DAYS]
+  );
+  return {
+    products: rows.filter(r => !r.known_missing),
+    skipped: rows.filter(r => r.known_missing).length,
+  };
+}
+
+// A 404 NOT_FOUND is a fact about the listing, not a fault in the sync, and it
+// arrives in bulk. Collect them and say it once per run instead of once per ASIN.
+function _isNotFound(err) {
+  return err?.status === 404 || err?.spCode === "NOT_FOUND";
+}
+
 // ─── BSR Sync ─────────────────────────────────────────────────────────────────
 async function syncBsr(workspaceId, marketplaceId, refreshToken) {
   const logId = await _startLog(workspaceId, marketplaceId, "bsr");
   let fetched = 0, upserted = 0;
+  const notFound = [];
   try {
-    const { rows: products } = await pool.query(
-      `SELECT id, asin FROM products WHERE workspace_id=$1 AND marketplace_id=$2 AND is_active=true`,
-      [workspaceId, marketplaceId]
-    );
+    const { products, skipped } = await _catalogTargets(workspaceId, marketplaceId);
+    if (skipped) {
+      logger.info("BSR sync: skipping ASINs the catalog sweep found missing here", {
+        marketplaceId, skipped, probing: products.length,
+      });
+    }
     for (const product of products) {
       try {
         const data = await getCatalogItem(product.asin, marketplaceId, refreshToken);
@@ -76,13 +118,20 @@ async function syncBsr(workspaceId, marketplaceId, refreshToken) {
         if (err.message?.includes("rate limit")) {
           logger.warn(`BSR sync rate-limited, pausing 10s`, { asin: product.asin });
           await _sleep(10000);
+        } else if (_isNotFound(err)) {
+          notFound.push(product.asin);
         } else {
           logger.warn(`BSR sync failed for ASIN ${product.asin}`, { error: err.message });
         }
       }
     }
+    if (notFound.length) {
+      logger.warn("BSR sync: ASINs not in this marketplace's catalog", {
+        marketplaceId, count: notFound.length, sample: notFound.slice(0, 5),
+      });
+    }
     await _finishLog(logId, "success", { fetched, upserted });
-    return { fetched, upserted };
+    return { fetched, upserted, notFound: notFound.length };
   } catch (err) {
     await _finishLog(logId, "failed", { fetched, upserted }, { error: err.message });
     throw err;
@@ -97,11 +146,14 @@ async function syncBsr(workspaceId, marketplaceId, refreshToken) {
 async function syncListingHealth(workspaceId, marketplaceId, refreshToken) {
   const logId = await _startLog(workspaceId, marketplaceId, "listing_health");
   let fetched = 0, upserted = 0;
+  const notFound = [];
   try {
-    const { rows: products } = await pool.query(
-      `SELECT id, asin FROM products WHERE workspace_id=$1 AND marketplace_id=$2 AND is_active=true`,
-      [workspaceId, marketplaceId]
-    );
+    const { products, skipped } = await _catalogTargets(workspaceId, marketplaceId);
+    if (skipped) {
+      logger.info("Listing health: skipping ASINs the catalog sweep found missing here", {
+        marketplaceId, skipped, probing: products.length,
+      });
+    }
     for (const product of products) {
       try {
         const content = await getListingContent(product.asin, marketplaceId, refreshToken);
@@ -137,13 +189,20 @@ async function syncListingHealth(workspaceId, marketplaceId, refreshToken) {
         if (err.message?.includes("rate limit")) {
           logger.warn(`Listing health sync rate-limited, pausing 10s`, { asin: product.asin });
           await _sleep(10000);
+        } else if (_isNotFound(err)) {
+          notFound.push(product.asin);
         } else {
           logger.warn(`Listing health sync failed for ASIN ${product.asin}`, { error: err.message });
         }
       }
     }
+    if (notFound.length) {
+      logger.warn("Listing health: ASINs not in this marketplace's catalog", {
+        marketplaceId, count: notFound.length, sample: notFound.slice(0, 5),
+      });
+    }
     await _finishLog(logId, "success", { fetched, upserted });
-    return { fetched, upserted };
+    return { fetched, upserted, notFound: notFound.length };
   } catch (err) {
     await _finishLog(logId, "failed", { fetched, upserted }, { error: err.message });
     throw err;
@@ -354,6 +413,17 @@ async function syncFinancials(workspaceId, marketplaceId, refreshToken, options 
     await _finishLog(logId, "success", { fetched, upserted });
     return { fetched, upserted };
   } catch (err) {
+    // Finances is the one SP-API section this app's role set does not cover, so
+    // the daily run has 403'd since the integration was built and sp_financials
+    // has never held a row. A missing grant is a standing fact, not a failure to
+    // investigate: record it as skipped, with the reason, so "failed" in
+    // sp_sync_log keeps meaning something actually broke. It stays scheduled —
+    // the day the Finance role is granted in Seller Central it simply starts working.
+    if (err.status === 403) {
+      const reason = "SP-API Finances role not granted to this app (403)";
+      await _finishLog(logId, "skipped", { fetched, upserted }, { error: reason });
+      return { fetched: 0, upserted: 0, skipped: true, reason };
+    }
     await _finishLog(logId, "failed", { fetched, upserted }, { error: err.message });
     throw err;
   }
@@ -720,5 +790,5 @@ function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 module.exports = {
   syncBsr, syncInventory, syncOrders, syncFinancials, syncPricing,
   syncListingHealth, syncMarketplaceListings,
-  _listingThumbnail,
+  _listingThumbnail, _catalogTargets,
 };

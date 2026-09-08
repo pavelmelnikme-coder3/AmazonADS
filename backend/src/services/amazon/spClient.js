@@ -171,18 +171,33 @@ async function getInventory(marketplaceId, refreshToken) {
   if (!token) throw new Error("SP_API_REFRESH_TOKEN not configured");
   const region = MARKETPLACE_REGION[marketplaceId] || "EU";
 
-  let items = [];
-  let nextToken = null;
-  do {
-    const params = { details: true, granularityType: "Marketplace", granularityId: marketplaceId, marketplaceIds: marketplaceId };
-    if (nextToken) params.nextToken = nextToken;
-    const data = await _spRequest(region, "/fba/inventory/v1/summaries", params, token);
-    items = items.concat(data.payload?.inventorySummaries || []);
-    nextToken = data.pagination?.nextToken || null;
-    if (nextToken) await _sleep(600);
-  } while (nextToken);
-
-  return items;
+  // FBA nextTokens are short-lived, and a 429 mid-walk parks us in the retry
+  // wrapper for up to 90s — long enough that Amazon rejects the next page with
+  // 400 InvalidInput "Next token is invalid or expired" and the whole inventory
+  // sync fails (2026-09-08 04:20 UTC). Losing a page mid-walk means losing the
+  // run, so start over from page one once rather than returning a partial list:
+  // a second walk costs a few calls, a failed sync costs a day of stock data.
+  for (let attempt = 1; ; attempt++) {
+    let items = [];
+    let nextToken = null;
+    try {
+      do {
+        const params = { details: true, granularityType: "Marketplace", granularityId: marketplaceId, marketplaceIds: marketplaceId };
+        if (nextToken) params.nextToken = nextToken;
+        const data = await _spRequest(region, "/fba/inventory/v1/summaries", params, token);
+        items = items.concat(data.payload?.inventorySummaries || []);
+        nextToken = data.pagination?.nextToken || null;
+        if (nextToken) await _sleep(600);
+      } while (nextToken);
+      return items;
+    } catch (err) {
+      const expiredToken = nextToken && /next token is invalid or expired/i.test(err.message || "");
+      if (!expiredToken || attempt >= 2) throw err;
+      logger.warn("FBA inventory nextToken expired mid-walk — restarting pagination", {
+        marketplaceId, pagesFetched: items.length,
+      });
+    }
+  }
 }
 
 // ─── Orders ───────────────────────────────────────────────────────────────────

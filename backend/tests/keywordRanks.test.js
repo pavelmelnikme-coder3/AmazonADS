@@ -317,6 +317,50 @@ describe("PATCH /keyword-ranks/labels/:asin", () => {
     );
   });
 
+  // Dragging an ASIN into a rank portfolio sends portfolio_id alone. An older
+  // build of this route defaulted the missing label to "" and wrote it, so that
+  // drag silently erased the ASIN's note — and, having no portfolio column at
+  // all, did not even record the move. Each field must only be written when the
+  // caller actually sent it.
+  test("a portfolio-only change leaves the existing label alone", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .patch(`/keyword-ranks/labels/${VALID_ASIN}`)
+      .send({ portfolio_id: "port-001" });
+
+    expect(res.status).toBe(200);
+    const [sql, params] = dbQuery.mock.calls[0];
+    expect(sql).toContain("INSERT INTO asin_labels");
+    expect(params).toEqual([WS_ID, VALID_ASIN, null, "port-001", true]);
+    expect(sql).toMatch(/label\s*=\s*CASE WHEN \$3 IS NOT NULL/);
+  });
+
+  test("a label-only change leaves the ASIN in its portfolio", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .patch(`/keyword-ranks/labels/${VALID_ASIN}`)
+      .send({ label: "Renamed" });
+
+    expect(res.status).toBe(200);
+    const [sql, params] = dbQuery.mock.calls[0];
+    expect(params).toEqual([WS_ID, VALID_ASIN, "Renamed", null, false]);
+    expect(sql).toMatch(/portfolio_id\s*=\s*CASE WHEN \$5/);
+  });
+
+  test("clearing a portfolio is still possible — an explicit null is written", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .patch(`/keyword-ranks/labels/${VALID_ASIN}`)
+      .send({ portfolio_id: null });
+
+    expect(res.status).toBe(200);
+    const [, params] = dbQuery.mock.calls[0];
+    expect(params).toEqual([WS_ID, VALID_ASIN, null, null, true]);
+  });
+
   test("updates label to empty string", async () => {
     dbQuery.mockResolvedValueOnce({ rows: [] });
 

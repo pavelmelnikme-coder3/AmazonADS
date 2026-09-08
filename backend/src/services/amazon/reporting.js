@@ -139,7 +139,7 @@ const REPORT_CONFIGS = {
  * Submit a report request to Amazon Ads v3 API.
  * Returns the reportId (Amazon's ID for polling).
  */
-async function createReportRequest({ profile, campaignType, reportLevel, startDate, endDate, granularity = "DAILY" }) {
+async function createReportRequest({ profile, campaignType, reportLevel, startDate, endDate, granularity = "DAILY", onWindowClamped }) {
   const config = REPORT_CONFIGS[campaignType]?.[reportLevel];
   if (!config) throw new Error(`Unsupported report: ${campaignType}/${reportLevel}`);
 
@@ -175,6 +175,7 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
   // window that can persist >45s, so we honor the Retry-After header when present
   // and otherwise back off exponentially (15→30→60→120s, capped) with jitter.
   const MAX_REPORT_ATTEMPTS = 5;
+  let clampedToRetention = false;
   for (let attempt = 1; attempt <= MAX_REPORT_ATTEMPTS; attempt++) {
     let response;
     try {
@@ -193,6 +194,37 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
           });
           return match[1];
         }
+      }
+
+      // 400 + a retention hint: Amazon names the earliest date this report type
+      // still holds, e.g. "startDate (2026-06-09) must be equal to or after
+      // report type data retention start date (2026-07-10)". Retention is per ad
+      // product — Sponsored Products keeps 95 days, Sponsored Brands only 60
+      // (both verified against the live API on 2026-09-08) — so the same 31-day
+      // backfill chunk is accepted for SP and rejected for SB, which is how the
+      // 2026-09-07 search-term backfill lost 14 SB chunks to a bare
+      // "status code 400". Re-ask for the part of the window Amazon still has;
+      // only when the whole window predates retention is there nothing to fetch.
+      const retentionHint = status === 400
+        ? /retention start date \((\d{4}-\d{2}-\d{2})\)/.exec(detail)
+        : null;
+      if (retentionHint && !clampedToRetention) {
+        const earliest = retentionHint[1];
+        if (earliest > endDate) {
+          const e = new Error(
+            `${campaignType}/${reportLevel} window ${startDate}..${endDate} predates Amazon's data retention (starts ${earliest})`
+          );
+          e.retentionExpired = true;
+          throw e;
+        }
+        clampedToRetention = true;
+        logger.warn("Report window predates Amazon retention — clamping start date", {
+          campaignType, reportLevel, requestedStart: startDate, clampedStart: earliest, endDate,
+        });
+        body.startDate = earliest;
+        body.name = `${campaignType}-${reportLevel}-${earliest}-${endDate}-${Date.now().toString(36)}`;
+        if (onWindowClamped) onWindowClamped(earliest);
+        continue;
       }
 
       // 429: throttled — wait and retry, preferring Amazon's Retry-After header
@@ -217,6 +249,11 @@ async function createReportRequest({ profile, campaignType, reportLevel, startDa
         campaignType,
         reportLevel,
       });
+      // An axios error says only "Request failed with status code 400", and that
+      // is the string report_requests.error_message keeps. Amazon's own `detail`
+      // is the part that says what to change, so carry it into the message the
+      // failed row will show.
+      if (detail) err.message = `${err.message}: ${detail}`;
       throw err;
     }
   }
@@ -552,6 +589,13 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
       reportLevel,
       startDate,
       endDate,
+      // Amazon may hand back a shorter window than we asked for (see the
+      // retention clamp there). Record the window actually requested, so the row
+      // does not claim data it was never allowed to ask for.
+      onWindowClamped: (clampedStart) => {
+        query("UPDATE report_requests SET date_start = $1 WHERE id = $2", [clampedStart, requestId])
+          .catch(e => logger.warn("Could not record clamped report start", { requestId, error: e.message }));
+      },
     });
 
     logger.info("Report requested from Amazon", { requestId, amazonReportId, campaignType, reportLevel, startDate, endDate });
@@ -613,9 +657,23 @@ async function runReportingPipeline({ profileDbRecord, campaignType, reportLevel
       await query("UPDATE report_requests SET status = 'processing', updated_at = NOW() WHERE id = $1", [requestId]);
     }
 
-    throw new Error("Report polling timed out after 10 minutes");
+    throw new Error(`Report polling timed out after ${Math.round(maxWaitMs / 60000)} minutes`);
 
   } catch (err) {
+    // A window older than Amazon's retention is not a failure to retry: the data
+    // no longer exists on their side and never will again. Mark it skipped, with
+    // the reason, so 'failed' in report_requests keeps meaning "worth looking at"
+    // and the queue job does not fail either.
+    if (err.retentionExpired) {
+      await query(
+        "UPDATE report_requests SET status = 'skipped', error_message = $1, completed_at = NOW(), updated_at = NOW() WHERE id = $2",
+        [err.message, requestId]
+      );
+      logger.info("Report skipped — window predates Amazon retention", {
+        requestId, campaignType, reportLevel, startDate, endDate,
+      });
+      return { success: false, skipped: true, reason: err.message };
+    }
     await query(
       "UPDATE report_requests SET status = 'failed', error_message = $1, updated_at = NOW() WHERE id = $2",
       [err.message, requestId]
