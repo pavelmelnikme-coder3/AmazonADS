@@ -12,13 +12,32 @@ const { query } = require("../../db/pool");
 async function persistResults(searchId, workspaceId, businesses) {
   if (!businesses.length) return [];
 
+  // An address OSM already publishes needs no scraping: it arrives as 'found', so the
+  // scraper skips the row and add-to-contacts picks it up straight away. Rows without one
+  // stay 'pending' and take the website route exactly as before. On a repeat sighting the
+  // stored emails win — they may have come from a scrape that looked deeper than the tags.
+  // Postgres has no ragged array-of-arrays, so the per-row email lists travel as array
+  // literals in a plain text[] and are cast back one row at a time.
+  const emailsLiteral = (b) => {
+    const list = Array.isArray(b.emails) ? b.emails : [];
+    if (!list.length) return "{}";
+    return `{${list.map((e) => `"${String(e).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",")}}`;
+  };
   const { rows } = await query(
     `INSERT INTO lead_results
-       (search_id, workspace_id, osm_type, osm_id, name, category, address, lat, lon, website, phone)
-     SELECT $1, $2, u.osm_type, u.osm_id, u.name, u.category, u.address, u.lat, u.lon, u.website, u.phone
-     FROM UNNEST($3::text[], $4::bigint[], $5::text[], $6::text[], $7::text[], $8::float8[], $9::float8[], $10::text[], $11::text[])
-       AS u(osm_type, osm_id, name, category, address, lat, lon, website, phone)
-     ON CONFLICT (workspace_id, osm_type, osm_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id
+       (search_id, workspace_id, osm_type, osm_id, name, category, address, lat, lon, website, phone,
+        emails, scrape_status)
+     SELECT $1, $2, u.osm_type, u.osm_id, u.name, u.category, u.address, u.lat, u.lon, u.website, u.phone,
+            u.emails::text[],
+            CASE WHEN COALESCE(array_length(u.emails::text[], 1), 0) > 0 THEN 'found' ELSE 'pending' END
+     FROM UNNEST($3::text[], $4::bigint[], $5::text[], $6::text[], $7::text[], $8::float8[], $9::float8[], $10::text[], $11::text[], $12::text[])
+       AS u(osm_type, osm_id, name, category, address, lat, lon, website, phone, emails)
+     ON CONFLICT (workspace_id, osm_type, osm_id) DO UPDATE SET
+       emails = CASE WHEN COALESCE(array_length(lead_results.emails, 1), 0) > 0
+                     THEN lead_results.emails ELSE EXCLUDED.emails END,
+       scrape_status = CASE WHEN COALESCE(array_length(lead_results.emails, 1), 0) = 0
+                             AND COALESCE(array_length(EXCLUDED.emails, 1), 0) > 0
+                            THEN 'found' ELSE lead_results.scrape_status END
      RETURNING *`,
     [
       searchId, workspaceId,
@@ -27,6 +46,7 @@ async function persistResults(searchId, workspaceId, businesses) {
       businesses.map((b) => b.address), businesses.map((b) => b.lat),
       businesses.map((b) => b.lon), businesses.map((b) => b.website),
       businesses.map((b) => b.phone),
+      businesses.map(emailsLiteral),
     ]
   );
 

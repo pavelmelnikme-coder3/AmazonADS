@@ -188,6 +188,23 @@ function pickCategory(tags) {
   return base || tags.cuisine || null;
 }
 
+// A business that publishes its address in OSM has already answered the question the
+// website scraper exists to ask. Taking `email`/`contact:email` straight from the tags
+// skips a fetch of someone else's site per lead, and reaches the ones with no website
+// at all — which the scraper writes off as 'no_website' and never revisits.
+// OSM allows several addresses in one tag, separated by ';'.
+function pickEmails(tags) {
+  const raw = [tags.email, tags["contact:email"]].filter(Boolean).join(";");
+  const seen = new Set();
+  for (const part of raw.split(";")) {
+    const addr = part.trim().toLowerCase();
+    // Deliberately conservative: anything that isn't plainly an address is left to the
+    // scraper rather than promoted into a mailing list on a guess.
+    if (/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(addr)) seen.add(addr);
+  }
+  return [...seen];
+}
+
 function pickAddress(tags) {
   const parts = [
     [tags["addr:street"], tags["addr:housenumber"]].filter(Boolean).join(" "),
@@ -197,8 +214,34 @@ function pickAddress(tags) {
   return parts.length ? parts.join(", ") : null;
 }
 
+// Overpass elements → lead rows. Shared by the live search and by any bulk import, so a
+// lead loaded from a saved Overpass response is the same shape, with the same address
+// handling, as one that arrived over the wire.
+function mapElements(elements) {
+  const results = [];
+  for (const el of elements || []) {
+    const tags = el.tags || {};
+    if (!tags.name) continue; // unnamed matches aren't useful leads
+    const lat = el.type === "node" ? el.lat : el.center?.lat;
+    const lon = el.type === "node" ? el.lon : el.center?.lon;
+    results.push({
+      osm_type: el.type,
+      osm_id: el.id,
+      name: tags.name,
+      category: pickCategory(tags),
+      address: pickAddress(tags),
+      lat: lat ?? null,
+      lon: lon ?? null,
+      website: tags.website || tags["contact:website"] || null,
+      phone: tags.phone || tags["contact:phone"] || null,
+      emails: pickEmails(tags),
+    });
+  }
+  return results;
+}
+
 /**
- * @returns {Promise<Array<{osm_type, osm_id, name, category, address, lat, lon, website, phone}>>}
+ * @returns {Promise<Array<{osm_type, osm_id, name, category, address, lat, lon, website, phone, emails}>>}
  *
  * The free public overpass-api.de instance is shared load-balanced infrastructure and
  * empirically flaky under load — it can return a transient 406/429/503/504 for a request
@@ -275,26 +318,7 @@ async function searchBusinesses({ bbox, query, limit = 501 }) {
     throw new Error("Search timed out — the region is too large for this query, try a smaller region or more specific business type");
   }
 
-  const elements = resp.data?.elements || [];
-  const results = [];
-  for (const el of elements) {
-    const tags = el.tags || {};
-    if (!tags.name) continue; // unnamed matches aren't useful leads
-    const lat = el.type === "node" ? el.lat : el.center?.lat;
-    const lon = el.type === "node" ? el.lon : el.center?.lon;
-    results.push({
-      osm_type: el.type,
-      osm_id: el.id,
-      name: tags.name,
-      category: pickCategory(tags),
-      address: pickAddress(tags),
-      lat: lat ?? null,
-      lon: lon ?? null,
-      website: tags.website || tags["contact:website"] || null,
-      phone: tags.phone || tags["contact:phone"] || null,
-    });
-  }
-  return results;
+  return mapElements(resp.data?.elements || []);
 }
 
-module.exports = { searchBusinesses, buildQuery, buildFilters, interpretQuery };
+module.exports = { searchBusinesses, buildQuery, buildFilters, interpretQuery, pickEmails, mapElements };
