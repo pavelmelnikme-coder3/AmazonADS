@@ -45,6 +45,36 @@ const withUpload = (mw) => (req, res, next) => mw(req, res, (err) => {
   next(err);
 });
 
+// A campaign with no segment sends to every active contact — that is what NULL means to
+// resolveRecipientIds, and email_campaigns.segment_id is ON DELETE SET NULL. So deleting a
+// segment does not leave a campaign without an audience; it silently swaps its audience for
+// the whole list. Verified on the live schema 2026-09-08: a draft pointing at a segment came
+// back with segment_id NULL the moment the segment was deleted, which for this workspace
+// would have turned a 3,248-contact send into a 5,297-contact one with nothing shown.
+//
+// So a segment still owned by a campaign that can yet be sent is not deletable. 'sent' and
+// 'failed' campaigns are left out: they will never send again, and blocking a cleanup
+// forever over a finished campaign would be its own bug.
+const SENDABLE_STATUSES = ["draft", "scheduled", "paused", "sending"];
+
+async function campaignsUsingSegments(workspaceId, segmentIds) {
+  if (!segmentIds.length) return [];
+  const { rows } = await query(
+    `SELECT name, status FROM email_campaigns
+      WHERE workspace_id = $1 AND segment_id = ANY($2::uuid[]) AND status = ANY($3::text[])
+      ORDER BY name`,
+    [workspaceId, segmentIds, SENDABLE_STATUSES]
+  );
+  return rows;
+}
+
+function segmentInUseMessage(campaigns) {
+  const named = campaigns.map(c => `“${c.name}” (${c.status})`).join(", ");
+  return `Still in use by ${campaigns.length === 1 ? "a campaign" : "campaigns"}: ${named}. ` +
+    "Deleting it would send those to every active contact instead — point them at another " +
+    "audience first.";
+}
+
 // ─── Contacts ─────────────────────────────────────────────────────────────────
 // Distinct tags across this workspace's contacts, with counts — powers the "lists" filter in
 // the Contacts tab (each Lead Finder search, or a manually-tagged import, shows up as one tag).
@@ -169,14 +199,8 @@ router.delete("/contacts/lists/:tag", async (req, res, next) => {
       [req.workspaceId, tag]
     );
     if (segments.length) {
-      const { rows: [{ count: live }] } = await query(
-        `SELECT COUNT(*)::int AS count FROM email_campaigns
-          WHERE workspace_id=$1 AND segment_id = ANY($2::uuid[]) AND status IN ('sending','scheduled')`,
-        [req.workspaceId, segments.map(s => s.id)]
-      );
-      if (live) return res.status(409).json({
-        error: "A campaign is currently sending or scheduled to this list — pause it first.",
-      });
+      const blocking = await campaignsUsingSegments(req.workspaceId, segments.map(s => s.id));
+      if (blocking.length) return res.status(409).json({ error: segmentInUseMessage(blocking) });
     }
 
     let deletedContacts = 0;
@@ -252,6 +276,10 @@ router.put("/segments/:id", async (req, res, next) => {
 
 router.delete("/segments/:id", async (req, res, next) => {
   try {
+    // Same reason the list delete refuses: this would not unset those campaigns' audience,
+    // it would widen it to everyone (see SENDABLE_STATUSES above).
+    const blocking = await campaignsUsingSegments(req.workspaceId, [req.params.id]);
+    if (blocking.length) return res.status(409).json({ error: segmentInUseMessage(blocking) });
     await query("DELETE FROM email_segments WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     res.json({ ok: true });
   } catch (err) { next(err); }
@@ -422,6 +450,31 @@ router.post("/campaigns/:id/test", async (req, res, next) => {
     });
     if (r.status !== "sent") return res.status(502).json({ error: r.error || "send failed" });
     res.json({ ok: true, messageId: r.messageId });
+  } catch (err) { next(err); }
+});
+
+// Who this campaign would actually reach, asked before sending rather than reported after.
+// The send confirmation used to say only "send to all matching contacts?", so the one number
+// that decides whether sending is safe — how many people — was never shown until the send
+// had already been queued.
+router.get("/campaigns/:id/audience", async (req, res, next) => {
+  try {
+    const { rows: [c] } = await query(
+      "SELECT id, workspace_id, segment_id FROM email_campaigns WHERE id=$1 AND workspace_id=$2",
+      [req.params.id, req.workspaceId]
+    );
+    if (!c) return res.status(404).json({ error: "Campaign not found" });
+
+    let segmentName = null;
+    if (c.segment_id) {
+      const { rows: [s] } = await query("SELECT name FROM email_segments WHERE id=$1 AND workspace_id=$2",
+        [c.segment_id, req.workspaceId]);
+      segmentName = s?.name || null;
+    }
+    const { resolveRecipientIds } = require("../services/email/dispatch");
+    const ids = await resolveRecipientIds(c);
+    res.json({ recipients: ids.length, segment_id: c.segment_id, segment_name: segmentName,
+               all_contacts: !c.segment_id });
   } catch (err) { next(err); }
 });
 

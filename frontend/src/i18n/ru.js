@@ -53,6 +53,8 @@ export default {
     importFileHint: "Колонки email/имя/фамилия определяются автоматически (EMAIL, VORNAME/First Name, NACHNAME/Last Name); остальные колонки сохраняются как атрибуты для подстановок.",
     importFileDone: "Импортировано {imported}, пропущено {skipped}, невалидных {invalid} (колонка email: {col}).",
     testSent: "Тест отправлен на {email}.", confirmSend: "Отправить «{name}» всем подходящим контактам сейчас?",
+    confirmSendSegment: "Отправить «{name}» сейчас?\n\nАудитория: {segment} — {n} получателей.",
+    confirmSendAll: "Отправить «{name}» сейчас?\n\nУ кампании НЕТ сегмента, поэтому она уйдёт ВСЕМ активным контактам: {n} получателей.",
     sendQueued: "В очереди {n} получателей.",
     editorVisual: "Визуально", editorHtml: "HTML",
     editorSwitchToHtmlConfirm: "Переключиться в режим HTML? Текущие блоки будут скомпилированы в HTML, а визуальный редактор сбросится, если вы вернётесь обратно.",

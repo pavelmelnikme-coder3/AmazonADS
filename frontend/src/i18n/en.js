@@ -53,6 +53,8 @@ export default {
     importFileHint: "Email/first name/last name columns are detected automatically (EMAIL, VORNAME/First Name, NACHNAME/Last Name); any other columns are kept as merge-tag attributes.",
     importFileDone: "Imported {imported}, skipped {skipped}, invalid {invalid} (email column: {col}).",
     testSent: "Test sent to {email}.", confirmSend: "Send “{name}” to all matching contacts now?",
+    confirmSendSegment: "Send “{name}” now?\n\nAudience: {segment} — {n} recipients.",
+    confirmSendAll: "Send “{name}” now?\n\nThis campaign has NO segment, so it goes to EVERY active contact: {n} recipients.",
     sendQueued: "Queued {n} recipients.",
     editorVisual: "Visual", editorHtml: "HTML",
     editorSwitchToHtmlConfirm: "Switch to raw HTML mode? The current blocks will be compiled to HTML and the visual editor will be reset if you switch back.",

@@ -17647,6 +17647,12 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const [statusFilter, setStatusFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [contactTags, setContactTags] = useState([]); // [{tag, count}] — the "lists" a user has collected
+  // The contacts table used to render whatever one request returned and say nothing about
+  // the rest: at 3,248 contacts in one list that meant 200 rows shown and 3,048 silently
+  // missing, with the list chip still claiming the full count.
+  const CONTACTS_PER_PAGE = 100;
+  const [contactPage, setContactPage] = useState(1);
+  const [contactsTotal, setContactsTotal] = useState(0);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [importSource, setImportSource] = useState("");
@@ -17681,8 +17687,14 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
   const attachmentTotalBytes = (list) => (list || []).reduce((s, a) => s + (a.size || 0), 0);
 
-  const loadContacts = () => apiFetch(`/email-marketing/contacts?limit=200${statusFilter ? `&status=${statusFilter}` : ""}${tagFilter ? `&tag=${encodeURIComponent(tagFilter)}` : ""}`)
-    .then(d => setContacts(d?.data || [])).catch(() => {});
+  const loadContacts = () => apiFetch(`/email-marketing/contacts?limit=${CONTACTS_PER_PAGE}&page=${contactPage}${statusFilter ? `&status=${statusFilter}` : ""}${tagFilter ? `&tag=${encodeURIComponent(tagFilter)}` : ""}`)
+    .then(d => {
+      setContacts(d?.data || []);
+      setContactsTotal(d?.pagination?.total || 0);
+      // Deleting contacts can leave the current page past the end of a now-shorter list;
+      // stepping back beats showing an empty table under a "3201–3248" counter.
+      if (!(d?.data || []).length && contactPage > 1) setContactPage(p => Math.max(1, p - 1));
+    }).catch(() => {});
   const loadContactTags = () => apiFetch("/email-marketing/contacts/tags").then(d => setContactTags(d?.data || [])).catch(() => {});
   const loadCampaigns = () => apiFetch("/email-marketing/campaigns").then(d => setCampaigns(d?.data || [])).catch(() => {});
   const loadSegments = () => apiFetch("/email-marketing/segments").then(d => setSegments(d?.data || [])).catch(() => {});
@@ -17691,7 +17703,9 @@ const EmailMarketingPage = ({ workspaceId }) => {
   const loadLeadResults = (id) => apiFetch(`/lead-finder/searches/${id}/results`).then(d => setLeadResults(d?.data || [])).catch(() => {});
 
   useEffect(() => { loadCampaigns(); loadSegments(); }, [workspaceId]);
-  useEffect(() => { if (tab === "contacts") { loadContacts(); loadContactTags(); } if (tab === "suppressions") loadSuppressions(); if (tab === "leads") loadLeadSearches(); }, [tab, statusFilter, tagFilter, workspaceId]);
+  useEffect(() => { if (tab === "contacts") { loadContacts(); loadContactTags(); } if (tab === "suppressions") loadSuppressions(); if (tab === "leads") loadLeadSearches(); }, [tab, statusFilter, tagFilter, contactPage, workspaceId]);
+  // Page 7 of one list is not page 7 of the next, so any change of filter starts over.
+  useEffect(() => { setContactPage(1); }, [statusFilter, tagFilter, workspaceId]);
 
   // While a campaign is actively drip-sending, poll the list so its progress bar moves
   // without the user having to refresh — the drip cron itself only ticks every 5 min, so
@@ -18031,7 +18045,18 @@ const EmailMarketingPage = ({ workspaceId }) => {
   }
 
   async function sendCampaign(c) {
-    if (!window.confirm(t("email.confirmSend", { name: c.name }))) return;
+    // How many people this is about to reach is the one thing worth knowing before saying
+    // yes, and a campaign with no segment goes to every active contact — so the count and
+    // that fact go in the question, not in the notification afterwards.
+    let audience = null;
+    try { audience = await apiFetch(`/email-marketing/campaigns/${c.id}/audience`); }
+    catch { /* fall back to the old wording rather than blocking the send on a count */ }
+    const question = !audience
+      ? t("email.confirmSend", { name: c.name })
+      : audience.all_contacts
+        ? t("email.confirmSendAll", { name: c.name, n: audience.recipients })
+        : t("email.confirmSendSegment", { name: c.name, segment: audience.segment_name || "—", n: audience.recipients });
+    if (!window.confirm(question)) return;
     setBusy(true); setErr("");
     try { const r = await post(`/email-marketing/campaigns/${c.id}/send`, {}); flash(t("email.sendQueued", { n: r.total })); loadCampaigns(); }
     catch (e) { setErr(e.message); } finally { setBusy(false); }
@@ -18196,6 +18221,24 @@ const EmailMarketingPage = ({ workspaceId }) => {
                 {!contacts.length && <tr><td colSpan={5} style={{ padding: 28, textAlign: "center", color: "var(--tx3)" }}>{t("email.noContacts")}</td></tr>}
               </tbody>
             </table>
+            {contactsTotal > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                            padding: "8px 14px", borderTop: "1px solid var(--b1)", fontSize: 12, color: "var(--tx3)" }}>
+                <span>
+                  {((contactPage - 1) * CONTACTS_PER_PAGE) + 1}–{Math.min(contactPage * CONTACTS_PER_PAGE, contactsTotal)}{" "}
+                  {t("common.of")} {contactsTotal.toLocaleString()}
+                </span>
+                {contactsTotal > CONTACTS_PER_PAGE && (
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}
+                      onClick={() => setContactPage(p => Math.max(1, p - 1))} disabled={contactPage === 1}>{t("common.back")}</button>
+                    <button className="btn btn-ghost" style={{ fontSize: 11, padding: "2px 8px" }}
+                      onClick={() => setContactPage(p => p + 1)}
+                      disabled={contactPage * CONTACTS_PER_PAGE >= contactsTotal}>{t("common.next")}</button>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

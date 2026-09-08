@@ -36,15 +36,15 @@ function app() {
   return a;
 }
 
-// The route's query sequence: count → segments → [live campaigns] → [delete contacts] →
-// untag → [delete segments].
-function mockSequence({ count = 131, segments = [], live = 0, deleted = 0, untagged = 131 } = {}) {
+// The route's query sequence: count → segments → [campaigns still pointing at them] →
+// [delete contacts] → untag → [delete segments].
+function mockSequence({ count = 131, segments = [], blocking = [], deleted = 0, untagged = 131 } = {}) {
   const calls = [];
   dbQuery.mockImplementation((sql) => {
     calls.push(sql);
     if (/COUNT\(\*\)::int AS count FROM email_contacts/.test(sql)) return Promise.resolve({ rows: [{ count }] });
     if (/FROM email_segments/.test(sql) && /SELECT/.test(sql)) return Promise.resolve({ rows: segments });
-    if (/COUNT\(\*\)::int AS count FROM email_campaigns/.test(sql)) return Promise.resolve({ rows: [{ count: live }] });
+    if (/SELECT name, status FROM email_campaigns/.test(sql)) return Promise.resolve({ rows: blocking });
     if (/DELETE FROM email_contacts/.test(sql)) return Promise.resolve({ rowCount: deleted });
     if (/UPDATE email_contacts SET tags = array_remove/.test(sql)) return Promise.resolve({ rowCount: untagged });
     if (/DELETE FROM email_segments/.test(sql)) return Promise.resolve({ rowCount: segments.length });
@@ -101,14 +101,26 @@ describe("segments defined by the tag go with it", () => {
   });
 
   test("a campaign mid-send against that segment blocks the whole delete", async () => {
-    const calls = mockSequence({ segments: [{ id: SEG_ID }], live: 1 });
+    const calls = mockSequence({ segments: [{ id: SEG_ID }], blocking: [{ name: "Spring", status: "sending" }] });
     const res = await delList("asian", "contacts");
     expect(res.status).toBe(409);
-    expect(res.body.error).toMatch(/sending or scheduled/i);
+    expect(res.body.error).toMatch(/Spring/);
     // Nothing may have been touched.
     expect(calls.some(s => /DELETE FROM email_contacts/.test(s))).toBe(false);
     expect(calls.some(s => /UPDATE email_contacts/.test(s))).toBe(false);
     expect(calls.some(s => /DELETE FROM email_segments/.test(s))).toBe(false);
+  });
+
+  // The old guard only knew 'sending' and 'scheduled' — the two states a campaign is least
+  // likely to be in when someone tidies up lists. A draft, the ordinary case, went straight
+  // through, and ON DELETE SET NULL then aimed it at every active contact.
+  test("a draft campaign against that segment blocks it too", async () => {
+    const calls = mockSequence({ segments: [{ id: SEG_ID }], blocking: [{ name: "asian_b2b", status: "draft" }] });
+    const res = await delList("asian");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/asian_b2b/);
+    expect(calls.some(s => /DELETE FROM email_segments/.test(s))).toBe(false);
+    expect(calls.some(s => /UPDATE email_contacts/.test(s))).toBe(false);
   });
 });
 

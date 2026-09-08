@@ -53,6 +53,8 @@ export default {
     importFileHint: "E-Mail-/Vorname-/Nachname-Spalten werden automatisch erkannt (EMAIL, VORNAME/First Name, NACHNAME/Last Name); alle anderen Spalten werden als Platzhalter-Attribute übernommen.",
     importFileDone: "Importiert {imported}, übersprungen {skipped}, ungültig {invalid} (E-Mail-Spalte: {col}).",
     testSent: "Test an {email} gesendet.", confirmSend: "„{name}“ jetzt an alle passenden Kontakte senden?",
+    confirmSendSegment: "„{name}“ jetzt senden?\n\nZielgruppe: {segment} — {n} Empfänger.",
+    confirmSendAll: "„{name}“ jetzt senden?\n\nDiese Kampagne hat KEIN Segment und geht an ALLE aktiven Kontakte: {n} Empfänger.",
     sendQueued: "{n} Empfänger eingereiht.",
     editorVisual: "Visuell", editorHtml: "HTML",
     editorSwitchToHtmlConfirm: "Zum HTML-Modus wechseln? Die aktuellen Blöcke werden zu HTML kompiliert; der visuelle Editor wird beim Zurückwechseln zurückgesetzt.",
