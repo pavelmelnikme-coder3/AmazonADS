@@ -743,7 +743,11 @@ Campaigns:
 ```
 GET    /campaigns                 GET /campaigns/:id
 POST   /campaigns   { name*, subject, from_name, from_email, reply_to, html_body, segment_id, content_blocks? }
-PUT    /campaigns/:id             (editable only while draft/scheduled/paused; content_blocks explicitly settable to null)
+PUT    /campaigns/:id             (editable only while draft/scheduled/paused). Every field is patch-style:
+                                  omit it and it keeps its value. `segment_id` and `content_blocks` are
+                                  presence-checked, so both can be explicitly set to null — omitting
+                                  `segment_id` does NOT clear the audience (it used to, and NULL means
+                                  every active contact, so a partial update silently widened the send).
 DELETE /campaigns/:id             (draft/scheduled/paused/failed only)
 GET    /campaigns/:id/audience    → { recipients, segment_id, segment_name, all_contacts }
                                      — who this campaign would actually reach, resolved by the send path's own
@@ -757,7 +761,10 @@ POST   /campaigns/:id/pause
 GET    /campaigns/:id/stats       → counters + per-status send breakdown + computed `rates` (open/click/
                                      click-to-open/bounce/complaint/unsubscribe %, null if denominator is 0)
 ```
-- `subject`/`html_body` support `{{first_name}}`, `{{last_name}}`, and any imported attribute. A postal-address + unsubscribe footer is appended automatically.
+- `subject`/`html_body` support `{{first_name}}`, `{{last_name}}`, and any imported attribute, plus
+  `{{unsubscribe}}` and `{{mirror}}`. A postal-address + unsubscribe footer is appended automatically;
+  its opening sentence depends on the recipient's `consent_source` — an address this app collected
+  itself (`scraped_public_website`) is told where it was reached, never that it opted in.
 - `content_blocks: { version:1, blocks:[...] }` (block types: text/image/button/divider/spacer) — the visual editor's format; when set, `html_body` is the last-compiled-from-blocks output (source of truth for sending either way).
 - **`/send` has no test/dry-run mode** — omitting `segment_id` targets ALL active contacts. Always use `/campaigns/:id/test` (single explicit recipient) to verify a campaign or the send pipeline itself; never call `/send` "just to check it works."
 

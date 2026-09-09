@@ -340,16 +340,24 @@ router.put("/campaigns/:id", async (req, res, next) => {
     // content_blocks needs to be explicitly settable to NULL (switching a campaign back to
     // raw-HTML mode) — COALESCE can't express "set to null", so use a presence check instead.
     const hasContentBlocks = Object.prototype.hasOwnProperty.call(req.body, "content_blocks");
+    // segment_id needs the same treatment, and for a sharper reason: every other field here is
+    // "update only if provided", but this one was assigned unconditionally, so a PUT that simply
+    // did not mention it — a partial update from any caller other than this app's own form —
+    // set it to NULL. NULL is not "no audience": it means every active contact. A campaign
+    // aimed at a 3,248-person segment would quietly become a campaign aimed at everyone.
+    const hasSegment = Object.prototype.hasOwnProperty.call(req.body, "segment_id");
     // Only editable while not in-flight.
     const { rows: [c] } = await query(
       `UPDATE email_campaigns SET
          name=COALESCE($3,name), subject=COALESCE($4,subject), from_name=COALESCE($5,from_name),
          from_email=COALESCE($6,from_email), reply_to=COALESCE($7,reply_to), html_body=COALESCE($8,html_body),
-         segment_id=$9, content_blocks = CASE WHEN $10 THEN $11::jsonb ELSE content_blocks END,
+         segment_id = CASE WHEN $9 THEN $10::uuid ELSE segment_id END,
+         content_blocks = CASE WHEN $11 THEN $12::jsonb ELSE content_blocks END,
          updated_at=NOW()
        WHERE id=$1 AND workspace_id=$2 AND status IN ('draft','scheduled','paused') RETURNING *`,
       [req.params.id, req.workspaceId, name ?? null, subject ?? null, from_name ?? null,
-       from_email ?? null, reply_to ?? null, html_body ?? null, segment_id ?? null,
+       from_email ?? null, reply_to ?? null, html_body ?? null,
+       hasSegment, hasSegment ? (segment_id || null) : null,
        hasContentBlocks, hasContentBlocks ? JSON.stringify(req.body.content_blocks) : null]
     );
     if (!c) return res.status(409).json({ error: "Campaign not found or not editable" });

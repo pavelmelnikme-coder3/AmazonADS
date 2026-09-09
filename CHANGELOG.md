@@ -6,6 +6,72 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-09 — The marketing module read against its own data, before the first large send
+
+A review of the whole email module — dispatch, webhooks, rendering, campaign CRUD — with the
+3,248-contact list about to be sent to. Four defects, each measured against the one campaign
+this workspace has actually sent.
+
+### Fixed
+
+- **The compliance footer asserted an opt-in nobody had given.** This workspace holds 2,011
+  contacts with a real opt-in URL as their consent source and 3,330 collected from published
+  business listings — and every one of them was told "Sie erhalten diese E-Mail, weil Sie sich
+  dafür angemeldet haben". The campaign written for the second group says the honest thing in
+  its own footer; this line was appended directly beneath it, contradicting it. The app is
+  careful never to present a scraped address as consent anywhere else — the one place the
+  recipient actually reads was the exception. The footer now states how the address was
+  reached, in all three languages, and an unknown consent source still reads as opt-in (an
+  import has to prove consent to get in at all).
+
+- **A send could overwrite the provider's own verdict.** Brevo accepts a message, delivers it
+  and posts its webhook while the batch is still working through its other recipients, so the
+  row can already say 'delivered' when processBatch writes 'sent' over it. 507 of the 1,990
+  rows of the July campaign carry a delivered_at and a status of 'sent' — a quarter of the
+  send log misreporting itself, which is why its status breakdown showed 1,070 delivered while
+  its own counter said 1,585. Status now only moves forward from 'queued'; the message id and
+  sent_at are still written either way, since the id is what correlates a late event to the row.
+
+- **Webhook counters counted events, not row transitions.** Providers repeat events — a retry,
+  a soft_bounce followed by a blocked, a redelivery — and each one incremented the campaign's
+  aggregate. Measured on the July campaign: `bounced` 168 against 125 rows actually bounced,
+  `delivered` 1,585 against 1,583. Every counter now follows the row actually changing, while
+  suppression and contact status still apply on every event, because the point of those is
+  that the address stays excluded rather than that it was counted. The unsubscribe link does
+  the same: a second click, or a mail client prefetching it, no longer adds an unsubscribe.
+
+- **PUT /campaigns/:id cleared the audience when it was not mentioned.** Every other field
+  there is "update only if provided"; segment_id was assigned unconditionally, so a partial
+  update from any caller that did not name it set it to NULL — which is not "no audience" but
+  every active contact. The same silent widening as deleting a segment, through a different
+  door. It is now presence-checked, like content_blocks.
+
+- **A rejected webhook said nothing.** Failing closed is right; failing closed in silence is
+  how it would go unnoticed. A rejected call now logs why, at most once an hour.
+
+### Data healed
+
+507 send rows restored to 'delivered' from the evidence of their own delivered_at, and the two
+campaign counters that had drifted recomputed from the rows they summarise: delivered
+1,585 → 1,583, bounced 168 → 125. `opened` and `clicked` already agreed and were left alone;
+`unsubscribed` is not recomputable from send rows, since the token is per contact, not per send.
+
+### Notes
+
+- **Two `.env` files exist on the server** and only one of them is the app's: the backend loads
+  `backend/.env` through dotenv, which `printenv` in the container does not show and which is
+  not the root `/root/adsflow/.env`. Reading the wrong one made the Brevo webhook secret look
+  unset and the webhook look dead; it is set, 48 characters, and the endpoint is working. Ask
+  the running process, not the file: `node -e "require(\'dotenv\').config(); …"`.
+- Every unsubscribe and view-in-browser link currently renders as
+  `http://159.69.222.12:4000/...` — plain HTTP to a bare IP, because that is APP_PUBLIC_URL.
+  It resolves and works, but it is the single biggest deliverability risk in a 3,248-recipient
+  cold B2B send, and Gmail/Yahoo expect an HTTPS target for RFC 8058 one-click unsubscribe.
+- `EMAIL_DAILY_CAP=250` (Brevo free tier is 300/day for the whole account, transactional
+  included), so a 3,248-recipient campaign drains over about thirteen days.
+
+---
+
 ## [Unreleased] — 2026-09-08 — A health check that found five standing failures, and 13,816 leads the quota said were unreachable
 
 A full pass over production — containers, cron, queues, data freshness, write-back — plus the

@@ -121,9 +121,20 @@ async function processBatch({ campaignId, contactIds }) {
     // drip day retries it, rather than burning the recipient as a permanent failure.
     if (r.status === "deferred") continue;
     if (r.status === "sent") sent++; else failed++;
+    // The provider's webhook can beat this write. Brevo accepts the message over SMTP,
+    // delivers it, and posts `delivered` while this batch is still working through its other
+    // concurrent sends — so by the time we get here the row may already say 'delivered' (or
+    // 'bounced'). Overwriting it with 'sent' loses the verdict permanently: 507 of the 1990
+    // rows of the 2026-07 campaign carry a delivered_at and a status of 'sent', which is why
+    // its status breakdown shows 1070 delivered while its own counter says 1585.
+    // Status only ever moves forward from 'queued' here; the message id and sent_at are still
+    // recorded either way, since the id is what correlates late webhook events to this row.
     await query(
-      `UPDATE email_sends SET status=$3, ses_message_id=$4, error=$5,
-              sent_at = CASE WHEN $3='sent' THEN NOW() ELSE sent_at END
+      `UPDATE email_sends
+          SET status = CASE WHEN status = 'queued' THEN $3 ELSE status END,
+              ses_message_id = $4,
+              error = $5,
+              sent_at = CASE WHEN $3 = 'sent' THEN COALESCE(sent_at, NOW()) ELSE sent_at END
         WHERE campaign_id=$1 AND contact_id=$2`,
       [campaignId, c.id, r.status, r.messageId || null, r.error || null]
     );

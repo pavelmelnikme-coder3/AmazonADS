@@ -121,6 +121,45 @@ describe("DELETE /contacts/lists/:tag", () => {
   });
 });
 
+describe("PUT /campaigns/:id and the audience", () => {
+  // Every other field here is "update only if provided". segment_id was assigned
+  // unconditionally, so a partial update that never mentioned it set it to NULL — and NULL is
+  // not "no audience", it is every active contact. Same silent widening as deleting a segment.
+  test("a partial update that never mentions segment_id leaves the audience alone", async () => {
+    dbQuery.mockReset();
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: "c1", name: "renamed" }] });
+
+    const res = await request(app()).put("/email-marketing/campaigns/c1").send({ name: "renamed" });
+
+    expect(res.status).toBe(200);
+    const [sql, params] = dbQuery.mock.calls[0];
+    expect(sql).toMatch(/segment_id = CASE WHEN \$9 THEN \$10::uuid ELSE segment_id END/);
+    expect(params[8]).toBe(false);   // "segment_id was not in the body"
+  });
+
+  test("an explicit segment_id is still applied", async () => {
+    dbQuery.mockReset();
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: "c1" }] });
+
+    await request(app()).put("/email-marketing/campaigns/c1").send({ segment_id: SEG_ID });
+
+    const [, params] = dbQuery.mock.calls[0];
+    expect(params[8]).toBe(true);
+    expect(params[9]).toBe(SEG_ID);
+  });
+
+  test("clearing the audience on purpose still works", async () => {
+    dbQuery.mockReset();
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: "c1" }] });
+
+    await request(app()).put("/email-marketing/campaigns/c1").send({ segment_id: null });
+
+    const [, params] = dbQuery.mock.calls[0];
+    expect(params[8]).toBe(true);
+    expect(params[9]).toBeNull();
+  });
+});
+
 describe("GET /campaigns/:id/audience", () => {
   test("reports the count and the segment it came from", async () => {
     dbQuery

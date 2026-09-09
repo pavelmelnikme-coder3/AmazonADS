@@ -49,14 +49,20 @@ async function doUnsubscribe(token) {
   const { rows: [c] } = await query(
     "SELECT id, workspace_id, email FROM email_contacts WHERE unsubscribe_token = $1", [token]);
   if (!c) return false;
-  await query("UPDATE email_contacts SET status='unsubscribed', updated_at=NOW() WHERE id=$1", [c.id]);
+  // The counter follows the contact actually changing state, not the link being hit. The same
+  // link gets opened more than once in practice — a second click, a mail client that prefetches
+  // it, a browser reload of the confirmation page — and counting each hit would report more
+  // unsubscribes for a campaign than it had recipients. Unsubscribing stays idempotent either
+  // way: status and suppression are both already set the second time round.
+  const { rowCount: changed } = await query(
+    "UPDATE email_contacts SET status='unsubscribed', updated_at=NOW() WHERE id=$1 AND status <> 'unsubscribed'", [c.id]);
   const { rows: [lastSend] } = await query(
     `SELECT campaign_id FROM email_sends WHERE contact_id=$1 AND status <> 'queued'
       ORDER BY sent_at DESC NULLS LAST, created_at DESC LIMIT 1`, [c.id]);
   await query(
     `INSERT INTO email_suppressions (workspace_id, email, reason, source_campaign_id) VALUES ($1,$2,'unsubscribe',$3)
      ON CONFLICT (workspace_id, lower(email)) DO NOTHING`, [c.workspace_id, c.email, lastSend?.campaign_id || null]);
-  if (lastSend) await query("UPDATE email_campaigns SET unsubscribed = unsubscribed + 1 WHERE id=$1", [lastSend.campaign_id]);
+  if (lastSend && changed) await query("UPDATE email_campaigns SET unsubscribed = unsubscribed + 1 WHERE id=$1", [lastSend.campaign_id]);
   return true;
 }
 
@@ -263,10 +269,18 @@ async function applyBrevoEvent(evt) {
      ON CONFLICT (workspace_id, lower(email)) DO NOTHING`,
     [send.workspace_id, send.email, reason, send.campaign_id]);
 
+  // Every aggregate counter below is incremented only when the send row it describes
+  // actually changed. Providers repeat events — a retry, a soft_bounce followed by a
+  // blocked, a second delivery attempt — and a counter that adds one per *event* rather
+  // than per *row transition* drifts away from the rows it is supposed to summarise. The
+  // 2026-07 campaign shows exactly that: `bounced` = 168 against 125 rows actually bounced,
+  // `delivered` = 1585 against 1583 rows with a delivered_at.
   if (type === "delivered") {
     if (!send.delivered_at) {
-      await query("UPDATE email_sends SET status='delivered', delivered_at=NOW() WHERE id=$1 AND status NOT IN ('bounced','complained')", [send.id]);
-      await query("UPDATE email_campaigns SET delivered = delivered + 1 WHERE id=$1", [send.campaign_id]);
+      const { rowCount } = await query(
+        "UPDATE email_sends SET status='delivered', delivered_at=NOW() WHERE id=$1 AND delivered_at IS NULL AND status NOT IN ('bounced','complained')",
+        [send.id]);
+      if (rowCount) await query("UPDATE email_campaigns SET delivered = delivered + 1 WHERE id=$1", [send.campaign_id]);
     }
   } else if (type === "opened" || type === "unique_opened") {
     // Brevo's plain "opened" fires on every open (not just the first) unless the account is
@@ -283,27 +297,34 @@ async function applyBrevoEvent(evt) {
       await query("UPDATE email_campaigns SET clicked = clicked + 1 WHERE id=$1", [send.campaign_id]);
     }
   } else if (type === "hard_bounce" || type === "blocked" || type === "invalid_email") {
-    await query("UPDATE email_sends SET status='bounced', error=$2 WHERE id=$1", [send.id, evt.reason || type]);
-    await query("UPDATE email_campaigns SET bounced = bounced + 1 WHERE id=$1", [send.campaign_id]);
+    const { rowCount } = await query(
+      "UPDATE email_sends SET status='bounced', error=$2 WHERE id=$1 AND status <> 'bounced'", [send.id, evt.reason || type]);
+    if (rowCount) await query("UPDATE email_campaigns SET bounced = bounced + 1 WHERE id=$1", [send.campaign_id]);
+    // Suppression and contact status are idempotent in themselves, and must run even for a
+    // repeat event: the point is that this address stays excluded, not that we counted it.
     await suppress("hard_bounce");
     await query("UPDATE email_contacts SET status='bounced', updated_at=NOW() WHERE id=$1", [send.contact_id]);
   } else if (type === "soft_bounce") {
     // Transient — logged and counted, but NOT suppressed (unlike hard_bounce/blocked), since the
     // address may well accept mail on a future campaign (mirrors the SES permanent/transient split).
-    await query("UPDATE email_sends SET status='bounced', error=$2 WHERE id=$1", [send.id, evt.reason || type]);
-    await query("UPDATE email_campaigns SET bounced = bounced + 1 WHERE id=$1", [send.campaign_id]);
+    const { rowCount } = await query(
+      "UPDATE email_sends SET status='bounced', error=$2 WHERE id=$1 AND status <> 'bounced'", [send.id, evt.reason || type]);
+    if (rowCount) await query("UPDATE email_campaigns SET bounced = bounced + 1 WHERE id=$1", [send.campaign_id]);
   } else if (type === "spam") {
-    await query("UPDATE email_sends SET status='complained' WHERE id=$1", [send.id]);
-    await query("UPDATE email_campaigns SET complained = complained + 1 WHERE id=$1", [send.campaign_id]);
+    const { rowCount } = await query(
+      "UPDATE email_sends SET status='complained' WHERE id=$1 AND status <> 'complained'", [send.id]);
+    if (rowCount) await query("UPDATE email_campaigns SET complained = complained + 1 WHERE id=$1", [send.campaign_id]);
     await suppress("complaint");
     await query("UPDATE email_contacts SET status='complained', updated_at=NOW() WHERE id=$1", [send.contact_id]);
   } else if (type === "unsubscribed") {
     // Unlikely to ever fire in practice — our emails carry our own RFC 8058 List-Unsubscribe
     // link (routes/emailPublic.js doUnsubscribe), not a Brevo-hosted one, so Brevo has no
     // unsubscribe click of its own to report. Handled anyway in case that ever changes.
-    await query("UPDATE email_campaigns SET unsubscribed = unsubscribed + 1 WHERE id=$1", [send.campaign_id]);
+    const { rowCount } = await query(
+      "UPDATE email_contacts SET status='unsubscribed', updated_at=NOW() WHERE id=$1 AND status <> 'unsubscribed'",
+      [send.contact_id]);
+    if (rowCount) await query("UPDATE email_campaigns SET unsubscribed = unsubscribed + 1 WHERE id=$1", [send.campaign_id]);
     await suppress("unsubscribe");
-    await query("UPDATE email_contacts SET status='unsubscribed', updated_at=NOW() WHERE id=$1", [send.contact_id]);
   }
   // request/deferred/error: transport-level states we already capture at send time; no action.
 }
@@ -311,9 +332,25 @@ async function applyBrevoEvent(evt) {
 // Brevo doesn't sign webhook payloads, so authenticity is a shared secret baked into the URL
 // itself (configured as the webhook target in Brevo's dashboard) — fail closed if it's not set
 // rather than silently accepting unauthenticated writes to suppression/complaint status.
+let _rejectedWebhookLoggedAt = 0;
 router.post("/webhooks/brevo", express.json({ limit: "256kb" }), async (req, res) => {
   const secret = process.env.BREVO_WEBHOOK_SECRET;
-  if (!secret || req.query.token !== secret) return res.status(403).send("forbidden");
+  if (!secret || req.query.token !== secret) {
+    // Failing closed is right; failing closed in silence is how this goes unnoticed for weeks.
+    // With BREVO_WEBHOOK_SECRET unset the endpoint rejects every event the provider sends, so
+    // delivered/opened/bounced stats stop moving and hard bounces stop being suppressed — with
+    // nothing in the log to say why. Rate-limited to one line an hour so a misconfigured or
+    // hostile caller cannot flood the log either.
+    const now = Date.now();
+    if (now - _rejectedWebhookLoggedAt > 3600_000) {
+      _rejectedWebhookLoggedAt = now;
+      logger.warn("Brevo webhook rejected — events are being dropped", {
+        reason: secret ? "token mismatch" : "BREVO_WEBHOOK_SECRET is not set",
+        hint: "set BREVO_WEBHOOK_SECRET and point Brevo's webhook URL at ?token=<that value>",
+      });
+    }
+    return res.status(403).send("forbidden");
+  }
   try {
     const events = Array.isArray(req.body) ? req.body : [req.body];
     for (const evt of events) await applyBrevoEvent(evt);

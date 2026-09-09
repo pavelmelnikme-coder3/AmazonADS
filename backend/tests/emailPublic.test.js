@@ -14,7 +14,7 @@ describe("doUnsubscribe", () => {
   test("resolves token → marks contact unsubscribed + inserts suppression attributed to last campaign", async () => {
     dbQuery
       .mockResolvedValueOnce({ rows: [{ id: "c1", workspace_id: "ws1", email: "a@b.com" }] }) // lookup token
-      .mockResolvedValueOnce({ rows: [] })                             // UPDATE contact unsubscribed
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })                // UPDATE contact unsubscribed (it changed)
       .mockResolvedValueOnce({ rows: [{ campaign_id: "camp1" }] })     // SELECT most recent send
       .mockResolvedValueOnce({ rows: [] })                             // INSERT suppression
       .mockResolvedValueOnce({ rows: [] });                            // UPDATE campaign unsubscribed += 1
@@ -31,7 +31,7 @@ describe("doUnsubscribe", () => {
   test("contact never received a campaign send → suppression still inserted, no campaign counter touched", async () => {
     dbQuery
       .mockResolvedValueOnce({ rows: [{ id: "c1", workspace_id: "ws1", email: "a@b.com" }] })
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [] })  // SELECT most recent send → none
       .mockResolvedValueOnce({ rows: [] }); // INSERT suppression
     const ok = await _internal.doUnsubscribe("tok1");
@@ -54,7 +54,7 @@ describe("applySesEvent", () => {
   test("permanent bounce → mark bounced, suppress (hard_bounce), flag contact", async () => {
     dbQuery
       .mockResolvedValueOnce({ rows: [sendRow] }) // find sends by messageId
-      .mockResolvedValue({ rows: [] });           // all subsequent updates
+      .mockResolvedValue({ rows: [], rowCount: 1 });           // all subsequent updates
     await _internal.applySesEvent({
       eventType: "Bounce", mail: { messageId: "m1" },
       bounce: { bounceType: "Permanent", bouncedRecipients: [{ emailAddress: "a@b.com" }] },
@@ -68,7 +68,7 @@ describe("applySesEvent", () => {
   });
 
   test("transient bounce → marked bounced but NOT suppressed", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applySesEvent({
       eventType: "Bounce", mail: { messageId: "m1" },
       bounce: { bounceType: "Transient", bouncedRecipients: [{ emailAddress: "a@b.com" }] },
@@ -77,7 +77,7 @@ describe("applySesEvent", () => {
   });
 
   test("complaint → suppress (complaint) + flag contact complained", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applySesEvent({
       eventType: "Complaint", mail: { messageId: "m1" },
       complaint: { complainedRecipients: [{ emailAddress: "a@b.com" }] },
@@ -88,7 +88,7 @@ describe("applySesEvent", () => {
   });
 
   test("delivery → marks delivered + bumps counter", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applySesEvent({ eventType: "Delivery", mail: { messageId: "m1" }, delivery: {} });
     expect(dbQuery.mock.calls.some((c) => /status='delivered'/.test(c[0]))).toBe(true);
     expect(dbQuery.mock.calls.some((c) => /delivered = delivered \+ 1/.test(c[0]))).toBe(true);
@@ -100,18 +100,18 @@ describe("applySesEvent", () => {
   });
 
   test("open → bumps counter on first open, not on a repeat open (was: unconditional +1 every event)", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applySesEvent({ eventType: "Open", mail: { messageId: "m1" } });
     expect(dbQuery.mock.calls.some((c) => /opened = opened \+ 1/.test(c[0]))).toBe(true);
 
     dbQuery.mockClear();
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: "2026-01-01T00:00:00Z" }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: "2026-01-01T00:00:00Z" }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applySesEvent({ eventType: "Open", mail: { messageId: "m1" } });
     expect(dbQuery.mock.calls.some((c) => /opened = opened \+ 1/.test(c[0]))).toBe(false);
   });
 
   test("click → bumps counter on first click only", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, clicked_at: "2026-01-01T00:00:00Z" }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, clicked_at: "2026-01-01T00:00:00Z" }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applySesEvent({ eventType: "Click", mail: { messageId: "m1" } });
     expect(dbQuery.mock.calls.some((c) => /clicked = clicked \+ 1/.test(c[0]))).toBe(false);
   });
@@ -130,7 +130,7 @@ describe("applyBrevoEvent", () => {
   });
 
   test("delivered → correlates by tag (email_sends.id), bumps counter once", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "delivered", tag: "send1" });
     const lookup = dbQuery.mock.calls[0];
     expect(lookup[0]).toMatch(/es\.id = \$1/);
@@ -140,7 +140,7 @@ describe("applyBrevoEvent", () => {
   });
 
   test("falls back to message-id lookup when no tag present (pre-tag sends)", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "delivered", "message-id": "mid-1" });
     const lookup = dbQuery.mock.calls[0];
     expect(lookup[0]).toMatch(/ses_message_id = \$1/);
@@ -148,7 +148,7 @@ describe("applyBrevoEvent", () => {
   });
 
   test("unwraps a JSON-stringified single-element array tag (real Brevo SMTP webhook shape)", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "delivered", tag: '["send1"]' });
     const lookup = dbQuery.mock.calls[0];
     expect(lookup[1]).toEqual(["send1"]); // unwrapped, not the raw '["send1"]' string
@@ -162,30 +162,30 @@ describe("applyBrevoEvent", () => {
   });
 
   test("opened → unique-gated: first opened event counts, repeat does not", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "opened", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /opened = opened \+ 1/.test(c[0]))).toBe(true);
 
     dbQuery.mockClear();
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: "2026-01-01T00:00:00Z" }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: "2026-01-01T00:00:00Z" }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "opened", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /opened = opened \+ 1/.test(c[0]))).toBe(false);
   });
 
   test("unique_opened is treated the same as opened", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, opened_at: null }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "unique_opened", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /opened = opened \+ 1/.test(c[0]))).toBe(true);
   });
 
   test("click → unique-gated the same way as opened", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, clicked_at: null }] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [{ ...sendRow, clicked_at: null }] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "click", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /clicked = clicked \+ 1/.test(c[0]))).toBe(true);
   });
 
   test("hard_bounce → bounced + suppressed + contact flagged", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "hard_bounce", tag: "send1", reason: "mailbox does not exist" });
     expect(dbQuery.mock.calls.some((c) => /status='bounced'/.test(c[0]))).toBe(true);
     expect(dbQuery.mock.calls.some((c) => /bounced = bounced \+ 1/.test(c[0]))).toBe(true);
@@ -195,20 +195,20 @@ describe("applyBrevoEvent", () => {
   });
 
   test("blocked and invalid_email are treated as permanent bounces too", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "blocked", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /INSERT INTO email_suppressions/.test(c[0]))).toBe(true);
   });
 
   test("soft_bounce → counted but NOT suppressed", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "soft_bounce", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /bounced = bounced \+ 1/.test(c[0]))).toBe(true);
     expect(dbQuery.mock.calls.some((c) => /INSERT INTO email_suppressions/.test(c[0]))).toBe(false);
   });
 
   test("spam → complained + suppressed + contact flagged", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "spam", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /status='complained'/.test(c[0]))).toBe(true);
     const sup = dbQuery.mock.calls.find((c) => /INSERT INTO email_suppressions/.test(c[0]));
@@ -216,7 +216,7 @@ describe("applyBrevoEvent", () => {
   });
 
   test("unsubscribed → suppressed + campaign counter bumped", async () => {
-    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [] });
+    dbQuery.mockResolvedValueOnce({ rows: [sendRow] }).mockResolvedValue({ rows: [], rowCount: 1 });
     await _internal.applyBrevoEvent({ event: "unsubscribed", tag: "send1" });
     expect(dbQuery.mock.calls.some((c) => /unsubscribed = unsubscribed \+ 1/.test(c[0]))).toBe(true);
   });

@@ -61,14 +61,39 @@ function contactFields(contact, opts = {}) {
 // message this code writes rather than the campaign author — and it shipped hardcoded English
 // under a German campaign. Kept deliberately small: this is legal boilerplate, not UI copy, so
 // it lives here rather than pulling the frontend's i18n bundle into the mail path.
+// `optIn` is for addresses that actually opted in. `listed` is for the ones this app collected
+// from a published business listing — it says where the address came from instead of asserting
+// a consent that was never given.
+//
+// This matters because the claim was unconditional. Every contact this workspace holds is one
+// of two kinds: 2,011 carry a real opt-in URL as their consent_source, and 3,330 carry
+// 'scraped_public_website' — and the footer told both groups "you signed up for this". The
+// campaign body written for the second group says the honest thing ("Sie erhalten diese E-Mail
+// als Gastronomiebetrieb im Geschäftskundenverteiler"), and this footer was appended directly
+// beneath it contradicting it. Everywhere else the app is careful never to present scraped
+// addresses as consent; the one place the recipient actually reads was the exception.
 const FOOTER_TEXT = {
-  en: { optIn: "You are receiving this because you opted in.", unsubscribe: "Unsubscribe",
+  en: { optIn: "You are receiving this because you opted in.",
+        listed: "You are receiving this at a business address published on your website.",
+        unsubscribe: "Unsubscribe",
         test: "[TEST] Unsubscribe and view-in-browser links are inert in test sends — they only work for real recipients." },
-  de: { optIn: "Sie erhalten diese E-Mail, weil Sie sich dafür angemeldet haben.", unsubscribe: "Abmelden",
+  de: { optIn: "Sie erhalten diese E-Mail, weil Sie sich dafür angemeldet haben.",
+        listed: "Sie erhalten diese E-Mail an eine Geschäftsadresse, die auf Ihrer Website veröffentlicht ist.",
+        unsubscribe: "Abmelden",
         test: "[TEST] Abmelde- und Browser-Links sind in Testsendungen inaktiv — sie funktionieren nur für echte Empfänger." },
-  ru: { optIn: "Вы получаете это письмо, потому что подписались на рассылку.", unsubscribe: "Отписаться",
+  ru: { optIn: "Вы получаете это письмо, потому что подписались на рассылку.",
+        listed: "Вы получаете это письмо на рабочий адрес, опубликованный на вашем сайте.",
+        unsubscribe: "Отписаться",
         test: "[TEST] Ссылки отписки и «открыть в браузере» в тестовой отправке неактивны — они работают только для реальных получателей." },
 };
+
+// Consent sources this app writes when it collected an address itself rather than being given
+// it. Anything else is treated as a real opt-in, because that is what an import demands proof of.
+const COLLECTED_CONSENT_SOURCES = new Set(["scraped_public_website"]);
+
+function consentLine(contact, txt) {
+  return COLLECTED_CONSENT_SOURCES.has(String(contact?.consent_source || "")) ? txt.listed : txt.optIn;
+}
 
 // Order of preference: what the caller asked for, then what the contact itself says (an
 // imported `locale`/`lang` attribute), then the deployment default, then English. Unknown
@@ -99,7 +124,7 @@ function renderHtmlForContact(htmlBody, contact, opts = {}) {
   const txt = FOOTER_TEXT[resolveLocale(contact, opts)];
   const unsubLine = opts.isTest
     ? `<div>${esc(txt.test)}</div>`
-    : `<div>${esc(txt.optIn)} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;">${esc(txt.unsubscribe)}</a>.</div>`;
+    : `<div>${esc(consentLine(contact, txt))} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;">${esc(txt.unsubscribe)}</a>.</div>`;
   const footer = `
   <div style="margin-top:28px;padding-top:14px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
     ${addr ? `<div style="margin-bottom:6px;">${esc(addr)}</div>` : ""}
@@ -108,4 +133,4 @@ function renderHtmlForContact(htmlBody, contact, opts = {}) {
   return `${body}${footer}`;
 }
 
-module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact, resolveLocale, FOOTER_TEXT };
+module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact, resolveLocale, consentLine, FOOTER_TEXT, COLLECTED_CONSENT_SOURCES };

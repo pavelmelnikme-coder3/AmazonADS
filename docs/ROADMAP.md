@@ -1,6 +1,6 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 8 September 2026 — statuses re-verified against the live deployment and the code.
+> Last updated: 9 September 2026 — statuses re-verified against the live deployment and the code.
 > Sprint 1 ✅ · Sprint 2 ✅ · Sprint 3 ✅ · Sprint 4 ✅ · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅ · Keyword Research ✅
 > S4-4 (SB keyword-level reports) — **working** via `sbSearchTerm`, which carries `keywordId`/`keywordText`;
 > SB keyword metrics are current in `fact_metrics_daily` (58 rows over the last 30 days, latest 2026-09-06).
@@ -486,13 +486,15 @@ Full audit and fix of all EN/RU/DE translations — zero language mixing.
 
 ---
 
-## 📌 Current Backlog — what is actually open (8 September 2026)
+## 📌 Current Backlog — what is actually open (9 September 2026)
 
 Every sprint item S1–S4 is delivered. What remains is deployment configuration and follow-ups found
 by auditing production, not unfinished sprint scope.
 
 | Item | Severity | Where | Notes |
 |------|----------|-------|-------|
+| Unsubscribe links are plain HTTP to a bare IP | 🔴 | deployment | `APP_PUBLIC_URL=http://159.69.222.12:4000`, so every unsubscribe and view-in-browser link in a campaign points there. It works, but it is the biggest deliverability risk in a cold B2B send, and Gmail/Yahoo expect HTTPS for an RFC 8058 one-click unsubscribe. Needs a domain + TLS in front of the API. |
+| A 3,248-contact send takes ~13 days | 🟡 | deployment | `EMAIL_DAILY_CAP=250` against Brevo's free 300/day account-wide cap. The drip drains it correctly, but the campaign is not a one-day event. A paid plan and a higher cap is the only way to shorten it. |
 | No bid-raising automation | 🟡 | product | The nine active rules pause, negate and adjust one budget. The two `raise_bid_pct` rules older docs described as "paused" no longer exist in the database. |
 | Lead Finder: no in-app country sweep | 🟡 | product | **Solved for data, not yet in the UI (2026-09-08).** Tiling a country is 304 Overpass requests and the public endpoint bans the IP first; one `area` query per Bundesland covers the same ground in 16 requests and never touches the quota. All 13,816 German asian restaurants were collected that way, but by script — the Lead Finder still only knows how to tile a bbox. |
 | Marketing routes have no role check | 🟡 | code | Deleting a contact list with its contacts, and sending a campaign, are open to any workspace member. `requireRole` exists and guards connections; note it reads the org role (`req.user.role`), not `req.workspaceRole`. |

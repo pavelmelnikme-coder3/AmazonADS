@@ -149,26 +149,26 @@ describe("PUT /campaigns/:id — content_blocks explicit-null handling", () => {
     dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID }] });
     await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ name: "renamed" });
     const params = dbQuery.mock.calls[0][1];
-    expect(params[9]).toBe(false);  // hasContentBlocks
-    expect(params[10]).toBeNull();
+    expect(params[10]).toBe(false);  // hasContentBlocks
+    expect(params[11]).toBeNull();
   });
 
   test("explicit content_blocks:null actually nulls the column (switch to HTML mode)", async () => {
     dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID, content_blocks: null }] });
     await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ content_blocks: null });
     const params = dbQuery.mock.calls[0][1];
-    expect(params[9]).toBe(true);  // hasContentBlocks — CASE takes the "set it" branch
-    expect(params[10]).toBe("null"); // JSON.stringify(null) → the JSON scalar null, cast via ::jsonb
+    expect(params[10]).toBe(true);  // hasContentBlocks — CASE takes the "set it" branch
+    expect(params[11]).toBe("null"); // JSON.stringify(null) → the JSON scalar null, cast via ::jsonb
     const sql = dbQuery.mock.calls[0][0];
-    expect(sql).toMatch(/CASE WHEN \$10 THEN \$11::jsonb ELSE content_blocks END/);
+    expect(sql).toMatch(/CASE WHEN \$11 THEN \$12::jsonb ELSE content_blocks END/);
   });
 
   test("explicit content_blocks:{...} sets the new value", async () => {
     dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID }] });
     await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ content_blocks: { version: 1, blocks: [{ id: "b1", type: "text" }] } });
     const params = dbQuery.mock.calls[0][1];
-    expect(params[9]).toBe(true);
-    expect(JSON.parse(params[10])).toEqual({ version: 1, blocks: [{ id: "b1", type: "text" }] });
+    expect(params[10]).toBe(true);
+    expect(JSON.parse(params[11])).toEqual({ version: 1, blocks: [{ id: "b1", type: "text" }] });
   });
 });
 
