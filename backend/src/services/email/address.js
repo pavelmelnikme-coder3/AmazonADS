@@ -73,6 +73,10 @@ const PLACEHOLDER_DOMAINS = new Set([
   "firma.de", "musterfirma.de", "beispiel.de", "beispiel.com", "beispiel.org",
   "deinedomain.de", "ihre-domain.de", "meinedomain.de", "company.com", "yourcompany.de",
   "ihrefirma.de", "meinefirma.de",
+  // "Beispielshop" is the demo storefront a German shop system ships with. Whole-word matching
+  // on "beispiel.de" does not reach it, and it arrived twice under a real brand name as its
+  // first_name — a reminder that a plausible display name says nothing about the address.
+  "beispielshop.de", "beispielshop.com", "mustershop.de", "musterhaus.de", "testshop.de",
 ]);
 
 // Mailboxes nobody reads, and local parts a template shipped with. Checked independently of the

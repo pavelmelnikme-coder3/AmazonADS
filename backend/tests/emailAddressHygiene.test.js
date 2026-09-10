@@ -79,6 +79,8 @@ describe("strings that are not addresses at all", () => {
     ["andere@email.de", "unreachable_local"],
     ["max.mustermann@gmail.com", "unreachable_local"],
     ["you@company.com", "placeholder_domain"],
+    ["shop@beispielshop.com", "placeholder_domain"],
+    ["service@beispielshop.de", "placeholder_domain"],
     ["noreply@sushi-yakumi.de", "unreachable_local"],
     ["postmaster@sushi-yakumi.de", "unreachable_local"],
   ])("%s is rejected as %s", (raw, reason) => {
