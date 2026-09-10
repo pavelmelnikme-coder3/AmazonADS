@@ -247,7 +247,10 @@ router.post("/searches/:id/add-to-contacts", async (req, res, next) => {
     let added = 0, tagged = 0, skipped = 0;
     for (const c of candidates) {
       const contacts = c.emails.map((email) => ({ email, first_name: c.name, tags: [tag] }));
-      const result = await insertContacts(req.workspaceId, contacts, "scraped_public_website", "lead_finder", req.ip);
+      // Scraped addresses are the ones that need the DNS check most: nothing about a published
+      // website guarantees the mailbox on it still exists, and a dead domain is a certain hard
+      // bounce against the sending account's reputation.
+      const result = await insertContacts(req.workspaceId, contacts, "scraped_public_website", "lead_finder", req.ip, { verifyMx: true });
       added += result.imported;
       // Already a contact from an earlier import, now carrying this tag too — reported
       // apart from `added` so the count of new addresses stays honest, and apart from

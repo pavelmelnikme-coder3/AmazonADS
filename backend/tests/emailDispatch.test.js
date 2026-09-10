@@ -64,7 +64,7 @@ describe("processBatch idempotency + counters", () => {
     provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: "m1", status: "sent", error: null }]);
 
     const r = await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1", "c2"] });
-    expect(r).toEqual({ sent: 1, failed: 0 });
+    expect(r).toEqual({ sent: 1, failed: 0, deferred: 0, quotaHit: false });
     // only queued contacts were queried (c2 excluded by the s.status='queued' join filter)
     const sel = dbQuery.mock.calls[1][0];
     expect(sel).toMatch(/s\.status = 'queued'/);
@@ -110,7 +110,9 @@ describe("processBatch idempotency + counters", () => {
     provider.sendBulkEmail.mockResolvedValueOnce([{ email: "a@b.com", messageId: null, status: "deferred", error: "quota exceeded" }]);
 
     const r = await dispatch.processBatch({ campaignId: "camp1", contactIds: ["c1"] });
-    expect(r).toEqual({ sent: 0, failed: 0 });
+    // quotaHit tells dripSend to stop the run: the account is out of budget, so every
+    // remaining recipient today would get the same answer.
+    expect(r).toEqual({ sent: 0, failed: 0, deferred: 1, quotaHit: true });
     // deferred row is NOT written to email_sends (stays 'queued' for the next drip day)
     expect(dbQuery.mock.calls.some((c) => /UPDATE email_sends SET status/.test(c[0]))).toBe(false);
     // campaign not marked sent

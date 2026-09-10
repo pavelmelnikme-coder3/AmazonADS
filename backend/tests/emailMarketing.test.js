@@ -51,7 +51,7 @@ describe("POST /contacts/import", () => {
     const res = await request(app()).post("/email-marketing/contacts/import")
       .send({ consent_source: "double-optin", contacts: [{ email: "a@b.com" }, { email: "c@d.com" }, { email: "not-an-email" }] });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ imported: 1, tagged: 0, skipped: 1, invalid: 1 });
+    expect(res.body).toEqual({ imported: 1, tagged: 0, skipped: 1, invalid: 1, rejected: { unparseable: 1 } });
   });
 
   // An address already on the list still belongs in the audience it is being imported
@@ -62,7 +62,7 @@ describe("POST /contacts/import", () => {
     dbQuery.mockResolvedValueOnce({ rows: [{ inserted: false }] });
     const res = await request(app()).post("/email-marketing/contacts/import")
       .send({ consent_source: "double-optin", contacts: [{ email: "a@b.com", tags: ["asian_b2b"] }] });
-    expect(res.body).toEqual({ imported: 0, tagged: 1, skipped: 0, invalid: 0 });
+    expect(res.body).toEqual({ imported: 0, tagged: 1, skipped: 0, invalid: 0, rejected: {} });
 
     const [sql] = dbQuery.mock.calls[0];
     expect(sql).toMatch(/ON CONFLICT \(workspace_id, lower\(email\)\) DO UPDATE/);

@@ -108,9 +108,34 @@ function resolveLocale(contact, opts = {}) {
   return "en";
 }
 
+// Where the compliance footer belongs in the author's HTML.
+//
+// It used to be concatenated onto the end of the string. Campaign bodies in this project are
+// complete HTML documents — the asian_b2b body is 19,012 characters ending in `</body></html>`
+// — so the footer landed *after* `</html>`: outside the document, outside the 600px centred
+// table every other part of the email sits in, rendering full-width at the left edge in a
+// system font, and at the mercy of whatever each client does with trailing content (Outlook's
+// Word engine is entitled to drop it). That footer carries the postal address German law
+// requires and the only visible unsubscribe link in the message — and this body's own text
+// promises "Den Abmeldelink finden Sie am Ende dieser Nachricht". The RFC 8058
+// List-Unsubscribe header is unaffected either way, but a header is not a visible opt-out.
+//
+// So: inside `</body>` when there is one, inside `</html>` if the body tag is missing, appended
+// only for a fragment (the block editor's output), which is the one case where appending was
+// always right. Matching is case-insensitive and takes the LAST occurrence, so a `</body>`
+// mentioned earlier in escaped sample markup cannot pull the footer into the middle.
+function injectFooter(html, footer) {
+  const body = String(html || "");
+  for (const tag of ["</body>", "</html>"]) {
+    const at = body.toLowerCase().lastIndexOf(tag);
+    if (at !== -1) return body.slice(0, at) + footer + body.slice(at);
+  }
+  return body + footer;
+}
+
 /**
  * Render the final HTML for one recipient: merge tags applied + a compliance footer
- * appended (postal address from COMPANY_POSTAL_ADDRESS + unsubscribe link). The footer
+ * inserted (postal address from COMPANY_POSTAL_ADDRESS + unsubscribe link). The footer
  * is always added so every marketing email is legally complete even if the author omits it.
  *
  * @param {object} [opts]
@@ -123,14 +148,29 @@ function renderHtmlForContact(htmlBody, contact, opts = {}) {
   const addr = process.env.COMPANY_POSTAL_ADDRESS || "";
   const txt = FOOTER_TEXT[resolveLocale(contact, opts)];
   const unsubLine = opts.isTest
-    ? `<div>${esc(txt.test)}</div>`
-    : `<div>${esc(consentLine(contact, txt))} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;">${esc(txt.unsubscribe)}</a>.</div>`;
+    ? esc(txt.test)
+    : `${esc(consentLine(contact, txt))} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;text-decoration:underline;">${esc(txt.unsubscribe)}</a>.`;
+  // Table-based and width-constrained like the rest of the email: a bare <div> dropped into a
+  // document whose content is a centred 600px table renders as a full-width orphan, and Outlook
+  // needs the table anyway. Colours are a shade darker than the old #94a3b8 — legal boilerplate
+  // still has to be readable on the light grey page background these bodies use.
   const footer = `
-  <div style="margin-top:28px;padding-top:14px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;line-height:1.6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-    ${addr ? `<div style="margin-bottom:6px;">${esc(addr)}</div>` : ""}
-    ${unsubLine}
-  </div>`;
-  return `${body}${footer}`;
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr>
+    <td align="center" style="padding:0 12px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" class="email-container" style="width:600px;max-width:600px;border-collapse:collapse;">
+        <tr>
+          <td style="padding:20px 8px 28px;border-top:1px solid #d5dde3;color:#6e8394;font-size:12px;line-height:1.6;font-family:Arial,Helvetica,sans-serif;text-align:left;">
+            ${addr ? `<div style="margin-bottom:6px;">${esc(addr)}</div>` : ""}
+            <div>${unsubLine}</div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+`;
+  return injectFooter(body, footer);
 }
 
-module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact, resolveLocale, consentLine, FOOTER_TEXT, COLLECTED_CONSENT_SOURCES };
+module.exports = { esc, publicBase, unsubscribeUrl, mirrorUrl, applyMergeTags, contactFields, renderHtmlForContact, injectFooter, resolveLocale, consentLine, FOOTER_TEXT, COLLECTED_CONSENT_SOURCES };

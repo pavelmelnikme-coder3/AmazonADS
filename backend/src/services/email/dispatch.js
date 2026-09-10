@@ -16,6 +16,11 @@ const SEND_RATE = Math.max(1, parseInt(process.env.SES_MAX_SEND_RATE, 10) || 10)
 // headroom for transactional alerts. dripSend() never exceeds today's remaining budget.
 const DAILY_CAP = Math.max(1, parseInt(process.env.EMAIL_DAILY_CAP, 10) || 250);
 
+// How many transport-level failures one recipient gets before the row is given up on. Only
+// transient deferrals count (see migration 051) — a relay hiccup should not cost a recipient,
+// but an address that fails this way five days running is not going to start working.
+const MAX_SEND_ATTEMPTS = Math.max(1, parseInt(process.env.EMAIL_MAX_SEND_ATTEMPTS, 10) || 5);
+
 // Active, non-suppressed recipients for a campaign (segment filter is tags + status).
 async function resolveRecipientIds(campaign) {
   const params = [campaign.workspace_id];
@@ -114,12 +119,37 @@ async function processBatch({ campaignId, contactIds }) {
   });
 
   const byEmail = new Map(results.map((r) => [r.email, r]));
-  let sent = 0, failed = 0;
+  let sent = 0, failed = 0, deferred = 0, quotaHit = false;
   for (const c of contacts) {
     const r = byEmail.get(c.email) || { status: "failed", error: "no result" };
-    // 'deferred' = provider hit the daily quota → leave the row 'queued' so the next
-    // drip day retries it, rather than burning the recipient as a permanent failure.
-    if (r.status === "deferred") continue;
+    // 'deferred' = worth trying again, for one of two reasons the provider tells apart:
+    //   quota     — the ACCOUNT is out of budget today. Nothing about this recipient, costs
+    //               no retry, and the caller stops the run: the next address would fail too.
+    //   transient — the transport failed on this message (dropped connection, timeout, SMTP
+    //               4yz). The row stays 'queued' for the next drip, but burns one attempt, so
+    //               an address that fails this way every day is eventually given up on rather
+    //               than retried forever.
+    if (r.status === "deferred") {
+      deferred++;
+      // An adapter that defers without saying why means quota — that was what 'deferred' meant
+      // before the two were told apart, and it is the reading that costs a recipient nothing.
+      if ((r.deferReason || "quota") === "quota") { quotaHit = true; continue; }
+      const { rows: [row] } = await query(
+        `UPDATE email_sends SET attempts = attempts + 1, error = $3
+           WHERE campaign_id = $1 AND contact_id = $2 RETURNING attempts`,
+        [campaignId, c.id, r.error || "transient send failure"]);
+      if ((row?.attempts || 0) >= MAX_SEND_ATTEMPTS) {
+        // Out of retries: record it as a real failure so it leaves the queue and the campaign
+        // can finish, and say so in the log rather than letting a recipient vanish quietly.
+        await query(
+          "UPDATE email_sends SET status = CASE WHEN status='queued' THEN 'failed' ELSE status END WHERE campaign_id=$1 AND contact_id=$2",
+          [campaignId, c.id]);
+        failed++;
+        logger.warn("Giving up on a recipient after repeated transport failures",
+          { campaignId, email: c.email, attempts: row?.attempts, error: r.error });
+      }
+      continue;
+    }
     if (r.status === "sent") sent++; else failed++;
     // The provider's webhook can beat this write. Brevo accepts the message over SMTP,
     // delivers it, and posts `delivered` while this batch is still working through its other
@@ -141,7 +171,7 @@ async function processBatch({ campaignId, contactIds }) {
   }
   await query("UPDATE email_campaigns SET sent = sent + $2, updated_at=NOW() WHERE id=$1", [campaignId, sent]);
   await maybeFinish(campaignId);
-  return { sent, failed };
+  return { sent, failed, deferred, quotaHit };
 }
 
 // Mark the campaign 'sent' once nothing is left queued (safe with worker concurrency 1).
@@ -168,6 +198,12 @@ async function sentToday() {
 }
 
 let _dripRunning = false;
+// The day (YYYY-MM-DD) the provider last told us the account is out of quota. The drip runs
+// every 5 minutes; without this it would keep reopening SMTP connections for the rest of the
+// day — 288 futile passes — each one a rejected authentication attempt against Brevo. Cleared
+// simply by the date changing.
+let _quotaExhaustedOn = null;
+const today = () => new Date().toISOString().slice(0, 10);
 /**
  * Send as many queued recipients as today's budget allows, oldest campaign first, across
  * ALL 'sending' campaigns in the account. Idempotent and self-serialising (in-process lock)
@@ -181,6 +217,7 @@ async function dripSend() {
   _dripRunning = true;
   try {
     if (!provider.isConfigured()) return { sent: 0, budget: 0, skipped: true };
+    if (_quotaExhaustedOn === today()) return { sent: 0, budget: 0, skipped: true, quotaExhausted: true };
     const budget = DAILY_CAP - (await sentToday());
     if (budget <= 0) { logger.info("Email drip: daily budget exhausted", { cap: DAILY_CAP }); return { sent: 0, budget: 0 }; }
 
@@ -202,16 +239,25 @@ async function dripSend() {
       if (!byCampaign.has(r.campaign_id)) byCampaign.set(r.campaign_id, []);
       byCampaign.get(r.campaign_id).push(r.contact_id);
     }
-    let sent = 0;
+    let sent = 0, quotaExhausted = false;
     for (const [campaignId, contactIds] of byCampaign) {
       const r = await processBatch({ campaignId, contactIds });
       sent += r.sent;
+      // The provider says the account is done for today. Every remaining recipient would get
+      // the same answer, so stop here instead of working through the rest of the budget.
+      if (r.quotaHit) {
+        quotaExhausted = true;
+        _quotaExhaustedOn = today();
+        logger.warn("Email drip stopped: provider reports the daily quota is exhausted",
+          { sent, cap: DAILY_CAP, hint: "EMAIL_DAILY_CAP may be above the plan's real limit" });
+        break;
+      }
     }
     logger.info("Email drip sent", { sent, budget, cap: DAILY_CAP });
-    return { sent, budget };
+    return { sent, budget, ...(quotaExhausted ? { quotaExhausted: true } : {}) };
   } finally {
     _dripRunning = false;
   }
 }
 
-module.exports = { SEND_RATE, DAILY_CAP, resolveRecipientIds, prepareCampaign, processBatch, maybeFinish, dripSend, sentToday };
+module.exports = { SEND_RATE, DAILY_CAP, MAX_SEND_ATTEMPTS, resolveRecipientIds, prepareCampaign, processBatch, maybeFinish, dripSend, sentToday };

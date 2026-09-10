@@ -1,0 +1,11 @@
+-- Bounded retry for marketing sends that failed on transport rather than on the recipient.
+--
+-- A dropped connection or a timeout talking to the SMTP relay used to land the send row on
+-- 'failed', which is terminal: nothing returns it to 'queued', so that recipient silently
+-- leaves the campaign. Such rows now stay queued and the drip picks them up again — which
+-- needs a counter, or a genuinely unsendable address would be retried forever.
+--
+-- Counts only attempts that ended in a transient deferral. A quota deferral is the account
+-- being out of budget for the day, says nothing about this recipient, and must not consume
+-- one of its retries.
+ALTER TABLE email_sends ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;

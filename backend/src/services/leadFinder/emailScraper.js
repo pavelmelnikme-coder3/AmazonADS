@@ -10,38 +10,29 @@ const logger = require("../../config/logger");
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36";
 
-// No "/" or "%" in the local-part class (unlike the RFC-legal-but-vanishingly-rare quoted
-// form) — keeping them out stops the match from swallowing whole URL paths (Google Maps
-// links, CDN script URLs) or un-decoded percent-escapes ("%20aw@site.de" from a raw querystring
-// fragment) as if they were part of the local part of an email.
-const EMAIL_RE = /[a-zA-Z0-9.!#$&'*+=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/g;
+// The local-part class is deliberately the same set address.js accepts, and no wider. It used
+// to span the full RFC-legal punctuation (!#$&*=?^`{|}~) and the `+` quantifier is greedy
+// leftwards, so in `var m='impressum@site.de'` the match began at `m=` — every one of those
+// characters was in the class. normalizeAddress() strips junk off the *edges* of a local part
+// but will not cut into the middle of one (it would happily turn a real `foo!bar@site.de` into
+// `bar@site.de` and mail a stranger), so `m='impressum` could only be rejected outright, and
+// the lead was lost. With the class narrowed, the match starts at `'impressum` — a single
+// stray quote on the edge, which is exactly what normalizeAddress is for. "/" and "%" stay out
+// so a match can't swallow a URL path or an un-decoded percent-escape.
+const EMAIL_RE = /[a-zA-Z0-9._+'-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/g;
 const MAILTO_RE = /mailto:([^"'?<>\s]+)/gi;
 
-// Third-party widget/vendor domains that show up on countless small-business sites via cookie
-// consent banners (listing every processor's DPO contact) or embedded scripts — never the
-// business's own address, so always noise for a prospecting list.
-const JUNK_DOMAINS = [
-  "example.com", "sentry.io", "wixpress.com", "schema.org", "w3.org",
-  "godaddy.com", "domain.com", "yourdomain.com", "email.com", "hcaptcha.com",
-  "google.com", "fb.com", "facebook.com", "vimeo.com", "trustindex.io",
-];
-const JUNK_SUFFIXES = [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js"];
+// Junk classification and normalization both live in services/email/address.js, shared with
+// the import path — the two gates drifted apart once (this file grew a filter while the import
+// path's `isEmail` accepted anything with an "@" in it), and a scraped address reaches
+// email_contacts through both.
+const { classifyAddress } = require("../email/address");
 
-function isJunkEmail(email) {
-  const lower = email.toLowerCase();
-  if (JUNK_SUFFIXES.some((s) => lower.endsWith(s))) return true;
-  const [localPart, domain = ""] = lower.split("@");
-  // Social-widget captions often embed escaped "\n\n@handle.tld"-shaped text (e.g. an
-  // Instagram handle like "cancun.restaurants") that only regex-matches as an email because
-  // the literal backslash before "n" isn't a valid local-part char, leaving a bogus 1-char
-  // local part ("n@..."). Real contact emails essentially never have a 1-char local part.
-  if (localPart.length < 2) return true;
-  // CDN/npm version strings (e.g. "leaflet@1.0.0-rc.3") can have a letter buried in a
-  // pre-release tag ("rc"), so checking the whole domain for "any letter anywhere" isn't
-  // enough — a real TLD (the last label) is always alphabetic, never a bare version number.
-  const lastLabel = domain.split(".").pop() || "";
-  if (!/^[a-z]+$/.test(lastLabel)) return true;
-  return JUNK_DOMAINS.some((d) => domain === d || domain.endsWith("." + d));
+// Keep whatever the classifier could repair ('impressum@site.de → impressum@site.de) and
+// drop the rest, so a stray quote off a JS string no longer costs a real lead.
+function keepAddress(raw, found) {
+  const { email, ok } = classifyAddress(raw);
+  if (ok) found.add(email);
 }
 
 function extractEmails(html) {
@@ -55,14 +46,9 @@ function extractEmails(html) {
     // trailing character (e.g. "%5C" decoding to a literal backslash) would otherwise get
     // appended straight onto an otherwise-valid address ("info@site.de\") since mailto hrefs
     // aren't required to contain nothing but the address.
-    for (const addr of decoded.toLowerCase().match(EMAIL_RE) || []) {
-      if (!isJunkEmail(addr)) found.add(addr);
-    }
+    for (const addr of decoded.toLowerCase().match(EMAIL_RE) || []) keepAddress(addr, found);
   }
-  for (const m of html.matchAll(EMAIL_RE)) {
-    const addr = m[0].toLowerCase();
-    if (!isJunkEmail(addr)) found.add(addr);
-  }
+  for (const m of html.matchAll(EMAIL_RE)) keepAddress(m[0].toLowerCase(), found);
   return [...found];
 }
 
@@ -100,4 +86,4 @@ async function fetchEmailsFromWebsite(rawUrl) {
   }
 }
 
-module.exports = { fetchEmailsFromWebsite };
+module.exports = { fetchEmailsFromWebsite, extractEmails };

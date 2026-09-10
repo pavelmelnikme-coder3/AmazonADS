@@ -51,6 +51,20 @@ function isQuotaError(err) {
   return /limit|quota|exceed|too many|rate|throttl|max .*reach/.test(msg);
 }
 
+// A failure of the transport, not a verdict on the recipient: a dropped TCP connection, a
+// timeout talking to the relay, a DNS blip, or any SMTP 4yz (RFC 5321 defines 4yz as transient
+// and explicitly retryable). These were being recorded as `failed`, which is terminal — the
+// send row never returns to 'queued', so nothing ever retries it and that recipient is dropped
+// from the campaign in silence. A five-minute relay hiccup could quietly cost a whole batch.
+function isTransientError(err) {
+  const code = String(err?.code || "").toUpperCase();
+  if (["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ESOCKET", "ECONNECTION", "EDNS", "EAI_AGAIN", "EPIPE", "ETIMEOUT"].includes(code)) return true;
+  const msg = `${err?.message || ""} ${err?.response || ""}`.toLowerCase();
+  // Only a leading 4yz counts: "550 …" quoting a 4xx in its text must stay a hard failure.
+  if (/(^|\s)4\d\d[ -]/.test(`${err?.response || ""}`)) return true;
+  return /timeout|timed out|connection closed|connection lost|socket|greeting never received|try again|temporar/.test(msg);
+}
+
 function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -98,9 +112,13 @@ async function sendBulkEmail({ fromEmail, fromName, replyTo, entries, attachment
         });
         return { email: e.email, messageId: info.messageId || null, status: "sent", error: null };
       } catch (err) {
-        const quota = isQuotaError(err);
-        logger.warn("Brevo send failed", { email: e.email, error: err.message, quota });
-        return { email: e.email, messageId: null, status: quota ? "deferred" : "failed", error: err.message };
+        // `deferReason` separates the two kinds of retry the caller has to treat differently:
+        // 'quota' means the ACCOUNT is done for today, so there is no point trying the next
+        // recipient at all; 'transient' is about this one message and is worth a bounded retry.
+        const deferReason = isQuotaError(err) ? "quota" : isTransientError(err) ? "transient" : null;
+        logger.warn("Brevo send failed", { email: e.email, error: err.message, code: err.code, deferReason });
+        return { email: e.email, messageId: null, status: deferReason ? "deferred" : "failed",
+                 deferReason, error: err.message };
       }
     }));
     results.push(...settled);
@@ -108,4 +126,4 @@ async function sendBulkEmail({ fromEmail, fromName, replyTo, entries, attachment
   return results;
 }
 
-module.exports = { isConfigured, sendBulkEmail, _internal: { isQuotaError, chunk } };
+module.exports = { isConfigured, sendBulkEmail, _internal: { isQuotaError, isTransientError, chunk } };

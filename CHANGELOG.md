@@ -6,6 +6,95 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-10 — The list the campaign was about to go to
+
+The module was functionally ready; what it was about to send to was not. Everything below was
+found by running the code against the live 3,248-address audience and reading what came back.
+
+### Fixed
+
+- **The compliance footer shipped outside the HTML document.** Campaign bodies here are complete
+  documents — the asian_b2b body is 19,012 characters ending in `</body></html>` — and the footer
+  was concatenated onto the end of the string, so it landed *after* `</html>`: outside the 600px
+  centred table the rest of the email lives in, rendering full-width at the left edge in a system
+  font, and at the mercy of whatever each client does with trailing content. That footer carries
+  the postal address German law requires and the only visible unsubscribe link in the message,
+  and the body's own text promises "Den Abmeldelink finden Sie am Ende dieser Nachricht". It is
+  now injected before `</body>` (before `</html>` if there is no body tag, appended only for a
+  fragment, matching the last closing tag so escaped sample markup cannot misplace it), wrapped
+  in the same width-constrained table as the rest of the email.
+
+- **One address validator, shared, instead of two that drifted.** The scraper had grown a junk
+  filter while the import path's gate stayed `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`, which accepts
+  anything containing an "@". Between them they let 33 entries into the audience. The rules now
+  live in `services/email/address.js` and nothing else may have its own: shape (a real TLD is
+  alphabetic and at least two characters, which is what rejects every npm/CDN version string
+  while keeping 163.com), vendor and placeholder domains, file names, chat-platform ids, and the
+  German placeholder family. It also *repairs* rather than discards: `'impressum@…` and
+  `#buchhaltung@…` are live mailboxes wearing a character off a JS string literal, and
+  `gulnari-@outlook.de` one wearing a trailing hyphen.
+
+- **The scraper's regex matched leftwards into code.** Its local-part class spanned the full
+  RFC-legal punctuation, and `+` is greedy, so in `var m='impressum@site.de'` the match began at
+  `m=`. Normalization trims the *edges* of a local part but deliberately will not cut into the
+  middle of one — it would turn a real `foo!bar@site.de` into `bar@site.de` and mail a stranger —
+  so such a match could only be thrown away, and the lead was lost. The class now matches what
+  the validator accepts, so the match starts at `'impressum` and the quote is trimmed.
+
+- **A DNS gate on stored addresses.** 98 of the 1,939 domains in the audience resolve to nothing
+  at all, confirmed over three passes with increasing timeouts. Every address at one of them is a
+  guaranteed hard bounce, and the bounce rate is what gets a sending account suspended — Brevo
+  acts around 5% and the July campaign came in at 6.3%. Two of those domains are damage no
+  character-level rule can see, because the wreckage is still shaped like a domain:
+  `asia-thaigourmet-bonner-str.deinfo` is ".de" glued to the word that followed it in the HTML.
+  Imports and lead promotion now resolve each distinct domain once, in parallel, and fail OPEN —
+  a SERVFAIL or a timeout says nothing about the domain, and losing a paid-for lead to a DNS blip
+  is the worse error.
+
+- **A transient SMTP failure silently dropped the recipient.** A dropped connection, a timeout
+  talking to the relay or any SMTP 4yz landed the send row on 'failed', which is terminal:
+  nothing returns it to 'queued', so nothing ever retries it. Transport failures now keep the row
+  queued and burn one of five attempts (migration 051 adds the counter), and the row is only
+  given up on — loudly — at the ceiling. A quota refusal is told apart from that: it is about the
+  account, not the recipient, so it costs no attempt and now stops the whole run for the day
+  rather than letting the five-minute drip reopen SMTP connections 288 times to be refused.
+
+### Changed
+
+- `insertContacts` reports *why* addresses were rejected, by rule, instead of a bare `invalid: n`.
+- Suppression validation stays permissive on purpose — a vendor's DPO address is exactly what an
+  operator needs to put on a never-send list, and the strict gate rejects those by design.
+- `backend/.env` and `docker-compose.yml` disagreed on `APP_PUBLIC_URL` (`:3000` vs `:4000`) and
+  `MAIL_FROM_NAME`. Compose wins and was right, so the recipient-facing unsubscribe link worked —
+  on the accident that dotenv does not overwrite an existing variable. Both now agree.
+
+### Production data
+
+The audience went from 3,248 to 3,104. No contact was deleted; addresses that must never be
+mailed went on the suppression list and everything else simply lost the campaign's tag.
+
+- 4 addresses repaired (a leading quote or `#`), 1 more (a trailing hyphen); 1 unrepairable
+  duplicate of an address already in the audience.
+- 99 at domains that cannot receive mail, 30 that were not a business address at all — among
+  them Cloudflare's and Font Awesome's privacy teams, WordPress's DPO, four Readymag mailboxes,
+  Spotify's privacy team off an embedded player, Deliveroo's French office, and the German
+  template family (`ihre@email.de`, `max.mustermann@gmail.com`).
+- 10 second generic mailboxes at a business that already had one (info + reservierung). Narrow
+  on purpose: the other 160 same-domain groups are branches of a chain (`wedding@`,
+  `nollendorf@berlin.mmaah.de`) or separate businesses sharing a platform domain (`as351@`,
+  `as1773@app-smart.de`), and those are real, distinct prospects. A keyword sweep for "seo" had
+  also flagged six Korean restaurants; whole-label matching is why they survived.
+- 5 valid addresses at companies that are simply not the audience — two web agencies, a marketing
+  agency, an AP mailbox at an IT vendor, a developer's portfolio domain. Kept out of the validator
+  deliberately: those are perfectly good addresses, and this is a targeting call, not a rule.
+
+Verified on production afterwards, against the deployed code and env: 0 of 3,104 addresses fail
+the rules, 0 of 1,817 domains cannot receive mail, a random sample renders with the unsubscribe
+link and postal address inside the document and no unreplaced merge tags, and what `POST /send`
+would queue matches the audience exactly. 77 suites / 1,559 tests.
+
+---
+
 ## [Unreleased] — 2026-09-09 — The marketing module read against its own data, before the first large send
 
 A review of the whole email module — dispatch, webhooks, rendering, campaign CRUD — with the

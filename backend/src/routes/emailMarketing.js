@@ -34,7 +34,13 @@ const uploadAttachment = multer({ storage: attachmentStorage(), limits: { fileSi
 router.use(requireAuth, requireWorkspace);
 
 const newToken = () => crypto.randomBytes(24).toString("hex");
-const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+// Two different questions, deliberately answered by two different gates.
+//   isSendableAddress — "would we put this on a list and mail it?" Strict: shape, vendor and
+//     placeholder domains, scraper wreckage. Used for the test-send address.
+//   normalizeAddress  — "what is the canonical form of this string?" Used for suppression,
+//     which must stay permissive: a vendor DPO address is exactly the kind of thing an
+//     operator needs to add to a never-send list, and the strict gate rejects those by design.
+const { isSendableAddress, normalizeAddress, hasDeliverableShape } = require("../services/email/address");
 
 // Wraps a multer middleware so oversize/bad-type uploads come back as a clean 400 instead
 // of falling through to the generic 500 handler (MulterError has no .status of its own).
@@ -116,7 +122,7 @@ router.post("/contacts/import", async (req, res, next) => {
     const { contacts, consent_source, consent_method = "import" } = req.body;
     if (!Array.isArray(contacts) || !contacts.length) return res.status(400).json({ error: "contacts[] required" });
     if (!consent_source) return res.status(400).json({ error: "consent_source required (GDPR proof of opt-in)" });
-    const result = await insertContacts(req.workspaceId, contacts, consent_source, consent_method, req.ip);
+    const result = await insertContacts(req.workspaceId, contacts, consent_source, consent_method, req.ip, { verifyMx: true });
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -134,7 +140,7 @@ router.post("/contacts/import-file", withUpload(upload.single("file")), async (r
     catch (e) { return res.status(400).json({ error: `Could not read file: ${e.message}` }); }
     if (!parsed.contacts.length) return res.status(400).json({ error: "No contact rows found in file" });
 
-    const result = await insertContacts(req.workspaceId, parsed.contacts, consent_source, consent_method, req.ip);
+    const result = await insertContacts(req.workspaceId, parsed.contacts, consent_source, consent_method, req.ip, { verifyMx: true });
     res.json({ ...result, detected: parsed.detected, rows: parsed.contacts.length });
   } catch (err) { next(err); }
 });
@@ -439,7 +445,7 @@ router.post("/campaigns/:id/test", async (req, res, next) => {
   try {
     if (!isConfigured()) return res.status(400).json({ error: "Email sender not configured" });
     const { email } = req.body;
-    if (!isEmail(email)) return res.status(400).json({ error: "valid email required" });
+    if (!isSendableAddress(email)) return res.status(400).json({ error: "valid email required" });
     const { rows: [c] } = await query("SELECT * FROM email_campaigns WHERE id=$1 AND workspace_id=$2", [req.params.id, req.workspaceId]);
     if (!c) return res.status(404).json({ error: "Campaign not found" });
     const fakeContact = { email, first_name: "", last_name: "", attributes: {}, unsubscribe_token: "test-" + newToken() };
@@ -584,8 +590,8 @@ router.get("/suppressions", async (req, res, next) => {
 
 router.post("/suppressions", async (req, res, next) => {
   try {
-    const email = String(req.body.email || "").trim().toLowerCase();
-    if (!isEmail(email)) return res.status(400).json({ error: "valid email required" });
+    const email = normalizeAddress(req.body.email) || "";
+    if (!hasDeliverableShape(email)) return res.status(400).json({ error: "valid email required" });
     await query(
       `INSERT INTO email_suppressions (workspace_id, email, reason) VALUES ($1,$2,'manual')
        ON CONFLICT (workspace_id, lower(email)) DO NOTHING`, [req.workspaceId, email]);

@@ -83,7 +83,10 @@ describe("POST /searches/:id/add-to-contacts", () => {
 
     expect(insertContacts).toHaveBeenCalledWith(
       WS_ID, [{ email: "a@wok.de", first_name: "Asia Wok", tags: ["asian_b2b"] }],
-      "scraped_public_website", "lead_finder", expect.anything()
+      "scraped_public_website", "lead_finder", expect.anything(),
+      // Scraped addresses get the DNS check: a published website is no guarantee the mailbox
+      // on it still exists, and a dead domain is a certain hard bounce.
+      { verifyMx: true }
     );
   });
 

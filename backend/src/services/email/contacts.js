@@ -1,8 +1,13 @@
 const crypto = require("crypto");
 const { query } = require("../../db/pool");
+const { classifyAddress } = require("./address");
 
 const newToken = () => crypto.randomBytes(24).toString("hex");
-const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+// The shape gate used to be `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`, which accepts anything with an "@"
+// in it — `alpinejs@3.x.x`, `s*q@0.l`, `120363406267552979@g.us` and a quote-prefixed
+// `'impressum@…` all passed it and reached a 3,248-address audience. address.js holds the real
+// rules, shared with the scraper so the two cannot drift again.
+const isEmail = (s) => classifyAddress(s).ok;
 
 // Shared insert path for /contacts/import, /contacts/import-file, and lead-finder's
 // add-to-contacts. ON CONFLICT keeps re-imports idempotent.
@@ -15,11 +20,35 @@ const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim())
 // time this address was collected and is never rewritten, and `status` is left alone, so a
 // contact who unsubscribed stays unsubscribed and out of every send (see
 // resolveRecipientIds, which filters on status and the suppression list).
-async function insertContacts(workspaceId, contacts, consentSource, consentMethod, ip) {
+// @param {object} [opts]
+// @param {boolean} [opts.verifyMx] - resolve each distinct domain before storing anything, and
+//   drop addresses whose domain cannot receive mail at all. 98 of the 1,939 domains in the
+//   asian_b2b audience resolve to nothing; every address at one of them is a guaranteed hard
+//   bounce, and hard bounces are what gets a sending account suspended. Two of those domains
+//   are scraper damage no character-level rule can see — `…-bonner-str.deinfo` is ".de" glued
+//   to the word that followed it in the HTML. Fails open on a DNS problem (see mx.js).
+async function insertContacts(workspaceId, contacts, consentSource, consentMethod, ip, opts = {}) {
   let imported = 0, tagged = 0, skipped = 0, invalid = 0;
-  for (const c of contacts) {
-    const email = String(c.email || "").trim().toLowerCase();
-    if (!isEmail(email)) { invalid++; continue; }
+  // Why each rejected row was rejected, so an import that quietly loses addresses can say
+  // which rule took them — `invalid: 37` on its own tells the operator nothing actionable.
+  const rejected = {};
+
+  // Classify first, then resolve the surviving domains in one parallel pass — checking DNS
+  // for `alpinejs@3.x.x` would be a waste of a lookup.
+  const classified = contacts.map((c) => ({ contact: c, ...classifyAddress(c.email) }));
+  let deliverable = null;
+  if (opts.verifyMx) {
+    const { partitionByMx } = require("./mx");
+    ({ deliverable } = await partitionByMx(classified.filter((c) => c.ok).map((c) => c.email)));
+  }
+
+  for (const { contact: c, email, ok, reason } of classified) {
+    // classifyAddress repairs what it can (a scraped `'impressum@site.de` is a real address
+    // wearing a stray quote) and names the rule when it can't.
+    if (!ok) { invalid++; rejected[reason] = (rejected[reason] || 0) + 1; continue; }
+    if (deliverable && !deliverable.has(email)) {
+      invalid++; rejected.no_mail_exchanger = (rejected.no_mail_exchanger || 0) + 1; continue;
+    }
     const { rows } = await query(
       `INSERT INTO email_contacts
          (workspace_id, email, first_name, last_name, attributes, tags, status,
@@ -40,7 +69,7 @@ async function insertContacts(workspaceId, contacts, consentSource, consentMetho
     else if (rows[0].inserted) imported++;
     else tagged++;
   }
-  return { imported, tagged, skipped, invalid };
+  return { imported, tagged, skipped, invalid, rejected };
 }
 
 module.exports = { insertContacts, isEmail };
