@@ -364,7 +364,15 @@ router.put("/campaigns/:id", async (req, res, next) => {
       [req.params.id, req.workspaceId, name ?? null, subject ?? null, from_name ?? null,
        from_email ?? null, reply_to ?? null, html_body ?? null,
        hasSegment, hasSegment ? (segment_id || null) : null,
-       hasContentBlocks, hasContentBlocks ? JSON.stringify(req.body.content_blocks) : null]
+       // An explicit `content_blocks: null` means "this is a raw-HTML campaign", and migration
+       // 038 defines that as a SQL NULL. JSON.stringify(null) is the string "null", which
+       // ::jsonb turns into the JSON scalar null — a value that is NOT NULL to Postgres, so
+       // `WHERE content_blocks IS NULL` misses it. Both campaigns in production carry that
+       // scalar today. Reading it back in JS is unaffected (the driver hands over null either
+       // way), which is exactly why it went unnoticed.
+       hasContentBlocks,
+       hasContentBlocks && req.body.content_blocks != null
+         ? JSON.stringify(req.body.content_blocks) : null]
     );
     if (!c) return res.status(409).json({ error: "Campaign not found or not editable" });
     res.json(c);

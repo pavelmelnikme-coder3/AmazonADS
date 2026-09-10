@@ -158,9 +158,20 @@ describe("PUT /campaigns/:id — content_blocks explicit-null handling", () => {
     await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ content_blocks: null });
     const params = dbQuery.mock.calls[0][1];
     expect(params[10]).toBe(true);  // hasContentBlocks — CASE takes the "set it" branch
-    expect(params[11]).toBe("null"); // JSON.stringify(null) → the JSON scalar null, cast via ::jsonb
+    // A real SQL NULL, which is what migration 038 defines as "raw-HTML campaign". It used to
+    // pass JSON.stringify(null) — the string "null" — which ::jsonb stores as the JSON scalar
+    // null: not NULL to Postgres, so `WHERE content_blocks IS NULL` would not find it.
+    expect(params[11]).toBeNull();
     const sql = dbQuery.mock.calls[0][0];
     expect(sql).toMatch(/CASE WHEN \$11 THEN \$12::jsonb ELSE content_blocks END/);
+  });
+
+  // An empty object is still a value, not an absence — it must not be turned into a NULL by
+  // the null-guard added alongside the fix above.
+  test("content_blocks:{} is stored as a value, not collapsed to NULL", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ id: CAMP_ID }] });
+    await request(app()).put(`/email-marketing/campaigns/${CAMP_ID}`).send({ content_blocks: {} });
+    expect(dbQuery.mock.calls[0][1][11]).toBe("{}");
   });
 
   test("explicit content_blocks:{...} sets the new value", async () => {
