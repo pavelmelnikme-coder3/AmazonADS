@@ -74,10 +74,30 @@ async function buildReportData(wid, start, end) {
   );
 
   // 4. All tracked products (for ASINs without sku_mapping)
+  // wawi_name is the ERP's own name for the article, used only when Amazon gave us no listing
+  // title — half this catalogue is dead in the DE marketplace, and those rows showed here as a
+  // bare ASIN. See migration 053.
   const { rows: productRows } = await query(
-    `SELECT asin, title FROM products WHERE workspace_id = $1 AND is_active = true`,
+    `SELECT p.asin, p.title, v.wawi_name
+       FROM products p
+       LEFT JOIN wawi_asin_names v ON v.workspace_id = p.workspace_id AND v.asin = UPPER(p.asin)
+      WHERE p.workspace_id = $1 AND p.is_active = true`,
     [wid]
   );
+
+  // Amazon's own listing title, taken from the order lines it sent us. 78 ASINs in the last 30
+  // days of orders have no products row at all — nothing ever created one — and every one of them
+  // carries a title here, so the report was printing a bare ASIN while the name sat in our own
+  // database. Preferred over the ERP name below: this is what the listing is actually called.
+  const { rows: orderTitleRows } = await query(
+    `SELECT DISTINCT ON (UPPER(asin)) UPPER(asin) AS asin, title
+       FROM sp_order_items
+      WHERE workspace_id = $1 AND COALESCE(title, '') <> '' AND asin IS NOT NULL
+      ORDER BY UPPER(asin), updated_at DESC NULLS LAST`,
+    [wid]
+  );
+  const orderTitleMap = {};
+  for (const r of orderTitleRows) orderTitleMap[r.asin] = r.title;
 
   // 5. Build maps
   const bsrMap = {};
@@ -148,8 +168,14 @@ async function buildReportData(wid, start, end) {
     const acos_pct     = sales > 0 ? total_ads   / sales * 100 : 0;
     const real_acos    = sales > 0 ? total_spend / sales * 100 : 0;
 
-    // derive product_name: sku_mapping > products.title > asin
-    const rawTitle = sku.product_name || (prod && prod.title) || asin;
+    // derive product_name, best source first: an explicit mapping the operator set, then the
+    // Amazon listing title we hold, then the title Amazon put on the order line, then the ERP's
+    // own article name, and only then the bare ASIN.
+    const rawTitle = sku.product_name
+      || (prod && prod.title)
+      || orderTitleMap[String(asin).toUpperCase()]
+      || (prod && prod.wawi_name)
+      || asin;
     const product_name = rawTitle.length > 80 ? rawTitle.slice(0, 77) + "…" : rawTitle;
 
     rows.push({

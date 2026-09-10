@@ -292,6 +292,8 @@ export default {
     totalRow: "TOTAL ({n} products)",
   },
   products: {
+    nameFromWawi: "Wawi",
+    nameFromWawiHint: "Name from Wawi — Amazon has no listing for this ASIN, so the ERP's own article name is shown.",
     title: "Products & BSR",
     addAsin: "Add ASIN",
     noProducts: "No products tracked yet",

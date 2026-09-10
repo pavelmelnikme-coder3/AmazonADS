@@ -46,6 +46,10 @@ router.get("/", async (req, res, next) => {
       `SELECT
          p.id, p.asin, p.marketplace_id, p.title, p.brand, p.image_url, p.is_active,
          p.created_at, p.parent_asin,
+         -- The ERP's own name, for the ASINs Amazon has no listing title for. Kept separate from
+         -- the title column so the UI can say where the name came from, and so the meta scraper
+         -- still sees an empty title and keeps trying if the listing comes back (migration 053).
+         wn.wawi_name,
          ${advExists} AS is_advertised,
          (p.title IS NOT NULL AND p.title <> '') AS is_available,
          -- How many campaigns carry an ad for this ASIN (see GET /products/ad-placements
@@ -98,6 +102,8 @@ router.get("/", async (req, res, next) => {
            - COALESCE(adp.ad_spend_7d, 0)
          )::numeric, 2) AS profit_7d
        FROM products p
+       LEFT JOIN wawi_asin_names wn
+              ON wn.workspace_id = p.workspace_id AND wn.asin = UPPER(p.asin)
        LEFT JOIN LATERAL (
          SELECT best_rank, best_category, classification_ranks, display_group_ranks, captured_at
          FROM bsr_snapshots

@@ -93,18 +93,24 @@ function buildApp() {
  *   2. fact_metrics_daily JOIN campaigns (ASIN regex)
  *   3. bsr_snapshots LATERAL JOIN
  *   4. products SELECT
+ *   5. sp_order_items — Amazon's own listing title, for the ASINs with no products row
+ *
+ * The order matters: these are positional mocks, so a query added to the route without a
+ * matching entry here leaves the next one undefined and every test in this block 500s.
  */
 function mockBuildReportData({
-  skuRows    = [],
-  metrics    = [],
-  bsr        = [],
-  products   = [],
+  skuRows     = [],
+  metrics     = [],
+  bsr         = [],
+  orderTitles = [],
+  products    = [],
 } = {}) {
   dbQuery
-    .mockResolvedValueOnce({ rows: skuRows })   // sku_mapping
-    .mockResolvedValueOnce({ rows: metrics })   // fact_metrics_daily
-    .mockResolvedValueOnce({ rows: bsr })       // bsr_snapshots
-    .mockResolvedValueOnce({ rows: products }); // products
+    .mockResolvedValueOnce({ rows: skuRows })     // sku_mapping
+    .mockResolvedValueOnce({ rows: metrics })     // fact_metrics_daily
+    .mockResolvedValueOnce({ rows: bsr })         // bsr_snapshots
+    .mockResolvedValueOnce({ rows: products })    // products
+    .mockResolvedValueOnce({ rows: orderTitles }); // sp_order_items titles
 }
 
 beforeEach(() => {
@@ -279,6 +285,56 @@ describe("GET /analytics-report/data", () => {
     expect(row.sd_spend).toBeCloseTo(20);
     expect(row.total_ads).toBeCloseTo(120);
     expect(row.sales).toBeCloseTo(580);
+  });
+
+  // Where a product's name comes from, best source first. 78 ASINs in the last 30 days of orders
+  // have no products row at all, and every one of them carries a title on the order line — so the
+  // report was printing a bare ASIN while Amazon's own name for it sat in our database. A further
+  // 276 products have no Amazon title because their listing is dead; 66 of those are articles in
+  // the ERP, which is the last resort before giving up and showing the ASIN.
+  test("falls back to the Amazon title from the order line when there is no products row", async () => {
+    mockBuildReportData({
+      products: [],
+      orderTitles: [{ asin: "B0H5KVKLR7", title: "EVOCAMP Campingstuhl faltbar, bis 150 kg" }],
+      metrics: [{ asin: "B0H5KVKLR7", campaign_type: "SP", cost: "5", sales_14d: "50", units_sold: "1", clicks: "3", impressions: "10" }],
+    });
+    const res = await request(buildApp()).get("/analytics-report/data");
+    expect(res.status).toBe(200);
+    const row = res.body.rows.find(r => r.asin === "B0H5KVKLR7");
+    expect(row.product_name).toBe("EVOCAMP Campingstuhl faltbar, bis 150 kg");
+  });
+
+  test("falls back to the ERP name when neither Amazon source has one", async () => {
+    mockBuildReportData({
+      products: [{ asin: "B08QJ9J1J7", title: null, wawi_name: "SET Elektrischer Kohleanzünder 550W" }],
+    });
+    const res = await request(buildApp()).get("/analytics-report/data");
+    const row = res.body.rows.find(r => r.asin === "B08QJ9J1J7");
+    expect(row.product_name).toBe("SET Elektrischer Kohleanzünder 550W");
+  });
+
+  test("an Amazon listing title still beats both fallbacks", async () => {
+    mockBuildReportData({
+      products: [{ asin: "B0X", title: "The Amazon Listing Title", wawi_name: "internal ERP name" }],
+      orderTitles: [{ asin: "B0X", title: "Title From An Order Line" }],
+    });
+    const res = await request(buildApp()).get("/analytics-report/data");
+    expect(res.body.rows.find(r => r.asin === "B0X").product_name).toBe("The Amazon Listing Title");
+  });
+
+  test("an order-line title beats the ERP name — it is what the listing is actually called", async () => {
+    mockBuildReportData({
+      products: [{ asin: "B0Y", title: null, wawi_name: "internal ERP name" }],
+      orderTitles: [{ asin: "B0Y", title: "Title From An Order Line" }],
+    });
+    const res = await request(buildApp()).get("/analytics-report/data");
+    expect(res.body.rows.find(r => r.asin === "B0Y").product_name).toBe("Title From An Order Line");
+  });
+
+  test("with no name anywhere the ASIN is still shown, not an empty cell", async () => {
+    mockBuildReportData({ products: [{ asin: "B0Z", title: null, wawi_name: null }] });
+    const res = await request(buildApp()).get("/analytics-report/data");
+    expect(res.body.rows.find(r => r.asin === "B0Z").product_name).toBe("B0Z");
   });
 
   test("derives product_name from products table when sku_mapping has none", async () => {

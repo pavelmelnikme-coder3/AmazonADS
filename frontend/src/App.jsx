@@ -1706,6 +1706,17 @@ const RANK_DAYS = [7, 30];
 // over the preceding three weeks — and every one of them rendered as the same grey dash a
 // genuinely unranked keyword gets. Someone reading this page saw a product that had dropped out
 // of the rankings; what had actually happened was that nobody could look.
+// What to call a product on screen. `title` is the Amazon listing title and is empty for half
+// this catalogue — those listings are dead in the home marketplace, so the scraper has nothing to
+// fetch and the row used to render as a bare ASIN. The ERP knows what the article is, so its name
+// stands in, marked as such: it is the company's own wording, not what a shopper sees on Amazon.
+function productDisplayName(p) {
+  const title = (p?.title || "").trim();
+  if (title) return { name: title, fromWawi: false };
+  const wawi = (p?.wawi_name || "").trim();
+  return wawi ? { name: wawi, fromWawi: true } : { name: "", fromWawi: false };
+}
+
 function positionBadge(position, found, blocked) {
   if (blocked) return { label: "?", bg: "rgba(245,158,11,.12)", color: "var(--amb)", border: "rgba(245,158,11,.35)", blocked: true };
   if (!found || position === null || position === 0) return { label: "—", bg: "var(--s2)", color: "var(--tx3)", border: "var(--b2)" };
@@ -5600,7 +5611,8 @@ const ProductsPage = ({ workspaceId }) => {
         listing_id: lid,
         rep, children: ch, asins: ch.map(c => c.asin),
         asin_count: ch.length,
-        title: rep.title, image_url: rep.image_url, brand: rep.brand, marketplace_id: rep.marketplace_id,
+        title: productDisplayName(rep).name, title_from_wawi: productDisplayName(rep).fromWawi,
+        image_url: rep.image_url, brand: rep.brand, marketplace_id: rep.marketplace_id,
         best_rank: ranks.length ? Math.min(...ranks) : null,
         issue_count: ch.reduce((s, c) => s + (num(c.lh_issue_count)), 0),
         // Distinguish "every variation checked, 0 issues" from "some variation
@@ -6325,7 +6337,12 @@ const ProductsPage = ({ workspaceId }) => {
                                 : <span className="badge bg-amb" style={{ fontSize: 9 }} title={tr("products.recPartialHint")}>{tr("products.recPartial")}</span>
                           )}
                         </div>
-                        {L.title && <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{L.title}</div>}
+                        {L.title && <div style={{ fontSize: 12, color: "var(--tx2)", marginBottom: 7, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {L.title}
+                          {L.title_from_wawi && <span title={tr("products.nameFromWawiHint")}
+                            style={{ marginLeft: 6, fontSize: 9, letterSpacing: .5, padding: "1px 5px", borderRadius: 4,
+                              background: "var(--s3)", color: "var(--tx3)", fontFamily: "var(--mono)" }}>{tr("products.nameFromWawi")}</span>}
+                        </div>}
                         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
                           {periodOrders && (
                             <span title={tr("products.ordersPeriodHint", { start: periodOrders.start || "—", end: periodOrders.end || "—", units: Math.round(L.period_units).toLocaleString() })}
@@ -6462,7 +6479,13 @@ const ProductsPage = ({ workspaceId }) => {
                                     <Kpi label={`ACOS ${tr("products.d7")}`} value={pctOrDash(Number(c.ad_sales_7d) > 0 ? (Number(c.ad_spend_7d) / Number(c.ad_sales_7d)) * 100 : null)} color="#ef4444" title={tr("products.fixed7dHint")} />
                                     {c.sell_price && <Kpi label={tr("products.trendPrice")} value={money(c.sell_price)} color="var(--grn)" />}
                                   </div>
-                                  {c.title && <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</div>}
+                                  {(() => { const dn = productDisplayName(c); return dn.name ? (
+                                    <div style={{ fontSize: 11, color: "var(--tx3)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {dn.name}
+                                      {dn.fromWawi && <span title={tr("products.nameFromWawiHint")}
+                                        style={{ marginLeft: 5, fontSize: 9, letterSpacing: .5, padding: "1px 4px", borderRadius: 3,
+                                          background: "var(--s3)", color: "var(--tx3)", fontFamily: "var(--mono)" }}>{tr("products.nameFromWawi")}</span>}
+                                    </div>) : null; })()}
                                 </div>
                                 <ChartToggle open={cOpen} onClick={() => { toggleSet(setChildChartsOpen, c.asin); if (!ts) fetchTimeseries(L.listing_id, L.asins); }} />
                               </div>

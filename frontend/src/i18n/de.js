@@ -292,6 +292,8 @@ export default {
     totalRow: "GESAMT ({n} Produkte)",
   },
   products: {
+    nameFromWawi: "Wawi",
+    nameFromWawiHint: "Name aus Wawi — für diese ASIN gibt es kein Amazon-Listing, daher wird die Artikelbezeichnung aus dem ERP angezeigt.",
     title: "Produkte & BSR",
     addAsin: "ASIN hinzufügen",
     noProducts: "Keine Produkte verfolgt",
