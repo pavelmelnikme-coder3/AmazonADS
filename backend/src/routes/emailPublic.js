@@ -12,7 +12,7 @@ const router = express.Router();
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
 const { resolveUploadPath } = require("../services/email/uploads");
-const { renderHtmlForContact } = require("../services/email/render");
+const { renderHtmlForContact, esc } = require("../services/email/render");
 
 const MessageValidator = require("sns-validator");
 const snsValidator = new MessageValidator();
@@ -98,22 +98,79 @@ router.get("/campaigns/:id/mirror/:token", async (req, res) => {
   }
 });
 
-// One-click POST (mail clients post List-Unsubscribe=One-Click). Always 200 to avoid retries.
+// Everything a recipient sees on this route, in the language the mail was written in. The page
+// is served from the API, not the app, so it cannot reach the frontend's i18n bundle.
+const UNSUB_TEXT = {
+  en: { confirmTitle: "Unsubscribe", confirmBody: "Confirm that you no longer want to receive marketing email at this address.",
+        confirmBtn: "Unsubscribe", doneTitle: "You're unsubscribed", doneBody: "You won't receive further marketing emails.",
+        badTitle: "Link expired or invalid", badBody: "This unsubscribe link is no longer valid." },
+  de: { confirmTitle: "Abmelden", confirmBody: "Bestätigen Sie, dass Sie an dieser Adresse keine Werbe-E-Mails mehr erhalten möchten.",
+        confirmBtn: "Abmelden", doneTitle: "Sie sind abgemeldet", doneBody: "Sie erhalten keine weiteren Werbe-E-Mails.",
+        badTitle: "Link abgelaufen oder ungültig", badBody: "Dieser Abmeldelink ist nicht mehr gültig." },
+  ru: { confirmTitle: "Отписка", confirmBody: "Подтвердите, что вы больше не хотите получать рекламные письма на этот адрес.",
+        confirmBtn: "Отписаться", doneTitle: "Вы отписаны", doneBody: "Рекламные письма больше приходить не будут.",
+        badTitle: "Ссылка недействительна", badBody: "Этот адрес отписки больше не действует." },
+};
+const unsubText = (req) => {
+  const want = String(req.query.lang || process.env.MAIL_DEFAULT_LOCALE || "en").slice(0, 2).toLowerCase();
+  return UNSUB_TEXT[want] || UNSUB_TEXT.en;
+};
+
+const unsubPage = (title, body, extra = "") => `<!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="robots" content="noindex">
+    <title>${esc(title)}</title></head>
+    <body style="font-family:-apple-system,Segoe UI,sans-serif;background:#0f1117;color:#e2e8f0;text-align:center;padding:60px 20px;">
+      <h1 style="font-size:22px;">${esc(title)}</h1>
+      <p style="color:#94a3b8;">${esc(body)}</p>
+      ${extra}
+    </body></html>`;
+
+// One-click POST — this is the one that actually unsubscribes.
+//
+// Mail clients post here for RFC 8058 List-Unsubscribe-Post (Gmail's own "Unsubscribe" button),
+// and the confirmation page below posts here too. Always 200, so a client does not retry.
 router.post("/unsubscribe/:token", express.urlencoded({ extended: false }), async (req, res) => {
-  try { await doUnsubscribe(req.params.token); } catch (e) { logger.warn("unsubscribe POST failed", { error: e.message }); }
+  let ok = false;
+  try { ok = await doUnsubscribe(req.params.token); } catch (e) { logger.warn("unsubscribe POST failed", { error: e.message }); }
+  // A form submission wants a page back; a mail client's one-click post does not care.
+  if (String(req.get("accept") || "").includes("text/html")) {
+    const t = unsubText(req);
+    return res.set("Content-Type", "text/html; charset=utf-8")
+      .send(ok ? unsubPage(t.doneTitle, t.doneBody) : unsubPage(t.badTitle, t.badBody));
+  }
   res.status(200).send("Unsubscribed");
 });
 
-// Human click → friendly confirmation page (also performs the unsubscribe).
+// GET shows a confirmation page and changes nothing.
+//
+// It used to unsubscribe on sight, which is defensible for a human clicking a link — a click is
+// a GET — but this address list is 3,102 business mailboxes, and corporate mail gateways
+// (Outlook Safe Links, Proofpoint, Mimecast) fetch every URL in a message before the recipient
+// ever sees it. Those recipients would have been unsubscribed by a scanner, silently, with no
+// way to tell that from a real opt-out. This was not theory: an internal check script fetched a
+// live token "to see that it returned 200" and unsubscribed a real contact.
+//
+// The legally required one-click path is untouched — it is the POST above, which is what the
+// List-Unsubscribe-Post header points at and what a mail client's own button uses.
 router.get("/unsubscribe/:token", async (req, res) => {
-  let ok = false;
-  try { ok = await doUnsubscribe(req.params.token); } catch (e) { logger.warn("unsubscribe GET failed", { error: e.message }); }
-  res.set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html><html><head><meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Unsubscribe</title></head>
-    <body style="font-family:-apple-system,Segoe UI,sans-serif;background:#0f1117;color:#e2e8f0;text-align:center;padding:60px 20px;">
-      <h1 style="font-size:22px;">${ok ? "You're unsubscribed" : "Link expired or invalid"}</h1>
-      <p style="color:#94a3b8;">${ok ? "You won't receive further marketing emails." : "This unsubscribe link is no longer valid."}</p>
-    </body></html>`);
+  const t = unsubText(req);
+  // Whether the token resolves is safe to reveal — it is already in the recipient's own mail —
+  // and telling them up front beats a button that turns out to do nothing.
+  let known = false;
+  try {
+    const { rows } = await query("SELECT 1 FROM email_contacts WHERE unsubscribe_token = $1", [req.params.token]);
+    known = rows.length > 0;
+  } catch (e) { logger.warn("unsubscribe GET lookup failed", { error: e.message }); }
+
+  if (!known) {
+    return res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage(t.badTitle, t.badBody));
+  }
+  const action = `/api/v1/email/unsubscribe/${encodeURIComponent(req.params.token)}`;
+  const form = `<form method="post" action="${esc(action)}" style="margin-top:22px;">
+        <button type="submit" style="font-family:inherit;font-size:15px;font-weight:600;padding:12px 28px;
+          border:0;border-radius:6px;background:#2f6fa8;color:#fff;cursor:pointer;">${esc(t.confirmBtn)}</button>
+      </form>`;
+  res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage(t.confirmTitle, t.confirmBody, form));
 });
 
 // ── SES → SNS webhook ─────────────────────────────────────────────────────────

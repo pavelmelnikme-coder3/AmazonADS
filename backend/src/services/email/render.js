@@ -18,8 +18,13 @@ function publicBase() {
 }
 
 // Public unsubscribe URL for a contact's opaque token (RFC 8058 link target).
-function unsubscribeUrl(token) {
-  return `${publicBase()}/api/v1/email/unsubscribe/${encodeURIComponent(token)}`;
+//
+// `locale` is carried so the confirmation page comes back in the language the mail was written
+// in — the page is served by the API and has no access to the frontend's i18n bundle, and a
+// German recipient meeting an English "Unsubscribe" button is a reason to hesitate.
+function unsubscribeUrl(token, locale) {
+  const base = `${publicBase()}/api/v1/email/unsubscribe/${encodeURIComponent(token)}`;
+  return locale ? `${base}?lang=${encodeURIComponent(locale)}` : base;
 }
 
 // "View in browser" URL for a campaign. Keyed by the recipient's own opaque token as well as
@@ -77,7 +82,7 @@ function contactFields(contact, opts = {}) {
     // the empty string and shipped as `href=""`. The one campaign sent so far went to 1070
     // recipients with two dead links (checked 2026-09-07). Contact attributes cannot shadow
     // these — a stray `unsubscribe` column must not be able to redirect the opt-out link.
-    unsubscribe: unsubscribeUrl(contact.unsubscribe_token),
+    unsubscribe: unsubscribeUrl(contact.unsubscribe_token, resolveLocale(contact, opts)),
     mirror: mirrorUrl(opts.campaignId, contact.unsubscribe_token),
   };
 }
@@ -171,10 +176,11 @@ function injectFooter(html, footer) {
 function renderHtmlForContact(htmlBody, contact, opts = {}) {
   const body = applyMergeTags(htmlBody, contactFields(contact, opts));
   const addr = process.env.COMPANY_POSTAL_ADDRESS || "";
-  const txt = FOOTER_TEXT[resolveLocale(contact, opts)];
+  const lang = resolveLocale(contact, opts);
+  const txt = FOOTER_TEXT[lang];
   const unsubLine = opts.isTest
     ? esc(txt.test)
-    : `${esc(consentLine(contact, txt))} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token))}" style="color:#64748b;text-decoration:underline;">${esc(txt.unsubscribe)}</a>.`;
+    : `${esc(consentLine(contact, txt))} <a href="${esc(unsubscribeUrl(contact.unsubscribe_token, lang))}" style="color:#64748b;text-decoration:underline;">${esc(txt.unsubscribe)}</a>.`;
   // Table-based and width-constrained like the rest of the email: a bare <div> dropped into a
   // document whose content is a centred 600px table renders as a full-width orphan, and Outlook
   // needs the table anyway. Colours are a shade darker than the old #94a3b8 — legal boilerplate

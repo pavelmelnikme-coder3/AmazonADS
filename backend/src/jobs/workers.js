@@ -44,11 +44,17 @@ const QUEUES = {
   LEAD_FINDER_SEARCH: "lead-finder-search",
 };
 
+// Retention was by count alone, so the failed set kept everything back to April and the number
+// stopped meaning anything: report-pipeline showed 202 failures, of which zero were from the last
+// three days — the rest were the June access incident and rate limits long since dealt with. A
+// failure worth reading is a recent one; an age bound makes the count a health signal again.
+const FAILED_JOB_TTL_DAYS = Math.max(1, parseInt(process.env.QUEUE_FAILED_TTL_DAYS, 10) || 14);
+
 const defaultJobOptions = {
   attempts: 3,
   backoff: { type: "exponential", delay: 5000 },
-  removeOnComplete: { count: 100 },
-  removeOnFail: { count: 500 },
+  removeOnComplete: { count: 100, age: 7 * 24 * 3600 },
+  removeOnFail: { count: 500, age: FAILED_JOB_TTL_DAYS * 24 * 3600 },
 };
 
 let queues = {};

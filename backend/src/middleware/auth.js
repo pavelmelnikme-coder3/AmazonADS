@@ -48,6 +48,13 @@ async function requireWorkspace(req, res, next) {
     return res.status(400).json({ error: "Workspace ID required (x-workspace-id header or ?workspaceId query param)" });
   }
 
+  // The value goes straight into `w.id = $2` on a uuid column, so anything that is not a uuid
+  // makes Postgres raise and the request comes back 500 — a malformed header answered as a
+  // server fault. Same shape as the pagination NaN: bad input, wrong status.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(workspaceId))) {
+    return res.status(400).json({ error: "Workspace ID must be a UUID" });
+  }
+
   const { rows } = await query(
     `SELECT w.id, w.org_id, w.name, wm.role as workspace_role
      FROM workspaces w
