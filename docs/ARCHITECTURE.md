@@ -650,3 +650,63 @@ self-serialising (`_dripRunning` in-process lock) function, so they can't double
   schedule forward when the client omits it (no UI field yet). The product-movers digest title now carries
   the comparison window (`· Nd vs prior Nd`). Cooldown for the scheduled movers was set to 120h (< the 168h
   between Fridays) so the weekly run is never blocked by a not-quite-elapsed cooldown.
+
+---
+
+## 2026-09-10 — Product naming, request hygiene, shared frontend logic
+
+### What a product is called: a five-source chain
+`products.title` holds the Amazon listing title and nothing else, so it is empty whenever a listing
+is dead in the home marketplace — half this catalogue. The Analytics report and the Products page
+resolve a name in this fixed order, pinned by tests:
+
+1. `sku.product_name` — an operator's own mapping, if one exists
+2. `products.title` — the Amazon listing title
+3. `sp_order_items.title` — the title Amazon put on the order line. Covers ASINs that are ordered
+   and advertised but have no `products` row at all (78 in the last 30 days)
+4. `wawi_asin_names.wawi_name` — the ERP's name for the article
+5. the bare ASIN
+
+Source 4 comes from migration **053**: `wawi_display_name(TEXT)` strips warehouse bookkeeping
+prefixes (`Lagerartikel`, `FBA`, `FBM`, `eBay`, `Amazon`/`AMZ`, `ANGEBOT`, `Kopie von`) — looping,
+because they stack — and the view `wawi_asin_names`
+picks **one** name per `(workspace_id, ASIN)` with `DISTINCT ON`, preferring a top-level item and
+then the most recently added. A leading `SET ` is deliberately kept — it is part of the product
+name, not bookkeeping.
+
+Two rules that look wrong and are not:
+- The view does **not** filter to top-level items the way the new-arrivals query does. That rule is
+  right for finding products, where a variation child is just a size; it is wrong for naming an
+  ASIN, because an ASIN *is* one variant and the child is the row that says which. 64 of the 66
+  matched ASINs are variation children — filtering them out leaves 4.
+- The ERP name is never written into `products.title`. It is the company's internal wording rather
+  than what a shopper sees, so the UI marks it as such; and a filled `title` would stop the meta
+  scraper from ever trying that ASIN again.
+
+### One owner for pagination arithmetic
+`routes/_pagination.js` (`paginate`, `pageNumber`, `limitNumber`) is the only place that turns
+`?page`/`?limit` into `LIMIT`/`OFFSET`. Thirteen routes had their own copy, and the two failure
+shapes both reached SQL: `Math.max(parseInt("abc"), 1)` is `NaN`, giving `OFFSET NaN`, and `-5` is
+truthy so a `|| 500` default never fired, giving a negative `LIMIT`. Both answered 500 in
+production. Add a paginated route by calling the helper, not by copying a neighbour.
+
+### Rate limiting is split by traffic class
+`app.js` keeps two buckets: the general per-IP limiter (300/min) and `webhookLimiter` (5,000/min)
+for the two provider webhook paths only, selected by `isWebhook(req)` and mutually exclusive — the
+general limiter `skip`s what the webhook limiter serves. The reason is that provider event volume
+is a function of *our* send rate, not of user activity, so the two must not share a budget: a
+250-message minute produced enough Brevo events to exhaust the user ceiling and lose 135 of them.
+The webhook paths remain authenticated by the shared secret in the URL, which fails closed.
+
+### Read vs. write on public links
+Anything reachable from inside an email must treat GET as a read. Corporate mail gateways fetch
+every URL in a message before the recipient sees it, so `GET /email/unsubscribe/:token` renders a
+confirmation page and changes no state; `POST` performs the unsubscribe, which is also what RFC
+8058 one-click and a mail client's own button use.
+
+### Frontend logic that can be tested lives outside App.jsx
+`App.jsx` is one ~19,000-line file, which means any logic inside it is untestable in practice. Pure
+logic is now lifted into small modules that `App.jsx` imports — `src/i18n/plural.js` (plural-form
+selection via `Intl.PluralRules`) and `src/lib/display.js` (rank badge, audit-value rendering,
+product name fallback) — and covered by vitest (`npm test` in `frontend/`). New pure helpers belong
+there rather than in `App.jsx`.

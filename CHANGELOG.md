@@ -6,6 +6,137 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-10 (audit) — Every section of the service, read with the console open
+
+A walk through the whole application while the asian_b2b campaign was sending, section by section,
+with the browser console and the network log open and every finding confirmed against production
+before a line was changed. Five commits, summarised here; each one carries its own reasoning.
+
+### Fixed
+
+- **`?page=abc` answered 500 on thirteen routes.** Each list route carried its own copy of
+  `(Math.max(parseInt(page), 1) - 1) * limit`, and `Math.max(NaN, 1)` is `NaN`, not 1 — so the
+  offset reached SQL as NaN and Postgres answered `column "nan" does not exist`. `?limit=-5` was
+  the same shape from the other end: `-5` is truthy, so the `|| 500` fallback never fired and the
+  clamp only capped the top. Two more spellings turned up on a second pass —
+  `(parseInt(page) - 1)` and `Math.max(parseInt(v), 1)` — which the first grep had missed.
+  `routes/_pagination.js` now owns the arithmetic for targets, productAds, adGroups, alerts, audit,
+  keywords, campaigns, negativeKeywords, negativeAsins, rules, sp and stubs.
+
+- **The nightly meta scrape was emptying the ScraperAPI plan every four days.** 276 ASINs have had
+  no title since April; the job re-fetched all of them nightly and got nothing every time. Two
+  faults kept it going: a 403 was recorded as a per-ASIN failure rather than as the fetcher
+  refusing us, so one refusal was followed by 275 more; and nothing remembered an ASIN had already
+  come back empty. The account read `requestCount 1045 / creditsLeft 0` when this was found — and
+  rank tracking shares the key, so it goes down with it. 403/429/503/401 now stops the run (404
+  stays per-ASIN, or one dead product would halt it) and migration 052 adds an attempt counter,
+  reset by a success and never spent on a refusal.
+
+- **Provider webhooks shared the user rate limit.** Caught during the live send: every event Brevo
+  posts arrives from one address in a burst that tracks the send rate, and 250 messages a minute
+  pushed it through the general 300/min per-IP ceiling — 135 events came back 429 in the first
+  hour. A refused webhook is a lost event, and a `hard_bounce` that never arrives never reaches the
+  suppression list, so the address stays on the list and bounces again on the next campaign.
+  Webhooks now have their own 5,000/min bucket; neither side can consume the other's. The exemption
+  is the two webhook paths only, still authenticated by the shared secret in the URL.
+
+- **A blocked rank check looked exactly like a keyword that had dropped out of the results.**
+  Amazon refuses about a quarter of them — 20 of 73 that day, 25.2% over three weeks — and
+  `positionBadge` had no third state, so every refusal rendered as the grey dash an unranked
+  keyword gets. Blocked checks now show an amber "?" with an explanation on hover, in all three
+  languages.
+
+- **The audit log printed "[object Object]".** The rule engine records the metrics a rule matched
+  on under `metrics` — the evidence for why it fired — and both diff renderers passed the value
+  through `String()`. That row now reads `cpc=0.54 ctr=10.34 acos=23.15 …`, full JSON on hover.
+
+- **Money was labelled in dollars on a EUR account** — thirteen hardcoded `$` across the campaign
+  detail modal, the keywords page and the Overview by-type table. They follow the marketplace
+  currency now, which meant teaching the keywords query to return it.
+
+- **The Overview said two profiles were synchronised.** One is a US profile whose connection was
+  revoked in March; its `sync_status` column still says "synced" from back then. The count now
+  also requires the connection to be active, and reads 1.
+
+- **A link scanner could unsubscribe a recipient.** GET on the unsubscribe link used to unsubscribe
+  on sight, which reads as reasonable until you remember that corporate mail gateways — Outlook
+  Safe Links, Proofpoint, Mimecast — fetch every URL in a message before the recipient sees it, and
+  this list is 3,102 business addresses. It was not theory: an internal check script fetched a live
+  token and unsubscribed a real contact, which had to be restored by hand. GET now shows a
+  confirmation page and changes nothing; the legally required one-click path is the POST, which is
+  what `List-Unsubscribe-Post` and a mail client's own button already use. The page speaks the
+  language the mail was written in.
+
+- **Counters read "1 профилей", "1 campaigns", "1 Kampagnen"** — the plural form used for every
+  value including one. The i18n layer now picks a form via `Intl.PluralRules`, which knows Russian
+  needs three (1, 2-4, 5+) and that 21 takes the singular while 11 does not. Eleven strings across
+  three languages.
+
+- **`/profiles` was scoped by organization alone** while every other route checks workspace
+  membership, and an org can hold more than one workspace — so an org member could read the
+  profiles of a workspace they do not belong to. It checks membership now. Unattached profiles stay
+  visible: that is the list the connect screen picks from.
+
+- **A workspace id that is not a UUID** reached `w.id = $2` on a uuid column and came back 500.
+  It is a 400 now, before any query runs.
+
+- **Queue retention was by count alone**, so report-pipeline showed 202 failures of which none were
+  from the last three days. Failures now also age out after 14 days.
+
+### Added
+
+- **A name for the ASINs Amazon gave us no title for.** The Analytics report was printing bare
+  ASINs for products whose name was in our own database the whole time, and the gap has two halves.
+  78 ASINs in the last 30 days of orders have no `products` row at all, though they are advertised,
+  ordered and in the ERP — every one carries a title on the order line, put there by Amazon, so
+  that is now the first fallback after `products.title`. The other half is 276 active products
+  whose listing is dead in the DE marketplace: no scrape will ever fetch a title, and no recent
+  order to borrow one from. 66 of them are articles in Wawi. Migration 053 adds a view resolving
+  one ERP name per ASIN and a function that strips the warehouse bookkeeping off the front —
+  `Lagerartikel_FBA_eBay_50 Paar (100 Stück) Ohrstöpsel` becomes `50 Paar (100 Stück) Ohrstöpsel`,
+  while a leading `SET ` stays, because in `SET Elektrischer Kohleanzünder + 4Kg Kohle` it is part
+  of the product. `products.title` stays what it claims to be; the ERP name travels beside it as
+  `wawi_name` and is marked in the UI, because it is the company's own wording rather than what a
+  shopper sees — and because writing it into `title` would stop the scraper ever trying that ASIN
+  again.
+
+### Tests
+
+- **The frontend had no test infrastructure at all.** Added vitest and the first two suites, 67
+  tests, over the pure logic that the audit had just corrected: `i18n/plural.js` (plural-form
+  selection, including the cases that are easy to get wrong — Russian 11-14 taking *many* while 21
+  takes *one*, `count: 0` being a count rather than a missing value, and a two-form string used in
+  a three-form locale) and `lib/display.js` (the rank badge's blocked state, the audit renderer's
+  nested objects, the product name fallback chain). Both modules were lifted out of `App.jsx` and
+  `i18n/index.jsx` unchanged so they could be tested on their own; the callers import them now.
+
+- **The intermittent "socket hang up" was the test invocation, not the tests.** `npm test` is
+  `jest --runInBand` and was always clean; running bare `npx jest` gave nine workers 44 supertest
+  files to share and exhausted the sockets, failing roughly one run in eight — in a different file
+  each time, which is what a real flake does not do. `maxWorkers: 1` moved into `jest.config.js`
+  with the reason written down, so the config no longer depends on which command you type.
+
+83 backend suites / 1,682 tests, plus 2 frontend suites / 67 tests.
+
+### Checked and found healthy, recorded rather than changed
+
+Rules (8-9 runs a day, 0 failures), search-term granularity, all four attribution windows,
+campaign_type mix, order statuses, Wawi, the audit log. Alerts are quiet because two are
+Friday-weekly and the third is a 400 EUR/day threshold against ~300 EUR of real spend — the
+1,341 EUR figure it appears to miss is the same spend counted once per entity level, five times
+over. 22 product ads sit orphaned because Amazon's ad list returns two campaigns its own campaign
+list does not.
+
+### Production data
+
+- 199 stale queue failures swept, keeping the 18 recent ones.
+- 16 profile rows and 2 connections cleaned — left by OAuth attempts that never completed, with no
+  campaigns, ads, metrics or report history, on revoked connections. 19 profiles → 3; the live one
+  still has its 1,180 campaigns.
+- Migration 052 parked the 276 dead ASINs at the attempt ceiling, so tonight the job asks for 0.
+
+---
+
 ## [Unreleased] — 2026-09-10 (later) — The campaign itself
 
 The list was clean; the email was not selling. Reworked against real data from this workspace's

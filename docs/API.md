@@ -3,6 +3,15 @@
 Base URL: `http://localhost:4000/api/v1`  
 All endpoints (except `/auth/*`) require: `Authorization: Bearer <jwt_token>`
 
+**Pagination.** Every paginated route takes `?page=` and `?limit=` and shares one helper,
+`routes/_pagination.js`. A value that is not a positive number — `?page=abc`, `?limit=-5` — falls
+back to the default rather than reaching SQL; each route had its own copy of the arithmetic before,
+and `Math.max(NaN, 1)` is `NaN`, so those two used to answer 500. `limit` is capped per route.
+
+**Workspace.** The workspace comes from the `x-workspace-id` header, `?workspaceId`, or a route
+param, and must be a UUID; anything else is a 400 before any query runs. Membership is checked
+against `workspace_members`, not organization alone — an org can hold more than one workspace.
+
 ---
 
 ## Authentication
@@ -783,9 +792,15 @@ Suppressions: `GET /suppressions`, `POST /suppressions { email }` (manual), `DEL
 
 ### Public — `/api/v1/email` (NO auth)
 ```
-GET  /unsubscribe/:token         — human confirmation page (also unsubscribes; attributes to the contact's
-                                    most recent campaign send + bumps its unsubscribed counter, best-effort)
-POST /unsubscribe/:token         — RFC 8058 one-click (body List-Unsubscribe=One-Click)
+GET  /unsubscribe/:token         — confirmation page ONLY; changes nothing. Corporate mail gateways
+                                    (Outlook Safe Links, Proofpoint, Mimecast) fetch every URL in a message
+                                    before the recipient sees it, so a GET that unsubscribed on sight
+                                    removed recipients who never clicked. The page carries a POST button and
+                                    is rendered in the language the campaign was written in (?lang=en|de|ru).
+POST /unsubscribe/:token         — performs the unsubscribe. RFC 8058 one-click (body List-Unsubscribe=One-Click)
+                                    and the confirmation page's button both land here; attributes to the
+                                    contact's most recent campaign send + bumps its unsubscribed counter,
+                                    best-effort.
 GET  /uploads/images/:id/:file   GET /uploads/files/:id/:file   — serves uploaded campaign assets (path-traversal guarded)
 POST /webhooks/ses               — legacy. SNS endpoint; signature-validated. Auto-confirms SubscriptionConfirmation;
                                     permanent Bounce/Complaint → suppress + flag contact; Delivery/Open/Click → counters.
@@ -794,6 +809,10 @@ POST /webhooks/brevo?token=<BREVO_WEBHOOK_SECRET>   — the one actually in use.
                                     correlated by the `tag` Brevo echoes back (set at send time to email_sends.id).
                                     Not signed by Brevo → 403 without the correct ?token. Must be registered manually
                                     in Brevo's dashboard (Transactional → Settings → Webhook) — see docs/EMAIL_SES_SETUP.md.
+                                    Both webhook paths are on their own rate-limit bucket (5,000/min) rather than
+                                    the general 300/min per-IP one: a send burst used to push its own event burst
+                                    past the user ceiling, and a refused webhook is a lost event. Nothing else
+                                    under /email is exempt.
 ```
 
 ---

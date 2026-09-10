@@ -1,6 +1,6 @@
 # AdsFlow — Product Roadmap
 
-> Last updated: 9 September 2026 — statuses re-verified against the live deployment and the code.
+> Last updated: 10 September 2026 — statuses re-verified against the live deployment and the code.
 > Sprint 1 ✅ · Sprint 2 ✅ · Sprint 3 ✅ · Sprint 4 ✅ · Production Deployment ✅ · UI Polish ✅ · i18n Audit ✅ · Keyword Research ✅
 > S4-4 (SB keyword-level reports) — **working** via `sbSearchTerm`, which carries `keywordId`/`keywordText`;
 > SB keyword metrics are current in `fact_metrics_daily` (58 rows over the last 30 days, latest 2026-09-06).
@@ -486,7 +486,7 @@ Full audit and fix of all EN/RU/DE translations — zero language mixing.
 
 ---
 
-## 📌 Current Backlog — what is actually open (9 September 2026)
+## 📌 Current Backlog — what is actually open (10 September 2026)
 
 Every sprint item S1–S4 is delivered. What remains is deployment configuration and follow-ups found
 by auditing production, not unfinished sprint scope.
@@ -499,7 +499,11 @@ by auditing production, not unfinished sprint scope.
 | Lead Finder: no in-app country sweep | 🟡 | product | **Solved for data, not yet in the UI (2026-09-08).** Tiling a country is 304 Overpass requests and the public endpoint bans the IP first; one `area` query per Bundesland covers the same ground in 16 requests and never touches the quota. All 13,816 German asian restaurants were collected that way, but by script — the Lead Finder still only knows how to tile a bbox. |
 | Marketing routes have no role check | 🟡 | code | Deleting a contact list with its contacts, and sending a campaign, are open to any workspace member. `requireRole` exists and guards connections; note it reads the org role (`req.user.role`), not `req.workspaceRole`. |
 | SP-API Finances role not granted | 🟡 | external | `sp_financials` has never held a row; the daily job 403s and is now recorded `skipped` with the reason. Needs the role in Seller Central. |
-| 276 tracked ASINs are gone from the DE catalog | 🟢 | data | Ad rows for delisted listings, `is_active` but 404 in SP-API and zero orders in 90 days. No longer probed (the sweep verdict is honoured), but they still sit in the product list. |
+| ScraperAPI plan is 1,000 requests a month | 🟡 | external | Shared by the product-meta scrape and rank tracking. The meta job no longer wastes it (migration 052 parked the 276 dead ASINs), but rank tracking alone runs 73 checks a day against a 33/day budget, which is why roughly a quarter of them come back blocked. A bigger plan is the only fix; the UI now at least says a check was refused rather than claiming the product is unranked. |
+| 117 send rows have no delivery verdict | 🟡 | external | The events that would have closed them were the ones the rate limiter refused with 429 before the webhook got its own bucket. Brevo keeps the history, but reading it back needs a REST API key (`v3/smtp/statistics/events`) — the account is configured for SMTP relay only, so the rows cannot be reconciled without one. New sends are unaffected. |
+| From-name, from-address and reply-to do not match the brand | 🟡 | deployment | The campaign is EVOCAMP throughout, and `MAIL_FROM_NAME` / `MAIL_FROM_EMAIL` / `MAIL_REPLY_TO` carry the legal entity instead. Not a compliance problem — the footer names both, which is what the carton says — but a cold recipient checks the sender line first, and a name they have never seen is the thing that gets a mail deleted. |
+| Frontend test coverage is two modules deep | 🟢 | code | vitest is wired up (`npm test` in `frontend/`) and covers `i18n/plural.js` and `lib/display.js`, 67 tests. Everything else worth testing is still inside the 19,000-line `App.jsx` and has to be lifted out of it first, one helper at a time, the way those two were. |
+| 210 tracked ASINs have no name from any source | 🟢 | data | Was 276: ad rows for delisted listings, `is_active` but 404 in SP-API and zero orders in 90 days, so no Amazon title and no order line to borrow one from. 66 of them are articles in Wawi and now show the ERP name (migration 053). The remaining 210 are not in the ERP either and still render as a bare ASIN. They are no longer probed — the sweep verdict is honoured — but they still sit in the product list. |
 | No search in the contacts list | 🟢 | product | The backend supports `?search=`; the UI never sends it. Noticeable now that one list holds 3,248 contacts. |
 | AI prompt chips are hardcoded English | 🟢 | i18n | The six suggested prompts bypass `t()` — the only known language-mixing left after the i18n audit. |
 

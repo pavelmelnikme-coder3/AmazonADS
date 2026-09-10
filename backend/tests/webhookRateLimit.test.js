@@ -25,15 +25,25 @@ function buildApp({ generalMax = 3, webhookMax = 50 } = {}) {
   return app;
 }
 
-const hammer = async (app, path, n, method = "post") => {
+// One listening server per test, reused for every request in it.
+//
+// `request(app)` binds a fresh ephemeral server for each call, and these tests fire twenty or
+// more in a row. Under a loaded parallel run that churn occasionally produced a "socket hang up"
+// — roughly one full-suite run in eight, always in this file. Nothing to do with rate limiting;
+// the sockets simply ran out from under it.
+const servers = [];
+const listen = (app) => { const s = app.listen(0); servers.push(s); return s; };
+afterEach(() => { while (servers.length) servers.pop().close(); });
+
+const hammer = async (server, path, n, method = "post") => {
   const codes = [];
-  for (let i = 0; i < n; i++) codes.push((await request(app)[method](path)).status);
+  for (let i = 0; i < n; i++) codes.push((await request(server)[method](path)).status);
   return codes;
 };
 
 describe("the general limiter still protects user traffic", () => {
   test("ordinary API calls are cut off at the ceiling", async () => {
-    const app = buildApp({ generalMax: 3 });
+    const app = listen(buildApp({ generalMax: 3 }));
     const codes = await hammer(app, "/api/v1/campaigns", 5, "get");
     expect(codes.slice(0, 3)).toEqual([200, 200, 200]);
     expect(codes.slice(3)).toEqual([429, 429]);
@@ -42,13 +52,13 @@ describe("the general limiter still protects user traffic", () => {
 
 describe("webhooks are on their own budget", () => {
   test("a burst well past the user ceiling is still accepted", async () => {
-    const app = buildApp({ generalMax: 3, webhookMax: 50 });
+    const app = listen(buildApp({ generalMax: 3, webhookMax: 50 }));
     const codes = await hammer(app, "/api/v1/email/webhooks/brevo?token=s", 20);
     expect(codes.every((c) => c === 200)).toBe(true);
   });
 
   test("the SES webhook gets the same treatment", async () => {
-    const app = buildApp({ generalMax: 3, webhookMax: 50 });
+    const app = listen(buildApp({ generalMax: 3, webhookMax: 50 }));
     const codes = await hammer(app, "/api/v1/email/webhooks/ses", 20);
     expect(codes.every((c) => c === 200)).toBe(true);
   });
@@ -56,14 +66,14 @@ describe("webhooks are on their own budget", () => {
   // The point of the split: a flood of webhook events must not use up the budget that keeps
   // the app usable, and vice versa.
   test("webhook traffic does not consume the user budget", async () => {
-    const app = buildApp({ generalMax: 3, webhookMax: 50 });
+    const app = listen(buildApp({ generalMax: 3, webhookMax: 50 }));
     await hammer(app, "/api/v1/email/webhooks/brevo?token=s", 20);
     const codes = await hammer(app, "/api/v1/campaigns", 3, "get");
     expect(codes).toEqual([200, 200, 200]);
   });
 
   test("user traffic does not consume the webhook budget", async () => {
-    const app = buildApp({ generalMax: 3, webhookMax: 50 });
+    const app = listen(buildApp({ generalMax: 3, webhookMax: 50 }));
     await hammer(app, "/api/v1/campaigns", 5, "get");
     const codes = await hammer(app, "/api/v1/email/webhooks/brevo?token=s", 10);
     expect(codes.every((c) => c === 200)).toBe(true);
@@ -71,7 +81,7 @@ describe("webhooks are on their own budget", () => {
 
   // Not unlimited — the exemption is a bigger bucket, not the absence of one.
   test("the webhook budget has a ceiling of its own", async () => {
-    const app = buildApp({ generalMax: 3, webhookMax: 5 });
+    const app = listen(buildApp({ generalMax: 3, webhookMax: 5 }));
     const codes = await hammer(app, "/api/v1/email/webhooks/brevo?token=s", 7);
     expect(codes.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
     expect(codes.slice(5)).toEqual([429, 429]);
@@ -79,7 +89,7 @@ describe("webhooks are on their own budget", () => {
 
   // Only the two webhook routes are exempt; nothing else under /email may borrow the bucket.
   test("other public email routes stay on the user budget", async () => {
-    const app = buildApp({ generalMax: 3 });
+    const app = listen(buildApp({ generalMax: 3 }));
     const codes = await hammer(app, "/api/v1/email/unsubscribe/tok", 5, "get");
     expect(codes.slice(3)).toEqual([429, 429]);
   });
