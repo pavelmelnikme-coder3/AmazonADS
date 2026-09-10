@@ -80,14 +80,36 @@ app.use(cookieParser());
 app.use(morgan("combined", { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
 // ─── Rate limiting ─────────────────────────────────────────────────────────────
+// Provider webhooks are not user traffic and must not share the per-IP budget with it. Every
+// event Brevo posts for a campaign — delivered, opened, click, bounce — arrives from the same
+// source address in a burst that tracks the send rate, so a 250-message batch pushes hundreds
+// of posts through in seconds. Under the general 300/min ceiling they came back 429, and a
+// rejected webhook is a lost event: not only a wrong number in the stats, but a hard_bounce
+// that never reaches the suppression list, so the address stays on the list and bounces again
+// next time. Seen live during the asian_b2b send.
+//
+// They are not unlimited: the URL carries a shared secret (routes/emailPublic.js fails closed
+// without it) and this ceiling is high enough for a full day's sending in one minute.
+const WEBHOOK_PATHS = ["/v1/email/webhooks/brevo", "/v1/email/webhooks/ses"];
+const isWebhook = (req) => WEBHOOK_PATHS.some((p) => req.path.startsWith(p));
+
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many webhook events." },
+});
+
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isWebhook,
   message: { error: "Too many requests, please slow down." },
 });
-app.use("/api/", limiter);
+app.use("/api/", (req, res, next) => (isWebhook(req) ? webhookLimiter : limiter)(req, res, next));
 
 // Stricter limit for auth endpoints (brute-force protection)
 // 5 attempts per 15 minutes per IP
