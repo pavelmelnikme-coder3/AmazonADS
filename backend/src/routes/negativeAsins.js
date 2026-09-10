@@ -4,6 +4,7 @@ const { requireAuth, requireWorkspace } = require('../middleware/auth');
 const { pushNegativeAsin } = require('../services/amazon/writeback');
 const { writeAudit, updateAuditStatus } = require('./audit');
 const logger = require('../config/logger');
+const { pageNumber, limitNumber } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -15,8 +16,8 @@ router.get('/', async (req, res, next) => {
       search, page = 1, limit: rawLimit = 100,
       campaignType, sortBy = 'created_at', sortDir = 'desc',
     } = req.query;
-    const limit = Math.min(parseInt(rawLimit) || 100, 500);
-    const offset = (parseInt(page) - 1) * limit;
+    const limit = limitNumber(rawLimit, 100, 500);
+    const offset = (pageNumber(page) - 1) * limit;
 
     const conditions = ['nt.workspace_id = $1'];
     const params = [req.workspaceId];

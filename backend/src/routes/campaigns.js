@@ -5,6 +5,7 @@ const { writeAudit } = require("./audit");
 const { post: apiPost, put: apiPut } = require("../services/amazon/adsClient");
 const { campaignBudgetFields, wrapCampaigns, partialError, campaignApiPath } = require("../services/amazon/writeback");
 const logger = require("../config/logger");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -27,7 +28,7 @@ router.get("/", async (req, res, next) => {
 
     const metricsInterval = Math.min(Math.max(parseInt(req.query.metricsDays) || 30, 1), 365);
 
-    const offset = (parseInt(page) - 1) * limit;
+    const offset = (pageNumber(page) - 1) * limit;
     const conditions = ["c.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;

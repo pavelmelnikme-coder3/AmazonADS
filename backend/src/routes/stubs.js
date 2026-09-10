@@ -3,6 +3,7 @@ const express = require("express");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { queueReportPipeline } = require("../jobs/workers");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 // ─── Ad Groups ────────────────────────────────────────────────────────────────
 const adGroupsRouter = express.Router();
@@ -11,7 +12,7 @@ adGroupsRouter.use(requireAuth, requireWorkspace);
 adGroupsRouter.get("/", async (req, res, next) => {
   try {
     const { campaignId, limit = 100, page = 1 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const offset = (pageNumber(page) - 1) * limitNumber(limit, 100, 1000);
     const cond = campaignId ? "AND ag.campaign_id = $3" : "";
     const params = campaignId ? [req.workspaceId, offset, campaignId] : [req.workspaceId, offset];
     const { rows } = await query(
@@ -32,7 +33,7 @@ keywordsRouter.use(requireAuth, requireWorkspace);
 keywordsRouter.get("/", async (req, res, next) => {
   try {
     const { campaignId, adGroupId, state, search, limit = 200, page = 1 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const offset = (pageNumber(page) - 1) * limitNumber(limit, 100, 1000);
     const conditions = ["k.workspace_id = $1"];
     const params = [req.workspaceId];
     let pi = 2;

@@ -2,6 +2,7 @@ const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { evaluateWorkspaceAlerts } = require("../services/alerts/evaluate");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -187,7 +188,7 @@ router.get("/", async (req, res, next) => {
     const rawLimit = parseInt(req.query.limit);
     const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 25;
     const { status = "open", page: pageParam = 1 } = req.query;
-    const page = Math.max(1, parseInt(pageParam));
+    const page = pageNumber(pageParam);
     const offset = (page - 1) * limit;
 
     const [{ rows }, { rows: countRows }] = await Promise.all([

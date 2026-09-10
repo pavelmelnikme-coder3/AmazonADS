@@ -517,6 +517,8 @@ export default {
     exportGenerating: "Wird erstellt…",
   },
   rankings: {
+    blocked: "Prüfung fehlgeschlagen",
+    blockedHint: "Amazon hat diese Anfrage nicht beantwortet — die heutige Position ist unbekannt. Das heißt nicht, dass das Produkt aus den Ergebnissen gefallen ist.",
     title: "Ranking-Tracker",
     subtitle: "Organische Keyword-Positionen auf Amazon verfolgen — täglich aktualisiert",
     addTitle: "Keyword zum Tracking hinzufügen",

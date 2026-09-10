@@ -1038,6 +1038,23 @@ const KeyboardShortcutsHelp = ({ onClose }) => {
 };
 
 // ─── ChangeHistory popup ──────────────────────────────────────────────────────
+// Audit diffs carry whatever the backend recorded, and some fields hold an object rather than a
+// scalar — the rule engine stores the metrics a rule matched on under `metrics`, which is exactly
+// the evidence for why it fired. Both renderers passed the value through String(), so that
+// evidence reached the page as the literal text "[object Object]". Objects are now shown as
+// compact key=value pairs, with the full JSON on hover when it does not fit.
+function auditValueText(v) {
+  if (v === null || v === undefined) return "—";
+  if (typeof v !== "object") return String(v);
+  if (Array.isArray(v)) return v.map(auditValueText).join(", ") || "—";
+  const parts = Object.entries(v).map(([k, x]) => {
+    const n = typeof x === "number" ? (Number.isInteger(x) ? x : Math.round(x * 100) / 100) : auditValueText(x);
+    return `${k}=${n}`;
+  });
+  return parts.join(" ") || "—";
+}
+const auditValueTitle = (v) => (v && typeof v === "object" ? JSON.stringify(v, null, 1) : undefined);
+
 function ChangeHistoryBtn({ entityId }) {
   const [open, setOpen] = useState(false);
   const [events, setEvents] = useState(null);
@@ -1063,9 +1080,7 @@ function ChangeHistoryBtn({ entityId }) {
     const diff = ev.diff;
     if (!diff) return ev.action;
     const parts = Object.entries(diff).map(([k, v]) => {
-      const before = v.before != null ? v.before : "—";
-      const after  = v.after  != null ? v.after  : "—";
-      return `${k}: ${before} → ${after}`;
+      return `${k}: ${auditValueText(v.before)} → ${auditValueText(v.after)}`;
     });
     return parts.join(", ") || ev.action;
   };
@@ -1686,7 +1701,13 @@ function applyLayoutAdditions(savedLayout, seen = []) {
 // ─── Rank Tracker Page ────────────────────────────────────────────────────────
 const RANK_DAYS = [7, 30];
 
-function positionBadge(position, found) {
+// `blocked` is not the same answer as "not in the results", and the two must not share a badge.
+// Amazon refuses roughly a quarter of these checks — 20 of 73 on the day this was written, 25.2%
+// over the preceding three weeks — and every one of them rendered as the same grey dash a
+// genuinely unranked keyword gets. Someone reading this page saw a product that had dropped out
+// of the rankings; what had actually happened was that nobody could look.
+function positionBadge(position, found, blocked) {
+  if (blocked) return { label: "?", bg: "rgba(245,158,11,.12)", color: "var(--amb)", border: "rgba(245,158,11,.35)", blocked: true };
   if (!found || position === null || position === 0) return { label: "—", bg: "var(--s2)", color: "var(--tx3)", border: "var(--b2)" };
   if (position <= 3)  return { label: `#${position}`, bg: "rgba(234,179,8,.15)",  color: "#ca8a04", border: "rgba(234,179,8,.4)" };
   if (position <= 10) return { label: `#${position}`, bg: "rgba(34,197,94,.15)",  color: "var(--grn)", border: "rgba(34,197,94,.4)" };
@@ -1705,6 +1726,10 @@ function rankDelta(current, prev) {
 // Full-featured campaign drill-down: Ad Groups → Keywords/Targets/Product Ads
 function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUpdate }) {
   const { t } = useI18n();
+  // Every figure below is in the campaign's marketplace currency. It used to be a hardcoded
+  // "$" on a workspace whose live profile is DE/EUR, so ad-group spend, keyword and target
+  // bids, and the daily budget were all labelled in the wrong currency.
+  const CURM = curSym(campaign.currency_code);
   const [view, setView]           = useState("campaign");
   const [selectedAg, setSelectedAg] = useState(null);
   const [tab, setTab]             = useState("adgroups");
@@ -2212,15 +2237,15 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                       ? <input type="number" step="0.01" min="0.02" value={editAg.defaultBid}
                           onChange={e => setEditAg(a => ({ ...a, defaultBid: e.target.value }))}
                           style={{ width: 72, fontSize: 11, padding: "2px 6px" }} />
-                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>${parseFloat(ag.default_bid || 0).toFixed(2)}</span>
+                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>{CURM}{parseFloat(ag.default_bid || 0).toFixed(2)}</span>
                     }</TD>
                     <TD><span style={{ fontSize: 11, color: "var(--tx3)" }}>
                       {Number(ag.keyword_count) > 0 && <span style={{ color: "var(--ac2)" }}>{ag.keyword_count}k</span>}
                       {Number(ag.target_count)  > 0 && <span style={{ color: "var(--amb)", marginLeft: 3 }}>{ag.target_count}t</span>}
                       {Number(ag.keyword_count) === 0 && Number(ag.target_count) === 0 && "—"}
                     </span></TD>
-                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{parseFloat(ag.spend) > 0 ? `$${parseFloat(ag.spend).toFixed(0)}` : "—"}</TD>
-                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{parseFloat(ag.sales) > 0 ? `$${parseFloat(ag.sales).toFixed(0)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{parseFloat(ag.spend) > 0 ? `${CURM}${parseFloat(ag.spend).toFixed(0)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{parseFloat(ag.sales) > 0 ? `${CURM}${parseFloat(ag.sales).toFixed(0)}` : "—"}</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: ag.acos != null ? acosColor(parseFloat(ag.acos)) : "var(--tx3)" }}>
                       {ag.acos != null ? `${parseFloat(ag.acos).toFixed(1)}%` : "—"}
                     </TD>
@@ -2306,11 +2331,11 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                       ? <input type="number" step="0.01" min="0.02" value={editKw.bid}
                           onChange={e => setEditKw(k => ({ ...k, bid: e.target.value }))}
                           style={{ width: 72, fontSize: 11, padding: "2px 6px" }} />
-                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>${parseFloat(kw.bid || 0).toFixed(2)}</span>
+                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>{CURM}{parseFloat(kw.bid || 0).toFixed(2)}</span>
                     }</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{kw.clicks ? Number(kw.clicks).toLocaleString() : "—"}</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{kw.orders ? Number(kw.orders) : "—"}</TD>
-                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{kw.spend && parseFloat(kw.spend) > 0 ? `$${parseFloat(kw.spend).toFixed(2)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{kw.spend && parseFloat(kw.spend) > 0 ? `${CURM}${parseFloat(kw.spend).toFixed(2)}` : "—"}</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: kw.acos != null ? acosColor(parseFloat(kw.acos)) : "var(--tx3)" }}>
                       {kw.acos != null ? `${parseFloat(kw.acos).toFixed(1)}%` : "—"}
                     </TD>
@@ -2407,11 +2432,11 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                       ? <input type="number" step="0.01" min="0.02" value={editTgt.bid}
                           onChange={e => setEditTgt(prev => ({ ...prev, bid: e.target.value }))}
                           style={{ width: 72, fontSize: 11, padding: "2px 6px" }} />
-                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>{tgt.bid ? `$${parseFloat(tgt.bid).toFixed(2)}` : "—"}</span>
+                      : <span style={{ fontFamily: "var(--mono)", color: "var(--ac2)" }}>{tgt.bid ? `${CURM}${parseFloat(tgt.bid).toFixed(2)}` : "—"}</span>
                     }</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--tx2)" }}>{tgt.clicks ? Number(tgt.clicks).toLocaleString() : "—"}</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--grn)" }}>{tgt.orders ? Number(tgt.orders) : "—"}</TD>
-                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{tgt.spend && parseFloat(tgt.spend) > 0 ? `$${parseFloat(tgt.spend).toFixed(2)}` : "—"}</TD>
+                    <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: "var(--ac2)" }}>{tgt.spend && parseFloat(tgt.spend) > 0 ? `${CURM}${parseFloat(tgt.spend).toFixed(2)}` : "—"}</TD>
                     <TD style={{ textAlign: "right", fontFamily: "var(--mono)", color: tgt.acos != null ? acosColor(parseFloat(tgt.acos)) : "var(--tx3)" }}>
                       {tgt.acos != null ? `${parseFloat(tgt.acos).toFixed(1)}%` : "—"}
                     </TD>
@@ -2573,10 +2598,10 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                       {parseInt(term.orders || 0) > 0 ? parseInt(term.orders).toLocaleString() : "—"}
                     </TD>
                     <TD style={{ textAlign: "right", color: "var(--ac2)" }}>
-                      {parseFloat(term.spend || 0) > 0 ? "$" + parseFloat(term.spend).toFixed(2) : "—"}
+                      {parseFloat(term.spend || 0) > 0 ? CURM + parseFloat(term.spend).toFixed(2) : "—"}
                     </TD>
                     <TD style={{ textAlign: "right", color: parseFloat(term.sales || 0) > 0 ? "var(--grn)" : "var(--tx3)" }}>
-                      {parseFloat(term.sales || 0) > 0 ? "$" + parseFloat(term.sales).toFixed(2) : "—"}
+                      {parseFloat(term.sales || 0) > 0 ? CURM + parseFloat(term.sales).toFixed(2) : "—"}
                     </TD>
                     <TD style={{ textAlign: "right", color: acos !== null ? acosColor(acos) : "var(--tx3)" }}>
                       {acos !== null ? acos.toFixed(1) + "%" : "—"}
@@ -2678,7 +2703,7 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
                   onChange={e => setEditCampaign(c => ({ ...c, dailyBudget: e.target.value }))}
                   style={{ fontSize: 13, padding: "6px 10px", width: 160 }} />
               : <div style={{ fontSize: 13, fontFamily: "var(--mono)" }}>
-                  {campaign.daily_budget ? `$${parseFloat(campaign.daily_budget).toFixed(2)}` : "—"}
+                  {campaign.daily_budget ? `${CURM}${parseFloat(campaign.daily_budget).toFixed(2)}` : "—"}
                 </div>
             }
           </div>
@@ -2846,11 +2871,11 @@ function CampaignDetailModal({ campaign, metricsDays = 30, onClose, onCampaignUp
             <span className={`tag ${campaign.state === "enabled" ? "tag-on" : campaign.state === "paused" ? "tag-pause" : "tag-arch"}`} style={{ fontSize: 10, display: "flex", alignItems: "center", gap: 4 }}>
               <span style={{ width: 4, height: 4, borderRadius: "50%", background: "currentColor", display: "inline-block" }} />{campaign.state}
             </span>
-            {chip(t("campaigns.colBudget"), campaign.daily_budget ? `$${parseFloat(campaign.daily_budget).toFixed(0)}` : "—")}
-            {chip("Spend", `$${parseFloat(campaign.spend || 0).toFixed(0)}`, "var(--ac2)")}
+            {chip(t("campaigns.colBudget"), campaign.daily_budget ? `${CURM}${parseFloat(campaign.daily_budget).toFixed(0)}` : "—")}
+            {chip("Spend", `${CURM}${parseFloat(campaign.spend || 0).toFixed(0)}`, "var(--ac2)")}
             {campaign.acos != null && chip("ACOS", `${parseFloat(campaign.acos).toFixed(1)}%`, acosColor(parseFloat(campaign.acos)))}
             {campaign.roas != null && chip("ROAS", `${parseFloat(campaign.roas).toFixed(2)}×`, "var(--pur)")}
-            {view === "adgroup" && selectedAg && selectedAg.default_bid && chip(t("campaigns.detail.agBid"), `$${parseFloat(selectedAg.default_bid).toFixed(2)}`, "var(--ac2)")}
+            {view === "adgroup" && selectedAg && selectedAg.default_bid && chip(t("campaigns.detail.agBid"), `${CURM}${parseFloat(selectedAg.default_bid).toFixed(2)}`, "var(--ac2)")}
             {view === "adgroup" && selectedAg && parseFloat(selectedAg.acos) > 0 && chip(t("campaigns.detail.agAcos"), `${parseFloat(selectedAg.acos).toFixed(1)}%`, acosColor(parseFloat(selectedAg.acos)))}
           </div>
         </div>
@@ -3638,7 +3663,7 @@ const RankTrackerPage = ({ workspaceId }) => {
               <SortableContext items={sortedKws.map(k => k.id)} strategy={verticalListSortingStrategy}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
                   {sortedKws.map(kw => {
-                    const badge  = positionBadge(kw.position, kw.found);
+                    const badge  = positionBadge(kw.position, kw.found, kw.blocked);
                     const delta  = rankDelta(kw.position, kw.prev_position);
                     const isExp  = expanded === kw.id;
                     const isChk  = checkingId === kw.id;
@@ -3664,7 +3689,8 @@ const RankTrackerPage = ({ workspaceId }) => {
                                   background: badge.bg, border: `1px solid ${badge.border}`,
                                   fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: badge.color,
                                   cursor: "default",
-                                }}>{badge.label}</div>
+                                }}
+                                title={badge.blocked ? t("rankings.blockedHint") : undefined}>{badge.label}</div>
                               <div style={{ width: 36, fontSize: 11, fontWeight: 600, textAlign: "center" }}>
                                 {delta === null ? <span style={{ color: "var(--tx3)" }}>—</span>
                                   : delta > 0 ? <span style={{ color: "var(--grn)" }}>↑{delta}</span>
@@ -7723,8 +7749,8 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
                   {rows.map((r, i) => (
                     <tr key={i}>
                       <td><span className="badge bg-bl" style={{ fontSize: 10 }}>{typeLabel(r.campaign_type)}</span></td>
-                      <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>${parseFloat(r.spend || 0).toFixed(0)}</td>
-                      <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{parseFloat(r.sales || 0) > 0 ? `$${parseFloat(r.sales).toFixed(0)}` : "—"}</td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--ac2)" }}>{CUR}{parseFloat(r.spend || 0).toFixed(0)}</td>
+                      <td className="num" style={{ textAlign: "right", color: "var(--grn)" }}>{parseFloat(r.sales || 0) > 0 ? `${CUR}${parseFloat(r.sales).toFixed(0)}` : "—"}</td>
                       <td className="num" style={{ textAlign: "right", color: acosColor(parseFloat(r.acos || 0)) }}>
                         {parseFloat(r.acos || 0) > 0 ? `${parseFloat(r.acos).toFixed(1)}%` : "—"}
                       </td>
@@ -7808,7 +7834,10 @@ const OverviewPage = ({ workspaceId, user, onSettingsUpdate, onNavigate }) => {
     return null;
   }
 
-  const activeProfiles = profiles?.filter(p => p.sync_status === "synced") || [];
+  // `sync_status` is a column that was last written when the sync last ran, and one profile
+  // here still says "synced" from April on a connection that has since been revoked. The
+  // Overview counted it and reported two synchronised profiles where there is one.
+  const activeProfiles = profiles?.filter(p => p.sync_status === "synced" && p.connection_status === "active") || [];
 
   return (
     <div className="fade">
@@ -9791,9 +9820,9 @@ const AuditPage = ({ workspaceId }) => {
                             <span key={field} style={{ fontSize: 10, padding: "2px 6px",
                               background: "var(--s3)", borderRadius: 4, color: "var(--tx2)" }}>
                               {field}:&nbsp;
-                              <span style={{ color: "var(--red)" }}>{String(before ?? "—")}</span>
+                              <span style={{ color: "var(--red)" }} title={auditValueTitle(before)}>{auditValueText(before)}</span>
                               <span style={{ color: "var(--tx3)", margin: "0 3px" }}>→</span>
-                              <span style={{ color: "var(--grn)" }}>{String(after ?? "—")}</span>
+                              <span style={{ color: "var(--grn)" }} title={auditValueTitle(after)}>{auditValueText(after)}</span>
                             </span>
                           ))}
                         </div>
@@ -11264,7 +11293,7 @@ function RuleHistoryModal({ rule, onClose }) {
                 {run.summary.slice(0, 3).map((a, i) => (
                   <div key={i} style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 2 }}>
                     • {a.entity_name || a.keyword_text}: {a.action}
-                    {a.old_bid && ` $${a.old_bid} → $${a.new_bid}`}
+                    {a.old_bid && ` ${a.old_bid} → ${a.new_bid}`}
                   </div>
                 ))}
                 {run.summary.length > 3 && (
@@ -12187,7 +12216,7 @@ const KeywordsPage = ({ workspaceId }) => {
                             {parseInt(term.orders || 0) > 0 ? parseInt(term.orders).toLocaleString() : "—"}
                           </td>
                           <td style={{ padding: "7px 10px", textAlign: "right", color: "var(--ac2)" }}>
-                            {parseFloat(term.spend || 0) > 0 ? "$" + parseFloat(term.spend).toFixed(2) : "—"}
+                            {parseFloat(term.spend || 0) > 0 ? CURM + parseFloat(term.spend).toFixed(2) : "—"}
                           </td>
                           <td style={{ padding: "7px 10px", textAlign: "right",
                             color: acos !== null ? acosColor(acos) : "var(--tx3)" }}>
@@ -12434,7 +12463,7 @@ const KeywordsPage = ({ workspaceId }) => {
                             )
                             : (
                               <span style={{ cursor: "pointer", color: "var(--ac2)" }} onClick={() => { setEditId(kw.id); setEditBid(kw.bid ? parseFloat(kw.bid).toFixed(2) : ""); }}>
-                                ${parseFloat(kw.bid || 0).toFixed(2)}
+                                {curSym(kw.currency_code)}{parseFloat(kw.bid || 0).toFixed(2)}
                               </span>
                             )
                           }

@@ -2,6 +2,7 @@ const express = require("express");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const logger = require("../config/logger");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -63,7 +64,7 @@ router.get("/", async (req, res, next) => {
     const rawLimit = parseInt(req.query.limit);
     const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 50;
     const { entityType, source, actorId, sortBy = "date", sortDir = "desc", page = 1 } = req.query;
-    const offset = (parseInt(page) - 1) * limit;
+    const offset = (pageNumber(page) - 1) * limit;
 
     const conditions = ["workspace_id = $1"];
     const params = [req.workspaceId];

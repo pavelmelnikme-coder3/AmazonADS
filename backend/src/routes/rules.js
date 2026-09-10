@@ -20,6 +20,7 @@ const { put, post } = require("../services/amazon/adsClient");
 const { normalizeKeywordText, unsupportedKeywordChars, sqlNormalizeKeywordText } = require("../services/amazon/keywordText");
 const logger  = require("../config/logger");
 const { getRedis } = require("../config/redis");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 router.use(requireAuth, requireWorkspace);
 
@@ -2281,7 +2282,7 @@ router.delete("/exemptions/:exemId", async (req, res, next) => {
 router.get("/", async (req, res, next) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || 25), 100);
-    const page   = Math.max(parseInt(req.query.page   || 1), 1);
+    const page   = pageNumber(req.query.page);
     const offset = (page - 1) * limit;
 
     const [{ rows }, { rows: [cnt] }] = await Promise.all([

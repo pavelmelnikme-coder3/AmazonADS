@@ -4,6 +4,7 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { writeAudit, updateAuditStatus } = require("./audit");
 const { pushKeywordUpdates, loadKeywordContext, pushNewKeywords } = require("../services/amazon/writeback");
 const logger = require("../config/logger");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -15,7 +16,7 @@ router.get("/", async (req, res, next) => {
     const { adGroupId, state, search, page = 1, sortBy = "keyword_text", sortDir = "asc", dateFrom, dateTo, metricsDays } = req.query;
     const rawLimit = parseInt(req.query.limit);
     const limit = VALID_LIMITS.includes(rawLimit) ? rawLimit : 100;
-    const offset = (parseInt(page) - 1) * limit;
+    const offset = (pageNumber(page) - 1) * limit;
 
     const conditions = ["k.workspace_id = $1"];
     const params = [req.workspaceId];
@@ -137,10 +138,14 @@ router.get("/", async (req, res, next) => {
            COALESCE(m.cost,0) as spend,
            COALESCE(m.sales_14d,0) as sales,
            COALESCE(m.orders_14d,0) as orders,
-           m.acos_14d as acos, m.roas_14d as roas, m.cpc
+           m.acos_14d as acos, m.roas_14d as roas, m.cpc,
+           -- Bids and spend are in the marketplace's currency, not dollars: this workspace's
+           -- live profile is DE/EUR and the page was rendering a hardcoded "$".
+           pr.currency_code
          FROM keywords k
          JOIN campaigns c ON c.id = k.campaign_id
          JOIN ad_groups ag ON ag.id = k.ad_group_id
+         LEFT JOIN amazon_profiles pr ON pr.id = c.profile_id
          ${metricsJoin}
          ${where}
          ORDER BY ${orderField} ${orderDir} NULLS LAST

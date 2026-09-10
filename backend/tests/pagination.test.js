@@ -11,7 +11,7 @@
  *
  * Both were reproduced against the live database before this was written.
  */
-const { paginate } = require("../src/routes/_pagination");
+const { paginate, pageNumber, limitNumber } = require("../src/routes/_pagination");
 
 const D = { defaultLimit: 500, maxLimit: 2000 };
 
@@ -77,5 +77,44 @@ describe("every result is safe to interpolate into SQL", () => {
       expect(Number.isFinite(n)).toBe(true);
       expect(String(n)).toMatch(/^\d+$/);
     }
+  });
+});
+
+// The routes that build their own limit from an allow-list only needed the page arithmetic
+// fixed. Confirmed live before the change: ?page=abc returned 500 on /campaigns, /keywords,
+// /audit, /negative-keywords and /rules.
+describe("pageNumber", () => {
+  test.each(["abc", "", " ", null, undefined, "NaN", "-1", "0", "e5", {}, []])(
+    "%p is page 1", (v) => expect(pageNumber(v)).toBe(1));
+
+  test.each([["1", 1], ["2", 2], ["37", 37], [5, 5], [" 4 ", 4]])(
+    "%p is page %i", (v, n) => expect(pageNumber(v)).toBe(n));
+
+  test("the result is always a positive integer", () => {
+    for (const v of ["abc", "-9", "3.7", "1e9", "0x10"]) {
+      const n = pageNumber(v);
+      expect(Number.isInteger(n)).toBe(true);
+      expect(n).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("limitNumber", () => {
+  test("an unparseable limit takes the fallback", () => {
+    expect(limitNumber("abc", 100, 500)).toBe(100);
+    expect(limitNumber(undefined, 100, 500)).toBe(100);
+  });
+
+  test("a negative or zero limit becomes 1, never reaching SQL as LIMIT -5", () => {
+    expect(limitNumber("-5", 100, 500)).toBe(1);
+    expect(limitNumber("0", 100, 500)).toBe(1);
+  });
+
+  test("a limit over the cap is clamped", () => {
+    expect(limitNumber("99999", 100, 500)).toBe(500);
+  });
+
+  test("an ordinary limit passes through", () => {
+    expect(limitNumber("250", 100, 500)).toBe(250);
   });
 });

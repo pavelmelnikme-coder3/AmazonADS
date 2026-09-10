@@ -517,6 +517,8 @@ export default {
     exportGenerating: "Generating…",
   },
   rankings: {
+    blocked: "Check failed",
+    blockedHint: "Amazon did not answer this request, so today's position is unknown. It does not mean the product left the results.",
     title: "Rank Tracker",
     subtitle: "Track organic keyword positions on Amazon search — updated daily",
     addTitle: "Add keyword to track",

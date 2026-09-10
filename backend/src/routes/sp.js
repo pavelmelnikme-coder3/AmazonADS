@@ -4,6 +4,7 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { query } = require("../db/pool");
 const { queueSpSync } = require("../jobs/workers");
 const logger = require("../config/logger");
+const { pageNumber, limitNumber } = require("./_pagination");
 
 router.use(requireAuth, requireWorkspace);
 
@@ -57,7 +58,7 @@ router.get("/orders", async (req, res, next) => {
     if (endDate)   { params.push(endDate);   q += ` AND o.purchase_date::date <= $${params.length}::date`; }
     if (status)    { params.push(status);    q += ` AND o.order_status = $${params.length}`; }
     if (fulfillmentChannel) { params.push(fulfillmentChannel); q += ` AND o.fulfillment_channel = $${params.length}`; }
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const offset = (pageNumber(page) - 1) * limitNumber(limit, 100, 1000);
     q += ` ORDER BY o.purchase_date DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(parseInt(limit), offset);
     const { rows } = await query(q, params);
@@ -114,7 +115,7 @@ router.get("/financials", async (req, res, next) => {
     if (endDate)   { params.push(endDate);   q += ` AND posted_date <= $${params.length}`; }
     if (eventType) { params.push(eventType); q += ` AND event_type = $${params.length}`; }
     if (asin)      { params.push(asin);      q += ` AND asin = $${params.length}`; }
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const offset = (pageNumber(page) - 1) * limitNumber(limit, 100, 1000);
     q += ` ORDER BY posted_date DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(parseInt(limit), offset);
     const { rows } = await query(q, params);

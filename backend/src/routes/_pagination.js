@@ -38,4 +38,22 @@ function paginate(query = {}, { defaultLimit = 100, maxLimit = 1000 } = {}) {
   return { limit, offset: (page - 1) * limit, page };
 }
 
-module.exports = { paginate };
+/**
+ * Just the page number, for routes that compute their own limit from an allow-list and only need
+ * the offset arithmetic made safe. Same rule: anything unparseable is page 1.
+ *
+ * `Math.max(parseInt(v), 1)` looks like it does this and does not — Math.max(NaN, 1) is NaN.
+ */
+function pageNumber(v) {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/** A positive integer limit, for routes that take one straight from the query string. */
+function limitNumber(v, fallback, max) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, 1), max);
+}
+
+module.exports = { paginate, pageNumber, limitNumber };
