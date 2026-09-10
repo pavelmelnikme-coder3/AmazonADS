@@ -4,6 +4,7 @@ const { requireAuth, requireWorkspace } = require("../middleware/auth");
 const { put, post: apiPost } = require("../services/amazon/adsClient");
 const { writeAudit } = require("./audit");
 const logger = require("../config/logger");
+const { paginate } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -18,8 +19,7 @@ router.get("/", async (req, res, next) => {
       metricsDays = 30,
     } = req.query;
 
-    const limit     = Math.min(parseInt(rawLimit)   || 200, 1000);
-    const offset    = (Math.max(parseInt(page), 1) - 1) * limit;
+    const { limit, offset } = paginate({ page, limit: rawLimit }, { defaultLimit: 200, maxLimit: 1000 });
     const mInterval = Math.min(Math.max(parseInt(metricsDays) || 30, 1), 365);
 
     const conditions = ["ag.workspace_id = $1"];

@@ -310,7 +310,20 @@ async function scrapeProductMeta(asin, marketplaceId = "A1PA6795UKMFR9") {
     logger.info("scrapeProductMeta: ok", { asin, title: title?.slice(0, 60), brand });
     return { asin, title, brand, imageUrl, blocked: false };
   } catch (err) {
-    logger.error("scrapeProductMeta: failed", { asin, error: err.message });
+    // An HTTP status is the fetcher refusing us, not this ASIN being unavailable, and the two
+    // must not be confused. ScraperAPI answers 403 with "You have exhausted the API Credits
+    // available in this monthly cycle" — the same answer it will give for every remaining ASIN
+    // in the run. Amazon's own 403/429/503 mean the same thing. Treated as `blocked`, the caller
+    // stops after one instead of walking the whole list to be refused each time.
+    const status = err.response?.status;
+    const refused = status === 403 || status === 429 || status === 503 || status === 401;
+    if (refused) {
+      logger.warn("scrapeProductMeta: refused by the fetcher — treating as blocked", {
+        asin, status, body: String(err.response?.data || "").slice(0, 120),
+      });
+      return { asin, blocked: true, error: `HTTP ${status}` };
+    }
+    logger.error("scrapeProductMeta: failed", { asin, error: err.message, status });
     return { asin, blocked: false, error: err.message };
   }
 }
@@ -319,17 +332,26 @@ async function scrapeProductMeta(asin, marketplaceId = "A1PA6795UKMFR9") {
  * Sync metadata for all products in a workspace that are missing a title.
  * Respects same rate-limit delays as rank scraper.
  */
+// How many nights running an ASIN may come back with nothing before it is left alone. 276 of
+// this workspace's 551 active products have had no title since April, and every one of them was
+// re-fetched every night: 276 requests a night against a 1,000-request monthly plan, which
+// empties the month's credits in four days and takes rank tracking down with it. They are ASINs
+// that no longer resolve in the DE catalogue, so the answer will not change tomorrow either.
+const META_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.PRODUCT_META_MAX_ATTEMPTS, 10) || 5);
+
 async function syncProductsMeta(workspaceId, db) {
   const { rows: products } = await db.query(
     `SELECT id, asin, marketplace_id FROM products
      WHERE workspace_id = $1 AND is_active = true AND title IS NULL
-     ORDER BY created_at ASC`,
-    [workspaceId]
+       AND COALESCE(meta_scrape_attempts, 0) < $2
+     ORDER BY COALESCE(meta_scrape_attempts, 0) ASC, created_at ASC`,
+    [workspaceId, META_MAX_ATTEMPTS]
   );
 
   logger.info("syncProductsMeta: starting", { workspaceId, count: products.length });
   let synced = 0;
   let blocked = 0;
+  let exhausted = 0;
 
   for (let i = 0; i < products.length; i++) {
     const { id, asin, marketplace_id } = products[i];
@@ -337,23 +359,31 @@ async function syncProductsMeta(workspaceId, db) {
 
     if (meta.blocked) {
       blocked++;
+      // Nothing was learned about this ASIN, so it does not spend one of its attempts.
       logger.warn("syncProductsMeta: blocked — stopping", { workspaceId, synced, remaining: products.length - i });
       break;
     }
 
     if (meta.title || meta.imageUrl) {
       await db.query(
-        `UPDATE products SET title=$1, brand=$2, image_url=$3, updated_at=NOW() WHERE id=$4`,
+        `UPDATE products SET title=$1, brand=$2, image_url=$3, meta_scrape_attempts=0, updated_at=NOW() WHERE id=$4`,
         [meta.title, meta.brand, meta.imageUrl, id]
       );
       synced++;
+    } else {
+      // Reached Amazon and came back with neither a title nor an image: this ASIN really has
+      // nothing to give. Count it, and stop asking once it has said so often enough.
+      const { rows: [row] } = await db.query(
+        `UPDATE products SET meta_scrape_attempts = COALESCE(meta_scrape_attempts, 0) + 1, updated_at = NOW()
+          WHERE id = $1 RETURNING meta_scrape_attempts`, [id]);
+      exhausted += (row?.meta_scrape_attempts || 0) >= META_MAX_ATTEMPTS ? 1 : 0;
     }
 
     if (i < products.length - 1) await randSleep(SCRAPERAPI_KEY ? 500 : 3000, SCRAPERAPI_KEY ? 1500 : 7000);
   }
 
-  logger.info("syncProductsMeta: done", { workspaceId, synced, blocked });
-  return { synced, blocked, total: products.length };
+  logger.info("syncProductsMeta: done", { workspaceId, synced, blocked, exhausted });
+  return { synced, blocked, exhausted, total: products.length };
 }
 
 module.exports = { scrapeRank, scrapeWorkspaceRanks, scrapeProductMeta, syncProductsMeta };

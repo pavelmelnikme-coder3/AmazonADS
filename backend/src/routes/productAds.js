@@ -1,6 +1,7 @@
 const express = require("express");
 const { query } = require("../db/pool");
 const { requireAuth, requireWorkspace } = require("../middleware/auth");
+const { paginate } = require("./_pagination");
 
 const router = express.Router();
 router.use(requireAuth, requireWorkspace);
@@ -9,8 +10,7 @@ router.use(requireAuth, requireWorkspace);
 router.get("/", async (req, res, next) => {
   try {
     const { campaignId, adGroupId, state, page = 1, limit: rawLimit = 500 } = req.query;
-    const limit  = Math.min(parseInt(rawLimit) || 500, 2000);
-    const offset = (Math.max(parseInt(page), 1) - 1) * limit;
+    const { limit, offset } = paginate({ page, limit: rawLimit }, { defaultLimit: 500, maxLimit: 2000 });
 
     const conditions = ["pa.workspace_id = $1"];
     const params = [req.workspaceId];
