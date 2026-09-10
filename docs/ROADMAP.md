@@ -505,7 +505,6 @@ by auditing production, not unfinished sprint scope.
 | Frontend test coverage is two modules deep | 🟢 | code | vitest is wired up (`npm test` in `frontend/`) and covers `i18n/plural.js` and `lib/display.js`, 67 tests. Everything else worth testing is still inside the 19,000-line `App.jsx` and has to be lifted out of it first, one helper at a time, the way those two were. |
 | 210 tracked ASINs have no name from any source | 🟢 | data | Was 276: ad rows for delisted listings, `is_active` but 404 in SP-API and zero orders in 90 days, so no Amazon title and no order line to borrow one from. 66 of them are articles in Wawi and now show the ERP name (migration 053). The remaining 210 are not in the ERP either and still render as a bare ASIN. They are no longer probed — the sweep verdict is honoured — but they still sit in the product list. |
 | No search in the contacts list | 🟢 | product | The backend supports `?search=`; the UI never sends it. Noticeable now that one list holds 3,248 contacts. |
-| AI prompt chips are hardcoded English | 🟢 | i18n | The six suggested prompts bypass `t()` — the only known language-mixing left after the i18n audit. |
 
 ---
 
