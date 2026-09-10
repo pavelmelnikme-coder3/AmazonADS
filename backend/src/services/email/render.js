@@ -33,10 +33,35 @@ function mirrorUrl(campaignId, token) {
 
 // Replace {{key}} merge tags from a flat field map (first_name, last_name, email, + attributes).
 // Unknown tags collapse to empty string so a missing field never leaks "{{x}}" into an email.
-function applyMergeTags(html, fields) {
-  return String(html || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
-    const v = fields[key];
-    return v == null ? "" : esc(String(v));
+// `{{ key }}` substitutes the field; `{{ key | fallback text }}` substitutes the fallback when
+// the field is missing, empty, or too long to belong in the sentence around it.
+//
+// The length rule is what makes personalization usable on this data rather than merely possible.
+// Every contact in the asian_b2b audience carries a business name in first_name, but they come
+// off public listings and 106 of 3,102 are unusable in a salutation — 48 are three characters or
+// fewer, and 58 run to things like "May Asia Shop | Asiatisches Restaurant und Asiatische
+// Lebensmittel". Without a fallback the choice is between no personalization at all and a
+// greeting that reads like a database dump; with one, 96.6% get their own name and the rest get
+// a clean generic line.
+const MERGE_MAX_LEN = Math.max(8, parseInt(process.env.EMAIL_MERGE_MAX_LEN, 10) || 34);
+
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.escape=true] - HTML-escape the substituted value. A subject line is
+ *   plain text, not markup: escaping there turns "Kaishi Asia Food & Culture" into
+ *   "Kaishi Asia Food &amp; Culture" in the recipient's inbox. The default stays on, because
+ *   every other caller writes into HTML.
+ */
+function applyMergeTags(html, fields, opts = {}) {
+  const escape = opts.escape !== false;
+  return String(html || "").replace(/\{\{\s*([\w.]+)\s*(?:\|([^}]*))?\}\}/g, (_, key, fallback) => {
+    const raw = fields[key];
+    const v = raw == null ? "" : String(raw).trim();
+    const usable = v.length > 0 && (fallback === undefined || v.length <= MERGE_MAX_LEN);
+    // The fallback is authored text, not recipient data, but it goes through the same treatment:
+    // it reaches the same position as the value it stands in for.
+    const out = usable ? v : (fallback == null ? "" : fallback.trim());
+    return escape ? esc(out) : out;
   });
 }
 

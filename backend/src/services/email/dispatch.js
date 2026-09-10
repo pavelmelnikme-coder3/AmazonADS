@@ -99,7 +99,8 @@ async function processBatch({ campaignId, contactIds }) {
 
   const entries = contacts.map((c) => ({
     email: c.email,
-    subject: applyMergeTags(campaign.subject || "", contactFields(c)),
+    // escape:false — the subject is plain text in the recipient's inbox, not markup.
+    subject: applyMergeTags(campaign.subject || "", contactFields(c), { escape: false }),
     html: renderHtmlForContact(campaign.html_body || "", c, { campaignId: campaign.id }),
     unsubscribeToken: c.unsubscribe_token,
     sendId: c.send_id,

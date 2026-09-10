@@ -6,6 +6,64 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-10 (later) — The campaign itself
+
+The list was clean; the email was not selling. Reworked against real data from this workspace's
+own catalogue, saved back as a draft.
+
+### Added
+
+- **`{{ key | fallback }}` merge tags.** Every one of the 3,102 contacts carries a business name
+  in `first_name` — "Thairestaurant Orchidee", "MMAAH! Eat Korean" — and the campaign used no
+  merge tags at all, greeting all of them with a flat "Guten Tag,". The names come off public
+  listings, so they are usable but not uniformly: substituting blindly would have put "May Asia
+  Shop | Asiatisches Restaurant und Asiatische Lebensmittel" inside a salutation. A tag may now
+  carry the text to use when the value is missing or longer than `EMAIL_MERGE_MAX_LEN` (34).
+  After cleaning 70 names at their separator, 3,079 of 3,102 get their own name and 23 fall back.
+
+### Fixed
+
+- **Merge tags were HTML-escaped in subject lines.** A subject is plain text in the inbox, so
+  "Kaishi Asia Food & Culture" would have arrived as "Kaishi Asia Food &amp;amp; Culture". The
+  escaping now has an off switch and the two subject-rendering call sites use it. Latent until
+  now only because no subject had ever contained a merge tag.
+
+- **The compliance footer named a different company than the email.** The body is EVOCAMP
+  throughout and the footer said "West & East GmbH", with both carrying their own version of why
+  the recipient was getting the mail. `COMPANY_POSTAL_ADDRESS` now names brand and legal entity
+  together — which is what the product carton itself says ("EVOCAMP powered by West&East") — and
+  the campaign's own footer no longer repeats the consent sentence.
+
+### Changed — the campaign
+
+- **A price, at last.** The old email promised "gestaffelte Preise" seven times and never named a
+  number; the only way to learn one was to click through. It now opens with the staffel taken
+  from this workspace's own live listings: 9,40 € for a single cartridge down to 1,19 € each in
+  the 84-pack. Labelled as what it is — retail, incl. VAT — with the business terms on request.
+  No wholesale figure was invented: `wawi_items.sales_price_net` is not a price list (the 56-pack
+  works out dearer per unit than the 28-pack), and there is no customer-group table.
+- **Photographs.** A physical product was being sold without a picture of it. Three product shots
+  and the 84-piece carton, pulled from the catalogue, resized to 600px and self-hosted (36–84 KB
+  each) rather than hotlinked — the one image the July campaign did carry was a 4.5 MB, 5504px
+  brand banner.
+- **The ask matches the subject.** The subject offered conditions while the only button offered a
+  price page, two screens down. A "Konditionen anfordern" button now sits directly under the
+  price block with a pre-filled mail, and the phone number beside it.
+- **Trust row rewritten.** "Sichere Bezahlung & Zahlungsschutz" is a webshop badge, not something
+  a restaurant buys on. Replaced with the company's own claims: direct from the manufacturer,
+  Warentest Online 1,1 (on their own packaging), gebinde up to 112.
+- **UTM on every external link**, eight of them, each with its own `utm_content` slot.
+- The spec row that read "227 g / Füllmenge je Kartusche / Bajonett-Anschluss" — which looked like
+  a third figure whose number had gone missing — is gone; the valve type sits in the product copy.
+
+Still missing, and only the business can supply them: minimum order quantity, lead time, and
+payment terms. "Kauf auf Rechnung, Zahlungsziel 30 Tage" would be the strongest line in the mail,
+and it is not in any system here to verify.
+
+Draft saved on production, status unchanged, 0 recipients queued. 78 suites / 1,585 tests.
+
+---
+
 ## [Unreleased] — 2026-09-10 — The list the campaign was about to go to
 
 The module was functionally ready; what it was about to send to was not. Everything below was
