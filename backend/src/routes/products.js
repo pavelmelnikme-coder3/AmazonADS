@@ -10,6 +10,19 @@ const logger = require("../config/logger");
 
 router.use(requireAuth, requireWorkspace);
 
+// A path id that is not a UUID can't name a row, and handing it to Postgres
+// turns a typo into a 500 ("invalid input syntax for type uuid").
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+for (const name of ["id", "noteId"]) {
+  router.param(name, (req, res, next, value) =>
+    UUID_RE.test(value) ? next() : res.status(404).json({ error: "Not found" }));
+}
+
+// A YYYY-MM-DD string that is also a real calendar day. The shape check alone
+// lets "2026-13-99" through, and Postgres answers that with a 500.
+const isoDate = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)
+  && !isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
+
 // An SB ad keeps state "ENABLED" while its creative is rejected or still waiting
 // for moderation — Amazon reports that separately, in creativeStatus and in
 // extendedData.servingStatus, and such an ad shows nothing to anyone. SP/SD rows
@@ -57,6 +70,11 @@ router.get("/", async (req, res, next) => {
          -- i.e. what has to be switched off to stop promoting the product.
          COALESCE(adcamp.campaign_count, 0)      AS ad_campaign_count,
          COALESCE(adcamp.live_campaign_count, 0) AS ad_campaign_live_count,
+         -- The campaigns themselves, so a listing row can count them DISTINCTLY across
+         -- its variations: one campaign advertising six variations is one campaign,
+         -- not six. Replaced by compact integer keys before the response goes out.
+         adcamp.campaign_ids      AS ad_campaign_ids,
+         adcamp.live_campaign_ids AS ad_campaign_live_ids,
          s.best_rank,
          s.best_category,
          s.classification_ranks,
@@ -120,7 +138,13 @@ router.get("/", async (req, res, next) => {
                 COUNT(DISTINCT pa.campaign_id) FILTER (
                   WHERE c.state = 'enabled' AND pa.state = 'enabled'
                     AND COALESCE(ag.state, 'enabled') = 'enabled'
-                    AND ${AD_CAN_SERVE}) AS live_campaign_count
+                    AND ${AD_CAN_SERVE}) AS live_campaign_count,
+                ARRAY_AGG(DISTINCT pa.campaign_id::text) FILTER (
+                  WHERE c.state <> 'archived' AND pa.state <> 'archived') AS campaign_ids,
+                ARRAY_AGG(DISTINCT pa.campaign_id::text) FILTER (
+                  WHERE c.state = 'enabled' AND pa.state = 'enabled'
+                    AND COALESCE(ag.state, 'enabled') = 'enabled'
+                    AND ${AD_CAN_SERVE}) AS live_campaign_ids
          FROM product_ads pa
          JOIN campaigns c ON c.id = pa.campaign_id
          LEFT JOIN ad_groups ag ON ag.id = pa.ad_group_id
@@ -217,6 +241,20 @@ router.get("/", async (req, res, next) => {
        ORDER BY s.best_rank ASC NULLS LAST, p.created_at DESC`,
       [req.workspaceId]
     );
+    // ~2800 (ASIN, campaign) pairs as UUIDs would be ~100 KB of payload; the client
+    // only needs to tell campaigns apart, so each one becomes a small integer that
+    // is stable within this response.
+    const campaignKey = new Map();
+    const keyOf = (id) => {
+      if (!campaignKey.has(id)) campaignKey.set(id, campaignKey.size);
+      return campaignKey.get(id);
+    };
+    for (const r of rows) {
+      r.ad_campaign_keys      = (r.ad_campaign_ids || []).map(keyOf);
+      r.ad_campaign_live_keys = (r.ad_campaign_live_ids || []).map(keyOf);
+      delete r.ad_campaign_ids;
+      delete r.ad_campaign_live_ids;
+    }
     res.json(rows);
   } catch (err) { next(err); }
 });
@@ -592,16 +630,21 @@ router.post("/:id/refresh", async (req, res, next) => {
 // GET /products/:id/history — BSR history for chart (all snapshots, optional ?start=YYYY-MM-DD&end=YYYY-MM-DD)
 router.get("/:id/history", async (req, res, next) => {
   try {
-    const { start, end } = req.query;
-    const params = [req.params.id];
-    let conds = `WHERE product_id = $1`;
-    if (start) { params.push(start); conds += ` AND captured_at >= $${params.length}::date`; }
-    if (end)   { params.push(end);   conds += ` AND captured_at < ($${params.length}::date + INTERVAL '1 day')`; }
+    // A malformed bound is ignored, like /period-orders does, rather than sent to SQL.
+    const start = isoDate(req.query.start) ? req.query.start : null;
+    const end   = isoDate(req.query.end)   ? req.query.end   : null;
+    // Scoped through products: bsr_snapshots has no workspace column, and without
+    // the join any product id — another workspace's included — returned its history.
+    const params = [req.params.id, req.workspaceId];
+    let conds = `WHERE s.product_id = $1 AND p.workspace_id = $2`;
+    if (start) { params.push(start); conds += ` AND s.captured_at >= $${params.length}::date`; }
+    if (end)   { params.push(end);   conds += ` AND s.captured_at < ($${params.length}::date + INTERVAL '1 day')`; }
     const { rows } = await query(
-      `SELECT captured_at, best_rank, best_category, classification_ranks, display_group_ranks
-       FROM bsr_snapshots
+      `SELECT s.captured_at, s.best_rank, s.best_category, s.classification_ranks, s.display_group_ranks
+       FROM bsr_snapshots s
+       JOIN products p ON p.id = s.product_id
        ${conds}
-       ORDER BY captured_at ASC`,
+       ORDER BY s.captured_at ASC`,
       params
     );
     res.json(rows);
@@ -619,8 +662,8 @@ router.get("/timeseries", async (req, res, next) => {
       .map((a) => a.trim().toUpperCase()).filter((a) => /^[A-Z0-9]{10}$/.test(a)).slice(0, 60);
     if (!asins.length) return res.json({ start: null, end: null, by_asin: {}, aggregate: [], prev: null });
 
-    const end   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
-    const start = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start) ? req.query.start
+    const end   = isoDate(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
+    const start = isoDate(req.query.start) ? req.query.start
       : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
     const compare = req.query.compare === "1" || req.query.compare === "true";
     const ws = req.workspaceId;
@@ -736,14 +779,18 @@ router.get("/timeseries", async (req, res, next) => {
 //                COUNT(DISTINCT order). Summing the per-ASIN counts client-side
 //                counted one order once per variation it touched, so a listing with
 //                many variations over-reported its order count.
+//   multi_asin_orders — the ASIN sets of orders that hold 2+ variations of one
+//                listing. When filters hide part of a family, by_listing no longer
+//                matches the rows on screen; with these the client can still count
+//                the visible variations' orders exactly, each shared order once.
 router.get("/period-orders", async (req, res, next) => {
   try {
-    const end   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
-    const start = /^\d{4}-\d{2}-\d{2}$/.test(req.query.start) ? req.query.start
+    const end   = isoDate(req.query.end)   ? req.query.end   : new Date().toISOString().slice(0, 10);
+    const start = isoDate(req.query.start) ? req.query.start
       : new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
     // Same status rule as the product list above: drop only what Amazon itself
     // no longer counts as a sale.
-    const [{ rows }, { rows: listingRows }] = await Promise.all([
+    const [{ rows }, { rows: listingRows }, { rows: multiRows }] = await Promise.all([
       query(
         `SELECT UPPER(oi.asin) AS asin,
            COUNT(DISTINCT o.id) AS orders,
@@ -774,13 +821,28 @@ router.get("/period-orders", async (req, res, next) => {
          GROUP BY 1`,
         [req.workspaceId, start, end]
       ),
+      query(
+        // Grouped on the same listing key as by_listing, so only orders whose
+        // variations belong to ONE family come back — the rare ones worth sending.
+        `SELECT ARRAY_AGG(DISTINCT UPPER(oi.asin)) AS asins
+         FROM sp_order_items oi
+         JOIN sp_orders o ON o.id = oi.order_id
+         LEFT JOIN products p
+           ON p.workspace_id = oi.workspace_id AND p.asin = UPPER(oi.asin) AND p.is_active
+         WHERE oi.workspace_id=$1 AND o.order_status NOT IN ('Canceled', 'Unfulfillable')
+           AND o.purchase_date::date BETWEEN $2 AND $3 AND oi.asin IS NOT NULL
+         GROUP BY o.id, COALESCE(p.parent_asin, UPPER(oi.asin))
+         HAVING COUNT(DISTINCT UPPER(oi.asin)) > 1`,
+        [req.workspaceId, start, end]
+      ),
     ]);
     const shape = (r) => ({ orders: Number(r.orders), units: Number(r.units), revenue: Math.round(Number(r.revenue) * 100) / 100 });
     const by_asin = {};
     for (const r of rows) by_asin[r.asin] = shape(r);
     const by_listing = {};
     for (const r of listingRows) by_listing[r.listing_id] = shape(r);
-    res.json({ start, end, by_asin, by_listing });
+    const multi_asin_orders = multiRows.map(r => r.asins);
+    res.json({ start, end, by_asin, by_listing, multi_asin_orders });
   } catch (err) { next(err); }
 });
 
@@ -806,6 +868,17 @@ router.post("/notes", async (req, res, next) => {
   try {
     const { product_id, note_date, text } = req.body;
     if (!text?.trim()) return res.status(400).json({ error: "text is required" });
+    if (note_date != null && note_date !== "" && !isoDate(note_date)) {
+      return res.status(400).json({ error: "note_date must be a YYYY-MM-DD date" });
+    }
+    // A note pinned to a product must pin to one of this workspace's products.
+    if (product_id) {
+      const owned = UUID_RE.test(String(product_id)) && (await query(
+        `SELECT 1 FROM products WHERE id = $1 AND workspace_id = $2`,
+        [product_id, req.workspaceId]
+      )).rows.length > 0;
+      if (!owned) return res.status(404).json({ error: "Product not found" });
+    }
     const { rows: [note] } = await query(
       `INSERT INTO product_notes (workspace_id, product_id, note_date, text, created_by)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,

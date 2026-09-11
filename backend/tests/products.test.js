@@ -20,8 +20,9 @@ const express = require("express");
 const WS_ID      = "ws---0001-0000-0000-000000000001";
 const ORG_ID     = "org--0001-0000-0000-000000000001";
 const USER_ID    = "user-0001-0000-0000-000000000001";
-const PRODUCT_ID = "prod-0001-0000-0000-000000000001";
-const NOTE_ID    = "note-0001-0000-0000-000000000001";
+// Real UUIDs: the router 404s any path id that isn't one before touching SQL.
+const PRODUCT_ID = "00000000-0000-4000-8000-00000000a001";
+const NOTE_ID    = "00000000-0000-4000-8000-00000000b001";
 
 const SAMPLE_PRODUCT = {
   id: PRODUCT_ID,
@@ -262,6 +263,48 @@ describe("GET /products/:id/history", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(0);
   });
+
+  // bsr_snapshots has no workspace column: without the products join, any product
+  // id — another workspace's too — returned its BSR history.
+  it("only returns history for a product of the caller's workspace", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    await request(app).get(`/products/${PRODUCT_ID}/history`);
+    const [sql, params] = dbQuery.mock.calls[0];
+    expect(sql).toMatch(/JOIN products p ON p\.id = s\.product_id/);
+    expect(sql).toMatch(/p\.workspace_id = \$2/);
+    expect(params).toEqual([PRODUCT_ID, WS_ID]);
+  });
+
+  it("drops an impossible date instead of sending it to Postgres", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app).get(`/products/${PRODUCT_ID}/history?start=2026-13-99&end=2026-09-10`);
+    expect(res.status).toBe(200);
+    expect(dbQuery.mock.calls[0][1]).toEqual([PRODUCT_ID, WS_ID, "2026-09-10"]);
+  });
+
+  it("answers 404 for an id that is not a UUID, without querying", async () => {
+    const res = await request(app).get("/products/not-a-uuid/history");
+    expect(res.status).toBe(404);
+    expect(dbQuery).not.toHaveBeenCalled();
+  });
+});
+
+describe("path ids that are not UUIDs", () => {
+  let app;
+  beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
+
+  it.each([
+    ["delete", "/products/123"],
+    ["post",   "/products/123/refresh"],
+    ["get",    "/products/123/marketplaces"],
+    ["delete", "/products/notes/abc"],
+  ])("%s %s → 404 instead of a Postgres 500", async (method, path) => {
+    const res = await request(app)[method](path);
+    expect(res.status).toBe(404);
+    expect(dbQuery).not.toHaveBeenCalled();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,6 +348,7 @@ describe("POST /products/notes", () => {
   beforeEach(() => { app = buildApp(); jest.clearAllMocks(); });
 
   it("creates a note and returns 201", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });   // product belongs to ws
     dbQuery.mockResolvedValueOnce({ rows: [SAMPLE_NOTE] });
 
     const res = await request(app)
@@ -313,6 +357,30 @@ describe("POST /products/notes", () => {
 
     expect(res.status).toBe(201);
     expect(res.body.text).toBe("This is a test note");
+    expect(dbQuery.mock.calls[0][1]).toEqual([PRODUCT_ID, WS_ID]);
+  });
+
+  it("refuses to pin a note to another workspace's product", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [] });
+
+    const res = await request(app)
+      .post("/products/notes")
+      .send({ product_id: PRODUCT_ID, text: "x" });
+
+    expect(res.status).toBe(404);
+    expect(dbQuery).toHaveBeenCalledTimes(1);   // no INSERT
+  });
+
+  it("refuses a product_id that is not a UUID without querying", async () => {
+    const res = await request(app).post("/products/notes").send({ product_id: "abc", text: "x" });
+    expect(res.status).toBe(404);
+    expect(dbQuery).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for an impossible note_date instead of a Postgres 500", async () => {
+    const res = await request(app).post("/products/notes").send({ note_date: "2026-02-30", text: "x" });
+    expect(res.status).toBe(400);
+    expect(dbQuery).not.toHaveBeenCalled();
   });
 
   it("creates workspace-level note without product_id", async () => {
@@ -444,10 +512,29 @@ describe("GET /products/period-orders", () => {
   const byListingRows = [
     { listing_id: "B00PARENT1", orders: "2", units: "4", revenue: "75.00" },
   ];
-  const mockBoth = () => {
+  const mockBoth = (multi = []) => {
     dbQuery.mockResolvedValueOnce({ rows: byAsinRows });
     dbQuery.mockResolvedValueOnce({ rows: byListingRows });
+    dbQuery.mockResolvedValueOnce({ rows: multi });
   };
+
+  it("lists the orders shared by several variations of one listing", async () => {
+    mockBoth([{ asins: ["B00AAAAAA1", "B00AAAAAA2"] }]);
+    const res = await request(app).get("/products/period-orders?start=2026-08-08&end=2026-08-14");
+
+    expect(res.body.multi_asin_orders).toEqual([["B00AAAAAA1", "B00AAAAAA2"]]);
+    const sql = dbQuery.mock.calls[2][0];
+    // Same listing key as by_listing, and only orders with 2+ distinct ASINs in it.
+    expect(sql).toMatch(/GROUP BY o\.id, COALESCE\(p\.parent_asin, UPPER\(oi\.asin\)\)/);
+    expect(sql).toMatch(/HAVING COUNT\(DISTINCT UPPER\(oi\.asin\)\) > 1/);
+  });
+
+  it("treats a well-shaped but impossible date as missing", async () => {
+    mockBoth();
+    const res = await request(app).get("/products/period-orders?start=2026-02-30&end=2026-08-14");
+    expect(res.body.start).not.toBe("2026-02-30");
+    expect(res.body.end).toBe("2026-08-14");
+  });
 
   it("returns both per-ASIN and listing-deduplicated aggregations", async () => {
     mockBoth();
@@ -691,6 +778,27 @@ describe("GET /products/ad-placements", () => {
     // The "live" counter must use the same three-link rule as the panel:
     // campaign + ad + ad group all enabled.
     expect(sql).toMatch(/COALESCE\(ag\.state, 'enabled'\) = 'enabled'/);
+  });
+
+  // A listing row counts campaigns across its variations; per-ASIN counts summed
+  // showed "6/60" for six variations sharing one live campaign (really 1/20).
+  it("ships compact campaign keys, shared across products, instead of UUIDs", async () => {
+    dbQuery.mockResolvedValueOnce({ rows: [
+      { asin: "B00AAAAAA1", ad_campaign_ids: ["uuid-a", "uuid-b"], ad_campaign_live_ids: ["uuid-a"] },
+      { asin: "B00AAAAAA2", ad_campaign_ids: ["uuid-b", "uuid-c"], ad_campaign_live_ids: null },
+      { asin: "B00AAAAAA3", ad_campaign_ids: null, ad_campaign_live_ids: null },
+    ] });
+
+    const res = await request(app).get("/products");
+    const [a, b, c] = res.body;
+    expect(a.ad_campaign_keys).toEqual([0, 1]);
+    expect(a.ad_campaign_live_keys).toEqual([0]);
+    expect(b.ad_campaign_keys).toEqual([1, 2]);      // uuid-b keeps key 1
+    expect(b.ad_campaign_live_keys).toEqual([]);
+    expect(c.ad_campaign_keys).toEqual([]);
+    expect(a).not.toHaveProperty("ad_campaign_ids");
+    const sql = dbQuery.mock.calls[0][0];
+    expect(sql).toMatch(/ARRAY_AGG\(DISTINCT pa\.campaign_id::text\) FILTER/);
   });
 
   it("includes Sponsored Brands, whose ads carry no SKU and no ad group", async () => {

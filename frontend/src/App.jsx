@@ -35,6 +35,7 @@ import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, us
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
 import { CSS as DndCSS } from '@dnd-kit/utilities';
 import { positionBadge, auditValueText, auditValueTitle, productDisplayName } from "./lib/display.js";
+import { listingPeriodOrders, listingCampaignCounts } from "./lib/listingMetrics.js";
 
 // Unified icon size helper
 const Ic = ({ icon: Icon, size = 14, color, style, className }) => (
@@ -5407,9 +5408,9 @@ const ProductsPage = ({ workspaceId }) => {
   const [childChartsOpen, setChildChartsOpen] = useState(() => new Set());        // child ASINs showing per-ASIN charts
   const [tsData, setTsData] = useState({});       // listingId → { aggregate, by_asin, prev }
   const [tsLoading, setTsLoading] = useState(() => new Set());
-  // { by_asin, by_listing } → { orders, units, revenue } over the selected range.
-  // by_listing is deduplicated across a variation family (one order that spans two
-  // variations is one order), so listing rows must never sum the per-ASIN counts.
+  // { by_asin, multi_asin_orders } over the selected range. by_asin → { orders, units,
+  // revenue }; multi_asin_orders lists the orders holding several variations of one
+  // listing, so listing rows count those once (see listingPeriodOrders).
   const [periodOrders, setPeriodOrders] = useState(null);
   const [compareMode, setCompareMode] = useState(false);  // overlay previous period on the trend charts
 
@@ -5548,10 +5549,8 @@ const ProductsPage = ({ workspaceId }) => {
       if (!map.has(lid)) map.set(lid, []);
       map.get(lid).push(p);
     }
-    // Full family size, before filtering. The backend's deduplicated order count covers
-    // the whole family, so it only applies when the filters left the family intact —
-    // otherwise fall back to summing the visible children (which can double-count an
-    // order spanning two of them, but at least matches the rows on screen).
+    // Full family size, before filtering — so a row can say when filters hid some of
+    // its variations (every figure on it then covers the visible ones only).
     const familySize = new Map();
     for (const p of (products || [])) {
       const lid = p.parent_asin || p.asin;
@@ -5565,10 +5564,12 @@ const ProductsPage = ({ workspaceId }) => {
       const adSpend7 = ch.reduce((s, c) => s + num(c.ad_spend_7d), 0);
       const adSales7 = ch.reduce((s, c) => s + num(c.ad_sales_7d), 0);
       const revenue7 = ch.reduce((s, c) => s + num(c.revenue_7d), 0);
+      const camps = listingCampaignCounts(ch);
       return {
         listing_id: lid,
         rep, children: ch, asins: ch.map(c => c.asin),
         asin_count: ch.length,
+        family_size: familySize.get(lid) || ch.length,
         title: productDisplayName(rep).name, title_from_wawi: productDisplayName(rep).fromWawi,
         image_url: rep.image_url, brand: rep.brand, marketplace_id: rep.marketplace_id,
         best_rank: ranks.length ? Math.min(...ranks) : null,
@@ -5578,22 +5579,19 @@ const ProductsPage = ({ workspaceId }) => {
         // 0 in the sum above and get mistaken for a clean listing.
         all_checked: ch.every(c => c.lh_checked_at),
         ad_spend_7d: adSpend7,
-        // Campaign counts are per ASIN; a variation family can share campaigns,
-        // so these are upper bounds used only to label the button — the panel
-        // itself lists the real (deduplicated per ASIN) campaigns.
-        ad_campaign_count: ch.reduce((s2, c) => s2 + num(c.ad_campaign_count), 0),
-        ad_campaign_live_count: ch.reduce((s2, c) => s2 + num(c.ad_campaign_live_count), 0),
+        // Distinct campaigns across the visible variations — summing the per-ASIN
+        // counts showed one campaign once per variation it advertises.
+        ad_campaign_count: camps.total,
+        ad_campaign_live_count: camps.live,
         units_7d: ch.reduce((s, c) => s + num(c.qty_7d), 0), // qty_7d is quantity_ordered — units, not orders
         acos_7d: adSales7 > 0 ? (adSpend7 / adSales7) * 100 : null,
         tacos_7d: revenue7 > 0 ? (adSpend7 / revenue7) * 100 : null,
         price_min: prices.length ? Math.min(...prices) : null,
         price_max: prices.length ? Math.max(...prices) : null,
-        // Orders come pre-deduplicated from the backend; summing the children would
-        // count a two-variation order twice. Units and revenue are genuinely additive,
-        // so they always follow the visible children.
-        period_orders: ch.length === (familySize.get(lid) || ch.length)
-          ? (periodOrders?.by_listing?.[lid]?.orders || 0)
-          : ch.reduce((s, c) => s + ((periodOrders?.by_asin?.[c.asin]?.orders) || 0), 0),
+        // Distinct orders over the visible variations: an order holding two of them
+        // counts once, whether or not a filter hid the rest of the family. Units and
+        // revenue are genuinely additive, so they always follow the visible children.
+        period_orders: listingPeriodOrders(ch.map(c => c.asin), periodOrders),
         period_units: ch.reduce((s, c) => s + ((periodOrders?.by_asin?.[c.asin]?.units) || 0), 0),
         period_revenue: ch.reduce((s, c) => s + ((periodOrders?.by_asin?.[c.asin]?.revenue) || 0), 0),
       };
@@ -5641,8 +5639,8 @@ const ProductsPage = ({ workspaceId }) => {
     get(`/products/period-orders${qs.toString() ? "?" + qs : ""}`)
       // Keep the range the backend actually used — it falls back to the last 30 days
       // when the pickers are empty, and the tooltip must not claim a different window.
-      .then(d => { if (live) setPeriodOrders({ by_asin: d.by_asin || {}, by_listing: d.by_listing || {}, start: d.start, end: d.end }); })
-      .catch(() => { if (live) setPeriodOrders({ by_asin: {}, by_listing: {}, start: null, end: null }); });
+      .then(d => { if (live) setPeriodOrders({ by_asin: d.by_asin || {}, multi_asin_orders: d.multi_asin_orders || [], start: d.start, end: d.end }); })
+      .catch(() => { if (live) setPeriodOrders({ by_asin: {}, multi_asin_orders: [], start: null, end: null }); });
     return () => { live = false; };
   }, [wantPeriodOrders, histStart, histEnd, workspaceId, tick]);
 
@@ -5930,7 +5928,7 @@ const ProductsPage = ({ workspaceId }) => {
             {tr("products.title")}
           </h1>
           <div style={{ fontSize: 12, color: "var(--tx3)" }}>
-            Track BSR rankings and connect advertising spend to product performance
+            {tr("products.subtitle")}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -5991,7 +5989,7 @@ const ProductsPage = ({ workspaceId }) => {
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Search ASIN, title, brand, SKU…"
+              placeholder={tr("products.searchPlaceholder")}
               style={{
                 width: "100%", boxSizing: "border-box",
                 padding: "6px 12px 6px 30px", borderRadius: 7, fontSize: 12,
@@ -6012,7 +6010,7 @@ const ProductsPage = ({ workspaceId }) => {
               onChange={e => setFilterBrand(e.target.value)}
               style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", cursor: "pointer" }}
             >
-              <option value="all">All brands ({brands.length})</option>
+              <option value="all">{tr("products.allBrands", { n: brands.length })}</option>
               {brands.map(b => <option key={b} value={b}>{b}</option>)}
             </select>
           )}
@@ -6020,23 +6018,23 @@ const ProductsPage = ({ workspaceId }) => {
           <select
             value={filterAvail}
             onChange={e => setFilterAvail(e.target.value)}
-            title="Filter by listing availability"
+            title={tr("products.availHint")}
             style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: filterAvail === "all" ? "var(--tx)" : "var(--ac2)", cursor: "pointer" }}
           >
-            <option value="all">All listings</option>
-            <option value="available">Available</option>
-            <option value="unavailable">Delisted</option>
+            <option value="all">{tr("products.availAll")}</option>
+            <option value="available">{tr("products.availYes")}</option>
+            <option value="unavailable">{tr("products.availNo")}</option>
           </select>
 
           <select
             value={filterAds}
             onChange={e => setFilterAds(e.target.value)}
-            title="Filter by advertising status"
+            title={tr("products.adsHint")}
             style={{ padding: "6px 10px", borderRadius: 7, fontSize: 12, background: "var(--s2)", border: "1px solid var(--b2)", color: filterAds === "all" ? "var(--tx)" : "var(--ac2)", cursor: "pointer" }}
           >
-            <option value="all">All ads</option>
-            <option value="advertised">Advertised</option>
-            <option value="not_advertised">Not advertised</option>
+            <option value="all">{tr("products.adsAll")}</option>
+            <option value="advertised">{tr("products.adsOn")}</option>
+            <option value="not_advertised">{tr("products.adsOff")}</option>
           </select>
 
           <select
@@ -6125,7 +6123,7 @@ const ProductsPage = ({ workspaceId }) => {
               style={{ padding: "5px 7px", borderRadius: 6, fontSize: 11, background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none", cursor: "pointer" }}
             />
             {(histStart || histEnd) && (
-              <button onClick={() => handleHistRange('', '')} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: "2px 4px", fontSize: 13, lineHeight: 1 }} title="Clear date filter">×</button>
+              <button onClick={() => handleHistRange('', '')} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--tx3)", padding: "2px 4px", fontSize: 13, lineHeight: 1 }} title={tr("products.clearDates")}>×</button>
             )}
           </div>
 
@@ -6188,44 +6186,45 @@ const ProductsPage = ({ workspaceId }) => {
           </button>
 
           <span style={{ fontSize: 12, color: "var(--tx3)", whiteSpace: "nowrap" }}>
-            {filteredProducts.length}{filteredProducts.length !== products.length ? ` / ${products.length}` : ""} products
+            {filteredProducts.length !== products.length
+              ? tr("products.countOf", { n: filteredProducts.length, total: products.length })
+              : tr("products.countAll", { n: products.length })}
           </span>
         </div>
       )}
 
       {view === "all" && (loading ? (
-        <div style={{ color: "var(--tx3)", fontSize: 13 }}>Loading…</div>
+        <div style={{ color: "var(--tx3)", fontSize: 13 }}>{tr("products.loading")}</div>
       ) : (!products?.length) ? (
         <div className="card" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center',
           justifyContent: 'center', padding: '60px 32px', gap: 16, textAlign: 'center' }}>
           <Ic icon={Package} size={48} style={{ color: 'var(--tx3)', opacity: 0.4 }} />
           <div>
             <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--tx)', margin: '0 0 6px' }}>
-              Start tracking your products
+              {tr("products.emptyTitle")}
             </p>
             <p style={{ fontSize: 13, color: 'var(--tx2)', margin: 0, maxWidth: 360, lineHeight: 1.6 }}>
-              Add an ASIN to see BSR trends, sales, and advertising spend
-              for each product in one place.
+              {tr("products.emptyBody")}
             </p>
           </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 4, fontSize: 12, color: 'var(--tx3)' }}>
-            <span>📦 BSR ranking history</span>
+          <div style={{ display: 'flex', gap: 8, marginTop: 4, fontSize: 12, color: 'var(--tx3)', flexWrap: 'wrap', justifyContent: 'center' }}>
+            <span>{tr("products.emptyF1")}</span>
             <span>·</span>
-            <span>💰 P&amp;L per ASIN</span>
+            <span>{tr("products.emptyF2")}</span>
             <span>·</span>
-            <span>📊 Ad spend attribution</span>
+            <span>{tr("products.emptyF3")}</span>
           </div>
           <p style={{ fontSize: 11, color: 'var(--tx3)', marginTop: 4,
             background: 'var(--s2)', border: '1px solid var(--b2)',
             borderRadius: 6, padding: '6px 12px' }}>
-            Enter a 10-character ASIN (e.g. B09XXXXX) in the field above
+            {tr("products.emptyHint")}
           </p>
         </div>
       ) : filteredProducts.length === 0 ? (
         <div className="card" style={{ padding: "32px 24px", textAlign: "center" }}>
-          <div style={{ fontSize: 13, color: "var(--tx3)" }}>No products match your filter</div>
+          <div style={{ fontSize: 13, color: "var(--tx3)" }}>{tr("products.noMatch")}</div>
           <button onClick={() => { setSearch(""); setFilterBrand("all"); setFilterAvail("all"); setFilterAds("all"); setFilterRec("all"); }} style={{ marginTop: 10, fontSize: 12, color: "var(--ac2)", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>
-            Clear filters
+            {tr("products.clearFilters")}
           </button>
         </div>
       ) : groupByListing ? (
@@ -6282,9 +6281,13 @@ const ProductsPage = ({ workspaceId }) => {
                             ? <span style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 700, color: "var(--tx)" }}>{L.listing_id}</span>
                             : <a href={amazonProductUrl(L.listing_id, L.marketplace_id)} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--ac2)", textDecoration: "none", borderBottom: "1px dotted var(--ac2)" }}>{L.listing_id}</a>}
                           {L.brand && <span className="badge bg-bl" style={{ fontSize: 10 }}>{L.brand}</span>}
-                          {grouped
-                            ? <span className="badge" style={{ fontSize: 10, fontWeight: 700, background: "rgba(99,102,241,.16)", color: "var(--ac2)", border: "1px solid rgba(99,102,241,.35)" }}>{tr("products.variations", { n: L.asin_count })}</span>
-                            : <span className="badge bg-bl" style={{ fontSize: 9 }}>{tr("products.single")}</span>}
+                          {L.family_size > L.asin_count
+                            // Filters hid part of the family: say so, or the totals on this
+                            // row read as the whole listing's.
+                            ? <span className="badge bg-amb" style={{ fontSize: 10, fontWeight: 700 }} title={tr("products.variationsPartialHint")}>{tr("products.variationsPartial", { n: L.asin_count, total: L.family_size })}</span>
+                            : grouped
+                              ? <span className="badge" style={{ fontSize: 10, fontWeight: 700, background: "rgba(99,102,241,.16)", color: "var(--ac2)", border: "1px solid rgba(99,102,241,.35)" }}>{tr("products.variations", { n: L.asin_count })}</span>
+                              : <span className="badge bg-bl" style={{ fontSize: 9 }}>{tr("products.single")}</span>}
                           {L.children.some(c => c.lh_checked_at) && (
                             L.issue_count > 0
                               ? <span className="badge bg-red" style={{ fontSize: 9 }}>⚠ {L.issue_count}</span>
@@ -6334,19 +6337,8 @@ const ProductsPage = ({ workspaceId }) => {
                           </button>
                         )}
                         {(() => {
-                          // Variations usually share campaigns, so the per-ASIN counters
-                          // summed on the listing row are an upper bound. Once the panel
-                          // data is loaded for every child, count the campaigns distinctly.
-                          const loaded = L.asins.every(a => adPlacements[a]);
-                          let total = L.ad_campaign_count, live = L.ad_campaign_live_count;
-                          if (loaded) {
-                            const all = new Set(), serving = new Set();
-                            for (const a of L.asins) for (const c of (adPlacements[a] || [])) {
-                              all.add(c.campaign_id);
-                              if (c.is_live) serving.add(c.campaign_id);
-                            }
-                            total = all.size; live = serving.size;
-                          }
+                          // Already distinct across the variations (listingCampaignCounts).
+                          const total = L.ad_campaign_count, live = L.ad_campaign_live_count;
                           const label = total === 0 ? "" : live === total ? ` (${total})` : ` (${live}/${total})`;
                           return (
                             <button
@@ -6507,7 +6499,7 @@ const ProductsPage = ({ workspaceId }) => {
                         href={amazonProductUrl(p.asin, p.marketplace_id)}
                         target="_blank" rel="noopener noreferrer"
                         style={{ fontFamily: "var(--mono)", fontSize: 13, fontWeight: 600, color: "var(--ac2)", textDecoration: "none", borderBottom: "1px dotted var(--ac2)" }}
-                        title="Открыть на Amazon"
+                        title={tr("products.openOnAmazon")}
                       >
                         {p.asin}
                       </a>
@@ -6522,7 +6514,7 @@ const ProductsPage = ({ workspaceId }) => {
                       )}
                       {bsrUpdated && (
                         <span style={{ fontSize: 10, color: "var(--tx3)", marginLeft: "auto" }}>
-                          Updated: {bsrUpdated}
+                          {tr("products.updatedAt", { when: bsrUpdated })}
                         </span>
                       )}
                     </div>
@@ -6631,18 +6623,18 @@ const ProductsPage = ({ workspaceId }) => {
                           {val}
                         </span>
                       );
-                      const pairChip = (label, v1, v2, colored) => {
+                      const pairChip = (label, v1, v2, colored, title) => {
                         const c1 = colored ? (v1 >= 0 ? "var(--grn)" : "var(--red)") : "var(--tx)";
                         const c2 = colored ? (v2 >= 0 ? "var(--grn)" : "var(--red)") : "var(--tx)";
                         return (
-                          <span style={{ display:"inline-flex", alignItems:"center", gap:3,
+                          <span title={title} style={{ display:"inline-flex", alignItems:"center", gap:3,
                             fontSize:10, padding:"2px 7px", borderRadius:20,
                             background:"var(--s2)", border:"1px solid var(--b2)",
                             whiteSpace:"nowrap" }}>
                             <span style={{ color:"var(--tx3)" }}>{label}</span>
                             <span style={{ color:c1 }}>€{v1.toFixed(2)}</span>
                             <span style={{ color:"var(--tx3)" }}>·</span>
-                            <span style={{ color:"var(--tx2)", fontSize:9 }}>7д</span>
+                            <span style={{ color:"var(--tx2)", fontSize:9 }}>{tr("products.d7")}</span>
                             <span style={{ color:c2 }}>€{v2.toFixed(2)}</span>
                           </span>
                         );
@@ -6653,10 +6645,16 @@ const ProductsPage = ({ workspaceId }) => {
                             {chip("FBA", fba, fba > 0 ? "var(--grn)" : "var(--tx3)")}
                             {chip("FBM", fbm, fbm > 0 ? "var(--ac2)" : "var(--tx3)")}
                           </>}
-                          {price > 0 && chip("Цена", `€${price.toFixed(2)}`)}
-                          {cogs > 0 && chip("Себес.", `€${cogs.toFixed(2)}`)}
+                          {price > 0 && chip(tr("products.trendPrice"), `€${price.toFixed(2)}`)}
+                          {cogs > 0 && chip(tr("products.cogs"), `€${cogs.toFixed(2)}`)}
                           {(ppcYest > 0 || ppc7d > 0) && pairChip("PPC", ppcYest, ppc7d, false)}
-                          {(revYest > 0 || rev7d > 0) && pairChip("Прибыль", profYest, prof7d, true)}
+                          {/* Without a cost price "profit" is just revenue minus the Amazon fee
+                              and PPC — a green number for every product, none of it real (no
+                              product in the account had one set on 2026-09-11). Show what we
+                              actually know instead. */}
+                          {(revYest > 0 || rev7d > 0) && (cogs > 0
+                            ? pairChip(tr("products.trendProfit"), profYest, prof7d, true)
+                            : pairChip(tr("products.revenue"), revYest, rev7d, false, tr("products.revenueNoCogsHint")))}
                         </div>
                       );
                     })()}
@@ -6740,7 +6738,7 @@ const ProductsPage = ({ workspaceId }) => {
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                       <span style={{ fontSize: 11, color: "var(--tx3)", fontFamily: "var(--mono)",
                         textTransform: "uppercase", letterSpacing: ".06em" }}>
-                        BSR History ({hist.filter(s => s.best_rank).length} points)
+                        {tr("products.bsrHistoryPoints", { n: hist.filter(s => s.best_rank).length })}
                       </span>
                     </div>
 
@@ -6750,35 +6748,35 @@ const ProductsPage = ({ workspaceId }) => {
                         background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)",
                         display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
                         <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                          <label style={{ fontSize: 10, color: "var(--tx3)" }}>Дата</label>
+                          <label style={{ fontSize: 10, color: "var(--tx3)" }}>{tr("products.noteDate")}</label>
                           <input type="date" value={noteForm.date}
                             onChange={e => setNoteForm(f => ({ ...f, date: e.target.value }))}
                             style={{ padding: "4px 8px", borderRadius: 5, fontSize: 12,
                               background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }} />
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 3, flex: "1 1 200px" }}>
-                          <label style={{ fontSize: 10, color: "var(--tx3)" }}>Заметка</label>
+                          <label style={{ fontSize: 10, color: "var(--tx3)" }}>{tr("products.note")}</label>
                           <input
                             autoFocus
                             value={noteForm.text}
                             onChange={e => setNoteForm(f => ({ ...f, text: e.target.value }))}
                             onKeyDown={e => e.key === "Enter" && handleSaveNote(p.id)}
-                            placeholder="Снизили цену на 10%..."
+                            placeholder={tr("products.notePlaceholder")}
                             style={{ padding: "4px 10px", borderRadius: 5, fontSize: 12,
                               background: "var(--s2)", border: "1px solid var(--b2)", color: "var(--tx)", outline: "none" }} />
                         </div>
                         <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--tx2)", cursor: "pointer" }}>
                           <input type="checkbox" checked={noteForm.forAll}
                             onChange={e => setNoteForm(f => ({ ...f, forAll: e.target.checked }))} />
-                          Для всех товаров
+                          {tr("products.noteForAll")}
                         </label>
                         <div style={{ display: "flex", gap: 6 }}>
                           <button onClick={() => handleSaveNote(p.id)} disabled={savingNote || !noteForm.text.trim()}
                             className="btn btn-primary" style={{ fontSize: 11, padding: "4px 12px" }}>
-                            {savingNote ? "…" : "Сохранить"}
+                            {savingNote ? "…" : tr("common.save")}
                           </button>
                           <button onClick={() => setAddingNote(null)} className="btn btn-ghost"
-                            style={{ fontSize: 11, padding: "4px 10px" }}>Отмена</button>
+                            style={{ fontSize: 11, padding: "4px 10px" }}>{tr("common.cancel")}</button>
                         </div>
                       </div>
                     )}
@@ -6792,7 +6790,7 @@ const ProductsPage = ({ workspaceId }) => {
                       />
                     ) : (
                       <div style={{ fontSize: 12, color: "var(--tx3)" }}>
-                        No history yet — BSR syncs every 6 hours
+                        {tr("products.noHistory")}
                       </div>
                     )}
                   </div>

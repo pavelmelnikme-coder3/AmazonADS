@@ -497,6 +497,11 @@ how many campaigns hold an ad for this ASIN, and how many of those actually serv
 (campaign **and** ad **and** ad group enabled). Archived campaigns and archived ads are
 excluded from both, matching `GET /products/ad-placements`.
 
+`ad_campaign_keys` / `ad_campaign_live_keys` *(2026-09-11)* list those same campaigns as small
+integers, stable within one response (the same campaign has the same key on every product). A
+listing row counts campaigns across its variations by uniting them — summing the per-ASIN counts
+above would count a shared campaign once per variation.
+
 ### GET /products/ad-placements?asins=B0AAA,B0BBB *(2026-08-25, SB added 2026-08-27)*
 "Which campaigns advertise this ASIN?" — the lookup behind the **Кампании (live/total)**
 panel on the Products page, so a product can be pulled out of advertising without hunting
@@ -552,18 +557,24 @@ Max 60 ASINs; default range = last 30 days. Lazy-loaded on expand.
 
 ### GET /products/period-orders?start=&end=
 Total orders/units/revenue per ASIN over a date range (default last 30d), from
-`sp_orders` (status ≠ Canceled). Powers "sort by orders for the period". Returns
-`{start, end, by_asin: { ASIN: { orders, units, revenue } }}`.
+`sp_orders` (status ∉ Canceled, Unfulfillable). Powers "sort by orders for the period". Returns
+`{start, end, by_asin: { ASIN: { orders, units, revenue } }, by_listing: { LISTING: {…} },
+multi_asin_orders: [[ASIN, ASIN], …]}`. `multi_asin_orders` *(2026-09-11)* holds the ASIN sets of
+orders that contain 2+ variations of one listing; with it the client counts the orders of any
+subset of a family exactly (sum per ASIN, then subtract each shared order's extra hits). A date
+that is not a real calendar day is ignored and the default used.
 
-### GET /products/:id/history?days=30
-BSR snapshots for one product over the last N days.
+### GET /products/:id/history?start=&end=
+BSR snapshots for one product of the caller's workspace (scoped through `products` — the
+snapshot table has no workspace column). A malformed bound is ignored. A non-UUID id → 404.
 
 ### GET /products/notes?product_id=...
 Notes pinned to the BSR chart. With no `product_id` returns ALL workspace
 notes (used for bulk expand).
 
 ### POST /products/notes / DELETE /products/notes/:id
-Note CRUD.
+Note CRUD. `product_id` must name a product of the workspace (else 404); `note_date` must be a
+real YYYY-MM-DD day (else 400).
 
 ### POST /products/sync-meta
 Trigger title/brand/image scrape for products without metadata.

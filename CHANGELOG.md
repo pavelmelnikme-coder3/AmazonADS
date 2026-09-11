@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATC
 
 ---
 
+## [Unreleased] — 2026-09-11 — Products page: what a listing row claims about its variations
+
+A check of the Products page against production (listings grouped by parent ASIN). Every amount on
+the screen — revenue, units, PPC, ACOS, TACOS, BSR, price — matched the database to the cent. What
+did not match was how a listing row adds up things its variations share.
+
+### Fixed
+
+- **"Кампании (live/total)" counted one campaign once per variation.** The listing row summed each
+  ASIN's campaign count, so six variations sitting in the same live campaign read "6/60" where the
+  truth was 1 of 20 (and "11/17" for 2 of 8). `GET /products` now carries `ad_campaign_keys` /
+  `ad_campaign_live_keys` per product — campaign ids mapped to small integers for the response, since
+  ~2,800 (ASIN, campaign) pairs as UUIDs would be ~100 KB — and the row counts them distinctly.
+- **Period orders double-counted once a filter hid part of a family.** The deduplicated per-listing
+  total only applied to a complete family; otherwise the row summed per-ASIN counts, and an order
+  holding two variations counted twice (100 shown, 98 true). `/products/period-orders` now returns
+  `multi_asin_orders`, the ASIN sets of orders shared between variations of one listing, which makes
+  the count exact for any visible subset.
+- **A cut-down listing looked whole.** The badge now reads "2 из 3 ASIN" when filters hide
+  variations, with a note that every figure on the row covers the visible ones only.
+- **"Прибыль" without a cost price was not profit.** No product has one set, so the flat view showed
+  revenue less the Amazon fee and PPC as a green profit for everything. Without COGS it now shows
+  revenue and says why.
+- **`GET /products/:id/history` was not scoped to the workspace.** `bsr_snapshots` has no workspace
+  column and the query read it by product id alone. It now joins through `products`. `POST /notes`
+  checks that a pinned product belongs to the workspace.
+- **Malformed input answered 500.** A path id that is not a UUID now gets 404 before any SQL; a date
+  such as `2026-13-99`, which the old shape-only check let through, is ignored (history, timeseries,
+  period-orders) or refused with 400 (`note_date`).
+- **English in the Russian interface.** Subtitle, search, filters, the product counter, empty states,
+  the note form and the history block are translated in all three languages.
+
 ## [Unreleased] — 2026-09-10 (audit) — Every section of the service, read with the console open
 
 A walk through the whole application while the asian_b2b campaign was sending, section by section,
